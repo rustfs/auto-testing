@@ -1,7 +1,7 @@
 # RustFS Heal Test
 
 Node-outage heal test driven by
-[`scripts/test/rustfs_heal_test.sh`](rustfs_heal_test.sh), based on the
+[`rustfs_heal_test.sh`](rustfs_heal_test.sh), based on the
 Obsidian note "RustFS Heal 测试步骤". Uses the same 3-node test environment as
 the pool expansion test (`vm000 vm001 vm002`).
 
@@ -78,12 +78,12 @@ Same repository secrets/variables as the pool expansion workflow:
 ## Manual usage
 
 ```bash
-./scripts/test/rustfs_heal_test.sh --all -y \
+./rustfs_heal_test.sh --all -y \
   --package-url https://dl.rustfs.com/artifacts/rustfs/packages/nightly/rustfs-nightly-latest.deb \
   --endpoint http://127.0.0.1:9000
 
-./scripts/test/rustfs_heal_test.sh --steps 5,6,7
-./scripts/test/rustfs_heal_test.sh --reset -y
+./rustfs_heal_test.sh --steps 5,6,7
+./rustfs_heal_test.sh --reset -y
 ```
 
 ## Known issues
