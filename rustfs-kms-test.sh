@@ -49,7 +49,7 @@ VAULT_ADDRESS="${RUSTFS_VAULT_ADDRESS:-http://10.0.0.4:8200}"
 VAULT_TOKEN="${RUSTFS_VAULT_TOKEN:-rustfs-dev-token}"
 VAULT_KV_MOUNT="secret"
 VAULT_KEY_PATH_PREFIX="rustfs"
-VAULT_DATA_DIR="${RUSTFS_VAULT_DATA_DIR:-/var/lib/rustfs-vault-data}"
+VAULT_DATA_DIR="${RUSTFS_VAULT_DATA_DIR:-${TMPDIR:-/tmp}/rustfs-vault-data}"
 VAULT_CONFIG_DIR="${RUSTFS_VAULT_CONFIG_DIR:-/var/lib/rustfs-vault-config}"
 HEAL_HOST="heal"
 HEAL_SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
@@ -57,7 +57,16 @@ HEAL_SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=ac
 # Run a command on the admin host (heal). When docker is present locally (the
 # script is being executed on heal / the runner), run it directly.
 heal_run() {
-  if command -v docker >/dev/null 2>&1; then "$@"; else ssh "${HEAL_SSH_OPTS[@]}" "${HEAL_HOST}" "$(printf '%q ' "$@")"; fi
+  if command -v docker >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
+      "$@"
+    else
+      # runner user without docker group: fall back to sudo docker
+      sudo -n docker "$@" 2>/dev/null || sudo docker "$@"
+    fi
+  else
+    ssh "${HEAL_SSH_OPTS[@]}" "${HEAL_HOST}" "$(printf '%q ' "$@")"
+  fi
 }
 
 heal_curl() {
@@ -408,7 +417,6 @@ vault_ensure_config() {
 set -e
 rm -rf '${VAULT_DATA_DIR}'
 mkdir -p '${VAULT_DATA_DIR}'
-chown -R 100:100 '${VAULT_DATA_DIR}'
 "
 }
 
@@ -474,7 +482,7 @@ vault_start() {
   fi
   vault_ensure_config
   log "starting vault container ${VAULT_CONTAINER} on ${HEAL_HOST}"
-  heal_run docker run -d --name "${VAULT_CONTAINER}" --network host --cap-add=IPC_LOCK \
+  heal_run docker run -d --name "${VAULT_CONTAINER}" --network host --cap-add=IPC_LOCK --user root \
     -v "${VAULT_DATA_DIR}:/vault/data" \
     -e "VAULT_LOCAL_CONFIG=storage \"file\" { path = \"/vault/data\" }
 listener \"tcp\" { address = \"0.0.0.0:8200\" tls_disable = true }
