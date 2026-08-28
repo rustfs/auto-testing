@@ -2,7 +2,7 @@
 
 End-to-end test for **storage pool expansion**, **data rebalancing** and
 **pool decommission**, driven by
-[`scripts/test/rustfs_pool_expand.sh`](rustfs_pool_expand.sh).
+[`rustfs_pool_expand.sh`](rustfs_pool_expand.sh).
 
 All pool / rebalance / decommission checks talk to the RustFS **admin API
 directly** with SigV4-signed HTTP requests and assert on the JSON responses
@@ -77,18 +77,18 @@ Set these in the repository (secrets/variables):
 
 ```bash
 # Full workflow with a release tag
-./scripts/test/rustfs_pool_expand.sh --all --with-warp -y \
+./rustfs_pool_expand.sh --all --with-warp -y \
   --version 1.0.0-rc.3 --endpoint http://10.0.0.7:9000
 
 # Use a direct .deb URL (e.g. nightly package on R2)
-./scripts/test/rustfs_pool_expand.sh --all --with-warp -y \
+./rustfs_pool_expand.sh --all --with-warp -y \
   --package-url https://dl.rustfs.com/artifacts/rustfs/packages/nightly/rustfs-nightly-latest.deb \
   --endpoint http://10.0.0.7:9000
 
 # Preflight / reset / single step
-./scripts/test/rustfs_pool_expand.sh --preflight --version 1.0.0-rc.3
-./scripts/test/rustfs_pool_expand.sh --reset -y
-./scripts/test/rustfs_pool_expand.sh --step 9 --finalize-decommission -y
+./rustfs_pool_expand.sh --preflight --version 1.0.0-rc.3
+./rustfs_pool_expand.sh --reset -y
+./rustfs_pool_expand.sh --step 9 --finalize-decommission -y
 ```
 
 ## Known issues and caveats
