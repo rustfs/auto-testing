@@ -1170,18 +1170,28 @@ test_s3c603() {
   assert_aws_ok || return 1
   make_test_file /tmp/s3c-v 512
   aws_run s3api put-object --bucket "s3c603-lk" --key f --body /tmp/s3c-v
+  local vid
+  vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
+  [ -n "${vid}" ] || { echo "put-object returned no VersionId"; return 1; }
   local until
   until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
   aws_run s3api put-object-retention --bucket "s3c603-lk" --key f \
     --retention "{\"Mode\":\"GOVERNANCE\",\"RetainUntilDate\":\"${until}\"}"
   assert_aws_ok || return 1
+  # Simple delete without --version-id only creates a delete marker; Object Lock
+  # does not block delete markers (AWS S3 semantics), so this must succeed.
   aws_run s3api delete-object --bucket "s3c603-lk" --key f
-  if [ "${AWS_CODE}" -eq 0 ]; then
-    echo "note: server did not enforce the governance retention on delete (server defect)"
-  fi
+  assert_aws_ok || return 1
+  # The protected version must still exist, unchanged.
+  aws_run s3api list-object-versions --bucket "s3c603-lk" --prefix f
+  printf '%s' "${AWS_OUT}" | jq -e --arg v "${vid}" \
+    '[.Versions[]? | select(.VersionId == $v and .Size > 0)] | length > 0' >/dev/null \
+    || { echo "protected version missing/unchanged check failed after simple delete"; return 1; }
+  # Direct delete of the protected version must be denied without bypass.
+  aws_run s3api delete-object --bucket "s3c603-lk" --key f --version-id "${vid}"
   assert_aws_fails_with "AccessDenied" || return 1
-  # with bypass governance + permission
-  aws_run s3api delete-object --bucket "s3c603-lk" --key f --bypass-governance-retention
+  # With bypass governance retention (and permission) it succeeds.
+  aws_run s3api delete-object --bucket "s3c603-lk" --key f --version-id "${vid}" --bypass-governance-retention
   assert_aws_ok || return 1
   rm_bucket "s3c603-lk"
 }
@@ -1191,18 +1201,28 @@ test_s3c604() {
   assert_aws_ok || return 1
   make_test_file /tmp/s3c-v 512
   aws_run s3api put-object --bucket "s3c604-lk" --key f --body /tmp/s3c-v
+  local vid
+  vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
+  [ -n "${vid}" ] || { echo "put-object returned no VersionId"; return 1; }
   local until
   until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
   aws_run s3api put-object-retention --bucket "s3c604-lk" --key f \
     --retention "{\"Mode\":\"COMPLIANCE\",\"RetainUntilDate\":\"${until}\"}"
   assert_aws_ok || return 1
+  # Simple delete without --version-id only creates a delete marker (allowed).
   aws_run s3api delete-object --bucket "s3c604-lk" --key f
-  if [ "${AWS_CODE}" -eq 0 ]; then
-    echo "note: server did not enforce the compliance retention on delete (server defect)"
-  fi
+  assert_aws_ok || return 1
+  aws_run s3api list-object-versions --bucket "s3c604-lk" --prefix f
+  printf '%s' "${AWS_OUT}" | jq -e --arg v "${vid}" \
+    '[.Versions[]? | select(.VersionId == $v and .Size > 0)] | length > 0' >/dev/null \
+    || { echo "protected version missing after simple delete"; return 1; }
+  # Direct delete of the protected version is denied and cannot be bypassed.
+  aws_run s3api delete-object --bucket "s3c604-lk" --key f --version-id "${vid}"
   assert_aws_fails_with "AccessDenied" || return 1
-  aws_run s3api delete-object --bucket "s3c604-lk" --key f --bypass-governance-retention
+  aws_run s3api delete-object --bucket "s3c604-lk" --key f --version-id "${vid}" --bypass-governance-retention
   assert_aws_fails_with "AccessDenied" || return 1
+  # NOTE: the COMPLIANCE-locked version cannot be removed before expiry; bucket
+  # cleanup depends on retention expiry or a fresh test environment.
   rm_bucket "s3c604-lk"
 }
 
@@ -1211,18 +1231,26 @@ test_s3c605() {
   assert_aws_ok || return 1
   make_test_file /tmp/s3c-v 512
   aws_run s3api put-object --bucket "s3c605-lk" --key f --body /tmp/s3c-v
+  local vid
+  vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
+  [ -n "${vid}" ] || { echo "put-object returned no VersionId"; return 1; }
   aws_run s3api put-object-legal-hold --bucket "s3c605-lk" --key f --legal-hold Status=ON
   assert_aws_ok || return 1
+  # Simple delete without --version-id only creates a delete marker (allowed).
   aws_run s3api delete-object --bucket "s3c605-lk" --key f
-  if [ "${AWS_CODE}" -eq 0 ]; then
-    echo "note: server did not enforce the legal hold on delete (server defect)"
-  fi
+  assert_aws_ok || return 1
+  aws_run s3api list-object-versions --bucket "s3c605-lk" --prefix f
+  printf '%s' "${AWS_OUT}" | jq -e --arg v "${vid}" \
+    '[.Versions[]? | select(.VersionId == $v and .Size > 0)] | length > 0' >/dev/null \
+    || { echo "protected version missing after simple delete"; return 1; }
+  # Direct delete of the legal-hold-protected version must be denied.
+  aws_run s3api delete-object --bucket "s3c605-lk" --key f --version-id "${vid}"
   assert_aws_fails_with "AccessDenied" || return 1
   aws_run s3api get-object-legal-hold --bucket "s3c605-lk" --key f
   printf '%s' "${AWS_OUT}" | jq -e '.LegalHold.Status == "ON"' >/dev/null || { echo "legal hold not ON: ${AWS_OUT}"; return 1; }
   aws_run s3api put-object-legal-hold --bucket "s3c605-lk" --key f --legal-hold Status=OFF
   assert_aws_ok || return 1
-  aws_run s3api delete-object --bucket "s3c605-lk" --key f
+  aws_run s3api delete-object --bucket "s3c605-lk" --key f --version-id "${vid}"
   assert_aws_ok || return 1
   rm_bucket "s3c605-lk"
 }
