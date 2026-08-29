@@ -3,7 +3,7 @@
 # rustfs-pool-expand.sh
 # RustFS multi-pool expansion & pool decommission test script
 #
-# Based on the Obsidian note "RustFS pool 扩容脚本". Full workflow:
+# Based on the Obsidian note "RustFS Pool Expansion Script". Full workflow:
 #   1. Download the RustFS package on all nodes
 #   2. Install the RustFS service on all nodes (dpkg -i)
 #   3. Start the first pool on node 0 and verify it

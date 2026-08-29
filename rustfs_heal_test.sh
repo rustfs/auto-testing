@@ -3,7 +3,7 @@
 # rustfs-heal-test.sh
 # RustFS node-outage heal test script
 #
-# Based on the Obsidian note "RustFS Heal 测试步骤". Full workflow:
+# Based on the Obsidian note "RustFS Heal Test Steps". Full workflow:
 #   1. Download the RustFS package on all nodes
 #   2. Install RustFS on all nodes (dpkg -i), write the 3x4 single-pool
 #      config, start all nodes in parallel and verify the topology via the

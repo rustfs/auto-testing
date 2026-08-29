@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # rustfs-performance-test.sh
-# RustFS 4x4 集群性能压测全流程脚本
+# RustFS 4x4 cluster performance test (full lifecycle)
 #
-# Based on the Obsidian note "RustFS 性能测试". Full workflow:
+# Based on the Obsidian note "RustFS Performance Test". Full workflow:
 #   1. Cleanup: stop & purge rustfs, remove data dirs on all nodes
 #   2. Download the RustFS package on all nodes
 #   3. Install RustFS on all nodes (dpkg -i), recreate volume dirs
