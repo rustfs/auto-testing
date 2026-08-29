@@ -11,7 +11,7 @@
 #   3. multi-node multi-disk    (vm000+vm001+vm002, 3x4)
 #
 # Driven from the admin host (heal). Environment setup follows the Obsidian
-# note "RustFS 环境搭建.md"; each case has an explicit pass criterion and
+# note "RustFS Environment Setup.md"; each case has an explicit pass criterion and
 # reports PASS / FAIL / UNSUPPORTED with error detail on failure.
 #
 # Usage:
@@ -1556,7 +1556,7 @@ test_s3c1004() {
     -F "AWSAccessKeyId=${ACCESS_KEY}" -F "signature=${sig}" \
     -F "file=@/tmp/s3c-v" "${ENDPOINT}/s3c1004-b1")"
   # Accept 204/201 (success) or 403 (signature mismatch is still a valid S3 semantic check);
-  # the acceptance is "符合 policy 的表单 204；超限/越界字段 403".
+  # the acceptance is "policy-conforming forms return 204; out-of-range fields return 403".
   if [ "${code}" = "204" ] || [ "${code}" = "201" ]; then
     aws_run s3api head-object --bucket "s3c1004-b1" --key post/f
     assert_aws_ok || return 1

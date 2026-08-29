@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 #
 # rustfs-performance-testing.sh
-# RustFS 对象存储压测脚本（固定版）：测试方法 + 执行 + 结果解析
+# RustFS object storage benchmark script (fixed): methodology + execution + result parsing
 #
-# 测试方法
-#   1) 方法：GET / PUT / MIXED（warp 默认混合负载 45% GET + 55% PUT）
-#   2) 对象尺寸：1KiB 4KiB 16KiB 128KiB 1MiB 4MiB 8MiB 16MiB 32MiB 64MiB
-#   3) 并发：64；单轮时长：5m；轮间 sleep：60s；GET 对象数：2500
-#   4) 顺序：GET 全部尺寸 -> PUT 全部尺寸 -> MIXED 全部尺寸
-#   5) 结果解析：每轮结束后自动解析 warp 输出，写入
-#      summary.tsv（机器可读）与 summary.md（Markdown 汇总表）
+# Methodology
+#   1) Methods: GET / PUT / MIXED (warp default mix 45% GET + 55% PUT)
+#   2) Object sizes: 1KiB 4KiB 16KiB 128KiB 1MiB 4MiB 8MiB 16MiB 32MiB 64MiB
+#   3) Concurrency: 64; duration per round: 5m; sleep between rounds: 60s; GET objects: 2500
+#   4) Order: GET all sizes -> PUT all sizes -> MIXED all sizes
+#   5) Result parsing: after each round, parse the warp output into
+#      summary.tsv (machine-readable) and summary.md (Markdown tables)
 #
-# 依赖：warp >= v1.6（MinIO warp），bash，awk/sed/grep
-# 说明：warp v1.6.1 的 put 不支持 --objects，脚本已自动处理（仅 get/mixed 传该参数）
+# Requirements: warp >= v1.6 (MinIO warp), bash, awk/sed/grep
+# Note: warp v1.6.1's put does not support --objects; handled automatically
+#       (the flag is only passed for get/mixed)
 #
-# 环境变量覆盖（不传时使用固定默认值）：
+# Env overrides (fixed defaults are used when unset):
 #   WARP_HOST WARP_ACCESS_KEY WARP_SECRET_KEY WARP_BUCKET
 #   WARP_CONCURRENCY WARP_DURATION WARP_GET_OBJECTS WARP_SLEEP_BETWEEN_ROUNDS
 #   WARP_RESULT_DIR
-#   WARP_METHODS WARP_SIZES   # 手动指定方法/尺寸（逗号或空格分隔），不传则全量
+#   WARP_METHODS WARP_SIZES   # restrict methods/sizes (comma/space separated); empty = full run
 
 set -u -o pipefail
 
@@ -45,7 +46,7 @@ fi
 TOTAL_ROUNDS=$(( ${#METHODS[@]} * ${#SIZES[@]} ))
 ROUND=0
 
-# --parse-only <result-dir>：只解析已有结果目录（${method}_${size}.txt），不执行压测
+# --parse-only <result-dir>: parse an existing result dir (${method}_${size}.txt) without running
 if [[ "${1:-}" == "--parse-only" && -n "${2:-}" ]]; then
   RESULT_DIR="$2"
 fi
@@ -55,7 +56,7 @@ SUMMARY_TSV="${RESULT_DIR}/summary.tsv"
 SUMMARY_MD="${RESULT_DIR}/summary.md"
 
 if [[ "${1:-}" != "--parse-only" ]] && ! command -v warp >/dev/null 2>&1; then
-  echo "错误：未找到 warp 命令，请先安装 MinIO warp。" >&2
+  echo "error: warp command not found; install MinIO warp first" >&2
   exit 1
 fi
 
@@ -63,9 +64,9 @@ log() {
   echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" | tee -a "${LOG_FILE}"
 }
 
-# ---- 结果解析 ----
+# ---- Result parsing ----
 
-# 提取指定 section（GET/PUT/Total 等）的 Average / Reqs / TTFB 原始行
+# Extract the raw Average / Reqs / TTFB lines of a section (GET/PUT/Total etc.)
 section_lines() {
   awk -v sec="$2" '
     /^Report: / { cur = $2; sub(/\.$/, "", cur) }
@@ -80,7 +81,7 @@ section_lines() {
   ' "$1"
 }
 
-# 从统计行中取字段：tp objs avg p50 p90 p99 ttfb_avg ttfb_p99 ttfb_worst
+# Extract fields from a stats block: tp objs avg p50 p90 p99 ttfb_avg ttfb_p99 ttfb_worst
 field() {
   case "$2" in
     tp)         echo "$1" | sed -n 's/^ *\* Average: \(.*\), \([0-9.]*\) obj\/s.*/\1/p' ;;
@@ -96,7 +97,7 @@ field() {
   esac
 }
 
-# 解析一轮输出，追加一行到 summary.tsv
+# Parse one round's output and append a row to summary.tsv
 parse_round() {
   local method="$1" size="$2" file="$3"
   local line
@@ -131,24 +132,24 @@ parse_round() {
   printf '%s\n' "${line}" >> "${SUMMARY_TSV}"
 }
 
-# 汇总 summary.tsv -> summary.md（Markdown 表格）
+# Build summary.md (Markdown tables) from summary.tsv
 gen_summary_md() {
   {
-    echo "# RustFS 性能压测结果"
+    echo "# RustFS Performance Test Results"
     echo ""
-    echo "- 日期：$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-    echo "- 目标：${HOST}"
-    echo "- 并发：${CONCURRENCY}；单轮：${DURATION}；sleep：${SLEEP_BETWEEN_ROUNDS}s；GET objects：${GET_OBJECTS}"
-    echo "- 方法：GET / PUT / MIXED（warp 默认混合负载）；尺寸：${SIZES[*]}"
+    echo "- Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    echo "- Target: ${HOST}"
+    echo "- Concurrency: ${CONCURRENCY}; duration: ${DURATION}; sleep: ${SLEEP_BETWEEN_ROUNDS}s; GET objects: ${GET_OBJECTS}"
+    echo "- Methods: GET / PUT / MIXED (warp default mix); sizes: ${SIZES[*]}"
     echo ""
   } > "${SUMMARY_MD}"
 
   for m in get put; do
     {
-      echo "## $(printf '%s' "$m" | tr '[:lower:]' '[:upper:]') 结果"
+      echo "## $(printf '%s' "$m" | tr '[:lower:]' '[:upper:]') Results"
       echo ""
-      echo "| 对象尺寸 | 平均吞吐 | 平均 obj/s | Avg Latency | P50 | P90 | P99 | TTFB Avg | TTFB P99 | TTFB 最差 |"
-      echo "|----------|----------|-----------|-------------|-----|-----|-----|----------|----------|-----------|"
+      echo "| Object Size | Avg Throughput | Avg obj/s | Avg Latency | P50 | P90 | P99 | TTFB Avg | TTFB P99 | TTFB Worst |"
+      echo "|-------------|----------------|-----------|-------------|-----|-----|-----|----------|----------|------------|"
     } >> "${SUMMARY_MD}"
     while IFS=$'\t' read -r method size tp objs avg p50 p90 p99 ttfb_avg ttfb_p99 ttfb_worst; do
       [[ "${method}" == "${m}" ]] && \
@@ -158,10 +159,10 @@ gen_summary_md() {
   done
 
   {
-    echo "## MIXED 结果（Total 口径）"
+    echo "## MIXED Results (Total)"
     echo ""
-    echo "| 对象尺寸 | Total 平均吞吐 | Total 平均 obj/s | Mixed-GET Avg | Mixed-PUT Avg |"
-    echo "|----------|---------------|------------------|----------------|----------------|"
+    echo "| Object Size | Total Avg Throughput | Total Avg obj/s | MIXED GET Avg | MIXED PUT Avg |"
+    echo "|-------------|----------------------|-----------------|---------------|---------------|"
   } >> "${SUMMARY_MD}"
   while IFS=$'\t' read -r method size tp objs gavg pavg rest; do
     [[ "${method}" == "mixed" ]] && \
@@ -170,7 +171,7 @@ gen_summary_md() {
   echo "" >> "${SUMMARY_MD}"
 }
 
-# ---- 主流程 ----
+# ---- Main flow ----
 
 mkdir -p "${RESULT_DIR}"
 log "CONFIG host=${HOST} bucket=${BUCKET} concurrency=${CONCURRENCY} duration=${DURATION} get_objects=${GET_OBJECTS} sleep_between_rounds=${SLEEP_BETWEEN_ROUNDS}s"
@@ -235,5 +236,5 @@ done
 gen_summary_md
 log "ALL_ROUNDS_COMPLETE summary_tsv=${SUMMARY_TSV} summary_md=${SUMMARY_MD}"
 echo ""
-echo "==== 结果汇总 ===="
+echo "==== Results summary ===="
 cat "${SUMMARY_MD}"
