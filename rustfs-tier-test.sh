@@ -21,6 +21,11 @@
 #
 set -Eeuo pipefail
 
+# Per-run temp dir (shared runners may leave stale /tmp files owned by other users)
+TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-test.XXXXXX")"
+trap 'rm -rf "${TEST_TMP}"' EXIT
+
+
 # ==================== Configuration ====================
 NODES=(vm000 vm001 vm002)
 SOURCE_NODE="${NODES[0]}"
@@ -596,7 +601,7 @@ run_test() {
     return 0
   fi
   printf '\n--- %s %s ---\n' "${id}" "${name}"
-  if "${fn}" > /tmp/tier-test.out 2>&1; then
+  if "${fn}" > "${TEST_TMP}/test.out" 2>&1; then
     PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
   else
     rc=$?
@@ -605,8 +610,8 @@ run_test() {
     else
       FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
       printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
-      cp /tmp/tier-test.out "/tmp/tier-${id}.out" 2>/dev/null || true
-      sed 's/^/      | /' /tmp/tier-test.out | tail -50
+      cp "${TEST_TMP}/test.out" ""${TEST_TMP}/${id}.out"" 2>/dev/null || true
+      sed 's/^/      | /' "${TEST_TMP}/test.out" | tail -50
     fi
   fi
 }

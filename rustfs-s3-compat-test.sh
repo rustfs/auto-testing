@@ -21,6 +21,11 @@
 #
 set -Eeuo pipefail
 
+# Per-run temp dir (shared runners may leave stale /tmp files owned by other users)
+TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-test.XXXXXX")"
+trap 'rm -rf "${TEST_TMP}"' EXIT
+
+
 # ==================== Configuration ====================
 NODES=(vm000 vm001 vm002)                    # hardcoded per request
 SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
@@ -351,7 +356,7 @@ run_test() {
     return 0
   fi
   printf '\n--- %s %s ---\n' "${id}" "${name}"
-  if "${fn}" > /tmp/s3c-test.out 2>&1; then
+  if "${fn}" > "${TEST_TMP}/test.out" 2>&1; then
     PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
   else
     rc=$?
@@ -360,7 +365,7 @@ run_test() {
     else
       FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
       printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
-      sed 's/^/      | /' /tmp/s3c-test.out | tail -40
+      sed 's/^/      | /' "${TEST_TMP}/test.out" | tail -40
     fi
   fi
 }
@@ -444,7 +449,7 @@ $(printf '%s' "${canonical_request}" | openssl dgst -sha256 -hex 2>/dev/null | a
   signature="$(printf '%s' "${string_to_sign}" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_signing}" -hex 2>/dev/null | awk '{print $NF}')"
   local curl_data=()
   [ -n "${data}" ] && curl_data=(--data-binary "@${data}")
-  curl -s -o /tmp/s3c-curl.out -w '%{http_code}' "${extra[@]}" "${curl_data[@]}" \
+  curl -s -o "${TEST_TMP}/curl.out" -w '%{http_code}' "${extra[@]}" "${curl_data[@]}" \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
     -H "x-amz-date: ${amz_date}" \
@@ -644,11 +649,11 @@ test_s3c106() {
   for invalid in "UPPER" "a_b" "1.2.3.4" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; do
     code="$(s3_signed_curl PUT "/${invalid}")"
     if [ "${code}" != "400" ]; then
-      echo "invalid bucket '${invalid}' returned HTTP ${code}, expected 400: $(head -c 200 /tmp/s3c-curl.out)"
+      echo "invalid bucket '${invalid}' returned HTTP ${code}, expected 400: $(head -c 200 "${TEST_TMP}/curl.out")"
       return 1
     fi
-    printf '%s' "$(cat /tmp/s3c-curl.out)" | grep -q "InvalidBucketName" \
-      || echo "note: invalid name '${invalid}' rejected with 400 but body lacks InvalidBucketName: $(head -c 200 /tmp/s3c-curl.out)"
+    printf '%s' "$(cat "${TEST_TMP}/curl.out")" | grep -q "InvalidBucketName" \
+      || echo "note: invalid name '${invalid}' rejected with 400 but body lacks InvalidBucketName: $(head -c 200 "${TEST_TMP}/curl.out")"
   done
 }
 
@@ -1546,7 +1551,7 @@ test_s3c1004() {
   policy="$(printf '{"expiration":"2099-12-31T00:00:00Z","conditions":[{"bucket":"s3c1004-b1"},{"key":"post/f"},["content-length-range",0,1048576]]}' | base64 -w0)"
   sig="$(printf '%s' "${policy}" | openssl dgst -sha1 -hmac "${SECRET_KEY}" -binary | base64)"
   local code
-  code="$(curl -s -o /tmp/s3c-post.out -w '%{http_code}' -F "key=post/f" -F "policy=${policy}" \
+  code="$(curl -s -o "${TEST_TMP}/post.out" -w '%{http_code}' -F "key=post/f" -F "policy=${policy}" \
     -F "x-amz-algorithm=AWS4-HMAC-SHA256" -F "x-amz-credential=${ACCESS_KEY}/20990101/us-east-1/s3/aws4_request" \
     -F "AWSAccessKeyId=${ACCESS_KEY}" -F "signature=${sig}" \
     -F "file=@/tmp/s3c-v" "${ENDPOINT}/s3c1004-b1")"
@@ -1558,11 +1563,11 @@ test_s3c1004() {
   elif [ "${code}" = "403" ]; then
     echo "POST policy rejected with 403 (signature validation)"
   elif [ "${code}" = "400" ]; then
-    echo "note: POST policy upload rejected with 400 ($(head -c 200 /tmp/s3c-post.out)) — treating as unsupported"
+    echo "note: POST policy upload rejected with 400 ($(head -c 200 "${TEST_TMP}/post.out")) — treating as unsupported"
     rm_bucket "s3c1004-b1"
     return 2
   else
-    echo "POST policy upload returned unexpected ${code}: $(head -c 300 /tmp/s3c-post.out)"
+    echo "POST policy upload returned unexpected ${code}: $(head -c 300 "${TEST_TMP}/post.out")"
     return 1
   fi
   rm_bucket "s3c1004-b1"
@@ -1611,7 +1616,7 @@ test_s3c1102() {
   aws_run s3api put-object --bucket "s3c1102-b1" --key f --body /tmp/s3c-v
   local code
   code="$(s3_signed_curl PUT "/s3c1102-b1/f" -H "If-None-Match: *" --data /tmp/s3c-v)"
-  [ "${code}" = "412" ] || { echo "If-None-Match:* on existing object returned ${code}: $(head -c 200 /tmp/s3c-curl.out)"; return 1; }
+  [ "${code}" = "412" ] || { echo "If-None-Match:* on existing object returned ${code}: $(head -c 200 "${TEST_TMP}/curl.out")"; return 1; }
   rm_bucket "s3c1102-b1"
 }
 
@@ -1818,7 +1823,7 @@ test_s3c1304() {
   # invalid max-keys
   local code
   code="$(s3_signed_curl GET "/s3c1304-b1?list-type=2&max-keys=notanumber")"
-  [ "${code}" = "400" ] || { echo "invalid max-keys returned ${code}: $(head -c 200 /tmp/s3c-curl.out)"; return 1; }
+  [ "${code}" = "400" ] || { echo "invalid max-keys returned ${code}: $(head -c 200 "${TEST_TMP}/curl.out")"; return 1; }
   rm_bucket "s3c1304-b1"
 }
 
