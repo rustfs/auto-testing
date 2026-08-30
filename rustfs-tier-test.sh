@@ -54,12 +54,12 @@ NOTIFY_TOKEN="notify-token"
 AUDIT_TOKEN="audit-token"
 MQTT_BROKER="tcp://${HEAL_IP}:1883"
 MQTT_TOPIC="rustfs/events"
-RECEIVER_SCRIPT="/tmp/rustfs-receiver.py"
-RECEIVER_PIDFILE="/tmp/rustfs-receiver.pid"
-MQTT_PIDFILE="/tmp/rustfs-mqtt-sub.pid"
-NOTIFY_EVENTS="/tmp/rustfs-notify-events.jsonl"
-AUDIT_EVENTS="/tmp/rustfs-audit-events.jsonl"
-MQTT_EVENTS="/tmp/rustfs-mqtt-events.jsonl"
+RECEIVER_SCRIPT="${TEST_TMP}/rustfs-receiver.py"
+RECEIVER_PIDFILE="${TEST_TMP}/rustfs-receiver.pid"
+MQTT_PIDFILE="${TEST_TMP}/rustfs-mqtt-sub.pid"
+NOTIFY_EVENTS="${TEST_TMP}/rustfs-notify-events.jsonl"
+AUDIT_EVENTS="${TEST_TMP}/rustfs-audit-events.jsonl"
+MQTT_EVENTS="${TEST_TMP}/rustfs-mqtt-events.jsonl"
 
 RUSTFS_CONFIG_FILE="/etc/default/rustfs"
 RUSTFS_SERVICE="rustfs"
@@ -368,8 +368,8 @@ receiver_install() {
 import json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-NOTIFY = "/tmp/rustfs-notify-events.jsonl"
-AUDIT = "/tmp/rustfs-audit-events.jsonl"
+NOTIFY = os.environ.get("RUSTFS_NOTIFY_EVENTS", "/tmp/rustfs-notify-events.jsonl")
+AUDIT = os.environ.get("RUSTFS_AUDIT_EVENTS", "/tmp/rustfs-audit-events.jsonl")
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -406,7 +406,8 @@ PYEOF
 receiver_start() {
   [ "${DRY_RUN}" -eq 1 ] && return 0
   receiver_stop
-  nohup python3 "${RECEIVER_SCRIPT}" "${RECEIVER_PORT}" >/tmp/rustfs-receiver.log 2>&1 &
+  RUSTFS_NOTIFY_EVENTS="${NOTIFY_EVENTS}" RUSTFS_AUDIT_EVENTS="${AUDIT_EVENTS}" \
+    nohup python3 "${RECEIVER_SCRIPT}" "${RECEIVER_PORT}" >"${TEST_TMP}/rustfs-receiver.log" 2>&1 &
   echo $! > "${RECEIVER_PIDFILE}"
   local waited=0
   while [ "${waited}" -lt 30 ]; do
@@ -519,9 +520,10 @@ env_setup() {
 set -euo pipefail
 SUDO=""; [ "\$(id -u)" -ne 0 ] && SUDO="sudo -n"
 \${SUDO} mkdir -p "${PACKAGES_DIR}"
-curl -fSL --retry 3 -o "/tmp/${PACKAGE_FILE}" "${url}"
-\${SUDO} install -m 0644 "/tmp/${PACKAGE_FILE}" "${PACKAGES_DIR}/${PACKAGE_FILE}"
-\${SUDO} rm -f "/tmp/${PACKAGE_FILE}"
+PKG_TMP="\$(mktemp /tmp/rustfs-tier-pkg.XXXXXX.deb)"
+curl -fSL --retry 3 -o "\${PKG_TMP}" "${url}"
+\${SUDO} install -m 0644 "\${PKG_TMP}" "${PACKAGES_DIR}/${PACKAGE_FILE}"
+rm -f "\${PKG_TMP}"
 if [ -n "${PACKAGE_SHA256}" ]; then
   echo "${PACKAGE_SHA256}  ${PACKAGES_DIR}/${PACKAGE_FILE}" | sha256sum -c - || exit 1
 fi
@@ -819,8 +821,8 @@ test_tier103() {
   assert_rc_ok || return 1
   # verify the edited tier still works end-to-end via a transition.
   new_bucket "t103-b1" || return 1
-  make_test_file /tmp/tier-f1 1048576
-  aws_run s3api put-object --bucket t103-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 1048576
+  aws_run s3api put-object --bucket t103-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   rc_run ilm rule add local/t103-b1 --storage-class "${TIER_NAME}" --transition-days 0
   assert_rc_ok || return 1
@@ -849,8 +851,8 @@ test_tier104() {
   add_tier rustfs DATATIER "${TARGET_ENDPOINT}" "${TIER_BUCKET}" "${ACCESS_KEY}" "${SECRET_KEY}" "x"
   assert_rc_ok || return 1
   new_bucket "t104b-b1" || return 1
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket t104b-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket t104b-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   rc_run ilm rule add local/t104b-b1 --storage-class DATATIER --transition-days 0
   assert_rc_ok || return 1
@@ -902,8 +904,8 @@ test_tier105() {
   aws_run s3api get-bucket-lifecycle-configuration --bucket t105-b1
   assert_aws_ok || return 1
   printf '%s' "${AWS_OUT}" | grep -q "${TIER_NAME}" || { echo "lifecycle rule missing tier: ${AWS_OUT}"; return 1; }
-  make_test_file /tmp/tier-f1 1048576
-  aws_run s3api put-object --bucket t105-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 1048576
+  aws_run s3api put-object --bucket t105-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   local out job
   out="$(run_transition t105-b1)" || return 1
@@ -916,16 +918,16 @@ test_tier105() {
     sleep 3; waited=$((waited+3))
   done
   [ "${waited}" -lt 120 ] || { echo "object not transitioned: ${AWS_OUT}"; return 1; }
-  aws_run s3api get-object --bucket t105-b1 --key f1 /tmp/tier-dl1
+  aws_run s3api get-object --bucket t105-b1 --key f1 ${TEST_TMP}/tier-dl1
   assert_aws_ok || return 1
-  [ "$(md5_of_file /tmp/tier-dl1)" = "$(md5_of_file /tmp/tier-f1)" ] || { echo "transitioned GET content mismatch"; return 1; }
+  [ "$(md5_of_file ${TEST_TMP}/tier-dl1)" = "$(md5_of_file ${TEST_TMP}/tier-f1)" ] || { echo "transitioned GET content mismatch"; return 1; }
   rm_bucket t105-b1
 }
 
 test_tier106() {
   new_bucket "t106-b1" || return 1
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket t106-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket t106-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   rc_run ilm rule add local/t106-b1 --storage-class "${TIER_NAME}" --transition-days 0
   assert_rc_ok || return 1
@@ -947,8 +949,8 @@ test_tier106() {
 
 test_tier107() {
   new_bucket "t107-b1" || return 1
-  make_test_file /tmp/tier-f1 1048576
-  aws_run s3api put-object --bucket t107-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 1048576
+  aws_run s3api put-object --bucket t107-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   rc_run ilm rule add local/t107-b1 --storage-class "${TIER_NAME}" --transition-days 0
   assert_rc_ok || return 1
@@ -972,9 +974,9 @@ test_tier107() {
     sleep 3; waited=$((waited+3))
   done
   [ "${waited}" -lt 90 ] || { echo "no x-amz-restore header after restore: ${AWS_OUT}"; return 1; }
-  aws_run s3api get-object --bucket t107-b1 --key f1 /tmp/tier-dl1
+  aws_run s3api get-object --bucket t107-b1 --key f1 ${TEST_TMP}/tier-dl1
   assert_aws_ok || return 1
-  [ "$(md5_of_file /tmp/tier-dl1)" = "$(md5_of_file /tmp/tier-f1)" ] || { echo "restored content mismatch"; return 1; }
+  [ "$(md5_of_file ${TEST_TMP}/tier-dl1)" = "$(md5_of_file ${TEST_TMP}/tier-f1)" ] || { echo "restored content mismatch"; return 1; }
   rm_bucket t107-b1
 }
 
@@ -982,12 +984,12 @@ test_tier108() {
   new_bucket "t108-b1" || return 1
   aws_run s3api put-bucket-versioning --bucket t108-b1 --versioning-configuration Status=Enabled
   assert_aws_ok || return 1
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket t108-b1 --key f --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket t108-b1 --key f --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   local vid1
   vid1="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId')"
-  aws_run s3api put-object --bucket t108-b1 --key f --body /tmp/tier-f1
+  aws_run s3api put-object --bucket t108-b1 --key f --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   local vid2
   vid2="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId')"
@@ -1016,8 +1018,8 @@ test_tier109() {
   aws_run s3api put-bucket-lifecycle-configuration --bucket t109-b1 \
     --lifecycle-configuration "{\"Rules\":[{\"ID\":\"exp\",\"Status\":\"Enabled\",\"Filter\":{\"Prefix\":\"\"},\"Expiration\":{\"Date\":\"${expdate}\"}}]}"
   assert_aws_ok || return 1
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket t109-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket t109-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   local out job
   out="$(run_transition t109-b1)" || return 1
@@ -1059,8 +1061,8 @@ test_tier111() {
   rc_run event add local/t111-b1 "${arn}" --event s3:ObjectCreated:*,s3:ObjectRemoved:*,s3:ObjectTransition:*,s3:ObjectRestore:*,s3:LifecycleExpiration:*
   assert_rc_ok || return 1
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket t111-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket t111-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   rc_run ilm rule add local/t111-b1 --storage-class "${TIER_NAME}" --transition-days 0
   assert_rc_ok || return 1
@@ -1083,8 +1085,8 @@ test_tier112() {
   add_tier rustfs T112TIER "${TARGET_ENDPOINT}" "${tb}" "${ACCESS_KEY}" "${SECRET_KEY}"
   assert_rc_ok || return 1
   new_bucket "t112-b1" || return 1
-  make_test_file /tmp/tier-f1 1048576
-  aws_run s3api put-object --bucket t112-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 1048576
+  aws_run s3api put-object --bucket t112-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   rc_run ilm rule add local/t112-b1 --storage-class T112TIER --transition-days 0
   assert_rc_ok || return 1
@@ -1128,8 +1130,8 @@ test_tier113() {
   # transition, adding another empty-prefix tier fails with
   # "Tier Perm Err.missing field `prefix`". This test surfaces that regression.
   new_bucket "t113-b1" || return 1
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket t113-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket t113-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   rc_run ilm rule add local/t113-b1 --storage-class "${TIER_NAME}" --transition-days 0
   assert_rc_ok || return 1
@@ -1191,11 +1193,11 @@ test_evt103() {
   rc_run event add local/evt103-b1 "${arn}" --event s3:ObjectCreated:*
   assert_rc_ok || return 1
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket evt103-b1 --key a/b.txt --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket evt103-b1 --key a/b.txt --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   # poke: a second event forces the delivery queue to flush promptly
-  aws_run s3api put-object --bucket evt103-b1 --key poke-103 --body /tmp/tier-f1
+  aws_run s3api put-object --bucket evt103-b1 --key poke-103 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   wait_notify 1 "ObjectCreated" || return 1
   notify_grep "ObjectCreated" | grep -q "evt103-b1" || { echo "event missing bucket: $(notify_grep 'ObjectCreated')"; return 1; }
@@ -1212,8 +1214,8 @@ test_evt104() {
   rc_run event add local/evt104-b1 "${arn}" --event s3:ObjectCreated:*,s3:ObjectRemoved:*,s3:ObjectTagging:*
   assert_rc_ok || return 1
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket evt104-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket evt104-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   aws_run s3api copy-object --bucket evt104-b1 --key f2 --copy-source evt104-b1/f1
   assert_aws_ok || return 1
@@ -1221,7 +1223,7 @@ test_evt104() {
   assert_aws_ok || return 1
   local uid
   uid="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
-  aws_run s3api upload-part --bucket evt104-b1 --key mp --part-number 1 --upload-id "${uid}" --body /tmp/tier-f1
+  aws_run s3api upload-part --bucket evt104-b1 --key mp --part-number 1 --upload-id "${uid}" --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   local etag
   etag="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag' | tr -d '"')"
@@ -1248,12 +1250,12 @@ test_evt105() {
     --notification-configuration "{\"QueueConfigurations\":[{\"Id\":\"f\",\"QueueArn\":\"${arn}\",\"Events\":[\"s3:ObjectCreated:*\"],\"Filter\":{\"Key\":{\"FilterRules\":[{\"Name\":\"prefix\",\"Value\":\"logs/\"},{\"Name\":\"suffix\",\"Value\":\".jpg\"}]}}}]}"
   assert_aws_ok || return 1
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket evt105-b1 --key "logs/x.jpg" --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket evt105-b1 --key "logs/x.jpg" --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
-  aws_run s3api put-object --bucket evt105-b1 --key "other/y.png" --body /tmp/tier-f1
+  aws_run s3api put-object --bucket evt105-b1 --key "other/y.png" --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
-  aws_run s3api put-object --bucket evt105-b1 --key "logs/poke.jpg" --body /tmp/tier-f1
+  aws_run s3api put-object --bucket evt105-b1 --key "logs/poke.jpg" --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   wait_notify 1 "logs/x.jpg" || return 1
   sleep 5
@@ -1272,13 +1274,13 @@ test_evt106() {
   receiver_stop
   local i
   for i in 1 2 3; do
-    aws_run s3api put-object --bucket evt106-b1 --key "off-${i}" --body /tmp/tier-f1
+    aws_run s3api put-object --bucket evt106-b1 --key "off-${i}" --body ${TEST_TMP}/tier-f1
     assert_aws_ok || return 1
   done
   sleep 3
   receiver_start
   # poke: a new event after recovery forces the queue to flush
-  aws_run s3api put-object --bucket evt106-b1 --key poke --body /tmp/tier-f1
+  aws_run s3api put-object --bucket evt106-b1 --key poke --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   wait_notify 3 "off-" || return 1
   rm_bucket evt106-b1
@@ -1320,8 +1322,8 @@ test_evt107() {
   [ "${waited}" -lt 60 ] || { echo "discard target still present after reset (reset HTTP ${code}): ${body}"; return 1; }
   # delivery for the referencing rule must stop (rule was removed as required)
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket evt107-b1 --key after --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket evt107-b1 --key after --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   sleep 10
   if [ "$(notify_count)" -ne 0 ]; then echo "events delivered after target reset: $(notify_grep .)"; return 1; fi
@@ -1338,21 +1340,21 @@ test_evt108() {
   body="$(admin_api PUT /rustfs/admin/v3/module-switches "" '{"notify_enabled":false,"audit_enabled":true}')"; code="$(admin_api_code)"
   [ "${code}" = "200" ] || { echo "disable notify -> HTTP ${code}: ${body}"; return 1; }
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket evt108-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket evt108-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   sleep 5
   if [ "$(notify_count)" -ne 0 ]; then echo "events delivered while notify disabled: $(notify_grep .)"; return 1; fi
   body="$(admin_api PUT /rustfs/admin/v3/module-switches "" '{"notify_enabled":true,"audit_enabled":true}')"; code="$(admin_api_code)"
   [ "${code}" = "200" ] || { echo "enable notify -> HTTP ${code}: ${body}"; return 1; }
   wait_targets_ready || return 1
-  aws_run s3api put-object --bucket evt108-b1 --key f2 --body /tmp/tier-f1
+  aws_run s3api put-object --bucket evt108-b1 --key f2 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   local waited=0
   while [ "${waited}" -lt 300 ]; do
     if grep -q "f2" "${NOTIFY_EVENTS}" 2>/dev/null; then break; fi
     if [ $((waited % 30)) -eq 0 ]; then
-      aws_run s3api put-object --bucket evt108-b1 --key "poke-${waited}" --body /tmp/tier-f1
+      aws_run s3api put-object --bucket evt108-b1 --key "poke-${waited}" --body ${TEST_TMP}/tier-f1
     fi
     sleep 5; waited=$((waited+5))
   done
@@ -1372,10 +1374,10 @@ test_aud101() {
 test_aud102() {
   new_bucket "aud102-b1" || return 1
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket aud102-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket aud102-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
-  aws_run s3api get-object --bucket aud102-b1 --key f1 /tmp/tier-dl1
+  aws_run s3api get-object --bucket aud102-b1 --key f1 ${TEST_TMP}/tier-dl1
   assert_aws_ok || return 1
   wait_audit 2 "aud102-b1" || return 1
   audit_grep "aud102-b1" | grep -qiE 'api|bucket|object|status|request_id|remote_host|time_to_response' \
@@ -1386,7 +1388,7 @@ test_aud102() {
 test_aud103() {
   new_bucket "aud103-b1" || return 1
   events_reset
-  aws_run s3api get-object --bucket aud103-b1 --key missing /tmp/tier-nope
+  aws_run s3api get-object --bucket aud103-b1 --key missing ${TEST_TMP}/tier-nope
   assert_aws_fails || return 1
   # wait for the failed GET entry specifically (requestPath contains the key)
   wait_audit 1 "aud103-b1/missing" || return 1
@@ -1414,10 +1416,10 @@ test_aud105() {
   new_bucket "aud105-b1" || return 1
   events_reset
   receiver_stop
-  make_test_file /tmp/tier-f1 65536
+  make_test_file ${TEST_TMP}/tier-f1 65536
   local i
   for i in 1 2 3; do
-    aws_run s3api put-object --bucket aud105-b1 --key "a-${i}" --body /tmp/tier-f1
+    aws_run s3api put-object --bucket aud105-b1 --key "a-${i}" --body ${TEST_TMP}/tier-f1
     assert_aws_ok || return 1
   done
   sleep 3
@@ -1429,8 +1431,8 @@ test_aud105() {
 test_aud106() {
   new_bucket "aud106-b1" || return 1
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket aud106-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket aud106-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   sleep 3
   # authorization headers must be redacted; target tokens must never appear
@@ -1452,15 +1454,15 @@ test_aud107() {
   body="$(admin_api PUT /rustfs/admin/v3/module-switches "" '{"notify_enabled":true,"audit_enabled":false}')"; code="$(admin_api_code)"
   [ "${code}" = "200" ] || { echo "disable audit -> HTTP ${code}: ${body}"; return 1; }
   events_reset
-  make_test_file /tmp/tier-f1 65536
-  aws_run s3api put-object --bucket aud107-b1 --key f1 --body /tmp/tier-f1
+  make_test_file ${TEST_TMP}/tier-f1 65536
+  aws_run s3api put-object --bucket aud107-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   sleep 5
   if [ "$(audit_count)" -ne 0 ]; then echo "audit entries written while disabled: $(audit_grep .)"; return 1; fi
   body="$(admin_api PUT /rustfs/admin/v3/module-switches "" '{"notify_enabled":true,"audit_enabled":true}')"; code="$(admin_api_code)"
   [ "${code}" = "200" ] || { echo "enable audit -> HTTP ${code}: ${body}"; return 1; }
   wait_targets_ready || return 1
-  aws_run s3api put-object --bucket aud107-b1 --key f2 --body /tmp/tier-f1
+  aws_run s3api put-object --bucket aud107-b1 --key f2 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
   wait_audit 1 "aud107-b1" || return 1
   rm_bucket aud107-b1
