@@ -66,8 +66,8 @@ heal_run() {
     if docker info >/dev/null 2>&1; then
       "$@"
     else
-      # runner user without docker group: fall back to sudo docker
-      sudo -n docker "$@" 2>/dev/null || sudo docker "$@"
+      # runner user without docker group: run the same command via sudo.
+      sudo -n "$@" 2>/dev/null || sudo "$@"
     fi
   else
     ssh "${HEAL_SSH_OPTS[@]}" "${HEAL_HOST}" "$(printf '%q ' "$@")"
