@@ -418,11 +418,16 @@ vault_remote_bash() {
 }
 
 vault_ensure_config() {
-  vault_remote_bash "
+  if vault_local; then
+    heal_run bash -lc "set -e; rm -rf '${VAULT_DATA_DIR}'; mkdir -p '${VAULT_DATA_DIR}'; chmod 0777 '${VAULT_DATA_DIR}'"
+  else
+    vault_remote_bash "
 set -e
 rm -rf '${VAULT_DATA_DIR}'
 mkdir -p '${VAULT_DATA_DIR}'
+chmod 0777 '${VAULT_DATA_DIR}'
 "
+  fi
 }
 
 vault_read_init() {
@@ -452,9 +457,16 @@ vault_ensure_ready() {
   if [ -z "${init}" ] || [ -z "$(printf '%s' "${init}" | jq -r '.root_token // empty' 2>/dev/null)" ]; then
     log "initializing vault (1-of-1 unseal key)"
     if vault_local; then
+      local tmp_init tmp_err
+      tmp_init="${TEST_TMP}/vault-init.json"
+      tmp_err="${TEST_TMP}/vault-init.stderr"
       heal_run docker exec -e "VAULT_ADDR=http://127.0.0.1:8200" "${VAULT_CONTAINER}" \
         vault operator init -key-shares=1 -key-threshold=1 -format=json \
-        > "${VAULT_DATA_DIR}/init.json" 2>/dev/null || die "vault init failed"
+        > "${tmp_init}" 2>"${tmp_err}" || {
+          cat "${tmp_err}" >&2 || true
+          die "vault init failed"
+        }
+      cat "${tmp_init}" | heal_run tee "${VAULT_DATA_DIR}/init.json" >/dev/null || die "vault init failed"
     else
       local tmp
       tmp="$(mktemp)"
