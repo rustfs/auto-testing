@@ -899,10 +899,33 @@ step4_write_data() {
     log "warp PID=${warp_pid}"
     trap 'kill "${warp_pid:-}" 2>/dev/null || true' EXIT
     monitor_storage "${STORAGE_THRESHOLD}" "${warp_pid}"
-    kill "${warp_pid}" 2>/dev/null || true
+    # Graceful stop first (SIGINT lets warp finish/abort in-flight multipart
+    # uploads), then SIGTERM/KILL as fallback; see rustfs/backlog#2063.
+    kill -INT "${warp_pid}" 2>/dev/null || true
+    local warp_stop_waited=0
+    while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 60 ]; do
+      sleep 1
+      warp_stop_waited=$((warp_stop_waited + 1))
+    done
+    if kill -0 "${warp_pid}" 2>/dev/null; then
+      warn "warp did not exit after SIGINT; sending SIGTERM"
+      kill -TERM "${warp_pid}" 2>/dev/null || true
+      warp_stop_waited=0
+      while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 30 ]; do
+        sleep 1
+        warp_stop_waited=$((warp_stop_waited + 1))
+      done
+    fi
+    if kill -0 "${warp_pid}" 2>/dev/null; then
+      warn "warp still running; sending SIGKILL"
+      kill -KILL "${warp_pid}" 2>/dev/null || true
+    fi
     trap - EXIT
     wait "${warp_pid}" 2>/dev/null || true
     log "warp stopped"
+    # Safety net: abort any incomplete multipart uploads left in the test
+    # bucket immediately, so no orphan can block the later decommission gate.
+    abort_stale_multipart_uploads "${WARP_BUCKET}"
   else
     cat <<'NOTE'
 Write data manually (or re-run with --with-warp to automate):
@@ -971,26 +994,46 @@ step8_rebalance() {
 # post-check refuses to finalize a pool that still contains them ("resolve it
 # before retrying decommission").
 abort_stale_multipart_uploads() {
-  local bucket="$1" body code key id
+  local bucket="$1" body code key id marker_key="" marker_id="" any=0 loops=0
+  while :; do
+    local q="uploads"
+    [ -n "${marker_key}" ] && q="${q}&key-marker=${marker_key}"
+    [ -n "${marker_id}" ] && q="${q}&upload-id-marker=${marker_id}"
+    body="$(admin_api GET "/${bucket}" "${q}")"
+    code="$(admin_api_code)"
+    [ "${code}" = "200" ] || die "list multipart uploads failed (HTTP ${code}): ${body}"
+    loops=$((loops + 1))
+    [ "${loops}" -gt 100 ] && die "multipart upload listing did not terminate (pagination loop)"
+    # Split the one-line XML into one <Upload>...</Upload> block per line.
+    while IFS= read -r block; do
+      [ -z "${block}" ] && continue
+      key="$(printf '%s' "${block}" | grep -oE '<Key>[^<]+</Key>' | sed 's#</\?Key>##g')"
+      id="$(printf '%s' "${block}" | grep -oE '<UploadId>[^<]+</UploadId>' | sed 's#</\?UploadId>##g')"
+      if [ -n "${key}" ] && [ -n "${id}" ]; then
+        any=1
+        log "aborting incomplete multipart upload ${id} for ${key}"
+        admin_api DELETE "/${bucket}/${key}" "uploadId=${id}" ""
+        code="$(admin_api_code)"
+        [ "${code}" = "200" ] || [ "${code}" = "204" ] \
+          || die "abort multipart upload failed (HTTP ${code}) for ${key} ${id}"
+      fi
+    done < <(printf '%s' "${body}" | sed 's#</Upload>#</Upload>\n#g' | grep '<Upload>')
+    marker_key="$(printf '%s' "${body}" | grep -oE '<NextKeyMarker>[^<]+</NextKeyMarker>' | sed 's#</\?NextKeyMarker>##g' | head -1)"
+    marker_id="$(printf '%s' "${body}" | grep -oE '<NextUploadIdMarker>[^<]+</NextUploadIdMarker>' | sed 's#</\?NextUploadIdMarker>##g' | head -1)"
+    [ -n "${marker_key}" ] || break
+  done
+  # Confirm the bucket has no incomplete uploads left before decommission.
   body="$(admin_api GET "/${bucket}" "uploads")"
   code="$(admin_api_code)"
-  if [ "${code}" != "200" ]; then
-    warn "list multipart uploads failed (HTTP ${code}); continuing without cleanup"
-    return 0
+  [ "${code}" = "200" ] || die "re-list multipart uploads failed (HTTP ${code}): ${body}"
+  if printf '%s' "${body}" | grep -q '<Upload>'; then
+    die "multipart upload cleanup incomplete: ${bucket} still has incomplete uploads"
   fi
-  # Split the one-line XML into one <Upload>...</Upload> block per line.
-  while IFS= read -r block; do
-    [ -z "${block}" ] && continue
-    key="$(printf '%s' "${block}" | grep -oE '<Key>[^<]+</Key>' | sed 's#</\?Key>##g')"
-    id="$(printf '%s' "${block}" | grep -oE '<UploadId>[^<]+</UploadId>' | sed 's#</\?UploadId>##g')"
-    if [ -n "${key}" ] && [ -n "${id}" ]; then
-      log "aborting stale multipart upload ${id} for ${key}"
-      admin_api DELETE "/${bucket}/${key}" "uploadId=${id}" ""
-      [ "$(admin_api_code)" = "200" ] || [ "$(admin_api_code)" = "204" ] \
-        || warn "abort multipart upload returned HTTP $(admin_api_code)"
-    fi
-  done < <(printf '%s' "${body}" | sed 's#</Upload>#</Upload>\n#g' | grep '<Upload>')
-  log "multipart upload cleanup done for ${bucket}"
+  if [ "${any}" -eq 1 ]; then
+    log "aborted incomplete multipart uploads in ${bucket}"
+  else
+    log "no incomplete multipart uploads in ${bucket}"
+  fi
 }
 
 step9_decommission() {
