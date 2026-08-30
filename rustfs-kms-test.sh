@@ -832,13 +832,13 @@ test_kms103() {
   kms_create_key "k103" "env=ci" || return 1
   local kid="${KMS_KEY_ID}"
   new_bucket "kms103-b1" || return 1
-  make_test_file /tmp/kms-f1 1048576
-  kms_sse_put kms103-b1 f1 /tmp/kms-f1 "${kid}"
+  make_test_file ${TEST_TMP}/kms-f1 1048576
+  kms_sse_put kms103-b1 f1 ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_ok || return 1
 
   rc_run admin kms stop local --yes
   assert_rc_ok || return 1
-  kms_sse_put kms103-b1 f2 /tmp/kms-f1 "${kid}"
+  kms_sse_put kms103-b1 f2 ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_fails || { echo "SSE-KMS upload unexpectedly succeeded while KMS stopped"; return 1; }
   echo "expected failure while stopped: ${AWS_OUT}"
 
@@ -846,7 +846,7 @@ test_kms103() {
   assert_rc_ok || return 1
   local waited=0
   while [ "${waited}" -lt 60 ]; do
-    kms_sse_put kms103-b1 f3 /tmp/kms-f1 "${kid}" && break
+    kms_sse_put kms103-b1 f3 ${TEST_TMP}/kms-f1 "${kid}" && break
     sleep 3; waited=$((waited+3))
   done
   [ "${waited}" -lt 60 ] || { echo "SSE-KMS upload still failing after restart: ${AWS_OUT}"; return 1; }
@@ -866,8 +866,8 @@ test_kms105() {
   [ "${code}" = "200" ] || { echo "clear-cache -> HTTP ${code}: ${body}"; return 1; }
   kms_create_key "k105" "env=ci" || return 1
   new_bucket "kms105-b1" || return 1
-  make_test_file /tmp/kms-f1 65536
-  kms_sse_put kms105-b1 f1 /tmp/kms-f1
+  make_test_file ${TEST_TMP}/kms-f1 65536
+  kms_sse_put kms105-b1 f1 ${TEST_TMP}/kms-f1
   assert_aws_ok || return 1
   rm_bucket kms105-b1
 }
@@ -908,8 +908,8 @@ test_kms203() {
   kms_create_key "k203" "env=ci" || return 1
   local kid="${KMS_KEY_ID}" body code
   new_bucket "kms203-b1" || return 1
-  make_test_file /tmp/kms-f1 65536
-  kms_sse_put kms203-b1 f1 /tmp/kms-f1 "${kid}"
+  make_test_file ${TEST_TMP}/kms-f1 65536
+  kms_sse_put kms203-b1 f1 ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_ok || return 1
 
   body="$(admin_api POST /rustfs/admin/v3/kms/keys/disable "" "{\"key_id\":\"${kid}\"}")"; code="$(admin_api_code)"
@@ -921,17 +921,17 @@ test_kms203() {
     echo "disable -> HTTP ${code}: ${body}"; return 1
   fi
 
-  kms_sse_put kms203-b1 f2 /tmp/kms-f1 "${kid}"
+  kms_sse_put kms203-b1 f2 ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_fails || { echo "SSE-KMS upload unexpectedly succeeded while key disabled"; return 1; }
   echo "expected failure while disabled: ${AWS_OUT}"
   # old object still decryptable
-  kms_sse_get kms203-b1 f1 /tmp/kms-dl1 "${kid}"
+  kms_sse_get kms203-b1 f1 ${TEST_TMP}/kms-dl1 "${kid}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file /tmp/kms-dl1)" = "$(md5_of_file /tmp/kms-f1)" ] || { echo "old object MD5 mismatch"; return 1; }
+  [ "$(md5_of_file ${TEST_TMP}/kms-dl1)" = "$(md5_of_file ${TEST_TMP}/kms-f1)" ] || { echo "old object MD5 mismatch"; return 1; }
 
   body="$(admin_api POST /rustfs/admin/v3/kms/keys/enable "" "{\"key_id\":\"${kid}\"}")"; code="$(admin_api_code)"
   [ "${code}" = "200" ] || { echo "enable -> HTTP ${code}: ${body}"; return 1; }
-  kms_sse_put kms203-b1 f3 /tmp/kms-f1 "${kid}"
+  kms_sse_put kms203-b1 f3 ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_ok || return 1
   rm_bucket kms203-b1
 }
@@ -940,8 +940,8 @@ test_kms204() {
   kms_create_key "k204" "env=ci" || return 1
   local kid="${KMS_KEY_ID}" body code
   new_bucket "kms204-b1" || return 1
-  make_test_file /tmp/kms-f1 65536
-  kms_sse_put kms204-b1 old /tmp/kms-f1 "${kid}"
+  make_test_file ${TEST_TMP}/kms-f1 65536
+  kms_sse_put kms204-b1 old ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_ok || return 1
 
   body="$(admin_api POST /rustfs/admin/v3/kms/keys/rotate "" "{\"key_id\":\"${kid}\"}")"; code="$(admin_api_code)"
@@ -954,10 +954,10 @@ test_kms204() {
     echo "rotate -> HTTP ${code}: ${body}"; return 1
   fi
   # old object still decryptable, new object encryptable
-  kms_sse_get kms204-b1 old /tmp/kms-dl1 "${kid}"
+  kms_sse_get kms204-b1 old ${TEST_TMP}/kms-dl1 "${kid}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file /tmp/kms-dl1)" = "$(md5_of_file /tmp/kms-f1)" ] || { echo "old object MD5 mismatch after rotation"; return 1; }
-  kms_sse_put kms204-b1 new /tmp/kms-f1 "${kid}"
+  [ "$(md5_of_file ${TEST_TMP}/kms-dl1)" = "$(md5_of_file ${TEST_TMP}/kms-f1)" ] || { echo "old object MD5 mismatch after rotation"; return 1; }
+  kms_sse_put kms204-b1 new ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_ok || return 1
   rm_bucket kms204-b1
 }
@@ -986,8 +986,8 @@ test_kms206() {
   st="$(kms_describe_key "${kid}")" || return 1
   printf '%s' "${st}" | grep -qiE 'active|enabled|available|usable|ready' || { echo "key not restored after cancel-deletion: ${st}"; return 1; }
   new_bucket "kms206-b1" || return 1
-  make_test_file /tmp/kms-f1 65536
-  kms_sse_put kms206-b1 f1 /tmp/kms-f1 "${kid}"
+  make_test_file ${TEST_TMP}/kms-f1 65536
+  kms_sse_put kms206-b1 f1 ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_ok || return 1
   rm_bucket kms206-b1
 }
@@ -1106,25 +1106,25 @@ test_kms301() {
   kms_create_key "k301" "env=ci" || return 1
   local kid="${KMS_KEY_ID}"
   new_bucket "kms301-b1" || return 1
-  make_test_file /tmp/kms-f1 1048576
-  kms_sse_put kms301-b1 f1 /tmp/kms-f1 "${kid}"
+  make_test_file ${TEST_TMP}/kms-f1 1048576
+  kms_sse_put kms301-b1 f1 ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_ok || return 1
   printf '%s' "${AWS_OUT}" | grep -q '"ServerSideEncryption": "aws:kms"' || { echo "put response missing SSE header: ${AWS_OUT}"; return 1; }
   printf '%s' "${AWS_OUT}" | grep -q "${kid}" || { echo "put response missing key id: ${AWS_OUT}"; return 1; }
-  kms_sse_get kms301-b1 f1 /tmp/kms-dl1 "${kid}"
+  kms_sse_get kms301-b1 f1 ${TEST_TMP}/kms-dl1 "${kid}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file /tmp/kms-dl1)" = "$(md5_of_file /tmp/kms-f1)" ] || { echo "SSE-KMS download MD5 mismatch"; return 1; }
+  [ "$(md5_of_file ${TEST_TMP}/kms-dl1)" = "$(md5_of_file ${TEST_TMP}/kms-f1)" ] || { echo "SSE-KMS download MD5 mismatch"; return 1; }
   # In multi-multi with a shared backend (vault), the object must also be
   # readable from a different node (validates cross-node KMS consistency).
   if [ "${CURRENT_TOPOLOGY}" = "${TOPO_MULTI_MULTI}" ]; then
     if [ "${KMS_BACKEND}" = "vault-kv2" ]; then
       local x_out x_code
       x_out="$(aws --endpoint-url http://rustfs-node2:9000 --region "${REGION}" s3api get-object \
-        --bucket kms301-b1 --key f1 /tmp/kms-dl-xnode 2>&1)"; x_code=$?
-      if [ "${x_code}" -ne 0 ] || [ "$(md5_of_file /tmp/kms-dl-xnode 2>/dev/null)" != "$(md5_of_file /tmp/kms-f1)" ]; then
+        --bucket kms301-b1 --key f1 ${TEST_TMP}/kms-dl-xnode 2>&1)"; x_code=$?
+      if [ "${x_code}" -ne 0 ] || [ "$(md5_of_file ${TEST_TMP}/kms-dl-xnode 2>/dev/null)" != "$(md5_of_file ${TEST_TMP}/kms-f1)" ]; then
         echo "cross-node SSE-KMS read failed: ${x_out}"; return 1
       fi
-      rm -f /tmp/kms-dl-xnode
+      rm -f ${TEST_TMP}/kms-dl-xnode
     fi
   fi
   rm_bucket kms301-b1
@@ -1137,8 +1137,8 @@ test_kms302() {
   aws_run s3api put-bucket-encryption --bucket kms302-b1 \
     --server-side-encryption-configuration "{\"Rules\":[{\"ApplyServerSideEncryptionByDefault\":{\"SSEAlgorithm\":\"aws:kms\",\"KMSMasterKeyID\":\"${kid}\"}}]}"
   assert_aws_ok || return 1
-  make_test_file /tmp/kms-f1 1048576
-  aws_run s3api put-object --bucket kms302-b1 --key bare --body /tmp/kms-f1
+  make_test_file ${TEST_TMP}/kms-f1 1048576
+  aws_run s3api put-object --bucket kms302-b1 --key bare --body ${TEST_TMP}/kms-f1
   assert_aws_ok || return 1
   aws_run s3api head-object --bucket kms302-b1 --key bare
   printf '%s' "${AWS_OUT}" | grep -q '"ServerSideEncryption": "aws:kms"' || { echo "bucket default SSE-KMS not applied: ${AWS_OUT}"; return 1; }
@@ -1146,7 +1146,7 @@ test_kms302() {
   # explicit header overrides bucket default
   kms_create_key "k302b" "env=ci" || return 1
   local kid2="${KMS_KEY_ID}"
-  aws_run s3api put-object --bucket kms302-b1 --key explicit --body /tmp/kms-f1 \
+  aws_run s3api put-object --bucket kms302-b1 --key explicit --body ${TEST_TMP}/kms-f1 \
     --server-side-encryption aws:kms --ssekms-key-id "${kid2}"
   assert_aws_ok || return 1
   aws_run s3api head-object --bucket kms302-b1 --key explicit
@@ -1158,16 +1158,16 @@ test_kms303() {
   kms_create_key "k303" "env=ci" || return 1
   local kid="${KMS_KEY_ID}"
   new_bucket "kms303-b1" || return 1
-  make_test_file /tmp/kms-mp 15728640
+  make_test_file ${TEST_TMP}/kms-mp 15728640
   aws_run s3api create-multipart-upload --bucket kms303-b1 --key mp \
     --server-side-encryption aws:kms --ssekms-key-id "${kid}"
   assert_aws_ok || return 1
   local uid
   uid="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
   [ -n "${uid}" ] && [ "${uid}" != "null" ] || { echo "no UploadId: ${AWS_OUT}"; return 1; }
-  split -b 5242880 /tmp/kms-mp /tmp/kms-part.
+  split -b 5242880 ${TEST_TMP}/kms-mp ${TEST_TMP}/kms-part.
   local etags=() i=0 p
-  for p in /tmp/kms-part.*; do
+  for p in ${TEST_TMP}/kms-part.*; do
     i=$((i+1))
     aws_run s3api upload-part --bucket kms303-b1 --key mp --part-number "${i}" \
       --upload-id "${uid}" --body "${p}"
@@ -1179,10 +1179,10 @@ test_kms303() {
   aws_run s3api complete-multipart-upload --bucket kms303-b1 --key mp --upload-id "${uid}" \
     --multipart-upload "{\"Parts\":[${parts}]}"
   assert_aws_ok || return 1
-  kms_sse_get kms303-b1 mp /tmp/kms-mp-dl "${kid}"
+  kms_sse_get kms303-b1 mp ${TEST_TMP}/kms-mp-dl "${kid}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file /tmp/kms-mp-dl)" = "$(md5_of_file /tmp/kms-mp)" ] || { echo "multipart SSE-KMS MD5 mismatch"; return 1; }
-  rm -f /tmp/kms-part.* /tmp/kms-mp-dl
+  [ "$(md5_of_file ${TEST_TMP}/kms-mp-dl)" = "$(md5_of_file ${TEST_TMP}/kms-mp)" ] || { echo "multipart SSE-KMS MD5 mismatch"; return 1; }
+  rm -f ${TEST_TMP}/kms-part.* ${TEST_TMP}/kms-mp-dl
   rm_bucket kms303-b1
 }
 
@@ -1190,8 +1190,8 @@ test_kms304() {
   kms_create_key "k304" "env=ci" || return 1
   local kid="${KMS_KEY_ID}"
   new_bucket "kms304-b1" || return 1
-  make_test_file /tmp/kms-f1 1048576
-  aws_run s3api put-object --bucket kms304-b1 --key plain --body /tmp/kms-f1
+  make_test_file ${TEST_TMP}/kms-f1 1048576
+  aws_run s3api put-object --bucket kms304-b1 --key plain --body ${TEST_TMP}/kms-f1
   assert_aws_ok || return 1
   # plaintext -> SSE-KMS
   aws_run s3api copy-object --bucket kms304-b1 --key enc --copy-source kms304-b1/plain \
@@ -1206,17 +1206,17 @@ test_kms304() {
   if printf '%s' "${AWS_OUT}" | grep -q '"ServerSideEncryption": "aws:kms"'; then
     echo "reverse copy still encrypted: ${AWS_OUT}"; return 1
   fi
-  aws_run s3api get-object --bucket kms304-b1 --key dec /tmp/kms-dec-dl
+  aws_run s3api get-object --bucket kms304-b1 --key dec ${TEST_TMP}/kms-dec-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file /tmp/kms-dec-dl)" = "$(md5_of_file /tmp/kms-f1)" ] || { echo "decrypted copy MD5 mismatch"; return 1; }
+  [ "$(md5_of_file ${TEST_TMP}/kms-dec-dl)" = "$(md5_of_file ${TEST_TMP}/kms-f1)" ] || { echo "decrypted copy MD5 mismatch"; return 1; }
   rm_bucket kms304-b1
 }
 
 test_kms305() {
   kms_create_key "k305" "env=ci" || return 1
   new_bucket "kms305-b1" || return 1
-  make_test_file /tmp/kms-f1 65536
-  aws_run s3api put-object --bucket kms305-b1 --key f --body /tmp/kms-f1 --ssekms-key-id "${KMS_KEY_ID}"
+  make_test_file ${TEST_TMP}/kms-f1 65536
+  aws_run s3api put-object --bucket kms305-b1 --key f --body ${TEST_TMP}/kms-f1 --ssekms-key-id "${KMS_KEY_ID}"
   assert_aws_fails || { echo "key id without aws:kms algorithm unexpectedly accepted"; return 1; }
   printf '%s' "${AWS_OUT}" | grep -qiE 'InvalidArgument|400' || { echo "unexpected error: ${AWS_OUT}"; return 1; }
   rm_bucket kms305-b1
@@ -1225,10 +1225,10 @@ test_kms305() {
 test_kms306() {
   kms_create_key "k306" "env=ci" || return 1
   new_bucket "kms306-b1" || return 1
-  make_test_file /tmp/kms-f1 65536
+  make_test_file ${TEST_TMP}/kms-f1 65536
   local key_b64
   key_b64="$(printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' | xxd -r -p | base64)"
-  aws_run s3api put-object --bucket kms306-b1 --key f --body /tmp/kms-f1 \
+  aws_run s3api put-object --bucket kms306-b1 --key f --body ${TEST_TMP}/kms-f1 \
     --server-side-encryption aws:kms --ssekms-key-id "${KMS_KEY_ID}" \
     --sse-customer-algorithm AES256 --sse-customer-key "${key_b64}"
   assert_aws_fails || { echo "SSE-C + SSE-KMS mutually exclusive not enforced"; return 1; }
@@ -1240,15 +1240,15 @@ test_kms307() {
   kms_create_key "k307" "env=ci" || return 1
   local kid="${KMS_KEY_ID}"
   new_bucket "kms307-b1" || return 1
-  make_test_file /tmp/kms-f1 1048576
-  kms_sse_put kms307-b1 old /tmp/kms-f1 "${kid}"
+  make_test_file ${TEST_TMP}/kms-f1 1048576
+  kms_sse_put kms307-b1 old ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_ok || return 1
 
   log "stopping vault for KMS-307"
   heal_run docker stop "${VAULT_CONTAINER}" >/dev/null || die "failed to stop vault"
   sleep 2
 
-  kms_sse_put kms307-b1 partial /tmp/kms-f1 "${kid}"
+  kms_sse_put kms307-b1 partial ${TEST_TMP}/kms-f1 "${kid}"
   assert_aws_fails || { echo "SSE-KMS upload unexpectedly succeeded while vault down"; return 1; }
   echo "expected failure while vault down: ${AWS_OUT}"
   aws_run s3api head-object --bucket kms307-b1 --key partial
@@ -1259,10 +1259,10 @@ test_kms307() {
 
   local waited=0
   while [ "${waited}" -lt 120 ]; do
-    rm -f /tmp/kms-dl1
-    if kms_sse_get kms307-b1 old /tmp/kms-dl1 "${kid}" 2>/dev/null \
-      && [ -f /tmp/kms-dl1 ] \
-      && [ "$(md5_of_file /tmp/kms-dl1)" = "$(md5_of_file /tmp/kms-f1)" ]; then
+    rm -f ${TEST_TMP}/kms-dl1
+    if kms_sse_get kms307-b1 old ${TEST_TMP}/kms-dl1 "${kid}" 2>/dev/null \
+      && [ -f ${TEST_TMP}/kms-dl1 ] \
+      && [ "$(md5_of_file ${TEST_TMP}/kms-dl1)" = "$(md5_of_file ${TEST_TMP}/kms-f1)" ]; then
       break
     fi
     sleep 3; waited=$((waited+3))
