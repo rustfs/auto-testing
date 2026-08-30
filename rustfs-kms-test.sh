@@ -538,7 +538,11 @@ vault_stop() {
   [ "${DRY_RUN}" -eq 1 ] && { log "DRY-RUN: remove vault container on ${HEAL_HOST}"; return 0; }
   log "stopping and removing vault container ${VAULT_CONTAINER} on ${HEAL_HOST}"
   heal_run docker rm -f "${VAULT_CONTAINER}" >/dev/null 2>&1 || true
-  vault_remote_bash "rm -rf '${VAULT_DATA_DIR}' '${VAULT_CONFIG_DIR}'"
+  if vault_local; then
+    heal_run rm -rf "${VAULT_DATA_DIR}" "${VAULT_CONFIG_DIR}"
+  else
+    vault_remote_bash "rm -rf '${VAULT_DATA_DIR}' '${VAULT_CONFIG_DIR}'"
+  fi
 }
 
 vault_down() {
