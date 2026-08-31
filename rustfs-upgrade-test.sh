@@ -281,8 +281,10 @@ rustfs_config_body() {
 RUSTFS_ACCESS_KEY=${ACCESS_KEY}
 RUSTFS_SECRET_KEY=${SECRET_KEY}
 RUSTFS_VOLUMES="${volumes}"
+RUSTFS_SSE_S3_MASTER_KEY=QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU=
 RUSTFS_KMS_ENABLE=true
 RUSTFS_KMS_BACKEND=${KMS_BACKEND}
+RUSTFS_KMS_DEFAULT_KEY_ID=${KMS_DEFAULT_KEY_ID}
 EOF
   case "${KMS_BACKEND}" in
     local)
@@ -511,7 +513,14 @@ env_setup_old() {
   export AWS_EC2_METADATA_DISABLED=true
   rc alias set local "${ENDPOINT}" "${ACCESS_KEY}" "${SECRET_KEY}" >/dev/null 2>&1 \
     || die "rc alias set failed for ${ENDPOINT}"
-  rc admin kms key create local --name "${KMS_DEFAULT_KEY_ID}" --json >/dev/null 2>&1 || true
+  if rc admin kms key create local --name "${KMS_DEFAULT_KEY_ID}" --json >/dev/null 2>&1; then
+    log "created default KMS key ${KMS_DEFAULT_KEY_ID}"
+  else
+    log "default KMS key ${KMS_DEFAULT_KEY_ID} already present or create skipped"
+  fi
+  if ! rc admin kms key status local "${KMS_DEFAULT_KEY_ID}" --json >/dev/null 2>&1; then
+    die "default KMS key ${KMS_DEFAULT_KEY_ID} is not usable after setup"
+  fi
 }
 
 upgrade_in_place() {
@@ -558,10 +567,18 @@ admin_api() {
     return 0
   fi
 
-  local payload_hash="UNSIGNED-PAYLOAD"
-  if [ -n "${body}" ]; then
-    payload_hash="$(sha256_hex "${body}")"
+  # Callers often embed the query in the path (e.g. add-user?accessKey=x).
+  # Split it so the canonical request separates URI and query like the server.
+  local path_only="${path%%\?*}" embedded_query="${path#*\?}"
+  if [ "${embedded_query}" != "${path}" ]; then
+    if [ -n "${query}" ]; then query="${query}&${embedded_query}"; else query="${embedded_query}"; fi
+    path="${path_only}"
   fi
+
+  # The S3-compatible admin channel on these builds accepts only the
+  # UNSIGNED-PAYLOAD signing form (matching the KMS suite); body-hash signing
+  # is rejected with SignatureDoesNotMatch on some versions.
+  local payload_hash="UNSIGNED-PAYLOAD"
 
   host_port="${API_ENDPOINT#*://}"
   host_port="${host_port%%/*}"
@@ -574,6 +591,11 @@ x-amz-content-sha256:${payload_hash}
 x-amz-date:${amz_date}
 "
   signed_headers="host;x-amz-content-sha256;x-amz-date"
+  if [ -n "${body}" ]; then
+    canonical_headers="content-type:application/json
+${canonical_headers}"
+    signed_headers="content-type;${signed_headers}"
+  fi
   canonical_request="${method}
 ${path}
 ${query}
@@ -597,7 +619,7 @@ $(sha256_hex "${canonical_request}")"
   url="http://${host_port}${path}${query:+?${query}}"
   tmp="$(mktemp)"
   local curl_args=()
-  [ -n "${body}" ] && curl_args+=(--data-binary "${body}")
+  [ -n "${body}" ] && curl_args+=(--data-binary "${body}" -H 'Content-Type: application/json')
   code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -w '%{http_code}' \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: ${payload_hash}" \
@@ -624,7 +646,13 @@ assert_admin_ok() {
 # ==================== AWS / S3 helpers ====================
 
 aws_run() {
-  AWS_OUT="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
+  # The if-context suppresses `set -e` so a failing aws CLI cannot silently
+  # kill the suite; the exit code is captured explicitly.
+  if AWS_OUT="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; then
+    AWS_CODE=0
+  else
+    AWS_CODE=$?
+  fi
 }
 
 aws_run_as() {
@@ -635,7 +663,11 @@ aws_run_as() {
   [ "${1:-}" = "--" ] && shift
   local env_args=(AWS_ACCESS_KEY_ID="${ak}" AWS_SECRET_ACCESS_KEY="${sk}" AWS_EC2_METADATA_DISABLED=true AWS_DEFAULT_REGION="${REGION}")
   if [ -n "${token}" ]; then env_args+=(AWS_SESSION_TOKEN="${token}"); fi
-  AWS_OUT="$(env "${env_args[@]}" aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
+  if AWS_OUT="$(env "${env_args[@]}" aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; then
+    AWS_CODE=0
+  else
+    AWS_CODE=$?
+  fi
 }
 
 assert_aws_ok() {
@@ -681,10 +713,16 @@ seed_golden() {
   log "seeding golden state on old version (kms=${KMS_BACKEND})"
 
   # KMS keys created on the old version must survive the upgrade.
-  rc admin kms key create local --name "upg-key" --json >/dev/null 2>&1 || true
+  if rc admin kms key create local --name "upg-key" --json >/dev/null 2>&1; then
+    log "seeded KMS key upg-key"
+  else
+    warn "KMS key create returned non-zero (proceeding; key may pre-exist)"
+  fi
   local upg_kid
-  upg_kid="$(rc admin kms key status local upg-key --json 2>/dev/null | jq -r '.key_id // .data.key_id // "upg-key"' 2>/dev/null)"
-  golden_set "kms:upg-key" "${upg_kid:-upg-key}"
+  upg_kid="$(rc admin kms key status local upg-key --json 2>/dev/null | jq -r '.key_id // .data.key_id // empty' 2>/dev/null || true)"
+  upg_kid="${upg_kid:-upg-key}"
+  golden_set "kms:upg-key" "${upg_kid}"
+  log "seeded KMS key id ${upg_kid}"
 
   # Data buckets.
   new_bucket upg-plain || die "seed: upg-plain"
@@ -695,6 +733,7 @@ seed_golden() {
   new_bucket upg-kms || die "seed: upg-kms"
   new_bucket upg-ctx || die "seed: upg-ctx"
   new_bucket upg-def || die "seed: upg-def"
+  log "seeded buckets"
 
   aws_run s3api put-bucket-versioning --bucket upg-versioned --versioning-configuration Status=Enabled
   assert_aws_ok || die "seed: enable versioning"
@@ -710,20 +749,24 @@ seed_golden() {
   aws_run s3api put-object --bucket upg-versioned --key obj --body "${TEST_TMP}/v1.bin"
   assert_aws_ok || die "seed: version v1"
   local vid1 vid2
-  vid1="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId')"
+  vid1="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId' 2>/dev/null || true)"
+  [ -n "${vid1}" ] || die "seed: no version id for v1: ${AWS_OUT}"
   aws_run s3api put-object --bucket upg-versioned --key obj --body "${TEST_TMP}/v2.bin"
   assert_aws_ok || die "seed: version v2"
-  vid2="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId')"
+  vid2="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId' 2>/dev/null || true)"
+  [ -n "${vid2}" ] || die "seed: no version id for v2: ${AWS_OUT}"
   aws_run s3api delete-object --bucket upg-versioned --key obj
   assert_aws_ok || die "seed: delete marker"
   golden_set "versions:upg-versioned:obj" "${vid1}|${vid2}"
+  log "seeded versioned object"
 
   # UPG-103 multipart (5MiB frame-aligned parts + small tail).
   make_test_file "${TEST_TMP}/mp.bin" 12582912
   aws_run s3api create-multipart-upload --bucket upg-mp --key mp
   assert_aws_ok || die "seed: mp create"
   local uid
-  uid="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
+  uid="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId' 2>/dev/null || true)"
+  [ -n "${uid}" ] || die "seed: no UploadId: ${AWS_OUT}"
   split -b 5242880 "${TEST_TMP}/mp.bin" "${TEST_TMP}/mp-part."
   local etags=() i=0 p
   for p in "${TEST_TMP}"/mp-part.*; do
@@ -737,28 +780,35 @@ seed_golden() {
   aws_run s3api complete-multipart-upload --bucket upg-mp --key mp --upload-id "${uid}" \
     --multipart-upload "{\"Parts\":[${parts}]}"
   assert_aws_ok || die "seed: mp complete"
+  log "seeded multipart object"
 
   # UPG-104 large object.
   make_test_file "${TEST_TMP}/large.bin" 20971520
   aws_run s3api put-object --bucket upg-large --key large --body "${TEST_TMP}/large.bin"
   assert_aws_ok || die "seed: large put"
+  log "seeded large object"
 
   # UPG-105 SSE-S3.
   make_test_file "${TEST_TMP}/sse3.bin" 65536
   aws_run s3api put-object --bucket upg-sse --key sse3 --body "${TEST_TMP}/sse3.bin" --server-side-encryption AES256
   assert_aws_ok || die "seed: SSE-S3 put"
+  log "seeded SSE-S3 object"
 
   # UPG-106 SSE-KMS with a pre-upgrade key.
   make_test_file "${TEST_TMP}/ssek.bin" 65536
   aws_run s3api put-object --bucket upg-kms --key ssek --body "${TEST_TMP}/ssek.bin" \
     --server-side-encryption aws:kms --ssekms-key-id "${upg_kid:-upg-key}"
   assert_aws_ok || die "seed: SSE-KMS put"
+  log "seeded SSE-KMS object"
 
   # UPG-107 encryption context.
+  local ctx_b64
+  ctx_b64="$(printf '%s' '{"purpose":"upgrade"}' | base64 | tr -d '\n')"
   aws_run s3api put-object --bucket upg-ctx --key ctx --body "${TEST_TMP}/ssek.bin" \
     --server-side-encryption aws:kms --ssekms-key-id "${upg_kid:-upg-key}" \
-    --ssekms-encryption-context '{"purpose":"upgrade"}'
+    --ssekms-encryption-context "${ctx_b64}"
   assert_aws_ok || die "seed: context put"
+  log "seeded context object"
 
   # UPG-201 user with a scoped policy.
   local out code
@@ -769,6 +819,7 @@ seed_golden() {
   out="$(admin_api POST /rustfs/admin/v3/idp/builtin/policy/attach "" "{\"policies\":[\"upgpolicy\"],\"user\":\"upguser\"}")"; code="$(admin_api_code)"
   [ "${code}" = "200" ] || die "seed: attach policy: ${out}"
   golden_set "creds:user" "upguser|upgsecret"
+  log "seeded IAM user"
 
   # UPG-202 service account.
   out="$(admin_api PUT /rustfs/admin/v3/add-service-accounts "" "{\"targetUser\":\"${ACCESS_KEY}\"}")"; code="$(admin_api_code)"
@@ -777,6 +828,7 @@ seed_golden() {
   sa_ak="$(printf '%s' "${out}" | jq -r '.credentials.accessKey')"
   sa_sk="$(printf '%s' "${out}" | jq -r '.credentials.secretKey')"
   golden_set "creds:sa" "${sa_ak}|${sa_sk}"
+  log "seeded service account"
 
   # UPG-203 STS credentials.
   aws_run sts assume-role --role-arn arn:aws:iam::123456789012:role/test \
@@ -787,12 +839,14 @@ seed_golden() {
     sts_sk="$(printf '%s' "${AWS_OUT}" | jq -r '.Credentials.SecretAccessKey')"
     sts_tok="$(printf '%s' "${AWS_OUT}" | jq -r '.Credentials.SessionToken')"
     golden_set "creds:sts" "${sts_ak}|${sts_sk}|${sts_tok}"
+    log "seeded STS credentials"
   fi
 
   # UPG-303 bucket default encryption.
   aws_run s3api put-bucket-encryption --bucket upg-def \
     --server-side-encryption-configuration "{\"Rules\":[{\"ApplyServerSideEncryptionByDefault\":{\"SSEAlgorithm\":\"aws:kms\",\"KMSMasterKeyID\":\"${upg_kid:-upg-key}\"}}]}"
   assert_aws_ok || die "seed: bucket default encryption"
+  log "seeded bucket default encryption"
 
   log "golden state seeded (${GOLDEN_FILE})"
 }
@@ -1069,7 +1123,7 @@ main() {
       LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/rustfs-upgrade.XXXXXX.log")"
       warn "log file not writable; using ${LOG_FILE}"
     fi
-    exec > >(tee -a "${LOG_FILE}") 2>&1
+    exec > >(tee "${LOG_FILE}") 2>&1
   fi
   if [ "${all}" -eq 1 ]; then
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}" "${TOPO_MULTI_MULTI}")

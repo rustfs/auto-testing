@@ -364,10 +364,17 @@ admin_api() {
     return 0
   fi
 
-  local payload_hash="UNSIGNED-PAYLOAD"
-  if [ -n "${body}" ]; then
-    payload_hash="$(sha256_hex "${body}")"
+  # Callers often embed the query in the path (e.g. add-user?accessKey=x).
+  # Split it so the canonical request separates URI and query like the server.
+  local path_only="${path%%\?*}" embedded_query="${path#*\?}"
+  if [ "${embedded_query}" != "${path}" ]; then
+    if [ -n "${query}" ]; then query="${query}&${embedded_query}"; else query="${embedded_query}"; fi
+    path="${path_only}"
   fi
+
+  # The S3-compatible admin channel accepts only the UNSIGNED-PAYLOAD signing
+  # form on the functional nightlies; body-hash signing is rejected.
+  local payload_hash="UNSIGNED-PAYLOAD"
 
   host_port="${API_ENDPOINT#*://}"
   host_port="${host_port%%/*}"
@@ -380,6 +387,11 @@ x-amz-content-sha256:${payload_hash}
 x-amz-date:${amz_date}
 "
   signed_headers="host;x-amz-content-sha256;x-amz-date"
+  if [ -n "${body}" ]; then
+    canonical_headers="content-type:application/json
+${canonical_headers}"
+    signed_headers="content-type;${signed_headers}"
+  fi
   canonical_request="${method}
 ${path}
 ${query}
@@ -403,7 +415,7 @@ $(sha256_hex "${canonical_request}")"
   url="http://${host_port}${path}${query:+?${query}}"
   tmp="$(mktemp)"
   local curl_args=()
-  [ -n "${body}" ] && curl_args+=(--data-binary "${body}")
+  [ -n "${body}" ] && curl_args+=(--data-binary "${body}" -H 'Content-Type: application/json')
   code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -w '%{http_code}' \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: ${payload_hash}" \
