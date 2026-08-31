@@ -284,6 +284,7 @@ RUSTFS_VOLUMES="${volumes}"
 RUSTFS_SSE_S3_MASTER_KEY=QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU=
 RUSTFS_KMS_ENABLE=true
 RUSTFS_KMS_BACKEND=${KMS_BACKEND}
+RUSTFS_KMS_DEFAULT_KEY_ID=${KMS_DEFAULT_KEY_ID}
 EOF
   case "${KMS_BACKEND}" in
     local)
@@ -512,7 +513,14 @@ env_setup_old() {
   export AWS_EC2_METADATA_DISABLED=true
   rc alias set local "${ENDPOINT}" "${ACCESS_KEY}" "${SECRET_KEY}" >/dev/null 2>&1 \
     || die "rc alias set failed for ${ENDPOINT}"
-  rc admin kms key create local --name "${KMS_DEFAULT_KEY_ID}" --json >/dev/null 2>&1 || true
+  if rc admin kms key create local --name "${KMS_DEFAULT_KEY_ID}" --json >/dev/null 2>&1; then
+    log "created default KMS key ${KMS_DEFAULT_KEY_ID}"
+  else
+    log "default KMS key ${KMS_DEFAULT_KEY_ID} already present or create skipped"
+  fi
+  if ! rc admin kms key status local "${KMS_DEFAULT_KEY_ID}" --json >/dev/null 2>&1; then
+    die "default KMS key ${KMS_DEFAULT_KEY_ID} is not usable after setup"
+  fi
 }
 
 upgrade_in_place() {
