@@ -357,6 +357,11 @@ x-amz-content-sha256:UNSIGNED-PAYLOAD
 x-amz-date:${amz_date}
 "
   signed_headers="host;x-amz-content-sha256;x-amz-date"
+  if [ -n "${body}" ]; then
+    canonical_headers="content-type:application/json
+${canonical_headers}"
+    signed_headers="content-type;${signed_headers}"
+  fi
   canonical_request="${method}
 ${path}
 ${query}
@@ -380,7 +385,7 @@ $(sha256_hex "${canonical_request}")"
   url="http://${host_port}${path}${query:+?${query}}"
   tmp="$(mktemp)"
   local curl_args=()
-  [ -n "${body}" ] && curl_args+=(--data-binary "${body}")
+  [ -n "${body}" ] && curl_args+=(--data-binary "${body}" -H 'Content-Type: application/json')
   code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -w '%{http_code}' \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
