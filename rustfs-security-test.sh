@@ -364,6 +364,14 @@ admin_api() {
     return 0
   fi
 
+  # Callers often embed the query in the path (e.g. add-user?accessKey=x).
+  # Split it so the canonical request separates URI and query like the server.
+  local path_only="${path%%\?*}" embedded_query="${path#*\?}"
+  if [ "${embedded_query}" != "${path}" ]; then
+    if [ -n "${query}" ]; then query="${query}&${embedded_query}"; else query="${embedded_query}"; fi
+    path="${path_only}"
+  fi
+
   # The S3-compatible admin channel accepts only the UNSIGNED-PAYLOAD signing
   # form on the functional nightlies; body-hash signing is rejected.
   local payload_hash="UNSIGNED-PAYLOAD"
