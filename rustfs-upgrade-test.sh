@@ -567,10 +567,10 @@ admin_api() {
     return 0
   fi
 
+  # The S3-compatible admin channel on these builds accepts only the
+  # UNSIGNED-PAYLOAD signing form (matching the KMS suite); body-hash signing
+  # is rejected with SignatureDoesNotMatch on some versions.
   local payload_hash="UNSIGNED-PAYLOAD"
-  if [ -n "${body}" ]; then
-    payload_hash="$(sha256_hex "${body}")"
-  fi
 
   host_port="${API_ENDPOINT#*://}"
   host_port="${host_port%%/*}"
