@@ -624,7 +624,13 @@ assert_admin_ok() {
 # ==================== AWS / S3 helpers ====================
 
 aws_run() {
-  AWS_OUT="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
+  # The if-context suppresses `set -e` so a failing aws CLI cannot silently
+  # kill the suite; the exit code is captured explicitly.
+  if AWS_OUT="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; then
+    AWS_CODE=0
+  else
+    AWS_CODE=$?
+  fi
 }
 
 aws_run_as() {
@@ -635,7 +641,11 @@ aws_run_as() {
   [ "${1:-}" = "--" ] && shift
   local env_args=(AWS_ACCESS_KEY_ID="${ak}" AWS_SECRET_ACCESS_KEY="${sk}" AWS_EC2_METADATA_DISABLED=true AWS_DEFAULT_REGION="${REGION}")
   if [ -n "${token}" ]; then env_args+=(AWS_SESSION_TOKEN="${token}"); fi
-  AWS_OUT="$(env "${env_args[@]}" aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
+  if AWS_OUT="$(env "${env_args[@]}" aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; then
+    AWS_CODE=0
+  else
+    AWS_CODE=$?
+  fi
 }
 
 assert_aws_ok() {
