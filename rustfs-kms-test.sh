@@ -204,6 +204,7 @@ RUSTFS_SECRET_KEY=${SECRET_KEY}
 RUSTFS_VOLUMES="${volumes}"
 RUSTFS_KMS_ENABLE=true
 RUSTFS_KMS_BACKEND=${KMS_BACKEND}
+RUSTFS_KMS_DEFAULT_KEY_ID=${KMS_DEFAULT_KEY_ID}
 EOF
   case "${KMS_BACKEND}" in
     local)
@@ -344,6 +345,14 @@ admin_api() {
     return 0
   fi
 
+  # Callers often embed the query in the path (e.g. add-user?accessKey=x).
+  # Split it so the canonical request separates URI and query like the server.
+  local path_only="${path%%\?*}" embedded_query="${path#*\?}"
+  if [ "${embedded_query}" != "${path}" ]; then
+    if [ -n "${query}" ]; then query="${query}&${embedded_query}"; else query="${embedded_query}"; fi
+    path="${path_only}"
+  fi
+
   host_port="${API_ENDPOINT#*://}"
   host_port="${host_port%%/*}"
 
@@ -356,6 +365,11 @@ x-amz-content-sha256:UNSIGNED-PAYLOAD
 x-amz-date:${amz_date}
 "
   signed_headers="host;x-amz-content-sha256;x-amz-date"
+  if [ -n "${body}" ]; then
+    canonical_headers="content-type:application/json
+${canonical_headers}"
+    signed_headers="content-type;${signed_headers}"
+  fi
   canonical_request="${method}
 ${path}
 ${query}
@@ -379,7 +393,7 @@ $(sha256_hex "${canonical_request}")"
   url="http://${host_port}${path}${query:+?${query}}"
   tmp="$(mktemp)"
   local curl_args=()
-  [ -n "${body}" ] && curl_args+=(--data-binary "${body}")
+  [ -n "${body}" ] && curl_args+=(--data-binary "${body}" -H 'Content-Type: application/json')
   code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -w '%{http_code}' \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
@@ -1652,16 +1666,18 @@ test_kms310() {
   local kid="${KMS_KEY_ID}"
   new_bucket "kms310-b1" || return 1
   make_test_file /tmp/kms-f1 65536
+  local ctx_b64
+  ctx_b64="$(printf '%s' '{"purpose":"ci"}' | base64 | tr -d '\n')"
   aws_run s3api put-object --bucket kms310-b1 --key ctx --body /tmp/kms-f1 \
     --server-side-encryption aws:kms --ssekms-key-id "${kid}" \
-    --ssekms-encryption-context '{"purpose":"ci"}'
+    --ssekms-encryption-context "${ctx_b64}"
   assert_aws_ok || { echo "SSE-KMS put with context failed: ${AWS_OUT}"; rm_bucket kms310-b1; return 1; }
   kms_sse_get kms310-b1 ctx /tmp/kms-dl1 "${kid}"
   assert_aws_ok || { rm_bucket kms310-b1; return 1; }
   [ "$(md5_of_file /tmp/kms-dl1)" = "$(md5_of_file /tmp/kms-f1)" ] || { echo "context object mismatch"; rm_bucket kms310-b1; return 1; }
   aws_run s3api put-object --bucket kms310-b1 --key bad --body /tmp/kms-f1 \
     --server-side-encryption AES256 \
-    --ssekms-encryption-context '{"purpose":"ci"}'
+    --ssekms-encryption-context "${ctx_b64}"
   assert_aws_fails || { echo "context with non-aws:kms algorithm unexpectedly accepted"; rm_bucket kms310-b1; return 1; }
   printf '%s' "${AWS_OUT}" | grep -qiE 'InvalidArgument|400' || { echo "unexpected error: ${AWS_OUT}"; rm_bucket kms310-b1; return 1; }
   rm_bucket kms310-b1
