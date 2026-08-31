@@ -559,6 +559,13 @@ run_all_tests() {
   run_test S3C-902 "SseC"                    test_s3c902
   run_test S3C-903 "BucketEncryption"        test_s3c903
   run_test S3C-904 "EncryptedCopyMultipart"  test_s3c904
+  run_test ENC-101 "SseS3SizeBoundaries"     test_enc101
+  run_test ENC-106 "SseCNegatives"           test_enc106
+  run_test ENC-107 "SseCRangeGet"            test_enc107
+  run_test ENC-108 "SseCMultipart"           test_enc108
+  run_test ENC-111 "SseChecksum"             test_enc111
+  run_test ENC-114 "PresignedUrlSseS3"       test_enc114
+  run_test ENC-117 "SnowballSse"             test_enc117
   run_test S3C-1001 "SigV4Basics"            test_s3c1001
   run_test S3C-1002 "SigV2Compatibility"     test_s3c1002
   run_test S3C-1003 "PresignedUrl"           test_s3c1003
@@ -580,6 +587,17 @@ run_all_tests() {
   run_test S3C-1303 "HugeKeyMetadata"        test_s3c1303
   run_test S3C-1304 "MalformedXmlParams"     test_s3c1304
   run_test S3C-1305 "ConcurrentOverwrite"    test_s3c1305
+  run_test SNW-101 "BasicTarExtract"         test_snw101
+  run_test SNW-102 "PrefixNormalization"     test_snw102
+  run_test SNW-103 "IgnoreDirs"              test_snw103
+  run_test SNW-104 "IgnoreErrors"            test_snw104
+  run_test SNW-105 "PathTraversalReject"     test_snw105
+  run_test SNW-106 "ArchiveFormats"          test_snw106
+  run_test SNW-107 "PathLengthLimit"         test_snw107
+  run_test SNW-108 "PaxPrivilegedMetadata"   test_snw108
+  run_test SNW-110 "ExtractQuota"            test_snw110
+  run_test SNW-112 "ExtractVersioning"       test_snw112
+  run_test SNW-114 "ResponseAndChecksum"     test_snw114
 }
 
 # ---------- 1. Bucket basics ----------
@@ -1492,6 +1510,192 @@ test_s3c904() {
   rm_bucket "s3c904-b1"
 }
 
+# ---------- 9b. Encryption supplements (ENC-*) ----------
+
+# 32-byte SSE-C keys (base64).
+ssec_key_a() { printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' | xxd -r -p | base64; }
+ssec_key_b() { printf 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210' | xxd -r -p | base64; }
+
+test_enc101() {
+  new_bucket "enc101-b1" || return 1
+  local size i
+  for size in 0 1 5242880; do
+    make_test_file "${TEST_TMP}/enc101-v" "${size}"
+    aws_run s3api put-object --bucket "enc101-b1" --key "f-${size}" --body "${TEST_TMP}/enc101-v" \
+      --server-side-encryption AES256
+    assert_aws_ok || { echo "SSE-S3 put size=${size} failed: ${AWS_OUT}"; return 1; }
+    aws_run s3api get-object --bucket "enc101-b1" --key "f-${size}" "${TEST_TMP}/enc101-dl"
+    assert_aws_ok || return 1
+    [ "$(wc -c < "${TEST_TMP}/enc101-dl")" = "${size}" ] || { echo "SSE-S3 size=${size} length mismatch"; return 1; }
+    if [ "${size}" -gt 0 ]; then
+      [ "$(md5_of_file "${TEST_TMP}/enc101-dl")" = "$(md5_of_file "${TEST_TMP}/enc101-v")" ] \
+        || { echo "SSE-S3 size=${size} MD5 mismatch"; return 1; }
+    fi
+  done
+  rm_bucket "enc101-b1"
+}
+
+test_enc106() {
+  new_bucket "enc106-b1" || return 1
+  make_test_file "${TEST_TMP}/enc106-v" 1048576
+  local key_a key_b
+  key_a="$(ssec_key_a)"
+  key_b="$(ssec_key_b)"
+  aws_run s3api put-object --bucket "enc106-b1" --key f --body "${TEST_TMP}/enc106-v" \
+    --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || return 1
+  # wrong key on read -> reject before any plaintext is emitted
+  aws_run s3api get-object --bucket "enc106-b1" --key f "${TEST_TMP}/enc106-dl" \
+    --sse-customer-algorithm AES256 --sse-customer-key "${key_b}"
+  assert_aws_fails_with "400|403|InvalidRequest|AccessDenied" || return 1
+  [ ! -s "${TEST_TMP}/enc106-dl" ] || { echo "wrong SSE-C key returned a non-empty body"; return 1; }
+  # non-32-byte key on write -> 400
+  local short_b64
+  short_b64="$(printf '0123456789abcdef' | xxd -r -p | base64)"
+  aws_run s3api put-object --bucket "enc106-b1" --key short --body "${TEST_TMP}/enc106-v" \
+    --sse-customer-algorithm AES256 --sse-customer-key "${short_b64}"
+  assert_aws_fails_with "400|InvalidArgument|InvalidKey" || return 1
+  rm_bucket "enc106-b1"
+}
+
+test_enc107() {
+  new_bucket "enc107-b1" || return 1
+  make_test_file "${TEST_TMP}/enc107-v" 1048576
+  local key_a
+  key_a="$(ssec_key_a)"
+  aws_run s3api put-object --bucket "enc107-b1" --key f --body "${TEST_TMP}/enc107-v" \
+    --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || return 1
+  # first byte, mid range, cross-frame boundary (DARE frame ~64KiB), suffix
+  local spec start count
+  for spec in "0-0" "100-199" "65535-65536" "1048575-1048575" "-100"; do
+    aws_run s3api get-object --bucket "enc107-b1" --key f "${TEST_TMP}/enc107-dl" --range "bytes=${spec}" \
+      --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+    assert_aws_ok || { echo "SSE-C range ${spec} failed: ${AWS_OUT}"; return 1; }
+    if [ "${spec}" = "-100" ]; then
+      start=1048476; count=100
+    else
+      start="${spec%-*}"; count=$(( ${spec#*-} - start + 1 ))
+    fi
+    dd if="${TEST_TMP}/enc107-v" of="${TEST_TMP}/enc107-slice" bs=1 skip="${start}" count="${count}" 2>/dev/null
+    cmp -s "${TEST_TMP}/enc107-dl" "${TEST_TMP}/enc107-slice" \
+      || { echo "SSE-C range ${spec} mismatch"; return 1; }
+  done
+  # out-of-range -> 416
+  aws_run s3api get-object --bucket "enc107-b1" --key f "${TEST_TMP}/enc107-dl" --range "bytes=1048576-1048577" \
+    --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_fails_with "416|InvalidRange" || return 1
+  rm_bucket "enc107-b1"
+}
+
+test_enc108() {
+  new_bucket "enc108-b1" || return 1
+  make_test_file "${TEST_TMP}/enc108-mp" 15728640
+  local key_a upload_id etag1 etag2 etag3
+  key_a="$(ssec_key_a)"
+  aws_run s3api create-multipart-upload --bucket "enc108-b1" --key mp \
+    --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || return 1
+  upload_id="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
+  head -c 5242880 "${TEST_TMP}/enc108-mp" > "${TEST_TMP}/enc108-p1"
+  head -c 10485760 "${TEST_TMP}/enc108-mp" | tail -c 5242880 > "${TEST_TMP}/enc108-p2"
+  tail -c 5242880 "${TEST_TMP}/enc108-mp" > "${TEST_TMP}/enc108-p3"
+  aws_run s3api upload-part --bucket "enc108-b1" --key mp --upload-id "${upload_id}" --part-number 1 \
+    --body "${TEST_TMP}/enc108-p1" --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || return 1; etag1="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
+  aws_run s3api upload-part --bucket "enc108-b1" --key mp --upload-id "${upload_id}" --part-number 2 \
+    --body "${TEST_TMP}/enc108-p2" --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || return 1; etag2="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
+  aws_run s3api upload-part --bucket "enc108-b1" --key mp --upload-id "${upload_id}" --part-number 3 \
+    --body "${TEST_TMP}/enc108-p3" --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || return 1; etag3="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
+  aws_run s3api complete-multipart-upload --bucket "enc108-b1" --key mp --upload-id "${upload_id}" \
+    --multipart-upload "{\"Parts\":[{\"ETag\":${etag1},\"PartNumber\":1},{\"ETag\":${etag2},\"PartNumber\":2},{\"ETag\":${etag3},\"PartNumber\":3}]}"
+  assert_aws_ok || return 1
+  aws_run s3api get-object --bucket "enc108-b1" --key mp "${TEST_TMP}/enc108-dl" \
+    --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || return 1
+  [ "$(md5_of_file "${TEST_TMP}/enc108-dl")" = "$(md5_of_file "${TEST_TMP}/enc108-mp")" ] \
+    || { echo "SSE-C multipart MD5 mismatch"; return 1; }
+  rm_bucket "enc108-b1"
+}
+
+test_enc111() {
+  new_bucket "enc111-b1" || return 1
+  make_test_file "${TEST_TMP}/enc111-v" 1024
+  aws_run s3api put-object --bucket "enc111-b1" --key f --body "${TEST_TMP}/enc111-v" \
+    --server-side-encryption AES256 --checksum-algorithm CRC32
+  assert_aws_ok || return 1
+  aws_run s3api head-object --bucket "enc111-b1" --key f
+  printf '%s' "${AWS_OUT}" | jq -e '.ChecksumCRC32 != null and .ServerSideEncryption == "AES256"' >/dev/null \
+    || { echo "SSE-S3 checksum echo missing: ${AWS_OUT}"; return 1; }
+  # bad Content-MD5 with SSE-S3 -> BadDigest, object not stored
+  aws_run s3api put-object --bucket "enc111-b1" --key bad --body "${TEST_TMP}/enc111-v" \
+    --server-side-encryption AES256 --content-md5 "AAAAAAAAAAAAAAAAAAAAAA=="
+  if [ "${AWS_CODE}" -eq 0 ]; then
+    echo "note: server accepted bad Content-MD5 with SSE-S3 (expected BadDigest)"
+    return 1
+  fi
+  assert_aws_fails_with "BadDigest|InvalidDigest" || return 1
+  aws_run s3api head-object --bucket "enc111-b1" --key bad
+  assert_aws_fails_with "404" || { echo "object stored despite bad Content-MD5"; return 1; }
+  rm_bucket "enc111-b1"
+}
+
+test_enc114() {
+  new_bucket "enc114-b1" || return 1
+  make_test_file "${TEST_TMP}/enc114-v" 1048576
+  aws_run s3api put-object --bucket "enc114-b1" --key f --body "${TEST_TMP}/enc114-v" \
+    --server-side-encryption AES256
+  assert_aws_ok || return 1
+  local url
+  url="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3 presign "s3://enc114-b1/f" --expires-in 60 2>/dev/null)"
+  [ -n "${url}" ] || { echo "presign produced no URL"; return 1; }
+  curl -fsS --max-time 30 -o "${TEST_TMP}/enc114-dl" "${url}" || { echo "presigned GET failed"; return 1; }
+  [ "$(md5_of_file "${TEST_TMP}/enc114-dl")" = "$(md5_of_file "${TEST_TMP}/enc114-v")" ] \
+    || { echo "presigned SSE-S3 GET MD5 mismatch"; return 1; }
+  # expired URL -> 403
+  url="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3 presign "s3://enc114-b1/f" --expires-in 1 2>/dev/null)"
+  sleep 2
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${url}")"
+  [ "${code}" = "403" ] || { echo "expired presigned GET returned ${code}"; return 1; }
+  rm_bucket "enc114-b1"
+}
+
+test_enc117() {
+  new_bucket "enc117-b1" || return 1
+  mkdir -p "${TEST_TMP}/enc117-src"
+  printf 'snowball-encrypted-payload\n' > "${TEST_TMP}/enc117-src/f.txt"
+  tar -cf "${TEST_TMP}/enc117.tar" -C "${TEST_TMP}/enc117-src" f.txt
+  # SSE-S3 extract
+  aws_run s3api put-object --bucket "enc117-b1" --key "fixture.tar" --body "${TEST_TMP}/enc117.tar" \
+    --metadata '{"snowball-auto-extract":"true"}' --server-side-encryption AES256
+  assert_aws_ok || { echo "SSE-S3 extract put failed: ${AWS_OUT}"; return 1; }
+  aws_run s3api head-object --bucket "enc117-b1" --key f.txt
+  printf '%s' "${AWS_OUT}" | jq -e '.ServerSideEncryption == "AES256"' >/dev/null \
+    || { echo "extracted entry not SSE-S3 encrypted: ${AWS_OUT}"; return 1; }
+  aws_run s3api get-object --bucket "enc117-b1" --key f.txt "${TEST_TMP}/enc117-dl"
+  assert_aws_ok || return 1
+  cmp -s "${TEST_TMP}/enc117-dl" "${TEST_TMP}/enc117-src/f.txt" || { echo "SSE-S3 extract content mismatch"; return 1; }
+  rm_bucket "enc117-b1"
+
+  # SSE-C extract
+  new_bucket "enc117-b2" || return 1
+  local key_a
+  key_a="$(ssec_key_a)"
+  aws_run s3api put-object --bucket "enc117-b2" --key "fixture.tar" --body "${TEST_TMP}/enc117.tar" \
+    --metadata '{"snowball-auto-extract":"true"}' \
+    --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || { echo "SSE-C extract put failed: ${AWS_OUT}"; return 1; }
+  aws_run s3api get-object --bucket "enc117-b2" --key f.txt "${TEST_TMP}/enc117-dl" \
+    --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
+  assert_aws_ok || { echo "SSE-C extract entry read failed: ${AWS_OUT}"; return 1; }
+  cmp -s "${TEST_TMP}/enc117-dl" "${TEST_TMP}/enc117-src/f.txt" || { echo "SSE-C extract content mismatch"; return 1; }
+  aws_run s3api get-object --bucket "enc117-b2" --key f.txt "${TEST_TMP}/enc117-dl"
+  assert_aws_fails_with "400|403|InvalidRequest|AccessDenied" || { echo "SSE-C entry readable without key"; return 1; }
+  rm_bucket "enc117-b2"
+}
+
 # ---------- 10. Signing / presigned / POST ----------
 
 test_s3c1001() {
@@ -1842,6 +2046,314 @@ test_s3c1305() {
   assert_aws_ok || return 1
   [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-v)" ] || { echo "concurrent overwrite produced torn object"; return 1; }
   rm_bucket "s3c1305-b1"
+}
+
+# ---------- 14. Snowball auto-extract (SNW-*) ----------
+
+# Build a plain tar with one file and one directory marker.
+snw_build_basic_tar() {
+  local out="$1" src="$2"
+  rm -rf "${src}"; mkdir -p "${src}/dir" "${src}/empty-dir"
+  printf 'root payload\n' > "${src}/root.txt"
+  printf 'nested payload\n' > "${src}/dir/file.txt"
+  tar -cf "${out}" -C "${src}" root.txt dir/file.txt empty-dir/
+}
+
+# Build a tar with a valid file plus a >1024-byte-path entry (PAX long name).
+snw_build_tar_with_long_name() {
+  python3 - "$1" <<'PY'
+import io, sys, tarfile
+path = sys.argv[1]
+tf = tarfile.open(path, 'w', format=tarfile.PAX_FORMAT)
+data = b'valid-body'
+ti = tarfile.TarInfo('valid.txt')
+ti.size = len(data)
+tf.addfile(ti, io.BytesIO(data))
+bad = b'ignored-body'
+ti2 = tarfile.TarInfo('a' * 1100 + '.txt')
+ti2.size = len(bad)
+tf.addfile(ti2, io.BytesIO(bad))
+tf.close()
+PY
+}
+
+test_snw101() {
+  new_bucket "snw101-b1" || return 1
+  snw_build_basic_tar "${TEST_TMP}/snw101.tar" "${TEST_TMP}/snw101-src" || return 1
+  aws_run s3api put-object --bucket "snw101-b1" --key "fixture.tar" --body "${TEST_TMP}/snw101.tar" \
+    --metadata '{"snowball-auto-extract":"true","snowball-prefix":"/tenant/"}' 
+  assert_aws_ok || return 1
+  aws_run s3api get-object --bucket "snw101-b1" --key "tenant/root.txt" "${TEST_TMP}/snw101-dl"
+  assert_aws_ok || { echo "extracted root.txt missing: ${AWS_OUT}"; return 1; }
+  [ "$(cat "${TEST_TMP}/snw101-dl")" = "root payload" ] || { echo "root payload mismatch"; return 1; }
+  aws_run s3api get-object --bucket "snw101-b1" --key "tenant/dir/file.txt" "${TEST_TMP}/snw101-dl2"
+  assert_aws_ok || return 1
+  [ "$(cat "${TEST_TMP}/snw101-dl2")" = "nested payload" ] || { echo "nested payload mismatch"; return 1; }
+  aws_run s3api head-object --bucket "snw101-b1" --key "tenant/empty-dir/"
+  assert_aws_ok || { echo "directory marker missing: ${AWS_OUT}"; return 1; }
+  # the archive object itself is consumed, not stored
+  aws_run s3api head-object --bucket "snw101-b1" --key "fixture.tar"
+  assert_aws_fails_with "404|NoSuchKey" || { echo "archive object was stored"; return 1; }
+  rm_bucket "snw101-b1"
+}
+
+test_snw102() {
+  new_bucket "snw102-b1" || return 1
+  snw_build_basic_tar "${TEST_TMP}/snw102.tar" "${TEST_TMP}/snw102-src" || return 1
+  # "///" normalizes to no prefix -> entries land at the bucket root
+  aws_run s3api put-object --bucket "snw102-b1" --key "a.tar" --body "${TEST_TMP}/snw102.tar" \
+    --metadata '{"snowball-auto-extract":"true","snowball-prefix":"///"}'
+  assert_aws_ok || return 1
+  aws_run s3api head-object --bucket "snw102-b1" --key "root.txt"
+  assert_aws_ok || { echo "no-prefix extraction failed: ${AWS_OUT}"; return 1; }
+  # leading/trailing slashes are trimmed
+  aws_run s3api put-object --bucket "snw102-b1" --key "b.tar" --body "${TEST_TMP}/snw102.tar" \
+    --metadata '{"snowball-auto-extract":"true","snowball-prefix":"/tenant-b/"}'
+  assert_aws_ok || return 1
+  aws_run s3api head-object --bucket "snw102-b1" --key "tenant-b/root.txt"
+  assert_aws_ok || { echo "trimmed-prefix extraction failed: ${AWS_OUT}"; return 1; }
+  # unsafe prefix with parent components -> InvalidArgument
+  aws_run s3api put-object --bucket "snw102-b1" --key "c.tar" --body "${TEST_TMP}/snw102.tar" \
+    --metadata '{"snowball-auto-extract":"true","snowball-prefix":"../victim/"}'
+  assert_aws_fails_with "InvalidArgument" || return 1
+  rm_bucket "snw102-b1"
+}
+
+test_snw103() {
+  new_bucket "snw103-b1" || return 1
+  snw_build_basic_tar "${TEST_TMP}/snw103.tar" "${TEST_TMP}/snw103-src" || return 1
+  aws_run s3api put-object --bucket "snw103-b1" --key "fixture.tar" --body "${TEST_TMP}/snw103.tar" \
+    --metadata '{"snowball-auto-extract":"true","snowball-ignore-dirs":"true"}'
+  assert_aws_ok || return 1
+  aws_run s3api head-object --bucket "snw103-b1" --key "empty-dir/"
+  assert_aws_fails_with "404|NoSuchKey" || { echo "directory marker not skipped"; return 1; }
+  aws_run s3api get-object --bucket "snw103-b1" --key "root.txt" "${TEST_TMP}/snw103-dl"
+  assert_aws_ok || return 1
+  rm_bucket "snw103-b1"
+}
+
+test_snw104() {
+  new_bucket "snw104-b1" || return 1
+  snw_build_tar_with_long_name "${TEST_TMP}/snw104.tar" || return 1
+  # without ignore-errors the whole extract is rejected
+  aws_run s3api put-object --bucket "snw104-b1" --key "fixture.tar" --body "${TEST_TMP}/snw104.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_fails_with "InvalidArgument" || return 1
+  # with ignore-errors the valid entry lands and the bad entry is skipped
+  aws_run s3api put-object --bucket "snw104-b1" --key "fixture2.tar" --body "${TEST_TMP}/snw104.tar" \
+    --metadata '{"snowball-auto-extract":"true","snowball-ignore-errors":"true"}'
+  assert_aws_ok || return 1
+  aws_run s3api get-object --bucket "snw104-b1" --key "valid.txt" "${TEST_TMP}/snw104-dl"
+  assert_aws_ok || { echo "valid entry missing with ignore-errors: ${AWS_OUT}"; return 1; }
+  [ "$(cat "${TEST_TMP}/snw104-dl")" = "valid-body" ] || { echo "valid entry payload mismatch"; return 1; }
+  rm_bucket "snw104-b1"
+}
+
+test_snw105() {
+  new_bucket "snw105-attacker" || return 1
+  new_bucket "snw105-victim" || return 1
+  python3 - "${TEST_TMP}/snw105.tar" <<'PY'
+import io, sys, tarfile
+path = sys.argv[1]
+tf = tarfile.open(path, 'w', format=tarfile.PAX_FORMAT)
+data = b'injected-body'
+ti = tarfile.TarInfo('../snw105-victim/evil-injected.txt')
+ti.size = len(data)
+tf.addfile(ti, io.BytesIO(data))
+tf.close()
+PY
+  aws_run s3api put-object --bucket "snw105-attacker" --key "fixture.tar" --body "${TEST_TMP}/snw105.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_fails_with "InvalidArgument" || return 1
+  aws_run s3api head-object --bucket "snw105-victim" --key "evil-injected.txt"
+  assert_aws_fails_with "404|NoSuchKey" || { echo "traversal entry escaped into victim bucket"; return 1; }
+  rm_bucket "snw105-attacker"
+  rm_bucket "snw105-victim"
+}
+
+test_snw106() {
+  new_bucket "snw106-b1" || return 1
+  snw_build_basic_tar "${TEST_TMP}/snw106.tar" "${TEST_TMP}/snw106-src" || return 1
+  local fmt
+  for fmt in tar tgz; do
+    cp "${TEST_TMP}/snw106.tar" "${TEST_TMP}/snw106-${fmt}"
+    if [ "${fmt}" = "tgz" ]; then
+      tar -czf "${TEST_TMP}/snw106-${fmt}" -C "${TEST_TMP}/snw106-src" root.txt
+    fi
+    aws_run s3api put-object --bucket "snw106-b1" --key "f.${fmt}" --body "${TEST_TMP}/snw106-${fmt}" \
+      --metadata '{"snowball-auto-extract":"true"}'
+    assert_aws_ok || { echo "format ${fmt} failed: ${AWS_OUT}"; return 1; }
+  done
+  # zip is a known-but-unsupported streaming format
+  python3 - "${TEST_TMP}/snw106.zip" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w') as zf:
+    zf.writestr('root.txt', b'zip-body')
+PY
+  aws_run s3api put-object --bucket "snw106-b1" --key "f.zip" --body "${TEST_TMP}/snw106.zip" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_fails_with "InvalidArgument" || { echo "zip extract unexpectedly succeeded"; return 1; }
+  # unknown extension is rejected before extraction
+  cp "${TEST_TMP}/snw106.tar" "${TEST_TMP}/snw106.xyz"
+  aws_run s3api put-object --bucket "snw106-b1" --key "f.xyz" --body "${TEST_TMP}/snw106.xyz" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_fails_with "InvalidArgument" || { echo "unknown extension extract unexpectedly succeeded"; return 1; }
+  rm_bucket "snw106-b1"
+}
+
+test_snw107() {
+  new_bucket "snw107-b1" || return 1
+  snw_build_tar_with_long_name "${TEST_TMP}/snw107.tar" || return 1
+  aws_run s3api put-object --bucket "snw107-b1" --key "fixture.tar" --body "${TEST_TMP}/snw107.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_fails_with "InvalidArgument" || return 1
+  # the over-limit entry must not be stored (earlier entries may remain, matching
+  # the per-entry commit semantics)
+  local long_key
+  long_key="$(printf 'a%.0s' $(seq 1 1100)).txt"
+  aws_run s3api head-object --bucket "snw107-b1" --key "${long_key}"
+  assert_aws_fails_with "404|NoSuchKey" || { echo "over-limit entry was stored"; return 1; }
+  rm_bucket "snw107-b1"
+}
+
+test_snw108() {
+  # PAX user metadata (tagging) on a plain bucket
+  new_bucket "snw108-b1" || return 1
+  python3 - "${TEST_TMP}/snw108-tag.tar" <<'PY'
+import io, sys, tarfile
+path = sys.argv[1]
+tf = tarfile.open(path, 'w', format=tarfile.PAX_FORMAT)
+data = b'pax-body'
+ti = tarfile.TarInfo('pax.txt')
+ti.size = len(data)
+ti.pax_headers = {'minio.metadata.x-amz-tagging': 'k=v'}
+tf.addfile(ti, io.BytesIO(data))
+tf.close()
+PY
+  aws_run s3api put-object --bucket "snw108-b1" --key "fixture.tar" --body "${TEST_TMP}/snw108-tag.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_ok || { echo "PAX tagging extract failed: ${AWS_OUT}"; return 1; }
+  aws_run s3api get-object-tagging --bucket "snw108-b1" --key "pax.txt"
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e '.TagSet[]? | select(.Key == "k" and .Value == "v")' >/dev/null \
+    || { echo "PAX tagging not applied: ${AWS_OUT}"; return 1; }
+  rm_bucket "snw108-b1"
+
+  # PAX object-lock retention + legal hold on a lock-enabled bucket
+  aws_run s3api create-bucket --bucket "snw108-lk" --object-lock-enabled-for-bucket
+  assert_aws_ok || return 1
+  local until
+  until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
+  python3 - "${TEST_TMP}/snw108-lock.tar" "${until}" <<'PY'
+import io, sys, tarfile
+path, until = sys.argv[1], sys.argv[2]
+tf = tarfile.open(path, 'w', format=tarfile.PAX_FORMAT)
+data = b'locked-body'
+ti = tarfile.TarInfo('locked.txt')
+ti.size = len(data)
+ti.pax_headers = {
+    'minio.metadata.x-amz-object-lock-mode': 'GOVERNANCE',
+    'minio.metadata.x-amz-object-lock-retain-until-date': until,
+    'minio.metadata.x-amz-object-lock-legal-hold': 'ON',
+}
+tf.addfile(ti, io.BytesIO(data))
+tf.close()
+PY
+  aws_run s3api put-object --bucket "snw108-lk" --key "fixture.tar" --body "${TEST_TMP}/snw108-lock.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_ok || { echo "PAX object-lock extract failed: ${AWS_OUT}"; return 1; }
+  aws_run s3api head-object --bucket "snw108-lk" --key "locked.txt"
+  printf '%s' "${AWS_OUT}" | jq -e '.ObjectLockMode == "GOVERNANCE" and .ObjectLockLegalHoldStatus == "ON" and .ObjectLockRetainUntilDate != null' >/dev/null \
+    || { echo "PAX object-lock metadata not applied: ${AWS_OUT}"; return 1; }
+  rm_bucket "snw108-lk"
+
+  # invalid PAX values are rejected (replication status must be REPLICA)
+  new_bucket "snw108-b2" || return 1
+  python3 - "${TEST_TMP}/snw108-bad.tar" <<'PY'
+import io, sys, tarfile
+path = sys.argv[1]
+tf = tarfile.open(path, 'w', format=tarfile.PAX_FORMAT)
+data = b'bad-body'
+ti = tarfile.TarInfo('bad.txt')
+ti.size = len(data)
+ti.pax_headers = {'minio.metadata.x-amz-bucket-replication-status': 'PENDING'}
+tf.addfile(ti, io.BytesIO(data))
+tf.close()
+PY
+  aws_run s3api put-object --bucket "snw108-b2" --key "fixture.tar" --body "${TEST_TMP}/snw108-bad.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_fails_with "InvalidArgument" || { echo "invalid PAX replication status accepted"; return 1; }
+  rm_bucket "snw108-b2"
+}
+
+test_snw110() {
+  new_bucket "snw110-b1" || return 1
+  rc_run quota set "local/snw110-b1" 1KB
+  assert_rc_ok "set quota 1KB" || return 1
+  snw_build_basic_tar "${TEST_TMP}/snw110.tar" "${TEST_TMP}/snw110-src" || return 1
+  # unpacked total (~30B) is below the 1KB quota -> accepted
+  aws_run s3api put-object --bucket "snw110-b1" --key "a.tar" --body "${TEST_TMP}/snw110.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_ok || { echo "below-quota extract failed: ${AWS_OUT}"; return 1; }
+  # a 2KB entry exceeds the 1KB quota -> rejected before any entry is stored
+  python3 - "${TEST_TMP}/snw110-big.tar" <<'PY'
+import io, sys, tarfile
+path = sys.argv[1]
+tf = tarfile.open(path, 'w', format=tarfile.PAX_FORMAT)
+data = b'x' * 2048
+ti = tarfile.TarInfo('big.txt')
+ti.size = len(data)
+tf.addfile(ti, io.BytesIO(data))
+tf.close()
+PY
+  aws_run s3api put-object --bucket "snw110-b1" --key "b.tar" --body "${TEST_TMP}/snw110-big.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_fails_with "InvalidRequest|QuotaExceeded|quota|InvalidArgument" || { echo "over-quota extract accepted"; return 1; }
+  aws_run s3api head-object --bucket "snw110-b1" --key "big.txt"
+  assert_aws_fails_with "404|NoSuchKey" || { echo "partial entries stored after quota rejection"; return 1; }
+  rc_run quota clear "local/snw110-b1"
+  rm_bucket "snw110-b1"
+}
+
+test_snw112() {
+  new_bucket "snw112-b1" || return 1
+  aws_run s3api put-bucket-versioning --bucket "snw112-b1" --versioning-configuration Status=Enabled
+  assert_aws_ok || return 1
+  printf 'version one\n' > "${TEST_TMP}/snw112-v1"
+  printf 'version two\n' > "${TEST_TMP}/snw112-v2"
+  mkdir -p "${TEST_TMP}/snw112-s1" "${TEST_TMP}/snw112-s2"
+  cp "${TEST_TMP}/snw112-v1" "${TEST_TMP}/snw112-s1/root.txt"
+  cp "${TEST_TMP}/snw112-v2" "${TEST_TMP}/snw112-s2/root.txt"
+  tar -cf "${TEST_TMP}/snw112-a.tar" -C "${TEST_TMP}/snw112-s1" root.txt
+  tar -cf "${TEST_TMP}/snw112-b.tar" -C "${TEST_TMP}/snw112-s2" root.txt
+  aws_run s3api put-object --bucket "snw112-b1" --key "a.tar" --body "${TEST_TMP}/snw112-a.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_ok || return 1
+  aws_run s3api put-object --bucket "snw112-b1" --key "b.tar" --body "${TEST_TMP}/snw112-b.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_ok || return 1
+  aws_run s3api list-object-versions --bucket "snw112-b1" --prefix root.txt
+  printf '%s' "${AWS_OUT}" | jq -e '[.Versions[]?] | length == 2' >/dev/null \
+    || { echo "expected 2 versions of extracted entry: ${AWS_OUT}"; return 1; }
+  rm_bucket "snw112-b1"
+}
+
+test_snw114() {
+  new_bucket "snw114-b1" || return 1
+  snw_build_basic_tar "${TEST_TMP}/snw114.tar" "${TEST_TMP}/snw114-src" || return 1
+  local archive_md5 etag
+  archive_md5="$(md5_of_file "${TEST_TMP}/snw114.tar")"
+  aws_run s3api put-object --bucket "snw114-b1" --key "fixture.tar" --body "${TEST_TMP}/snw114.tar" \
+    --metadata '{"snowball-auto-extract":"true"}'
+  assert_aws_ok || return 1
+  etag="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
+  [ "${etag}" = "\"${archive_md5}\"" ] || { echo "extract ETag ${etag} != archive MD5 ${archive_md5}"; return 1; }
+  # x-rustfs-max-content-length is rejected for extract uploads
+  local code
+  code="$(s3_signed_curl PUT "/snw114-b1/fixture2.tar?x-rustfs-max-content-length=1" \
+    -H "x-amz-meta-snowball-auto-extract: true" --data "${TEST_TMP}/snw114.tar")"
+  [ "${code}" = "400" ] || { echo "max-content-length extract returned ${code}: $(head -c 200 "${TEST_TMP}/curl.out")"; return 1; }
+  rm_bucket "snw114-b1"
 }
 
 # ==================== CLI parsing ====================
