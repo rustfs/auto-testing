@@ -1653,16 +1653,18 @@ test_kms310() {
   local kid="${KMS_KEY_ID}"
   new_bucket "kms310-b1" || return 1
   make_test_file /tmp/kms-f1 65536
+  local ctx_b64
+  ctx_b64="$(printf '%s' '{"purpose":"ci"}' | base64 | tr -d '\n')"
   aws_run s3api put-object --bucket kms310-b1 --key ctx --body /tmp/kms-f1 \
     --server-side-encryption aws:kms --ssekms-key-id "${kid}" \
-    --ssekms-encryption-context '{"purpose":"ci"}'
+    --ssekms-encryption-context "${ctx_b64}"
   assert_aws_ok || { echo "SSE-KMS put with context failed: ${AWS_OUT}"; rm_bucket kms310-b1; return 1; }
   kms_sse_get kms310-b1 ctx /tmp/kms-dl1 "${kid}"
   assert_aws_ok || { rm_bucket kms310-b1; return 1; }
   [ "$(md5_of_file /tmp/kms-dl1)" = "$(md5_of_file /tmp/kms-f1)" ] || { echo "context object mismatch"; rm_bucket kms310-b1; return 1; }
   aws_run s3api put-object --bucket kms310-b1 --key bad --body /tmp/kms-f1 \
     --server-side-encryption AES256 \
-    --ssekms-encryption-context '{"purpose":"ci"}'
+    --ssekms-encryption-context "${ctx_b64}"
   assert_aws_fails || { echo "context with non-aws:kms algorithm unexpectedly accepted"; rm_bucket kms310-b1; return 1; }
   printf '%s' "${AWS_OUT}" | grep -qiE 'InvalidArgument|400' || { echo "unexpected error: ${AWS_OUT}"; rm_bucket kms310-b1; return 1; }
   rm_bucket kms310-b1

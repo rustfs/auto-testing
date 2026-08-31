@@ -789,9 +789,11 @@ seed_golden() {
   log "seeded SSE-KMS object"
 
   # UPG-107 encryption context.
+  local ctx_b64
+  ctx_b64="$(printf '%s' '{"purpose":"upgrade"}' | base64 | tr -d '\n')"
   aws_run s3api put-object --bucket upg-ctx --key ctx --body "${TEST_TMP}/ssek.bin" \
     --server-side-encryption aws:kms --ssekms-key-id "${upg_kid:-upg-key}" \
-    --ssekms-encryption-context '{"purpose":"upgrade"}'
+    --ssekms-encryption-context "${ctx_b64}"
   assert_aws_ok || die "seed: context put"
   log "seeded context object"
 
