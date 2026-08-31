@@ -58,17 +58,30 @@ PACKAGES_DIR="/home/rustfs/packages"
 PACKAGE_FILE="rustfs.deb"
 PACKAGE_SHA256="${PACKAGE_SHA256:-}"
 
-# Admin API endpoint and credentials (SigV4-signed requests, no rc needed).
-# RUSTFS_RC_ENDPOINT is honoured as a fallback for existing setups.
-API_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://10.0.0.7:9000}}"
+# Endpoint fallback and credentials (SigV4-signed requests, no rc needed).
+# The legacy endpoint remains a fallback for existing setups, while pool tests
+# can pin control and data traffic to a live node and probe a load balancer
+# independently.
+LEGACY_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://10.0.0.7:9000}}"
+ADMIN_ENDPOINT="${RUSTFS_ADMIN_ENDPOINT:-${RUSTFS_CONTROL_ENDPOINT:-}}"
+WARP_ENDPOINT="${RUSTFS_WARP_ENDPOINT:-}"
+PROXY_ENDPOINT="${RUSTFS_PROXY_ENDPOINT:-}"
+PROXY_STAGE_HOOK="${RUSTFS_PROXY_STAGE_HOOK:-}"
 ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfs@test}"
 SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfs@test}"
 SIGV4_REGION="us-east-1"
 SIGV4_SERVICE="s3"
 API_REQUEST_TIMEOUT=60
-# admin_api writes the HTTP status here so callers can read it after the
+# API helpers write status and timing data here so callers can read it after a
 # command-substitution subshell exits ($$ is identical inside the subshell).
 ADMIN_API_CODE_FILE="${TMPDIR:-/tmp}/rustfs-pool-expand-api-code.$$"
+ADMIN_API_TIMING_FILE="${TMPDIR:-/tmp}/rustfs-pool-expand-api-timing.$$"
+PROXY_API_CODE_FILE="${TMPDIR:-/tmp}/rustfs-pool-expand-proxy-code.$$"
+PROXY_API_TIMING_FILE="${TMPDIR:-/tmp}/rustfs-pool-expand-proxy-timing.$$"
+ADMIN_ANOMALY_FILE="${TMPDIR:-/tmp}/rustfs-pool-expand-admin-anomaly.$$"
+PROXY_ANOMALY_FILE="${TMPDIR:-/tmp}/rustfs-pool-expand-proxy-anomaly.$$"
+STORAGEINFO_PROBE_RETRIES="${RUSTFS_STORAGEINFO_PROBE_RETRIES:-3}"
+STORAGEINFO_PROBE_RETRY_DELAY="${RUSTFS_STORAGEINFO_PROBE_RETRY_DELAY:-1}"
 
 # Complete RUSTFS_VOLUMES value per stage (one space-separated expression per pool)
 VOLUMES_1="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd"
@@ -76,6 +89,7 @@ VOLUMES_2="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd http://rustfs-node2:
 VOLUMES_3="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd http://rustfs-node2:9000/data/rustfs{1...4}/mnmd http://rustfs-node3:9000/data/rustfs{1...4}/mnmd"
 # Topology after decommissioning pool 0 (used by --finalize-decommission)
 VOLUMES_AFTER_DECOMMISSION="http://rustfs-node2:9000/data/rustfs{1...4}/mnmd http://rustfs-node3:9000/data/rustfs{1...4}/mnmd"
+read -r -a NODE_ENDPOINTS <<<"${RUSTFS_NODE_ENDPOINTS:-http://rustfs-node1:9000 http://rustfs-node2:9000 http://rustfs-node3:9000}"
 
 # RustFS service configuration (written to /etc/default/rustfs)
 RUSTFS_CONFIG_FILE="/etc/default/rustfs"
@@ -91,13 +105,14 @@ RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
 # Data writing & monitoring (step 4)
 WARP_BUCKET="test-10mb"
 WARP_OBJ_SIZE="100MiB"
-WARP_CONCURRENT=32
+WARP_CONCURRENT="${RUSTFS_WARP_CONCURRENT:-32}"
 WARP_DURATION="5m"
 # Warp log path; empty = auto-created unique temp file (the runner user may
 # not be able to write a shared /tmp path owned by another user).
 WARP_LOG_FILE="${RUSTFS_WARP_LOG_FILE:-}"
 STORAGE_THRESHOLD=85            # stop writing when usage reaches N% (note suggests 80-85)
 POLL_INTERVAL=30                # status polling interval (seconds)
+WARP_TRANSPORT_FAILURE_PATTERN='502 Bad Gateway|504 Gateway Time-out|HTTP([^0-9]+)?50(2|4)|status([^0-9]+)?50(2|4)|connection (closed|reset|refused)|unexpected EOF|broken pipe|timeout awaiting response headers|context deadline exceeded|i/o timeout|Client\.Timeout exceeded'
 
 # Timeouts (seconds)
 REBALANCE_TIMEOUT=86400
@@ -121,6 +136,7 @@ PREFLIGHT=0
 RESET=0
 LOG_FILE=""
 SELECTED_STEPS=()
+ACTIVE_WARP_PID=""
 
 # ==================== Helpers ====================
 
@@ -145,6 +161,62 @@ need_cmd() {
   # $1: command name; $2: description
   if [ "${DRY_RUN}" -eq 1 ]; then return 0; fi
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1 ($2); install it first"
+}
+
+normalize_http_endpoint() {
+  local endpoint="${1%/}" authority port
+  case "${endpoint}" in
+    http://*) ;;
+    https://*) die "HTTPS endpoint is not supported by this test yet: ${endpoint} (warp would require --tls)" ;;
+    *) die "endpoint must start with http://: ${endpoint}" ;;
+  esac
+  authority="${endpoint#http://}"
+  if ! [[ "${authority}" =~ ^[A-Za-z0-9._-]+(:[1-9][0-9]{0,4})?$ ]]; then
+    die "endpoint must contain only an HTTP authority (host[:port]): ${endpoint}"
+  fi
+  if [[ "${authority}" == *:* ]]; then
+    port="${authority##*:}"
+    [ "${port}" -le 65535 ] || die "invalid endpoint port: ${endpoint}"
+  fi
+  printf '%s' "${endpoint}"
+}
+
+resolve_endpoints() {
+  [[ "${WARP_CONCURRENT}" =~ ^[1-9][0-9]*$ ]] \
+    || die "warp concurrency must be a positive integer: ${WARP_CONCURRENT}"
+  [[ "${STORAGEINFO_PROBE_RETRIES}" =~ ^[1-9][0-9]*$ ]] \
+    || die "storageinfo probe retries must be a positive integer: ${STORAGEINFO_PROBE_RETRIES}"
+  [[ "${STORAGEINFO_PROBE_RETRY_DELAY}" =~ ^[0-9]+$ ]] \
+    || die "storageinfo probe retry delay must be a non-negative integer: ${STORAGEINFO_PROBE_RETRY_DELAY}"
+  ADMIN_ENDPOINT="$(normalize_http_endpoint "${ADMIN_ENDPOINT:-${LEGACY_ENDPOINT}}")"
+  WARP_ENDPOINT="$(normalize_http_endpoint "${WARP_ENDPOINT:-${LEGACY_ENDPOINT}}")"
+  if [ -n "${PROXY_ENDPOINT}" ]; then
+    PROXY_ENDPOINT="$(normalize_http_endpoint "${PROXY_ENDPOINT}")"
+  fi
+  if [ -n "${PROXY_STAGE_HOOK}" ]; then
+    [ -n "${PROXY_ENDPOINT}" ] || die "a proxy stage hook requires --proxy-endpoint"
+    [ -x "${PROXY_STAGE_HOOK}" ] || die "proxy stage hook is not executable: ${PROXY_STAGE_HOOK}"
+  fi
+  [ "${#NODE_ENDPOINTS[@]}" -ge "${#NODES[@]}" ] \
+    || die "RUSTFS_NODE_ENDPOINTS must provide at least ${#NODES[@]} direct node endpoints"
+  local i
+  for ((i=0; i<${#NODE_ENDPOINTS[@]}; i++)); do
+    NODE_ENDPOINTS[i]="$(normalize_http_endpoint "${NODE_ENDPOINTS[i]}")"
+  done
+}
+
+endpoint_authority() {
+  local endpoint="$1"
+  printf '%s' "${endpoint#http://}"
+}
+
+cleanup_runtime() {
+  if [ -n "${ACTIVE_WARP_PID}" ]; then
+    kill "${ACTIVE_WARP_PID}" 2>/dev/null || true
+  fi
+  rm -f "${ADMIN_API_CODE_FILE}" "${ADMIN_API_TIMING_FILE}" \
+    "${PROXY_API_CODE_FILE}" "${PROXY_API_TIMING_FILE}" \
+    "${ADMIN_ANOMALY_FILE}" "${PROXY_ANOMALY_FILE}"
 }
 
 # ==================== Admin API (SigV4-signed) ====================
@@ -177,24 +249,25 @@ canonical_query() {
   done | sort | paste -sd '&' -
 }
 
-# Issue an admin API request. Prints the response body on stdout and writes the
-# HTTP status (000 on transport failure) to ${ADMIN_API_CODE_FILE}.
-admin_api() {
-  # $1: method, $2: path, $3: query string
-  local method="$1" path="$2" query="$3"
+# Issue a SigV4 API request. Prints the response body on stdout and writes the
+# HTTP status (000 on transport failure) and curl timing data to caller-owned
+# files so direct and proxy probes cannot overwrite each other.
+api_request() {
+  # $1: endpoint, $2: status file, $3: timing file, $4: method, $5: path, $6: query string
+  local endpoint="$1" code_file="$2" timing_file="$3" method="$4" path="$5" query="$6"
   local amz_date date_stamp host_port
   local canonical_headers signed_headers canonical_request string_to_sign
   local scope k_date k_region k_service k_signing signature auth
-  local url tmp code
+  local url tmp metrics code connect_time starttransfer_time total_time curl_exit=0
 
   if [ "${DRY_RUN}" -eq 1 ]; then
-    log "DRY-RUN: admin API ${method} ${API_ENDPOINT}${path}${query:+?${query}}"
-    printf '200' > "${ADMIN_API_CODE_FILE}"
+    log "DRY-RUN: API ${method} ${endpoint}${path}${query:+?${query}}"
+    printf '200' > "${code_file}"
+    printf 'http=200 connect=0 ttfb=0 total=0 curl_exit=0' > "${timing_file}"
     return 0
   fi
 
-  host_port="${API_ENDPOINT#*://}"
-  host_port="${host_port%%/*}"
+  host_port="$(endpoint_authority "${endpoint}")"
 
   amz_date="$(date -u +%Y%m%dT%H%M%SZ)"
   date_stamp="${amz_date:0:8}"
@@ -225,22 +298,55 @@ $(sha256_hex "${canonical_request}")"
   signature="$(hmac_sha256_hex "${k_signing}" "${string_to_sign}")"
   auth="AWS4-HMAC-SHA256 Credential=${ACCESS_KEY}/${scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
 
-  url="http://${host_port}${path}${query:+?${query}}"
+  url="${endpoint}${path}${query:+?${query}}"
   tmp="$(mktemp)"
-  code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -w '%{http_code}' \
+  if metrics="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" \
+    -w $'%{http_code}\t%{time_connect}\t%{time_starttransfer}\t%{time_total}' \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
     -H "x-amz-date: ${amz_date}" \
     -H "Authorization: ${auth}" \
-    -X "${method}" "${url}")" || code="000"
-  printf '%s' "${code}" > "${ADMIN_API_CODE_FILE}"
+    -X "${method}" "${url}")"; then
+    curl_exit=0
+  else
+    curl_exit=$?
+  fi
+  IFS=$'\t' read -r code connect_time starttransfer_time total_time <<<"${metrics:-}"
+  if [ "${curl_exit}" -ne 0 ]; then
+    code="000"
+  fi
+  code="${code:-000}"
+  printf '%s' "${code}" > "${code_file}"
+  printf 'http=%s connect=%s ttfb=%s total=%s curl_exit=%s' \
+    "${code}" "${connect_time:-unknown}" "${starttransfer_time:-unknown}" \
+    "${total_time:-unknown}" "${curl_exit}" > "${timing_file}"
   cat "${tmp}"
   rm -f "${tmp}"
+}
+
+admin_api() {
+  api_request "${ADMIN_ENDPOINT}" "${ADMIN_API_CODE_FILE}" "${ADMIN_API_TIMING_FILE}" "$@"
+}
+
+proxy_api() {
+  api_request "${PROXY_ENDPOINT}" "${PROXY_API_CODE_FILE}" "${PROXY_API_TIMING_FILE}" "$@"
 }
 
 # Read the HTTP status written by the last admin_api call
 admin_api_code() {
   cat "${ADMIN_API_CODE_FILE}"
+}
+
+admin_api_timing() {
+  cat "${ADMIN_API_TIMING_FILE}"
+}
+
+proxy_api_code() {
+  cat "${PROXY_API_CODE_FILE}"
+}
+
+proxy_api_timing() {
+  cat "${PROXY_API_TIMING_FILE}"
 }
 
 # Run an admin API request and fail loudly (with the full response body) on a
@@ -281,7 +387,9 @@ run_remote() {
   script="$(cat)"
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: ssh ${SSH_USER}@${node} <<'REMOTE'"
-    printf '%s\n' "${script}" | sed 's/^/    | /'
+    printf '%s\n' "${script}" \
+      | sed -E 's/^(RUSTFS_(ACCESS_KEY|SECRET_KEY)=).*/\1[REDACTED]/' \
+      | sed 's/^/    | /'
     log "DRY-RUN: ----"
     return 0
   fi
@@ -297,7 +405,9 @@ run_remote_all() {
   for node in "${NODES[@]}"; do
     if [ "${DRY_RUN}" -eq 1 ]; then
       log "DRY-RUN: ssh ${SSH_USER}@${node} <<'REMOTE'"
-      printf '%s\n' "${script}" | sed 's/^/    | /'
+      printf '%s\n' "${script}" \
+        | sed -E 's/^(RUSTFS_(ACCESS_KEY|SECRET_KEY)=).*/\1[REDACTED]/' \
+        | sed 's/^/    | /'
       log "DRY-RUN: ----"
     else
       log "==> ${node}: executing remote script"
@@ -497,16 +607,180 @@ start_and_wait_nodes() {
   done
 }
 
+wait_node_ready() {
+  local index="$1" endpoint="${NODE_ENDPOINTS[$1]}" waited=0
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: waiting for ${NODES[$index]} readiness at ${endpoint}/health/ready"
+    return 0
+  fi
+  while [ "${waited}" -lt "${SERVICE_TIMEOUT}" ]; do
+    if curl -fsS --connect-timeout 5 --max-time 10 "${endpoint}/health/ready" >/dev/null 2>&1; then
+      log "${NODES[$index]}: ready at ${endpoint}"
+      return 0
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  diagnose_node_start_failure "${NODES[$index]}"
+  die "${NODES[$index]}: timed out waiting for ${endpoint}/health/ready (${SERVICE_TIMEOUT}s)"
+}
+
+assert_node_not_ready() {
+  local index="$1" endpoint="${NODE_ENDPOINTS[$1]}" code
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: asserting ${NODES[$index]} is not ready at ${endpoint}/health/ready"
+    return 0
+  fi
+  code="$(curl -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' \
+    "${endpoint}/health/ready" 2>/dev/null)" || code="000"
+  case "${code}" in
+    2??) die "${NODES[$index]} unexpectedly reports ready at ${endpoint} during this topology stage" ;;
+    *) log "${NODES[$index]}: intentionally inactive (ready probe HTTP ${code})" ;;
+  esac
+}
+
+# A topology stage is usable only after every intended member is directly
+# ready and every future member is still unavailable. This prevents a shared
+# proxy from hiding stale processes or routing to nodes the test has not yet
+# activated.
+verify_stage_readiness() {
+  local active_count="$1" i
+  [ "${active_count}" -le "${#NODES[@]}" ] || die "invalid active node count: ${active_count}"
+  for ((i=0; i<active_count; i++)); do
+    wait_node_ready "${i}"
+  done
+  for ((i=active_count; i<${#NODES[@]}; i++)); do
+    assert_node_not_ready "${i}"
+  done
+}
+
+configure_proxy_stage() {
+  local active_count="$1"
+  [ -n "${PROXY_STAGE_HOOK}" ] || return 0
+  local -a active_endpoints=("${NODE_ENDPOINTS[@]:0:active_count}")
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: ${PROXY_STAGE_HOOK} apply ${active_count} ${active_endpoints[*]}"
+    return 0
+  fi
+  log "configuring the dedicated proxy for ${active_count} active node(s): ${active_endpoints[*]}"
+  "${PROXY_STAGE_HOOK}" apply "${active_count}" "${active_endpoints[@]}"
+}
+
+record_endpoint_anomaly() {
+  local file="$1" message="$2"
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${message}" >> "${file}"
+}
+
+log_storageinfo_failure() {
+  local label="$1" endpoint="$2" attempt="$3" code="$4" timing="$5" body="$6"
+  printf '\033[1;31m[ERROR]\033[0m %s %s storageinfo attempt %s failed at %s (HTTP %s; %s)\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${label}" "${attempt}" "${endpoint}" "${code}" "${timing}" >&2
+  printf '%s\n' "${body}" >&2
+}
+
+log_storageinfo_success() {
+  local label="$1" endpoint="$2" attempt="$3" code="$4" timing="$5" body="$6"
+  printf '\033[1;36m[PROBE]\033[0m %s %s storageinfo attempt %s succeeded at %s (HTTP %s; %s)\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${label}" "${attempt}" "${endpoint}" "${code}" "${timing}" >&2
+  printf '%s\n' "${body}" >&2
+}
+
+# Print a successful storageinfo response on stdout. Failures are recorded in
+# a sticky file before bounded retries so a later 200 cannot turn the run into
+# a clean pass.
+storageinfo_with_retry() {
+  local kind="$1" endpoint request_fn code_fn timing_fn anomaly_file label
+  local attempt=1 body code timing
+  case "${kind}" in
+    admin)
+      endpoint="${ADMIN_ENDPOINT}"
+      request_fn=admin_api
+      code_fn=admin_api_code
+      timing_fn=admin_api_timing
+      anomaly_file="${ADMIN_ANOMALY_FILE}"
+      label="direct admin"
+      ;;
+    proxy)
+      endpoint="${PROXY_ENDPOINT}"
+      request_fn=proxy_api
+      code_fn=proxy_api_code
+      timing_fn=proxy_api_timing
+      anomaly_file="${PROXY_ANOMALY_FILE}"
+      label="proxy"
+      ;;
+    *) die "unknown storageinfo probe kind: ${kind}" ;;
+  esac
+
+  while [ "${attempt}" -le "${STORAGEINFO_PROBE_RETRIES}" ]; do
+    body="$(${request_fn} GET /rustfs/admin/v3/storageinfo "")"
+    code="$(${code_fn})"
+    timing="$(${timing_fn})"
+    if [ "${code}" = "200" ]; then
+      log_storageinfo_success "${label}" "${endpoint}" \
+        "${attempt}/${STORAGEINFO_PROBE_RETRIES}" "${code}" "${timing}" "${body}"
+      printf '%s' "${body}"
+      return 0
+    fi
+    log_storageinfo_failure "${label}" "${endpoint}" "${attempt}/${STORAGEINFO_PROBE_RETRIES}" \
+      "${code}" "${timing}" "${body}"
+    record_endpoint_anomaly "${anomaly_file}" \
+      "${label} storageinfo ${endpoint} HTTP ${code} ${timing}"
+    case "${code}" in
+      000|502|503|504) ;;
+      *) return 1 ;;
+    esac
+    if [ "${attempt}" -lt "${STORAGEINFO_PROBE_RETRIES}" ]; then
+      sleep "${STORAGEINFO_PROBE_RETRY_DELAY}"
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+probe_proxy_storageinfo() {
+  local body
+  [ -n "${PROXY_ENDPOINT}" ] || return 0
+  if ! body="$(storageinfo_with_retry proxy)"; then
+    warn "proxy storageinfo remained unavailable; continuing the direct pool flow to preserve diagnostics" >&2
+    return 0
+  fi
+  if ! printf '%s' "${body}" | jq -e '(.info.disks // .disks // []) | length' >/dev/null 2>&1; then
+    printf '\033[1;31m[ERROR]\033[0m proxy storageinfo returned HTTP 200 with an unexpected body:\n%s\n' "${body}" >&2
+    record_endpoint_anomaly "${PROXY_ANOMALY_FILE}" \
+      "proxy storageinfo ${PROXY_ENDPOINT} returned HTTP 200 with invalid JSON"
+  fi
+}
+
+assert_no_endpoint_anomalies() {
+  local failed=0
+  if [ -s "${ADMIN_ANOMALY_FILE}" ]; then
+    printf '%s\n' "--- recovered or persistent direct admin anomalies ---" >&2
+    cat "${ADMIN_ANOMALY_FILE}" >&2
+    failed=1
+  fi
+  if [ -s "${PROXY_ANOMALY_FILE}" ]; then
+    printf '%s\n' "--- recovered or persistent proxy anomalies ---" >&2
+    cat "${PROXY_ANOMALY_FILE}" >&2
+    failed=1
+  fi
+  [ "${failed}" -eq 0 ] \
+    || die "endpoint anomalies occurred; retries preserved diagnostics but do not qualify as a clean pass"
+}
+
 # Cluster storage usage percentage from the admin API (aggregate across disks)
 storage_usage_percent() {
-  local body
+  local body sample_time
   if [ "${DRY_RUN}" -eq 1 ]; then
-    log "DRY-RUN: GET ${API_ENDPOINT}/rustfs/admin/v3/storageinfo (storage usage)"
+    log "DRY-RUN: GET ${ADMIN_ENDPOINT}/rustfs/admin/v3/storageinfo (storage usage)"
     printf '0\n'
     return 0
   fi
-  body="$(admin_api GET /rustfs/admin/v3/storageinfo "")"
-  [ "$(admin_api_code)" = "200" ] || die "storageinfo API failed (HTTP $(admin_api_code))"
+  sample_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '\033[1;36m[PROBE]\033[0m %s storageinfo sample direct=%s proxy=%s\n' \
+    "${sample_time}" "${ADMIN_ENDPOINT}" "${PROXY_ENDPOINT:-disabled}" >&2
+  body="$(storageinfo_with_retry admin)" \
+    || die "direct storageinfo API remained unavailable at ${ADMIN_ENDPOINT}"
+  probe_proxy_storageinfo
   if ! printf '%s' "${body}" | jq -e '(.info.disks // .disks // []) | length' >/dev/null 2>&1; then
     printf '\033[1;31m[ERROR]\033[0m storageinfo response unexpected (expected JSON with .info.disks or .disks):\n%s\n' "${body}" >&2
     die "storageinfo response could not be parsed"
@@ -528,20 +802,38 @@ monitor_storage() {
     log "current storage usage: ${usage}%"
     awk -v u="${usage}" -v t="${threshold}" 'BEGIN{exit !(u >= t)}' && break
     if [ -n "${warp_pid}" ] && ! kill -0 "${warp_pid}" 2>/dev/null; then
-      warn "warp finished at ${usage}%, below the threshold of ${threshold}%"
-      warn "re-run step 4 to write more data; the data already written is enough to exercise the remaining steps"
-      return 0
+      die "warp finished at ${usage}%, below the required storage threshold of ${threshold}%"
     fi
     sleep "${POLL_INTERVAL}"
   done
   log "storage usage reached ${usage}%, stopping writes"
 }
 
+warp_log_has_transport_failure() {
+  local warp_log="$1"
+  grep -Eiq "${WARP_TRANSPORT_FAILURE_PATTERN}" "${warp_log}"
+}
+
+report_warp_errors() {
+  local warp_log="$1" slowdown_count
+  [ -r "${warp_log}" ] || die "warp log is unavailable: ${warp_log}"
+  slowdown_count="$(grep -Eic 'SlowDown|foreground write concurrency limit reached' "${warp_log}" || true)"
+  if [ "${slowdown_count}" -gt 0 ]; then
+    log "warp recorded ${slowdown_count} admission SlowDown response(s); capacity tuning remains tracked separately"
+  fi
+  if warp_log_has_transport_failure "${warp_log}"; then
+    printf '\033[1;31m[ERROR]\033[0m warp encountered forbidden proxy/transport failures:\n' >&2
+    grep -Ein "${WARP_TRANSPORT_FAILURE_PATTERN}" "${warp_log}" | head -n 50 >&2 || true
+    return 1
+  fi
+  return 0
+}
+
 # Verify the expected number of pools via the admin API (JSON + jq assertions)
 verify_pools() {
   local expected="$1"
   local body code count nonactive
-  log "verifying pools via admin API (expect at least ${expected} active): GET ${API_ENDPOINT}/rustfs/admin/v3/pools/list"
+  log "verifying pools via admin API (expect exactly ${expected} active): GET ${ADMIN_ENDPOINT}/rustfs/admin/v3/pools/list"
   if [ "${DRY_RUN}" -eq 1 ]; then return 0; fi
   body="$(admin_api GET /rustfs/admin/v3/pools/list "")"
   code="$(admin_api_code)"
@@ -555,8 +847,8 @@ verify_pools() {
     die "pools/list response could not be parsed as JSON"
   fi
   nonactive="$(printf '%s' "${body}" | jq '[.[] | select(.status != "active")] | length')"
-  if [ "${count}" -lt "${expected}" ] || [ "${nonactive}" -ne 0 ]; then
-    printf '\033[1;31m[ERROR]\033[0m pool assertion failed: expected >=%s active pools, got %s (non-active: %s)\n' \
+  if [ "${count}" -ne "${expected}" ] || [ "${nonactive}" -ne 0 ]; then
+    printf '\033[1;31m[ERROR]\033[0m pool assertion failed: expected exactly %s active pools, got %s (non-active: %s)\n' \
       "${expected}" "${count}" "${nonactive}" >&2
     printf '%s\n' "--- pool detail ---" >&2
     printf '%s' "${body}" | jq -r '.[] | "  pool id=\(.id) status=\(.status) decommission=\(.decommissionStatus) rebalance=\(.rebalanceStatus) used=\(.usedSize)/\(.totalSize) cmdline=\(.cmdline)"' >&2
@@ -566,6 +858,7 @@ verify_pools() {
   fi
   log "pools OK: ${count} pools, all active"
   printf '%s' "${body}" | jq -r '.[] | "  pool id=\(.id) status=\(.status) decommission=\(.decommissionStatus) rebalance=\(.rebalanceStatus)"'
+  probe_proxy_storageinfo
 }
 
 # Print a detailed rebalance failure report (never includes credentials)
@@ -682,7 +975,7 @@ print_decommission_detail() {
 # Wait for a pool decommission to complete
 wait_decommission() {
   local pool_id="$1" waited=0 body code
-  local complete failed canceled queued objects_failed bytes_failed remaining done
+  local complete failed canceled queued objects_failed bytes_failed remaining done_count
   log "waiting for pool ${pool_id} decommission to complete via admin API (timeout ${DECOMMISSION_TIMEOUT}s)..."
   while [ "${waited}" -lt "${DECOMMISSION_TIMEOUT}" ]; do
     if [ "${DRY_RUN}" -eq 1 ]; then
@@ -707,7 +1000,7 @@ wait_decommission() {
     objects_failed="$(printf '%s' "${body}" | jq -r --argjson id "${pool_id}" '.pools[] | select(.id == $id) | .decommissionInfo.objectsDecommissionedFailed // 0')"
     bytes_failed="$(printf '%s' "${body}" | jq -r --argjson id "${pool_id}" '.pools[] | select(.id == $id) | .decommissionInfo.bytesDecommissionedFailed // 0')"
     remaining="$(printf '%s' "${body}" | jq -r --argjson id "${pool_id}" '.pools[] | select(.id == $id) | (.decommissionInfo.queuedBuckets // [] | length)')"
-    done="$(printf '%s' "${body}" | jq -r --argjson id "${pool_id}" '.pools[] | select(.id == $id) | (.decommissionInfo.decommissionedBuckets // [] | length)')"
+    done_count="$(printf '%s' "${body}" | jq -r --argjson id "${pool_id}" '.pools[] | select(.id == $id) | (.decommissionInfo.decommissionedBuckets // [] | length)')"
     if [ "${failed}" = "true" ] || [ "${canceled}" = "true" ] \
       || [ "${objects_failed}" -gt 0 ] || [ "${bytes_failed}" -gt 0 ]; then
       print_decommission_detail "${body}" "${pool_id}" "FAILED"
@@ -719,7 +1012,7 @@ wait_decommission() {
       printf '%s' "${body}" | jq -r --argjson id "${pool_id}" '.pools[] | select(.id == $id) | "  pool id=\(.id) status=\(.status) complete=\(.decommissionInfo.complete) objects=\(.decommissionInfo.objectsDecommissioned) bytes=\(.decommissionInfo.bytesDecommissioned) waitingReason=\(.decommissionInfo.waitingReason // "null")"'
       return 0
     fi
-    log "pool ${pool_id} decommission in progress: doneBuckets=${done} queuedBuckets=${remaining} objects_failed=${objects_failed} queued=${queued}"
+    log "pool ${pool_id} decommission in progress: doneBuckets=${done_count} queuedBuckets=${remaining} objects_failed=${objects_failed} queued=${queued}"
     sleep "${POLL_INTERVAL}"
     waited=$((waited + POLL_INTERVAL))
   done
@@ -745,7 +1038,7 @@ preflight() {
         || die "cannot SSH to ${node}"
       log "${node}: SSH OK"
     done
-    log "admin API connectivity: GET ${API_ENDPOINT}/rustfs/admin/v3/pools/list"
+    log "direct admin API connectivity: GET ${ADMIN_ENDPOINT}/rustfs/admin/v3/pools/list"
     local body code
     body="$(admin_api GET /rustfs/admin/v3/pools/list "")"
     code="$(admin_api_code)"
@@ -761,7 +1054,7 @@ preflight() {
         printf '\033[1;31m[ERROR]\033[0m admin API check failed (HTTP %s) while ${RUSTFS_SERVICE} is active on %s\n' \
           "${code}" "${NODES[0]}" >&2
         printf '%s\n' "${body}" >&2
-        die "cannot reach the admin API at ${API_ENDPOINT} with the configured credentials"
+        die "cannot reach the admin API at ${ADMIN_ENDPOINT} with the configured credentials"
       fi
       printf '\033[1;33m[WARN]\033[0m admin API not reachable (HTTP %s) — ${RUSTFS_SERVICE} is not active on %s; the test will start the cluster and verify the API in step 3\n' \
         "${code}" "${NODES[0]}" >&2
@@ -867,6 +1160,8 @@ step3_start_first_pool() {
   ensure_volume_dirs "${NODES[0]}" "${VOLUMES_1}"
   service_action start "${NODES[0]}"
   wait_service_active "${NODES[0]}"
+  verify_stage_readiness 1
+  configure_proxy_stage 1
   log "checking service status: systemctl status ${RUSTFS_SERVICE}"
   if [ "${DRY_RUN}" -eq 0 ]; then
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODES[0]}" \
@@ -877,18 +1172,21 @@ step3_start_first_pool() {
 
 step4_write_data() {
   log "step 4: write data and monitor storage usage"
+  verify_stage_readiness 1
+  configure_proxy_stage 1
+  verify_pools 1
   if [ "${WITH_WARP}" -eq 1 ]; then
     need_cmd warp "warp benchmark tool"
     confirm "About to run warp writes in the background (bucket=${WARP_BUCKET}, duration=${WARP_DURATION}) and monitor usage up to ${STORAGE_THRESHOLD}%. Continue?"
     if [ "${DRY_RUN}" -eq 1 ]; then
-      log "DRY-RUN: warp put --host ${API_ENDPOINT#http://} --bucket ${WARP_BUCKET} ... (background)"
+      log "DRY-RUN: warp put --host $(endpoint_authority "${WARP_ENDPOINT}") --bucket ${WARP_BUCKET} --concurrent ${WARP_CONCURRENT} ... (background)"
       log "DRY-RUN: monitoring storage usage until ${STORAGE_THRESHOLD}%"
       return 0
     fi
     local warp_log warp_pid
     warp_log="${WARP_LOG_FILE:-$(mktemp "${TMPDIR:-/tmp}/rustfs-warp.XXXXXX.log")}"
-    log "starting warp writes (background), log: ${warp_log}"
-    warp put --host "${API_ENDPOINT#http://}" \
+    log "starting warp writes against ${WARP_ENDPOINT} (background), log: ${warp_log}"
+    warp put --host "$(endpoint_authority "${WARP_ENDPOINT}")" \
       --bucket "${WARP_BUCKET}" \
       --access-key "${ACCESS_KEY}" \
       --secret-key "${SECRET_KEY}" \
@@ -896,8 +1194,8 @@ step4_write_data() {
       --concurrent "${WARP_CONCURRENT}" \
       --noprefix --duration "${WARP_DURATION}" --noclear >"${warp_log}" 2>&1 &
     warp_pid=$!
+    ACTIVE_WARP_PID="${warp_pid}"
     log "warp PID=${warp_pid}"
-    trap 'kill "${warp_pid:-}" 2>/dev/null || true' EXIT
     monitor_storage "${STORAGE_THRESHOLD}" "${warp_pid}"
     # Graceful stop first (SIGINT lets warp finish/abort in-flight multipart
     # uploads), then SIGTERM/KILL as fallback; see rustfs/backlog#2063.
@@ -920,22 +1218,26 @@ step4_write_data() {
       warn "warp still running; sending SIGKILL"
       kill -KILL "${warp_pid}" 2>/dev/null || true
     fi
-    trap - EXIT
     wait "${warp_pid}" 2>/dev/null || true
+    ACTIVE_WARP_PID=""
     log "warp stopped"
+    local warp_transport_clean=1
+    report_warp_errors "${warp_log}" || warp_transport_clean=0
     # Safety net: abort any incomplete multipart uploads left in the test
     # bucket immediately, so no orphan can block the later decommission gate.
     abort_stale_multipart_uploads "${WARP_BUCKET}"
+    [ "${warp_transport_clean}" -eq 1 ] \
+      || die "warp observed an Nginx 502/504, timeout, or transport failure; see ${warp_log}"
   else
-    cat <<'NOTE'
+    cat <<NOTE
 Write data manually (or re-run with --with-warp to automate):
 
-  warp put --host "rustfs-node1:9000" --bucket "test-10mb" \
+  warp put --host "$(endpoint_authority "${WARP_ENDPOINT}")" --bucket "test-10mb" \
     --access-key "rustfs@test" --secret-key "rustfs@test" \
-    --obj.size "100MiB" --concurrent 32 --noprefix --duration 5m --noclear
+    --obj.size "100MiB" --concurrent ${WARP_CONCURRENT} --noprefix --duration 5m --noclear
 
 While writing, monitor storage usage:
-  GET ${API_ENDPOINT}/rustfs/admin/v3/storageinfo  (SigV4-signed)
+  GET ${ADMIN_ENDPOINT}/rustfs/admin/v3/storageinfo  (SigV4-signed)
   e.g. Storage: 30.88 GiB / 1.56 TiB (1%)
 
 Stop writing once usage reaches 80%-85%, then continue.
@@ -953,12 +1255,14 @@ step5_expand_pool2() {
   ensure_volume_dirs "${NODES[0]}" "${VOLUMES_2}"
   ensure_volume_dirs "${NODES[1]}" "${VOLUMES_2}"
   start_and_wait_nodes "${NODES[0]}" "${NODES[1]}"
+  verify_stage_readiness 2
+  configure_proxy_stage 2
   verify_pools 2
 }
 
 step6_rebalance() {
   log "step 6: start data rebalance (admin API)"
-  confirm "About to start rebalance (POST ${API_ENDPOINT}/rustfs/admin/v3/rebalance/start). Continue?"
+  confirm "About to start rebalance (POST ${ADMIN_ENDPOINT}/rustfs/admin/v3/rebalance/start). Continue?"
   if [ "${DRY_RUN}" -eq 0 ]; then
     start_rebalance_with_retry
   fi
@@ -977,12 +1281,14 @@ step7_expand_pool3() {
     ensure_volume_dirs "${node}" "${VOLUMES_3}"
   done
   start_and_wait_nodes "${NODES[@]}"
+  verify_stage_readiness "${#NODES[@]}"
+  configure_proxy_stage "${#NODES[@]}"
   verify_pools 3
 }
 
 step8_rebalance() {
   log "step 8: start data rebalance (admin API)"
-  confirm "About to start rebalance (POST ${API_ENDPOINT}/rustfs/admin/v3/rebalance/start). Continue?"
+  confirm "About to start rebalance (POST ${ADMIN_ENDPOINT}/rustfs/admin/v3/rebalance/start). Continue?"
   if [ "${DRY_RUN}" -eq 0 ]; then
     start_rebalance_with_retry
   fi
@@ -1064,7 +1370,7 @@ step9_decommission() {
     fi
     if [ "${attempt}" -ge "${DECOMMISSION_RETRIES}" ]; then
       warn "if the source bucket has many objects and the tested version is 1.0.0-rc.3, this is the known metacache-listing decommission bug; remove the test bucket (rc rb --force rustfs/${WARP_BUCKET}) or lower --storage-threshold, then re-run step 9"
-      die "pool ${DECOMMISSION_POOL_ID} still failed after ${attempt} attempts; investigate manually (POST ${API_ENDPOINT}/rustfs/admin/v3/pools/clear?by-id=true&pool=${DECOMMISSION_POOL_ID} to reset)"
+      die "pool ${DECOMMISSION_POOL_ID} still failed after ${attempt} attempts; investigate manually (POST ${ADMIN_ENDPOINT}/rustfs/admin/v3/pools/clear?by-id=true&pool=${DECOMMISSION_POOL_ID} to reset)"
     fi
     warn "attempt ${attempt} failed; clearing metadata and retrying in ${DECOMMISSION_RETRY_DELAY}s"
     if [ "${DRY_RUN}" -eq 0 ]; then
@@ -1084,6 +1390,8 @@ step9_decommission() {
     for node in "${NODES[@]}"; do
       wait_service_active "${node}"
     done
+    verify_stage_readiness "${#NODES[@]}"
+    configure_proxy_stage "${#NODES[@]}"
     verify_pools 2
   fi
 }
@@ -1108,10 +1416,16 @@ Options:
   --reset                    Reset all nodes (stop services, wipe data dirs + config). Destructive!
   --ssh-user USER            SSH user for the nodes (default azureuser)
   --ssh-port PORT            SSH port for the nodes (default 22)
-  --endpoint URL             Cluster admin API endpoint, e.g. http://10.0.0.7:9000 (default from config)
+  --endpoint URL             Legacy fallback for both admin and warp endpoints
   --rc-endpoint URL          Deprecated alias for --endpoint
+  --admin-endpoint URL       Direct active-node endpoint for admin and S3 cleanup requests
+  --warp-endpoint URL        Direct active-node endpoint used only by warp
+  --proxy-endpoint URL       Optional Nginx/LB storageinfo probe; any anomaly fails clean acceptance
+  --proxy-stage-hook FILE    Executable that applies stage-aware proxy membership
+  --node-endpoints URLS      Space-separated direct endpoints in node order
   --storage-threshold N      Stop writing when usage reaches N% (default 85)
   --warp-duration DUR        warp write duration, e.g. 5m, 20s (default 5m)
+  --warp-concurrent N        warp concurrent operations (default 32)
   --rebalance-timeout N      Rebalance wait timeout in seconds (default 86400)
   --decommission-timeout N   Decommission wait timeout in seconds (default 86400)
   --service-timeout N        Service start wait timeout in seconds (default 300)
@@ -1183,10 +1497,16 @@ main() {
       --reset) RESET=1 ;;
       --ssh-user) SSH_USER="$1"; shift ;;
       --ssh-port) SSH_PORT="$1"; shift ;;
-      --endpoint) API_ENDPOINT="$1"; shift ;;
-      --rc-endpoint) API_ENDPOINT="$1"; shift ;;
+      --endpoint) LEGACY_ENDPOINT="$1"; shift ;;
+      --rc-endpoint) LEGACY_ENDPOINT="$1"; shift ;;
+      --admin-endpoint) ADMIN_ENDPOINT="$1"; shift ;;
+      --warp-endpoint) WARP_ENDPOINT="$1"; shift ;;
+      --proxy-endpoint) PROXY_ENDPOINT="$1"; shift ;;
+      --proxy-stage-hook) PROXY_STAGE_HOOK="$1"; shift ;;
+      --node-endpoints) read -r -a NODE_ENDPOINTS <<<"$1"; shift ;;
       --storage-threshold) STORAGE_THRESHOLD="$1"; shift ;;
       --warp-duration) WARP_DURATION="$1"; shift ;;
+      --warp-concurrent) WARP_CONCURRENT="$1"; shift ;;
       --rebalance-timeout) REBALANCE_TIMEOUT="$1"; shift ;;
       --decommission-timeout) DECOMMISSION_TIMEOUT="$1"; shift ;;
       --service-timeout) SERVICE_TIMEOUT="$1"; shift ;;
@@ -1198,7 +1518,8 @@ main() {
       *) die "unknown option: ${opt} (see --help)" ;;
     esac
   done
-  trap 'rm -f "${ADMIN_API_CODE_FILE}"' EXIT
+  resolve_endpoints
+  trap cleanup_runtime EXIT
   if [ -n "${LOG_FILE}" ]; then
     mkdir -p "$(dirname "${LOG_FILE}")"
     if ! touch "${LOG_FILE}" 2>/dev/null; then
@@ -1221,6 +1542,7 @@ main() {
   if [ "${PREFLIGHT}" -eq 1 ]; then
     preflight
     if [ "${#SELECTED_STEPS[@]}" -eq 0 ]; then
+      assert_no_endpoint_anomalies
       log "preflight only (no steps selected); done"
       exit 0
     fi
@@ -1229,10 +1551,12 @@ main() {
   if [ "${DRY_RUN}" -eq 0 ]; then
     log "nodes: ${NODES[*]}  ssh user: ${SSH_USER}  version: ${RUSTFS_VERSION}"
     log "package: ${PACKAGE_URL}"
+    log "endpoints: admin=${ADMIN_ENDPOINT} warp=${WARP_ENDPOINT} proxy=${PROXY_ENDPOINT:-disabled}"
   else
     warn "DRY-RUN mode: only printing the commands that would run"
   fi
   run_steps
+  assert_no_endpoint_anomalies
   log "all done"
 }
 
