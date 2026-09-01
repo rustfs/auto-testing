@@ -21,9 +21,36 @@
 #
 set -Eeuo pipefail
 
-# Per-run temp dir (shared runners may leave stale /tmp files owned by other users)
-TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-test.XXXXXX")"
-trap 'rm -rf "${TEST_TMP}"' EXIT
+# Per-run temp dir (shared runners may leave stale /tmp files owned by other users).
+# Tests may inject an isolated directory while sourcing this file.
+if [ -n "${RUSTFS_TIER_TEST_TMP:-}" ]; then
+  TEST_TMP="${RUSTFS_TIER_TEST_TMP}"
+  TEST_TMP_OWNED=0
+  mkdir -p "${TEST_TMP}"
+else
+  TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-test.XXXXXX")"
+  TEST_TMP_OWNED=1
+fi
+
+CASE_ACTIVE=0
+CASE_CLEANUP_RUNNING=0
+CASE_CLEANUP_DONE=0
+
+suite_exit() {
+  local exit_code="${1:-$?}"
+  trap - EXIT INT TERM
+  if [ "${CASE_ACTIVE:-0}" -eq 1 ] && declare -F case_cleanup >/dev/null 2>&1; then
+    case_cleanup "signal-or-exit" >> "${TEST_TMP}/test.out" 2>&1 || true
+  fi
+  if [ "${TEST_TMP_OWNED:-0}" -eq 1 ] && [ -n "${TEST_TMP:-}" ] && [ -d "${TEST_TMP}" ]; then
+    rm -rf -- "${TEST_TMP}"
+  fi
+  exit "${exit_code}"
+}
+
+trap 'suite_exit $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 
 # ==================== Configuration ====================
@@ -82,7 +109,6 @@ VOLUMES_SINGLE_SINGLE="/data/rustfs1/mnmd"
 VOLUMES_SINGLE_MULTI="/data/rustfs{1...4}/mnmd"
 
 SERVICE_TIMEOUT=300
-POLL_INTERVAL=15
 
 TIER_NAME="WARM"
 TIER_BUCKET="tier-warm"
@@ -91,7 +117,9 @@ API_ENDPOINT="${SOURCE_ENDPOINT_SINGLE_SINGLE}"
 SIGV4_REGION="${REGION}"
 SIGV4_SERVICE="s3"
 API_REQUEST_TIMEOUT=120
-ADMIN_API_CODE_FILE="${TMPDIR:-/tmp}/rustfs-tier-api-code.$$"
+COMMAND_TIMEOUT=360
+CLEANUP_TIMEOUT=60
+ADMIN_API_CODE_FILE="${TEST_TMP}/rustfs-tier-api-code"
 
 # ==================== Runtime options ====================
 DRY_RUN=0
@@ -101,6 +129,22 @@ LOG_FILE=""
 SELECTED_TOPOLOGIES=()
 ENDPOINT=""
 VOLUMES=""
+CURRENT_TOPOLOGY=""
+CURRENT_CASE_ID=""
+CURRENT_CASE_NAME=""
+RUN_TOKEN="$(date -u +%y%m%d%H%M%S)-$$"
+
+RC_BIN_REQUEST="${RUSTFS_RC_BIN:-rc}"
+RC_BIN=""
+RC_SHA256=""
+RC_VERSION=""
+RC_CONFIG_DIR="${TEST_TMP}/rc-config"
+
+ARTIFACTS_DIR="${RUSTFS_TIER_ARTIFACTS_DIR:-${TEST_TMP}/artifacts}"
+RESULTS_DIR=""
+RESULT_LOG_DIR=""
+PROVENANCE_FILE=""
+RESIDUE_FILE=""
 
 # ==================== Helpers ====================
 
@@ -118,6 +162,90 @@ confirm() {
 need_cmd() {
   [ "${DRY_RUN}" -eq 1 ] && return 0
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1 ($2); install it first"
+}
+
+sha256_file() {
+  openssl dgst -sha256 -r "$1" 2>/dev/null | awk '{print $1}'
+}
+
+run_bounded() {
+  local seconds="$1"
+  shift
+  timeout --signal=TERM --kill-after=5 "${seconds}" "$@"
+}
+
+init_artifacts() {
+  RESULTS_DIR="${ARTIFACTS_DIR}/cases"
+  RESULT_LOG_DIR="${ARTIFACTS_DIR}/logs"
+  PROVENANCE_FILE="${ARTIFACTS_DIR}/provenance.json"
+  RESIDUE_FILE="${ARTIFACTS_DIR}/residue.jsonl"
+  mkdir -p "${RESULTS_DIR}" "${RESULT_LOG_DIR}"
+  if find "${RESULTS_DIR}" -maxdepth 1 -type f -name '*.json' -print -quit | grep -q .; then
+    die "artifacts case directory is not empty; use a unique --artifacts-dir: ${RESULTS_DIR}"
+  fi
+  : > "${RESIDUE_FILE}"
+}
+
+resolve_rc_binary() {
+  local candidate
+  if [[ "${RC_BIN_REQUEST}" == */* ]]; then
+    candidate="${RC_BIN_REQUEST}"
+  else
+    candidate="$(command -v "${RC_BIN_REQUEST}" 2>/dev/null || true)"
+  fi
+
+  if [ "${DRY_RUN}" -eq 1 ] && [ -z "${candidate}" ]; then
+    RC_BIN="${RC_BIN_REQUEST}"
+    RC_VERSION="dry-run (binary not resolved)"
+    RC_SHA256=""
+  else
+    [ -n "${candidate}" ] || die "missing command: ${RC_BIN_REQUEST} (RustFS client CLI)"
+    [ -x "${candidate}" ] || die "rc binary is not executable: ${candidate}"
+    RC_BIN="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${candidate}")"
+    RC_SHA256="$(sha256_file "${RC_BIN}")"
+    [ -n "${RC_SHA256}" ] || die "failed to calculate rc SHA-256: ${RC_BIN}"
+    RC_VERSION="$(run_bounded 30 "${RC_BIN}" --version 2>&1 | head -1)" \
+      || die "failed to read rc version from ${RC_BIN}"
+  fi
+
+  mkdir -p "${RC_CONFIG_DIR}"
+  export RC_CONFIG_DIR
+}
+
+write_provenance() {
+  jq -n \
+    --arg schema_version "1" \
+    --arg run_token "${RUN_TOKEN}" \
+    --arg rc_path "${RC_BIN}" \
+    --arg rc_version "${RC_VERSION}" \
+    --arg rc_sha256 "${RC_SHA256}" \
+    --arg rc_config_dir "${RC_CONFIG_DIR}" \
+    --arg expected_rc_sha256 "${RUSTFS_EXPECTED_RC_SHA256:-}" \
+    --arg package_url "$(resolve_package_url)" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      schema_version: ($schema_version | tonumber),
+      run_token: $run_token,
+      generated_at: $generated_at,
+      package_url: $package_url,
+      rc: {
+        path: $rc_path,
+        version: $rc_version,
+        sha256: $rc_sha256,
+        config_dir: $rc_config_dir,
+        expected_sha256: $expected_rc_sha256
+      }
+    }' > "${PROVENANCE_FILE}"
+}
+
+verify_rc_digest() {
+  local expected="${RUSTFS_EXPECTED_RC_SHA256:-}"
+  [ -z "${expected}" ] && return 0
+  [ "${DRY_RUN}" -eq 0 ] || die "RUSTFS_EXPECTED_RC_SHA256 cannot be verified in dry-run mode"
+  expected="$(printf '%s' "${expected}" | tr '[:upper:]' '[:lower:]')"
+  if [ "${RC_SHA256}" != "${expected}" ]; then
+    die "rc SHA-256 mismatch: expected ${expected}, got ${RC_SHA256} (${RC_BIN})"
+  fi
 }
 
 build_package_url() {
@@ -559,9 +687,9 @@ EOF
     done
     [ "${waited}" -lt "${SERVICE_TIMEOUT}" ] || die "target endpoint ${TARGET_ENDPOINT} not ready"
 
-    rc alias set local "${ENDPOINT}" "${ACCESS_KEY}" "${SECRET_KEY}" >/dev/null 2>&1 \
+    run_bounded "${COMMAND_TIMEOUT}" "${RC_BIN}" alias set local "${ENDPOINT}" "${ACCESS_KEY}" "${SECRET_KEY}" >/dev/null 2>&1 \
       || die "rc alias set failed for ${ENDPOINT}"
-    rc alias set target "${TARGET_ENDPOINT}" "${ACCESS_KEY}" "${SECRET_KEY}" >/dev/null 2>&1 \
+    run_bounded "${COMMAND_TIMEOUT}" "${RC_BIN}" alias set target "${TARGET_ENDPOINT}" "${ACCESS_KEY}" "${SECRET_KEY}" >/dev/null 2>&1 \
       || die "rc alias set failed for ${TARGET_ENDPOINT}"
     export AWS_ACCESS_KEY_ID="${ACCESS_KEY}"
     export AWS_SECRET_ACCESS_KEY="${SECRET_KEY}"
@@ -569,8 +697,8 @@ EOF
     export AWS_EC2_METADATA_DISABLED=true
 
     # Create the warm-tier bucket on the target instance.
-    aws --endpoint-url "${TARGET_ENDPOINT}" s3api create-bucket --bucket "${TIER_BUCKET}" >/dev/null 2>&1 \
-      || aws --endpoint-url "${TARGET_ENDPOINT}" s3api create-bucket --bucket "${TIER_BUCKET}" >/dev/null 2>&1
+    aws_target_run s3api create-bucket --bucket "${TIER_BUCKET}" \
+      || die "failed to create unique warm-tier bucket ${TIER_BUCKET}: ${AWS_OUT}"
     receiver_start
     mqtt_start
     # Enable the notify + audit modules via the (API-managed) module switch so
@@ -595,60 +723,323 @@ env_teardown() {
 
 PASS=0; FAIL=0; UNSUPPORTED=0
 FAILED_TESTS=()
+CASE_SOURCE_BUCKETS=()
+CASE_REMOTE_BUCKETS=()
+CASE_TIERS=()
+CASE_CLEANUP_ERRORS=()
+
+case_resources_reset() {
+  CASE_SOURCE_BUCKETS=()
+  CASE_REMOTE_BUCKETS=()
+  CASE_TIERS=()
+  CASE_CLEANUP_ERRORS=()
+  CASE_CLEANUP_RUNNING=0
+  CASE_CLEANUP_DONE=0
+  CASE_ACTIVE=1
+}
+
+register_source_bucket() {
+  local bucket="$1" item
+  [[ "${bucket}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] \
+    || { echo "unsafe source bucket name: ${bucket}" >&2; return 1; }
+  if [ "${#CASE_SOURCE_BUCKETS[@]}" -gt 0 ]; then
+    for item in "${CASE_SOURCE_BUCKETS[@]}"; do [ "${item}" = "${bucket}" ] && return 0; done
+  fi
+  CASE_SOURCE_BUCKETS+=("${bucket}")
+}
+
+register_remote_bucket() {
+  local bucket="$1" item
+  [[ "${bucket}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] \
+    || { echo "unsafe remote bucket name: ${bucket}" >&2; return 1; }
+  if [ "${#CASE_REMOTE_BUCKETS[@]}" -gt 0 ]; then
+    for item in "${CASE_REMOTE_BUCKETS[@]}"; do [ "${item}" = "${bucket}" ] && return 0; done
+  fi
+  CASE_REMOTE_BUCKETS+=("${bucket}")
+}
+
+register_case_tier() {
+  local tier="$1" item
+  [ -n "${tier}" ] && [[ "${tier}" =~ ^[A-Za-z0-9_-]+$ ]] \
+    || { echo "unsafe tier name: ${tier}" >&2; return 1; }
+  [ "${tier}" = "${TIER_NAME}" ] && return 0
+  if [ "${#CASE_TIERS[@]}" -gt 0 ]; then
+    for item in "${CASE_TIERS[@]}"; do [ "${item}" = "${tier}" ] && return 0; done
+  fi
+  CASE_TIERS+=("${tier}")
+}
+
+unregister_source_bucket() {
+  local bucket="$1" item kept=()
+  if [ "${#CASE_SOURCE_BUCKETS[@]}" -gt 0 ]; then
+    for item in "${CASE_SOURCE_BUCKETS[@]}"; do
+      [ "${item}" = "${bucket}" ] || kept+=("${item}")
+    done
+  fi
+  CASE_SOURCE_BUCKETS=("${kept[@]+"${kept[@]}"}")
+}
+
+unregister_case_tier() {
+  local tier="$1" item kept=()
+  if [ "${#CASE_TIERS[@]}" -gt 0 ]; then
+    for item in "${CASE_TIERS[@]}"; do
+      [ "${item}" = "${tier}" ] || kept+=("${item}")
+    done
+  fi
+  CASE_TIERS=("${kept[@]+"${kept[@]}"}")
+}
+
+record_cleanup_failure() {
+  local resource_type="$1" resource="$2" action="$3" detail="$4"
+  local summary="${resource_type}:${resource}:${action}: ${detail}"
+  CASE_CLEANUP_ERRORS+=("${summary}")
+  printf 'cleanup failure: %s\n' "${summary}" >&2
+  if [ -n "${RESIDUE_FILE}" ]; then
+    jq -nc \
+      --arg topology "${CURRENT_TOPOLOGY}" \
+      --arg case_id "${CURRENT_CASE_ID}" \
+      --arg resource_type "${resource_type}" \
+      --arg resource "${resource}" \
+      --arg action "${action}" \
+      --arg error "${detail}" \
+      --arg recorded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{topology:$topology,case_id:$case_id,resource_type:$resource_type,resource:$resource,action:$action,error:$error,recorded_at:$recorded_at}' \
+      >> "${RESIDUE_FILE}" 2>/dev/null || true
+  fi
+}
+
+aws_at_run() {
+  local endpoint="$1"
+  shift
+  if AWS_OUT="$(run_bounded "${COMMAND_TIMEOUT}" aws --endpoint-url "${endpoint}" --region "${REGION}" "$@" 2>&1)"; then
+    AWS_CODE=0
+  else
+    AWS_CODE=$?
+  fi
+  return "${AWS_CODE}"
+}
+
+cleanup_aws() {
+  local endpoint="$1"
+  shift
+  run_bounded "${CLEANUP_TIMEOUT}" aws --endpoint-url "${endpoint}" --region "${REGION}" "$@"
+}
+
+cleanup_bucket_data() {
+  local endpoint="$1" bucket="$2" out payload count key upload_id round=0 fail=0
+
+  out="$(cleanup_aws "${endpoint}" s3api list-multipart-uploads --bucket "${bucket}" --output json 2>&1)" || {
+    if printf '%s' "${out}" | grep -qiE 'NoSuchBucket|Not Found|404'; then return 0; fi
+    record_cleanup_failure bucket "${bucket}" list-multipart-uploads "${out}"
+    fail=1
+    out='{}'
+  }
+  while IFS=$'\t' read -r key upload_id; do
+    [ -n "${key}" ] && [ -n "${upload_id}" ] || continue
+    cleanup_aws "${endpoint}" s3api abort-multipart-upload --bucket "${bucket}" --key "${key}" --upload-id "${upload_id}" >/dev/null 2>&1 \
+      || { record_cleanup_failure bucket "${bucket}" abort-multipart-upload "key=${key} upload_id=${upload_id}"; fail=1; }
+  done < <(printf '%s' "${out}" | jq -r '.Uploads[]? | [.Key,.UploadId] | @tsv' 2>/dev/null)
+
+  cleanup_aws "${endpoint}" s3 rm "s3://${bucket}" --recursive >/dev/null 2>&1 || true
+
+  while [ "${round}" -lt 10 ]; do
+    if ! out="$(cleanup_aws "${endpoint}" s3api list-object-versions --bucket "${bucket}" --output json 2>&1)"; then
+      if printf '%s' "${out}" | grep -qiE 'NoSuchBucket|Not Found|404'; then return "${fail}"; fi
+      record_cleanup_failure bucket "${bucket}" list-object-versions "${out}"
+      return 1
+    fi
+    payload="$(printf '%s' "${out}" | jq -c '{Objects: ([.Versions[]? | {Key:.Key,VersionId:.VersionId}] + [.DeleteMarkers[]? | {Key:.Key,VersionId:.VersionId}]), Quiet:true}' 2>/dev/null)" \
+      || { record_cleanup_failure bucket "${bucket}" parse-object-versions "invalid JSON"; return 1; }
+    count="$(printf '%s' "${payload}" | jq '.Objects | length')"
+    [ "${count}" -eq 0 ] && return "${fail}"
+    cleanup_aws "${endpoint}" s3api delete-objects --bucket "${bucket}" --delete "${payload}" >/dev/null 2>&1 \
+      || { record_cleanup_failure bucket "${bucket}" delete-object-versions "count=${count}"; fail=1; }
+    round=$((round+1))
+  done
+
+  record_cleanup_failure bucket "${bucket}" drain "object versions remain after 10 rounds"
+  return 1
+}
+
+cleanup_source_bucket() {
+  local bucket="$1" out fail=0
+  if ! out="$(cleanup_aws "${ENDPOINT}" s3api delete-bucket-lifecycle --bucket "${bucket}" 2>&1)"; then
+    if ! printf '%s' "${out}" | grep -qiE 'NoSuchBucket|NoSuchLifecycle|Not Found|404'; then
+      record_cleanup_failure source-bucket "${bucket}" delete-lifecycle "${out}"
+      fail=1
+    fi
+  fi
+  cleanup_bucket_data "${ENDPOINT}" "${bucket}" || fail=1
+  if ! out="$(cleanup_aws "${ENDPOINT}" s3api delete-bucket --bucket "${bucket}" 2>&1)"; then
+    if ! printf '%s' "${out}" | grep -qiE 'NoSuchBucket|Not Found|404'; then
+      record_cleanup_failure source-bucket "${bucket}" delete-bucket "${out}"
+      fail=1
+    fi
+  fi
+  return "${fail}"
+}
+
+cleanup_remote_data() {
+  cleanup_bucket_data "${TARGET_ENDPOINT}" "$1"
+}
+
+cleanup_remote_bucket() {
+  local bucket="$1" out
+  if out="$(cleanup_aws "${TARGET_ENDPOINT}" s3api delete-bucket --bucket "${bucket}" 2>&1)"; then
+    return 0
+  fi
+  if printf '%s' "${out}" | grep -qiE 'NoSuchBucket|Not Found|404'; then return 0; fi
+  record_cleanup_failure remote-bucket "${bucket}" delete-bucket "${out}"
+  return 1
+}
+
+cleanup_tier() {
+  local tier="$1" out
+  if out="$(run_bounded "${CLEANUP_TIMEOUT}" "${RC_BIN}" ilm tier remove "${tier}" local 2>&1)"; then
+    return 0
+  fi
+  if printf '%s' "${out}" | grep -qiE 'TierNotFound|not found|does not exist'; then return 0; fi
+  if out="$(run_bounded "${CLEANUP_TIMEOUT}" "${RC_BIN}" ilm tier remove "${tier}" local --force 2>&1)"; then
+    return 0
+  fi
+  if printf '%s' "${out}" | grep -qiE 'TierNotFound|not found|does not exist'; then return 0; fi
+  record_cleanup_failure tier "${tier}" remove "${out}"
+  return 1
+}
+
+case_cleanup() {
+  local reason="${1:-case-finalizer}" i fail=0
+  [ "${CASE_CLEANUP_DONE}" -eq 0 ] || return 0
+  [ "${CASE_CLEANUP_RUNNING}" -eq 0 ] || return 0
+  CASE_CLEANUP_RUNNING=1
+  printf 'cleanup start (%s): topology=%s case=%s\n' "${reason}" "${CURRENT_TOPOLOGY}" "${CURRENT_CASE_ID}"
+
+  for ((i=${#CASE_SOURCE_BUCKETS[@]}-1; i>=0; i--)); do
+    cleanup_source_bucket "${CASE_SOURCE_BUCKETS[$i]}" || fail=1
+  done
+  for ((i=${#CASE_REMOTE_BUCKETS[@]}-1; i>=0; i--)); do
+    cleanup_remote_data "${CASE_REMOTE_BUCKETS[$i]}" || fail=1
+  done
+  for ((i=${#CASE_TIERS[@]}-1; i>=0; i--)); do
+    cleanup_tier "${CASE_TIERS[$i]}" || fail=1
+  done
+  for ((i=${#CASE_REMOTE_BUCKETS[@]}-1; i>=0; i--)); do
+    cleanup_remote_bucket "${CASE_REMOTE_BUCKETS[$i]}" || fail=1
+  done
+
+  CASE_CLEANUP_RUNNING=0
+  CASE_CLEANUP_DONE=1
+  CASE_ACTIVE=0
+  printf 'cleanup end: case=%s status=%s\n' "${CURRENT_CASE_ID}" "$([ "${fail}" -eq 0 ] && printf PASS || printf FAIL)"
+  return "${fail}"
+}
+
+write_case_result() {
+  local status="$1" case_rc="$2" cleanup_status="$3" duration="$4" cleanup_detail="${5:-}"
+  local target tmp
+  target="${RESULTS_DIR}/${CURRENT_TOPOLOGY}--${CURRENT_CASE_ID}.json"
+  tmp="$(mktemp "${RESULTS_DIR}/.case.XXXXXX")"
+  jq -n \
+    --arg schema_version "1" \
+    --arg topology "${CURRENT_TOPOLOGY}" \
+    --arg case_id "${CURRENT_CASE_ID}" \
+    --arg name "${CURRENT_CASE_NAME}" \
+    --arg status "${status}" \
+    --arg case_rc "${case_rc}" \
+    --arg cleanup_status "${cleanup_status}" \
+    --arg cleanup_detail "${cleanup_detail}" \
+    --arg duration_seconds "${duration}" \
+    --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{schema_version:($schema_version|tonumber),topology:$topology,case_id:$case_id,name:$name,status:$status,case_rc:($case_rc|tonumber),cleanup_status:$cleanup_status,cleanup_detail:$cleanup_detail,duration_seconds:($duration_seconds|tonumber),updated_at:$updated_at}' \
+    > "${tmp}"
+  mv "${tmp}" "${target}"
+}
 
 run_test() {
-  local id="$1" name="$2" fn="$3" rc
+  local id="$1" name="$2" fn="$3" rc=0 cleanup_rc=0 status cleanup_detail started
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     return 0
   fi
+  CURRENT_CASE_ID="${id}"
+  CURRENT_CASE_NAME="${name}"
+  case_resources_reset
+  started="${SECONDS}"
+  write_case_result RUNNING 0 PENDING 0
   printf '\n--- %s %s ---\n' "${id}" "${name}"
-  if "${fn}" > "${TEST_TMP}/test.out" 2>&1; then
-    PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
+  : > "${TEST_TMP}/test.out"
+  if "${fn}" >> "${TEST_TMP}/test.out" 2>&1; then
+    rc=0
   else
     rc=$?
-    if [ "${rc}" -eq 2 ]; then
-      UNSUPPORTED=$((UNSUPPORTED+1)); printf '\033[1;33m[UNSUPPORTED]\033[0m %s %s\n' "${id}" "${name}"
-    else
-      FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
-      printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
-      cp "${TEST_TMP}/test.out" ""${TEST_TMP}/${id}.out"" 2>/dev/null || true
-      sed 's/^/      | /' "${TEST_TMP}/test.out" | tail -50
-    fi
   fi
+  if case_cleanup "case-finalizer" >> "${TEST_TMP}/test.out" 2>&1; then cleanup_rc=0; else cleanup_rc=$?; fi
+  cleanup_detail=""
+  if [ "${#CASE_CLEANUP_ERRORS[@]}" -gt 0 ]; then
+    cleanup_detail="$(printf '%s\n' "${CASE_CLEANUP_ERRORS[@]}" | sed '/^$/d' | paste -sd ';' -)"
+  fi
+
+  if [ "${cleanup_rc}" -ne 0 ] && { [ "${rc}" -eq 0 ] || [ "${rc}" -eq 2 ]; }; then rc=1; fi
+  if [ "${rc}" -eq 0 ]; then
+    status=PASS; PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
+  elif [ "${rc}" -eq 2 ]; then
+    status=UNSUPPORTED; UNSUPPORTED=$((UNSUPPORTED+1)); printf '\033[1;33m[UNSUPPORTED]\033[0m %s %s\n' "${id}" "${name}"
+  else
+    status=FAIL; FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
+    printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
+    cp "${TEST_TMP}/test.out" "${RESULT_LOG_DIR}/${CURRENT_TOPOLOGY}--${id}.log" 2>/dev/null || true
+    sed 's/^/      | /' "${TEST_TMP}/test.out" | tail -50
+  fi
+  write_case_result "${status}" "${rc}" "$([ "${cleanup_rc}" -eq 0 ] && printf PASS || printf FAIL)" "$((SECONDS-started))" "${cleanup_detail}"
 }
 
 rc_run() {
-  RC_OUT="$(rc "$@" 2>&1)"; RC_CODE=$?
+  if RC_OUT="$(run_bounded "${COMMAND_TIMEOUT}" "${RC_BIN}" "$@" 2>&1)"; then RC_CODE=0; else RC_CODE=$?; fi
   return "${RC_CODE}"
 }
 
 assert_rc_ok() {
-  if [ "${RC_CODE}" -eq 7 ]; then echo "rc gated (exit 7): $*"; return 2; fi
-  [ "${RC_CODE}" -eq 0 ] || { echo "rc failed (exit ${RC_CODE}): $*"; echo "${RC_OUT}"; return 1; }
+  if [ "${RC_CODE}" -eq 7 ]; then echo "rc gated (exit 7)"; return 2; fi
+  [ "${RC_CODE}" -eq 0 ] || { echo "rc failed (exit ${RC_CODE})"; echo "${RC_OUT}"; return 1; }
 }
 
 aws_run() {
-  AWS_OUT="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
+  aws_at_run "${ENDPOINT}" "$@"
+}
+
+aws_target_run() {
+  aws_at_run "${TARGET_ENDPOINT}" "$@"
 }
 
 assert_aws_ok() {
-  [ "${AWS_CODE}" -eq 0 ] || { echo "aws failed (exit ${AWS_CODE}): $*"; echo "${AWS_OUT}"; return 1; }
+  [ "${AWS_CODE}" -eq 0 ] || { echo "aws failed (exit ${AWS_CODE})"; echo "${AWS_OUT}"; return 1; }
 }
 
 assert_aws_fails() {
-  [ "${AWS_CODE}" -ne 0 ] || { echo "aws unexpectedly succeeded: $*"; echo "${AWS_OUT}"; return 1; }
+  [ "${AWS_CODE}" -ne 0 ] || { echo "aws unexpectedly succeeded"; echo "${AWS_OUT}"; return 1; }
 }
 
 new_bucket() {
   local b="$1"
+  register_source_bucket "${b}" || return 1
   aws_run s3api create-bucket --bucket "${b}"
+  assert_aws_ok || return 1
+}
+
+new_remote_bucket() {
+  local b="$1"
+  register_remote_bucket "${b}" || return 1
+  aws_target_run s3api create-bucket --bucket "${b}"
   assert_aws_ok || return 1
 }
 
 rm_bucket() {
   local b="$1"
-  aws_run s3api delete-bucket --bucket "${b}" 2>/dev/null || true
+  if cleanup_source_bucket "${b}"; then
+    unregister_source_bucket "${b}"
+    return 0
+  fi
+  return 1
 }
 
 make_test_file() {
@@ -661,22 +1052,162 @@ md5_of_file() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
 add_tier() {
   local type="$1" name="$2" endpoint="$3" bucket="$4" ak="$5" sk="$6"
   local prefix="${7:-}"
-  local attempt=0
-  while [ "${attempt}" -lt 3 ]; do
-    rc_run ilm tier add "${type}" "${name}" local --endpoint "${endpoint}" \
-      --access-key "${ak}" --secret-key "${sk}" --bucket "${bucket}" --prefix "${prefix}"
-    if [ "${RC_CODE}" -eq 0 ]; then return 0; fi
-    if printf '%s' "${RC_OUT}" | grep -qi "missing field .prefix."; then
-      warn "tier add hit transient 'missing field prefix'; retrying (${attempt})"
-      sleep 5; attempt=$((attempt+1)); continue
-    fi
-    return 0
-  done
-  return 1
+  register_case_tier "${name}" || return 1
+  rc_run ilm tier add "${type}" "${name}" local --endpoint "${endpoint}" \
+    --access-key "${ak}" --secret-key "${sk}" --bucket "${bucket}" --prefix "${prefix}" || true
 }
 
 remove_tier() {
-  rc_run ilm tier remove "$1" local
+  local tier="$1" rc
+  if rc_run ilm tier remove "${tier}" local; then rc=0; else rc=$?; fi
+  if [ "${RC_CODE}" -eq 0 ]; then unregister_case_tier "${tier}"; fi
+  return "${rc}"
+}
+
+tier_config_json() {
+  local name="$1" bucket="$2" prefix="${3:-}"
+  jq -nc \
+    --arg name "${name}" \
+    --arg endpoint "${TARGET_ENDPOINT}" \
+    --arg access_key "${ACCESS_KEY}" \
+    --arg secret_key "${SECRET_KEY}" \
+    --arg bucket "${bucket}" \
+    --arg prefix "${prefix}" \
+    '{type:"rustfs",rustfs:{name:$name,endpoint:$endpoint,accessKey:$access_key,secretKey:$secret_key,bucket:$bucket,prefix:$prefix,region:"",storageClass:""}}'
+}
+
+xml_error_code() {
+  printf '%s' "$1" | tr -d '\r\n' | sed -n 's:.*<Code>\([^<]*\)</Code>.*:\1:p'
+}
+
+xml_error_message() {
+  printf '%s' "$1" | tr -d '\r\n' | sed -n 's:.*<Message>\([^<]*\)</Message>.*:\1:p'
+}
+
+expected_admin_error_message() {
+  case "$1" in
+    XMinioAdminTierBackendInUse) printf 'Specified remote tier is already in use' ;;
+    XMinioAdminTierBackendNotEmpty) printf 'Specified remote backend is not empty' ;;
+    *) return 1 ;;
+  esac
+}
+
+tier_is_configured() {
+  local name="$1" body code
+  body="$(admin_api GET /rustfs/admin/v3/tier "")"; code="$(admin_api_code)"
+  [ "${code}" = "200" ] || { echo "tier list -> HTTP ${code}: ${body}" >&2; return 2; }
+  printf '%s' "${body}" | jq -e --arg name "${name}" '.. | objects | select(.name? == $name)' >/dev/null 2>&1
+}
+
+assert_tier_absent() {
+  local name="$1" rc
+  if tier_is_configured "${name}"; then
+    echo "tier ${name} unexpectedly remains configured"
+    return 1
+  else
+    rc=$?
+    [ "${rc}" -eq 1 ] || return 1
+  fi
+}
+
+expect_add_tier_error() {
+  local name="$1" bucket="$2" prefix="$3" expected_status="$4" expected_code="$5"
+  local body status actual_code actual_message expected_message
+  expected_message="$(expected_admin_error_message "${expected_code}")" || return 1
+  register_case_tier "${name}" || return 1
+  body="$(admin_api PUT /rustfs/admin/v3/tier "" "$(tier_config_json "${name}" "${bucket}" "${prefix}")")"
+  status="$(admin_api_code)"
+  actual_code="$(xml_error_code "${body}")"
+  [ "${status}" = "${expected_status}" ] || {
+    echo "tier add ${name}: expected HTTP ${expected_status}, got ${status}: ${body}"
+    return 1
+  }
+  [ "${actual_code}" = "${expected_code}" ] || {
+    echo "tier add ${name}: expected XML code ${expected_code}, got ${actual_code:-<missing>}: ${body}"
+    return 1
+  }
+  actual_message="$(xml_error_message "${body}")"
+  [ "${actual_message}" = "${expected_message}" ] || {
+    echo "tier add ${name}: expected XML message '${expected_message}', got '${actual_message:-<missing>}': ${body}"
+    return 1
+  }
+
+  add_tier rustfs "${name}" "${TARGET_ENDPOINT}" "${bucket}" "${ACCESS_KEY}" "${SECRET_KEY}" "${prefix}"
+  [ "${RC_CODE}" -ne 0 ] || { echo "rc unexpectedly added occupied tier ${name}"; return 1; }
+  printf '%s' "${RC_OUT}" | grep -Fq "${expected_code}" \
+    || { echo "rc did not surface ${expected_code}: ${RC_OUT}"; return 1; }
+  assert_tier_absent "${name}"
+}
+
+expect_remove_tier_error() {
+  local name="$1" expected_status="$2" expected_code="$3"
+  local body status actual_code actual_message expected_message
+  expected_message="$(expected_admin_error_message "${expected_code}")" || return 1
+  body="$(admin_api DELETE "/rustfs/admin/v3/tier/${name}" "")"
+  status="$(admin_api_code)"
+  actual_code="$(xml_error_code "${body}")"
+  [ "${status}" = "${expected_status}" ] || {
+    echo "tier remove ${name}: expected HTTP ${expected_status}, got ${status}: ${body}"
+    return 1
+  }
+  [ "${actual_code}" = "${expected_code}" ] || {
+    echo "tier remove ${name}: expected XML code ${expected_code}, got ${actual_code:-<missing>}: ${body}"
+    return 1
+  }
+  actual_message="$(xml_error_message "${body}")"
+  [ "${actual_message}" = "${expected_message}" ] || {
+    echo "tier remove ${name}: expected XML message '${expected_message}', got '${actual_message:-<missing>}': ${body}"
+    return 1
+  }
+
+  remove_tier "${name}" || true
+  [ "${RC_CODE}" -ne 0 ] || { echo "rc unexpectedly removed protected tier ${name}"; return 1; }
+  printf '%s' "${RC_OUT}" | grep -Fq "${expected_code}" \
+    || { echo "rc did not surface ${expected_code}: ${RC_OUT}"; return 1; }
+  tier_is_configured "${name}" || { echo "protected tier ${name} disappeared after rejected remove"; return 1; }
+}
+
+remote_key_count() {
+  local bucket="$1" prefix="${2:-}"
+  aws_target_run s3api list-objects-v2 --bucket "${bucket}" --prefix "${prefix}" --max-keys 1 --output json || return 1
+  printf '%s' "${AWS_OUT}" | jq -r '.KeyCount // ([.Contents[]?] | length)'
+}
+
+wait_remote_state() {
+  local bucket="$1" prefix="$2" expected="$3" waited=0 count
+  while [ "${waited}" -lt 60 ]; do
+    count="$(remote_key_count "${bucket}" "${prefix}")" || return 1
+    if { [ "${expected}" = "empty" ] && [ "${count}" -eq 0 ]; } \
+      || { [ "${expected}" = "nonempty" ] && [ "${count}" -gt 0 ]; }; then
+      return 0
+    fi
+    sleep 3
+    waited=$((waited+3))
+  done
+  echo "remote namespace ${bucket}/${prefix} did not become ${expected} (last key count=${count:-unknown})"
+  return 1
+}
+
+delete_lifecycle_and_assert_absent() {
+  local bucket="$1"
+  aws_run s3api delete-bucket-lifecycle --bucket "${bucket}"
+  assert_aws_ok || return 1
+  aws_run s3api get-bucket-lifecycle-configuration --bucket "${bucket}"
+  [ "${AWS_CODE}" -ne 0 ] || { echo "lifecycle still present on ${bucket}: ${AWS_OUT}"; return 1; }
+  printf '%s' "${AWS_OUT}" | grep -qiE 'NoSuchLifecycle|not exist|404' \
+    || { echo "unexpected lifecycle absence response for ${bucket}: ${AWS_OUT}"; return 1; }
+}
+
+wait_object_transitioned() {
+  local bucket="$1" key="$2" tier="$3" waited=0
+  while [ "${waited}" -lt 120 ]; do
+    aws_run s3api head-object --bucket "${bucket}" --key "${key}"
+    if [ "${AWS_CODE}" -eq 0 ] && printf '%s' "${AWS_OUT}" | grep -Fq "${tier}"; then return 0; fi
+    sleep 3
+    waited=$((waited+3))
+  done
+  echo "object ${bucket}/${key} did not transition to ${tier}: ${AWS_OUT}"
+  return 1
 }
 
 run_transition() {
@@ -841,60 +1372,64 @@ test_tier103() {
 }
 
 test_tier104() {
-  # Non-empty prefixes are used here to work around the rc.4-preview.1 defect
-  # where adding an empty-prefix tier fails after a transition (TIER-113).
-  add_tier rustfs EMPTYTIER "${TARGET_ENDPOINT}" "${TIER_BUCKET}" "${ACCESS_KEY}" "${SECRET_KEY}" "x"
+  local topo_tag token out job
+  local empty_remote data_remote ref_remote data_source ref_source
+  local empty_tier data_tier ref_tier
+  token="${RUN_TOKEN//-/}"
+  case "${CURRENT_TOPOLOGY}" in single-single) topo_tag=ss ;; single-multi) topo_tag=sm ;; *) topo_tag=na ;; esac
+  empty_remote="t104-${topo_tag}-${RUN_TOKEN}-empty"
+  data_remote="t104-${topo_tag}-${RUN_TOKEN}-data"
+  ref_remote="t104-${topo_tag}-${RUN_TOKEN}-ref"
+  data_source="t104-${topo_tag}-${RUN_TOKEN}-srcd"
+  ref_source="t104-${topo_tag}-${RUN_TOKEN}-srcr"
+  empty_tier="T104E${token}"
+  data_tier="T104D${token}"
+  ref_tier="T104R${token}"
+
+  # Empty backend: add/remove succeeds and leaves no config entry.
+  new_remote_bucket "${empty_remote}" || return 1
+  wait_remote_state "${empty_remote}" "" empty || return 1
+  add_tier rustfs "${empty_tier}" "${TARGET_ENDPOINT}" "${empty_remote}" "${ACCESS_KEY}" "${SECRET_KEY}"
   assert_rc_ok || return 1
-  remove_tier EMPTYTIER
+  remove_tier "${empty_tier}"
   assert_rc_ok || return 1
-  # tier with data cannot be removed
-  add_tier rustfs DATATIER "${TARGET_ENDPOINT}" "${TIER_BUCKET}" "${ACCESS_KEY}" "${SECRET_KEY}" "x"
+  assert_tier_absent "${empty_tier}" || return 1
+
+  # Physical data: remove the lifecycle reference first so the only blocker is
+  # the non-empty remote namespace.
+  new_remote_bucket "${data_remote}" || return 1
+  add_tier rustfs "${data_tier}" "${TARGET_ENDPOINT}" "${data_remote}" "${ACCESS_KEY}" "${SECRET_KEY}"
   assert_rc_ok || return 1
-  new_bucket "t104b-b1" || return 1
-  make_test_file ${TEST_TMP}/tier-f1 65536
-  aws_run s3api put-object --bucket t104b-b1 --key f1 --body ${TEST_TMP}/tier-f1
+  new_bucket "${data_source}" || return 1
+  make_test_file "${TEST_TMP}/tier-f1" 65536
+  aws_run s3api put-object --bucket "${data_source}" --key f1 --body "${TEST_TMP}/tier-f1"
   assert_aws_ok || return 1
-  rc_run ilm rule add local/t104b-b1 --storage-class DATATIER --transition-days 0
+  rc_run ilm rule add "local/${data_source}" --storage-class "${data_tier}" --transition-days 0
   assert_rc_ok || return 1
-  local out job
-  out="$(run_transition t104b-b1)" || return 1
+  out="$(run_transition "${data_source}")" || return 1
   job="$(printf '%s' "${out}" | jq -r '.job_id // empty' 2>/dev/null)"
   if [ -n "${job}" ]; then wait_transition_job "${job}" >/dev/null || return 1; fi
-  local waited=0
-  while [ "${waited}" -lt 120 ]; do
-    aws_run s3api head-object --bucket t104b-b1 --key f1
-    if printf '%s' "${AWS_OUT}" | grep -q "DATATIER"; then break; fi
-    sleep 3; waited=$((waited+3))
-  done
-  [ "${waited}" -lt 120 ] || { echo "object not transitioned for DATATIER"; return 1; }
-  remove_tier DATATIER
-  if [ "${RC_CODE}" -eq 0 ]; then
-    echo "SERVER DEFECT (rc.4-preview.1): a tier holding transitioned data was removed; expected ERR_TIER_NOT_EMPTY"
-    rm_bucket t104b-b1
-    return 1
-  fi
-  if printf '%s' "${RC_OUT}" | grep -qiE 'missing field .prefix.'; then
-    echo "SERVER DEFECT (rc.4-preview.1): tier mutations fail with 'missing field prefix' after a transition; non-empty/in-use removal semantics unverifiable"
-    rm_bucket t104b-b1
-    return 1
-  fi
-  printf '%s' "${RC_OUT}" | grep -qiE 'not.?empty|NOT_EMPTY|data' || { echo "unexpected non-empty error: ${RC_OUT}"; return 1; }
-  rm_bucket t104b-b1
-  # in-use tier (referenced by a lifecycle rule) cannot be removed
-  add_tier rustfs REFTIER "${TARGET_ENDPOINT}" "${TIER_BUCKET}" "${ACCESS_KEY}" "${SECRET_KEY}" "x"
+  wait_object_transitioned "${data_source}" f1 "${data_tier}" || return 1
+  wait_remote_state "${data_remote}" "" nonempty || return 1
+  delete_lifecycle_and_assert_absent "${data_source}" || return 1
+  expect_remove_tier_error "${data_tier}" 400 XMinioAdminTierBackendNotEmpty || return 1
+  wait_remote_state "${data_remote}" "" nonempty || { echo "rejected remove damaged remote data"; return 1; }
+
+  # Lifecycle-only reference: the remote namespace is provably empty. This is
+  # RustFS's fail-closed extension, not a claim about native MinIO behavior.
+  new_remote_bucket "${ref_remote}" || return 1
+  wait_remote_state "${ref_remote}" "" empty || return 1
+  add_tier rustfs "${ref_tier}" "${TARGET_ENDPOINT}" "${ref_remote}" "${ACCESS_KEY}" "${SECRET_KEY}"
   assert_rc_ok || return 1
-  new_bucket "t104-b1" || return 1
-  rc_run ilm rule add local/t104-b1 --storage-class REFTIER --transition-days 0
+  new_bucket "${ref_source}" || return 1
+  rc_run ilm rule add "local/${ref_source}" --storage-class "${ref_tier}" --transition-days 0
   assert_rc_ok || return 1
-  remove_tier REFTIER
-  if [ "${RC_CODE}" -eq 0 ]; then
-    echo "SERVER DEFECT (rc.4-preview.1): a tier referenced by a lifecycle rule was removed; expected ERR_TIER_BACKEND_IN_USE"
-    rm_bucket t104-b1
-    return 1
-  fi
-  printf '%s' "${RC_OUT}" | grep -qiE 'in.?use|IN_USE|referenced' || { echo "unexpected in-use error: ${RC_OUT}"; return 1; }
-  rm_bucket t104-b1
-  remove_tier REFTIER || true
+  wait_remote_state "${ref_remote}" "" empty || return 1
+  expect_remove_tier_error "${ref_tier}" 409 XMinioAdminTierBackendInUse || return 1
+  delete_lifecycle_and_assert_absent "${ref_source}" || return 1
+  remove_tier "${ref_tier}"
+  assert_rc_ok || return 1
+  assert_tier_absent "${ref_tier}"
 }
 
 test_tier105() {
@@ -1080,15 +1615,19 @@ test_tier111() {
 test_tier112() {
   # Dedicated warm bucket so remote-data assertions are not confounded by other
   # tests sharing the main warm tier.
-  local tb="t112-warm"
-  aws --endpoint-url "${TARGET_ENDPOINT}" s3api create-bucket --bucket "${tb}" >/dev/null 2>&1 || true
-  add_tier rustfs T112TIER "${TARGET_ENDPOINT}" "${tb}" "${ACCESS_KEY}" "${SECRET_KEY}"
+  local topo_tag token tb tier
+  token="${RUN_TOKEN//-/}"
+  case "${CURRENT_TOPOLOGY}" in single-single) topo_tag=ss ;; single-multi) topo_tag=sm ;; *) topo_tag=na ;; esac
+  tb="t112-${topo_tag}-${RUN_TOKEN}-warm"
+  tier="T112${token}"
+  new_remote_bucket "${tb}" || return 1
+  add_tier rustfs "${tier}" "${TARGET_ENDPOINT}" "${tb}" "${ACCESS_KEY}" "${SECRET_KEY}"
   assert_rc_ok || return 1
   new_bucket "t112-b1" || return 1
   make_test_file ${TEST_TMP}/tier-f1 1048576
   aws_run s3api put-object --bucket t112-b1 --key f1 --body ${TEST_TMP}/tier-f1
   assert_aws_ok || return 1
-  rc_run ilm rule add local/t112-b1 --storage-class T112TIER --transition-days 0
+  rc_run ilm rule add local/t112-b1 --storage-class "${tier}" --transition-days 0
   assert_rc_ok || return 1
   local out job
   out="$(run_transition t112-b1)" || return 1
@@ -1097,14 +1636,16 @@ test_tier112() {
   local waited=0
   while [ "${waited}" -lt 120 ]; do
     aws_run s3api head-object --bucket t112-b1 --key f1
-    if printf '%s' "${AWS_OUT}" | grep -q "T112TIER"; then break; fi
+    if printf '%s' "${AWS_OUT}" | grep -Fq "${tier}"; then break; fi
     sleep 3; waited=$((waited+3))
   done
   [ "${waited}" -lt 120 ] || { echo "object not transitioned: ${AWS_OUT}"; return 1; }
   # remote copy must exist on the warm tier (prefix layout is backend-owned)
   local remote_out
+  waited=0
   while [ "${waited}" -lt 60 ]; do
-    remote_out="$(aws --endpoint-url "${TARGET_ENDPOINT}" s3api list-objects --bucket "${tb}" 2>&1)"
+    aws_target_run s3api list-objects --bucket "${tb}" || true
+    remote_out="${AWS_OUT}"
     if printf '%s' "${remote_out}" | grep -q '"Key"'; then break; fi
     sleep 3; waited=$((waited+3))
   done
@@ -1115,44 +1656,74 @@ test_tier112() {
   assert_aws_fails || { echo "local stub still present after delete"; return 1; }
   waited=0
   while [ "${waited}" -lt 60 ]; do
-    remote_out="$(aws --endpoint-url "${TARGET_ENDPOINT}" s3api list-objects --bucket "${tb}" 2>&1)"
+    aws_target_run s3api list-objects --bucket "${tb}" || true
+    remote_out="${AWS_OUT}"
     if ! printf '%s' "${remote_out}" | grep -qE '"Key"'; then echo "remote data cleaned"; break; fi
     sleep 3; waited=$((waited+3))
   done
   [ "${waited}" -lt 60 ] || { echo "remote data not cleaned: ${remote_out}"; return 1; }
   rm_bucket t112-b1
-  aws --endpoint-url "${TARGET_ENDPOINT}" s3api delete-bucket --bucket "${tb}" >/dev/null 2>&1 || true
-  remove_tier T112TIER || true
+  remove_tier "${tier}" || true
 }
 
 test_tier113() {
-  # rc.4-preview.1 defect: after a tier (WARM, empty prefix) is used by a
-  # transition, adding another empty-prefix tier fails with
-  # "Tier Perm Err.missing field `prefix`". This test surfaces that regression.
-  new_bucket "t113-b1" || return 1
-  make_test_file ${TEST_TMP}/tier-f1 65536
-  aws_run s3api put-object --bucket t113-b1 --key f1 --body ${TEST_TMP}/tier-f1
-  assert_aws_ok || return 1
-  rc_run ilm rule add local/t113-b1 --storage-class "${TIER_NAME}" --transition-days 0
+  local topo_tag token out job
+  local used_remote fresh_remote prefix_remote source
+  local used_tier occupied_candidate fresh_tier prefix_ok prefix_bad
+  token="${RUN_TOKEN//-/}"
+  case "${CURRENT_TOPOLOGY}" in single-single) topo_tag=ss ;; single-multi) topo_tag=sm ;; *) topo_tag=na ;; esac
+  used_remote="t113-${topo_tag}-${RUN_TOKEN}-used"
+  fresh_remote="t113-${topo_tag}-${RUN_TOKEN}-fresh"
+  prefix_remote="t113-${topo_tag}-${RUN_TOKEN}-prefix"
+  source="t113-${topo_tag}-${RUN_TOKEN}-src"
+  used_tier="T113U${token}"
+  occupied_candidate="T113C${token}"
+  fresh_tier="T113F${token}"
+  prefix_ok="T113P${token}"
+  prefix_bad="T113O${token}"
+
+  # Build an occupied backend without relying on the suite-wide WARM tier.
+  new_remote_bucket "${used_remote}" || return 1
+  add_tier rustfs "${used_tier}" "${TARGET_ENDPOINT}" "${used_remote}" "${ACCESS_KEY}" "${SECRET_KEY}"
   assert_rc_ok || return 1
-  local out job
-  out="$(run_transition t113-b1)" || return 1
+  new_bucket "${source}" || return 1
+  make_test_file "${TEST_TMP}/tier-f1" 65536
+  aws_run s3api put-object --bucket "${source}" --key f1 --body "${TEST_TMP}/tier-f1"
+  assert_aws_ok || return 1
+  rc_run ilm rule add "local/${source}" --storage-class "${used_tier}" --transition-days 0
+  assert_rc_ok || return 1
+  out="$(run_transition "${source}")" || return 1
   job="$(printf '%s' "${out}" | jq -r '.job_id // empty' 2>/dev/null)"
   if [ -n "${job}" ]; then wait_transition_job "${job}" >/dev/null || return 1; fi
-  local waited=0
-  while [ "${waited}" -lt 120 ]; do
-    aws_run s3api head-object --bucket t113-b1 --key f1
-    if printf '%s' "${AWS_OUT}" | grep -q "${TIER_NAME}"; then break; fi
-    sleep 3; waited=$((waited+3))
-  done
-  [ "${waited}" -lt 120 ] || { echo "object not transitioned: ${AWS_OUT}"; return 1; }
-  add_tier rustfs EMPTYAFT "${TARGET_ENDPOINT}" "${TIER_BUCKET}" "${ACCESS_KEY}" "${SECRET_KEY}"
-  if [ "${RC_CODE}" -ne 0 ]; then
-    echo "SERVER DEFECT (rc.4-preview.1): adding an empty-prefix tier after a transition failed: ${RC_OUT}"
-    return 1
-  fi
-  remove_tier EMPTYAFT || true
-  rm_bucket t113-b1
+  wait_object_transitioned "${source}" f1 "${used_tier}" || return 1
+  wait_remote_state "${used_remote}" "" nonempty || return 1
+
+  # An exact occupied namespace must report the compatibility error, not a
+  # permission/decode error and never "missing field prefix".
+  expect_add_tier_error "${occupied_candidate}" "${used_remote}" "" 409 XMinioAdminTierBackendInUse || return 1
+
+  # A prior expected rejection must not poison a subsequent add to a fresh
+  # backend.
+  new_remote_bucket "${fresh_remote}" || return 1
+  wait_remote_state "${fresh_remote}" "" empty || return 1
+  add_tier rustfs "${fresh_tier}" "${TARGET_ENDPOINT}" "${fresh_remote}" "${ACCESS_KEY}" "${SECRET_KEY}"
+  assert_rc_ok || return 1
+  remove_tier "${fresh_tier}"
+  assert_rc_ok || return 1
+  assert_tier_absent "${fresh_tier}" || return 1
+
+  # Same bucket, disjoint prefixes are valid; a prefix containing data is not.
+  new_remote_bucket "${prefix_remote}" || return 1
+  aws_target_run s3api put-object --bucket "${prefix_remote}" --key occupied/sentinel --body "${TEST_TMP}/tier-f1"
+  assert_aws_ok || return 1
+  wait_remote_state "${prefix_remote}" occupied/ nonempty || return 1
+  wait_remote_state "${prefix_remote}" fresh/ empty || return 1
+  add_tier rustfs "${prefix_ok}" "${TARGET_ENDPOINT}" "${prefix_remote}" "${ACCESS_KEY}" "${SECRET_KEY}" fresh/
+  assert_rc_ok || return 1
+  remove_tier "${prefix_ok}"
+  assert_rc_ok || return 1
+  assert_tier_absent "${prefix_ok}" || return 1
+  expect_add_tier_error "${prefix_bad}" "${prefix_remote}" occupied/ 409 XMinioAdminTierBackendInUse
 }
 
 test_evt101() {
@@ -1480,6 +2051,9 @@ Usage:
   --version <ver>           RustFS release tag (default: 1.0.0-rc.4-preview.1)
   --package-url <url>       Explicit .deb URL
   --sha256 <hash>           Verify downloaded .deb checksum
+  --rc-bin <path>           Exact rc binary to execute (default: resolve rc from PATH once)
+  --expected-rc-sha256 <h>  Fail before setup unless the rc binary matches this SHA-256
+  --artifacts-dir <path>    Persist structured case results, provenance, logs, and residue
   --keep-env                Do not tear down the environment after the last run
   --ssh-user <user>         SSH user for the test nodes (default: azureuser)
   --log-file <path>         Tee output to a log file
@@ -1500,6 +2074,9 @@ main() {
       --version) RUSTFS_VERSION="$1"; shift ;;
       --package-url) PACKAGE_URL="$1"; shift ;;
       --sha256) PACKAGE_SHA256="$1"; shift ;;
+      --rc-bin) RC_BIN_REQUEST="$1"; shift ;;
+      --expected-rc-sha256) RUSTFS_EXPECTED_RC_SHA256="$1"; shift ;;
+      --artifacts-dir) ARTIFACTS_DIR="$1"; shift ;;
       --keep-env) KEEP_ENV=1 ;;
       --ssh-user) SSH_USER="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
@@ -1528,17 +2105,24 @@ main() {
   done
   export PATH
   need_cmd ssh "SSH client"
-  need_cmd rc "RustFS client CLI"
   need_cmd aws "AWS CLI (s3api channel)"
   need_cmd jq "JSON processor"
+  need_cmd python3 "Python 3 (path canonicalization and receiver)"
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4)"
   need_cmd mosquitto_sub "mosquitto clients"
+  need_cmd timeout "GNU timeout (bounded CLI/network operations)"
+  init_artifacts
+  resolve_rc_binary
+  write_provenance
+  verify_rc_digest
   log "nodes: ${NODES[*]}  package: $(resolve_package_url)"
+  log "rc: path=${RC_BIN} version=${RC_VERSION} sha256=${RC_SHA256:-dry-run} config=${RC_CONFIG_DIR}"
 
   receiver_install
   local overall_fail=0 topo
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
+    CURRENT_TOPOLOGY="${topo}"
     log "== topology: ${topo} =="
     env_setup "${topo}"
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
