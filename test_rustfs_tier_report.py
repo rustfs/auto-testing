@@ -29,6 +29,7 @@ class TierReportTest(unittest.TestCase):
         status: str,
         *,
         filename: str | None = None,
+        extra: dict | None = None,
     ) -> Path:
         value = {
             "schema_version": 1,
@@ -39,6 +40,8 @@ class TierReportTest(unittest.TestCase):
             "case_rc": 0 if status == "PASS" else (2 if status == "UNSUPPORTED" else 1),
             "cleanup_status": "PASS",
         }
+        if extra:
+            value.update(extra)
         path = self.results / (filename or f"{topology}--{case_id}.json")
         path.write_text(json.dumps(value), encoding="utf-8")
         return path
@@ -91,6 +94,31 @@ class TierReportTest(unittest.TestCase):
         self.assertIn("single-single/TIER-101: unsupported without allowlist", rejected.errors)
         accepted = report.validate_results(self.results, allowed_unsupported=["single-single:TIER-101"])
         self.assertEqual([], accepted.errors)
+
+    def test_bucket_not_empty_failure_remains_a_gate_failure(self) -> None:
+        self.write_matrix()
+        self.write_result(
+            "single-single",
+            "TIER-107",
+            "RestoreObject",
+            "FAIL",
+            extra={
+                "cleanup_status": "FAIL",
+                "cleanup_detail": "remote-bucket:tier-warm:delete-bucket: BucketNotEmpty",
+                "failure_kind": "case_failed",
+                "failure_detail": "restore assertion failed",
+                "log_path": "logs/single-single--TIER-107.log",
+            },
+        )
+        validation = report.validate_results(self.results)
+        self.assertIn("single-single/TIER-107: case failed", validation.errors)
+        self.assertIn("single-single/TIER-107: cleanup_status='FAIL'", validation.errors)
+        row = next(
+            item
+            for item in validation.rows
+            if item["topology"] == "single-single" and item["case_id"] == "TIER-107"
+        )
+        self.assertIn("BucketNotEmpty", row["cleanup_detail"])
 
 
 if __name__ == "__main__":

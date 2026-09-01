@@ -119,6 +119,9 @@ SIGV4_SERVICE="s3"
 API_REQUEST_TIMEOUT=120
 COMMAND_TIMEOUT=360
 CLEANUP_TIMEOUT=60
+REMOTE_PROBE_TIMEOUT=15
+REMOTE_STATE_TIMEOUT=60
+REMOTE_PROBE_INTERVAL=3
 ADMIN_API_CODE_FILE="${TEST_TMP}/rustfs-tier-api-code"
 
 # ==================== Runtime options ====================
@@ -132,6 +135,12 @@ VOLUMES=""
 CURRENT_TOPOLOGY=""
 CURRENT_CASE_ID=""
 CURRENT_CASE_NAME=""
+CASE_FAILURE_KIND=""
+CASE_FAILURE_DETAIL=""
+CASE_LOG_PATH=""
+REMOTE_KEY_COUNT=""
+AWS_OUT=""
+AWS_CODE=0
 RUN_TOKEN="$(date -u +%y%m%d%H%M%S)-$$"
 
 RC_BIN_REQUEST="${RUSTFS_RC_BIN:-rc}"
@@ -172,6 +181,40 @@ run_bounded() {
   local seconds="$1"
   shift
   timeout --signal=TERM --kill-after=5 "${seconds}" "$@"
+}
+
+run_hard_bounded() {
+  local seconds="$1"
+  shift
+  timeout --signal=KILL "${seconds}" "$@"
+}
+
+bounded_safe_excerpt() {
+  local value="$1" limit="${2:-512}"
+  if { [ -n "${ACCESS_KEY:-}" ] && [[ "${value}" == *"${ACCESS_KEY}"* ]]; } \
+    || { [ -n "${SECRET_KEY:-}" ] && [[ "${value}" == *"${SECRET_KEY}"* ]]; } \
+    || printf '%s' "${value}" | grep -qiE 'authorization:|x-amz-credential|aws_access_key_id|aws_secret_access_key|accesskeyid|secretaccesskey'; then
+    printf '<redacted: credential-like content>'
+    return 0
+  fi
+  value="${value//$'\r'/ }"
+  value="${value//$'\n'/ }"
+  value="${value//$'\t'/ }"
+  while [[ "${value}" == *"  "* ]]; do value="${value//  / }"; done
+  if [ "${#value}" -gt "${limit}" ]; then
+    printf '%s...<truncated>' "${value:0:${limit}}"
+  else
+    printf '%s' "${value}"
+  fi
+}
+
+record_case_failure() {
+  local kind="$1" detail="$2"
+  [ -z "${CASE_FAILURE_KIND}" ] || return 0
+  [[ "${kind}" =~ ^[a-z0-9_]+$ ]] || kind=unknown_failure
+  CASE_FAILURE_KIND="${kind}"
+  CASE_FAILURE_DETAIL="$(bounded_safe_excerpt "${detail}" 2048)"
+  printf 'case failure: kind=%s detail=%s\n' "${CASE_FAILURE_KIND}" "${CASE_FAILURE_DETAIL}" >&2
 }
 
 init_artifacts() {
@@ -733,6 +776,10 @@ case_resources_reset() {
   CASE_REMOTE_BUCKETS=()
   CASE_TIERS=()
   CASE_CLEANUP_ERRORS=()
+  CASE_FAILURE_KIND=""
+  CASE_FAILURE_DETAIL=""
+  CASE_LOG_PATH=""
+  REMOTE_KEY_COUNT=""
   CASE_CLEANUP_RUNNING=0
   CASE_CLEANUP_DONE=0
   CASE_ACTIVE=1
@@ -808,15 +855,32 @@ record_cleanup_failure() {
   fi
 }
 
-aws_at_run() {
-  local endpoint="$1"
-  shift
-  if AWS_OUT="$(run_bounded "${COMMAND_TIMEOUT}" aws --endpoint-url "${endpoint}" --region "${REGION}" "$@" 2>&1)"; then
+aws_at_run_with_timeout() {
+  local timeout_seconds="$1" endpoint="$2"
+  shift 2
+  if AWS_OUT="$(run_bounded "${timeout_seconds}" aws --endpoint-url "${endpoint}" --region "${REGION}" "$@" 2>&1)"; then
     AWS_CODE=0
   else
     AWS_CODE=$?
   fi
   return "${AWS_CODE}"
+}
+
+aws_at_run_with_hard_timeout() {
+  local timeout_seconds="$1" endpoint="$2"
+  shift 2
+  if AWS_OUT="$(run_hard_bounded "${timeout_seconds}" aws --endpoint-url "${endpoint}" --region "${REGION}" "$@" 2>&1)"; then
+    AWS_CODE=0
+  else
+    AWS_CODE=$?
+  fi
+  return "${AWS_CODE}"
+}
+
+aws_at_run() {
+  local endpoint="$1"
+  shift
+  aws_at_run_with_timeout "${COMMAND_TIMEOUT}" "${endpoint}" "$@"
 }
 
 cleanup_aws() {
@@ -948,15 +1012,18 @@ write_case_result() {
     --arg case_rc "${case_rc}" \
     --arg cleanup_status "${cleanup_status}" \
     --arg cleanup_detail "${cleanup_detail}" \
+    --arg failure_kind "${CASE_FAILURE_KIND}" \
+    --arg failure_detail "${CASE_FAILURE_DETAIL}" \
+    --arg log_path "${CASE_LOG_PATH}" \
     --arg duration_seconds "${duration}" \
     --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{schema_version:($schema_version|tonumber),topology:$topology,case_id:$case_id,name:$name,status:$status,case_rc:($case_rc|tonumber),cleanup_status:$cleanup_status,cleanup_detail:$cleanup_detail,duration_seconds:($duration_seconds|tonumber),updated_at:$updated_at}' \
+    '{schema_version:($schema_version|tonumber),topology:$topology,case_id:$case_id,name:$name,status:$status,case_rc:($case_rc|tonumber),cleanup_status:$cleanup_status,cleanup_detail:$cleanup_detail,failure_kind:$failure_kind,failure_detail:$failure_detail,log_path:$log_path,duration_seconds:($duration_seconds|tonumber),updated_at:$updated_at}' \
     > "${tmp}"
   mv "${tmp}" "${target}"
 }
 
 run_test() {
-  local id="$1" name="$2" fn="$3" rc=0 cleanup_rc=0 status cleanup_detail started
+  local id="$1" name="$2" fn="$3" rc=0 cleanup_rc=0 status cleanup_detail started primary_excerpt log_name
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     return 0
@@ -973,13 +1040,25 @@ run_test() {
   else
     rc=$?
   fi
+  if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 2 ] && [ -z "${CASE_FAILURE_KIND}" ]; then
+    primary_excerpt="$(sed '/^[[:space:]]*$/d' "${TEST_TMP}/test.out" | tail -1)"
+    if [ -n "${primary_excerpt}" ]; then
+      primary_excerpt="$(bounded_safe_excerpt "${primary_excerpt}" 512)"
+      record_case_failure case_failed "case_exit=${rc}; last_output=${primary_excerpt}" >> "${TEST_TMP}/test.out" 2>&1
+    else
+      record_case_failure case_failed_without_diagnostic "case_exit=${rc}; test returned non-zero without diagnostic output" >> "${TEST_TMP}/test.out" 2>&1
+    fi
+  fi
   if case_cleanup "case-finalizer" >> "${TEST_TMP}/test.out" 2>&1; then cleanup_rc=0; else cleanup_rc=$?; fi
   cleanup_detail=""
   if [ "${#CASE_CLEANUP_ERRORS[@]}" -gt 0 ]; then
     cleanup_detail="$(printf '%s\n' "${CASE_CLEANUP_ERRORS[@]}" | sed '/^$/d' | paste -sd ';' -)"
   fi
 
-  if [ "${cleanup_rc}" -ne 0 ] && { [ "${rc}" -eq 0 ] || [ "${rc}" -eq 2 ]; }; then rc=1; fi
+  if [ "${cleanup_rc}" -ne 0 ] && { [ "${rc}" -eq 0 ] || [ "${rc}" -eq 2 ]; }; then
+    rc=1
+    record_case_failure cleanup_failed "case completed but cleanup failed; see cleanup_detail" >> "${TEST_TMP}/test.out" 2>&1
+  fi
   if [ "${rc}" -eq 0 ]; then
     status=PASS; PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
   elif [ "${rc}" -eq 2 ]; then
@@ -987,7 +1066,10 @@ run_test() {
   else
     status=FAIL; FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
     printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
-    cp "${TEST_TMP}/test.out" "${RESULT_LOG_DIR}/${CURRENT_TOPOLOGY}--${id}.log" 2>/dev/null || true
+    log_name="${CURRENT_TOPOLOGY}--${id}.log"
+    if cp "${TEST_TMP}/test.out" "${RESULT_LOG_DIR}/${log_name}" 2>/dev/null; then
+      CASE_LOG_PATH="logs/${log_name}"
+    fi
     sed 's/^/      | /' "${TEST_TMP}/test.out" | tail -50
   fi
   write_case_result "${status}" "${rc}" "$([ "${cleanup_rc}" -eq 0 ] && printf PASS || printf FAIL)" "$((SECONDS-started))" "${cleanup_detail}"
@@ -1009,6 +1091,14 @@ aws_run() {
 
 aws_target_run() {
   aws_at_run "${TARGET_ENDPOINT}" "$@"
+}
+
+aws_target_run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+  # This path is only used by the read-only namespace probe. A hard timeout
+  # keeps the complete process-group lifetime inside wait_remote_state's budget.
+  aws_at_run_with_hard_timeout "${timeout_seconds}" "${TARGET_ENDPOINT}" "$@"
 }
 
 assert_aws_ok() {
@@ -1168,23 +1258,67 @@ expect_remove_tier_error() {
 }
 
 remote_key_count() {
-  local bucket="$1" prefix="${2:-}"
-  aws_target_run s3api list-objects-v2 --bucket "${bucket}" --prefix "${prefix}" --max-keys 1 --output json || return 1
-  printf '%s' "${AWS_OUT}" | jq -r '.KeyCount // ([.Contents[]?] | length)'
+  local bucket="$1" prefix="${2:-}" probe_timeout="${3:-${REMOTE_PROBE_TIMEOUT}}"
+  local prefix_display parsed parse_error response_length output_excerpt timeout_marker=no
+  REMOTE_KEY_COUNT=""
+  prefix_display="${prefix:-<root>}"
+
+  if ! aws_target_run_with_timeout "${probe_timeout}" s3api list-objects-v2 \
+    --bucket "${bucket}" --prefix "${prefix}" --max-keys 1 --output json --no-paginate; then
+    case "${AWS_CODE}" in 124|137) timeout_marker=yes ;; esac
+    output_excerpt="$(bounded_safe_excerpt "${AWS_OUT}" 512)"
+    record_case_failure "$([ "${timeout_marker}" = yes ] && printf remote_probe_timeout || printf remote_probe_command)" \
+      "operation=ListObjectsV2; endpoint=${TARGET_ENDPOINT}; bucket=${bucket}; prefix=${prefix_display}; exit=${AWS_CODE}; timeout=${timeout_marker}; output_excerpt=${output_excerpt}"
+    return 1
+  fi
+
+  if parsed="$(printf '%s' "${AWS_OUT}" | jq -er '
+      if type != "object" then error("response is not an object")
+      elif (has("KeyCount") | not) then error("KeyCount is missing")
+      elif (.KeyCount | type) != "number" then error("KeyCount is not numeric")
+      elif (.KeyCount | floor) != .KeyCount then error("KeyCount is not an integer")
+      elif .KeyCount < 0 or .KeyCount > 1 then error("KeyCount is outside 0..1")
+      else .KeyCount
+      end
+    ' 2>&1)"; then
+    REMOTE_KEY_COUNT="${parsed}"
+    return 0
+  fi
+
+  parse_error="$(bounded_safe_excerpt "${parsed}" 256)"
+  response_length="${#AWS_OUT}"
+  output_excerpt="$(bounded_safe_excerpt "${AWS_OUT}" 512)"
+  record_case_failure remote_probe_decode \
+    "operation=ListObjectsV2; endpoint=${TARGET_ENDPOINT}; bucket=${bucket}; prefix=${prefix_display}; exit=0; response_length=${response_length}; parse_error=${parse_error}; output_excerpt=${output_excerpt}"
+  return 1
 }
 
 wait_remote_state() {
-  local bucket="$1" prefix="$2" expected="$3" waited=0 count
-  while [ "${waited}" -lt 60 ]; do
-    count="$(remote_key_count "${bucket}" "${prefix}")" || return 1
+  local bucket="$1" prefix="$2" expected="$3" started="${SECONDS}" count=unknown
+  local deadline=$((SECONDS + REMOTE_STATE_TIMEOUT)) attempted=0 now remaining probe_timeout sleep_for
+  while true; do
+    now="${SECONDS}"
+    if [ "${attempted}" -eq 1 ] && [ "${now}" -ge "${deadline}" ]; then break; fi
+    remaining=$((deadline - now))
+    probe_timeout="${REMOTE_PROBE_TIMEOUT}"
+    if [ "${probe_timeout}" -gt "${remaining}" ]; then probe_timeout="${remaining}"; fi
+    [ "${probe_timeout}" -gt 0 ] || break
+    remote_key_count "${bucket}" "${prefix}" "${probe_timeout}" || return 1
+    count="${REMOTE_KEY_COUNT}"
+    attempted=1
     if { [ "${expected}" = "empty" ] && [ "${count}" -eq 0 ]; } \
       || { [ "${expected}" = "nonempty" ] && [ "${count}" -gt 0 ]; }; then
       return 0
     fi
-    sleep 3
-    waited=$((waited+3))
+    now="${SECONDS}"
+    [ "${now}" -lt "${deadline}" ] || break
+    remaining=$((deadline - now))
+    sleep_for="${REMOTE_PROBE_INTERVAL}"
+    if [ "${sleep_for}" -gt "${remaining}" ]; then sleep_for="${remaining}"; fi
+    [ "${sleep_for}" -gt 0 ] && sleep "${sleep_for}"
   done
-  echo "remote namespace ${bucket}/${prefix} did not become ${expected} (last key count=${count:-unknown})"
+  record_case_failure remote_state_timeout \
+    "operation=wait_remote_state; endpoint=${TARGET_ENDPOINT}; bucket=${bucket}; prefix=${prefix:-<root>}; expected=${expected}; elapsed=$((SECONDS-started)); last_key_count=${count}"
   return 1
 }
 

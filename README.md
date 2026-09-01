@@ -7,7 +7,9 @@ Auto testing scripts
 `--artifacts-dir <unique-directory>`. The directory contains one atomic JSON
 result per `(topology, case_id)`, the exact `rc` path/version/SHA-256 and
 isolated config directory in `provenance.json`, failed-case logs, and a
-`residue.jsonl` cleanup manifest.
+`residue.jsonl` cleanup manifest. Failed results include a bounded,
+credential-safe `failure_kind`/`failure_detail`, a relative `log_path`, and a
+separate `cleanup_detail` so the primary defect is not overwritten by cleanup.
 
 Use `rustfs_tier_report.py` as the final gate. A complete two-topology run must
 contain 56 unique terminal results; FAIL, RUNNING, missing, duplicate, corrupt,
