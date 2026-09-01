@@ -48,7 +48,10 @@ SSH_PORT="${RUSTFS_SSH_PORT:-22}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "${SSH_PORT}")
 
 # Package: GitHub release tag, e.g. "1.0.0-rc.3". PACKAGE_URL is derived from
-# RUSTFS_VERSION unless --package-url / RUSTFS_PACKAGE_URL is given.
+# RUSTFS_VERSION unless --package-url / RUSTFS_PACKAGE_URL is given. The banner
+# only prints the resolved URL when a package is actually needed (steps 2-4) or
+# was explicitly requested; other steps never download anything, so they report
+# "not set" instead of the version-derived URL.
 RUSTFS_VERSION="${RUSTFS_VERSION:-1.0.0-rc.3}"
 PACKAGE_URL="${RUSTFS_PACKAGE_URL:-}"
 ARCH="${RUSTFS_ARCH:-amd64}"
@@ -241,6 +244,19 @@ resolve_package_url() {
   if [ -n "${PACKAGE_URL}" ]; then printf '%s' "${PACKAGE_URL}"; else build_package_url; fi
 }
 
+# True when the selected steps download/install the package, or a package URL
+# was explicitly given. Only then does the banner show a resolved package URL.
+banner_needs_package() {
+  local step
+  if [ -n "${PACKAGE_URL}" ] || [ -n "${RUSTFS_PACKAGE_URL:-}" ]; then return 0; fi
+  for step in "${SELECTED_STEPS[@]}"; do
+    case "${step}" in
+      2|3|4) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 preflight() {
   log "preflight checks"
   need_cmd ssh "openssh client"
@@ -431,7 +447,8 @@ Options:
   --all                     Run all steps 1-7
   --step N                  Run a single step
   --steps 1,3,5-7           Run selected steps
-  --version VERSION         GitHub release tag (default 1.0.0-rc.3)
+  --version VERSION         GitHub release tag (default 1.0.0-rc.3, used only when
+                            no --package-url is given for a download/install step)
   --package-url URL         Direct deb URL (overrides --version)
   --sha256 HASH             Verify package checksum
   --skip-download           Keep an existing package file
@@ -529,8 +546,12 @@ main() {
     fi
   fi
   [ "${#SELECTED_STEPS[@]}" -gt 0 ] || die "no steps selected (--all / --step / --steps)"
-  log "nodes: ${NODES[*]}  ssh user: ${SSH_USER}  version: ${RUSTFS_VERSION}"
-  log "package: $(resolve_package_url)"
+  log "nodes: ${NODES[*]}  ssh user: ${SSH_USER}"
+  if banner_needs_package; then
+    log "package: $(resolve_package_url)"
+  else
+    log "package: not set (no download/install step selected)"
+  fi
   log "result dir: ${RESULT_DIR}"
   [ "${DRY_RUN}" -eq 1 ] && warn "DRY-RUN mode: only printing the commands that would run"
   run_steps
