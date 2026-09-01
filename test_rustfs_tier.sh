@@ -195,6 +195,249 @@ test_wire_oracles_reject_http_500() (
   fi
 )
 
+test_tier_query_valid_contract() (
+  reset_harness
+  case_resources_reset
+  local mock_status=200 mock_body call_file="${TEST_ROOT}/tier-query-valid-calls"
+  local jq_call_file="${TEST_ROOT}/tier-query-valid-jq-calls"
+  admin_api() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >> "${call_file}"
+    printf '%s' "${mock_status}" > "${ADMIN_API_CODE_FILE}"
+    printf '%s' "${mock_body}"
+  }
+  jq() {
+    printf 'jq\n' >> "${jq_call_file}"
+    command jq "$@"
+  }
+  assert_query_status() {
+    local expected="$1" name="$2" label="$3" actual
+    : > "${call_file}"
+    : > "${jq_call_file}"
+    case_resources_reset
+    if tier_is_configured "${name}"; then actual=0; else actual=$?; fi
+    assert_eq "${expected}" "${actual}" "${label} status"
+    assert_eq 1 "$(wc -l < "${call_file}" | tr -d ' ')" "${label} request count"
+    assert_eq 1 "$(wc -l < "${jq_call_file}" | tr -d ' ')" "${label} jq count"
+    assert_eq $'GET\t/rustfs/admin/v3/tier\t' "$(< "${call_file}")" "${label} request"
+    assert_eq "" "${CASE_FAILURE_KIND}" "${label} neutral diagnostic"
+  }
+
+  mock_body='[{"type":"rustfs","rustfs":{"name":"TARGET","secretKey":"not-returned-in-diagnostics"}}]'
+  assert_query_status 0 TARGET "provider-only found"
+  assert_query_status 1 OTHER "provider-only absent"
+
+  mock_body='[]'
+  assert_query_status 1 TARGET "empty list absent"
+
+  mock_body='[{"type":"rustfs","name":"TARGET","rustfs":{}}]'
+  assert_query_status 0 TARGET "top-level-only found"
+
+  mock_body='[{"type":"rustfs","name":"TARGET","rustfs":{"name":"TARGET"}}]'
+  assert_query_status 0 TARGET "matching dual names found"
+
+  mock_body='[{"type":"future-provider","future-provider":{"name":"TARGET"}}]'
+  assert_query_status 0 TARGET "future provider found"
+
+  mock_body='[{"type":"future-provider","future-provider":{"name":"OTHER","metadata":{"name":"TARGET"}}}]'
+  assert_query_status 1 TARGET "unrelated nested name ignored"
+)
+
+test_tier_query_rejects_invalid_payloads() (
+  reset_harness
+  case_resources_reset
+  local mock_status=200 mock_body call_file="${TEST_ROOT}/tier-query-invalid-calls"
+  local jq_call_file="${TEST_ROOT}/tier-query-invalid-jq-calls"
+  local actual payload
+  local -a invalid_payloads=(
+    'not-json'
+    '{}'
+    '[1]'
+    '[{}]'
+    '[{"type":"","":{"name":"TARGET"}}]'
+    '[{"type":7,"name":"TARGET"}]'
+    '[{"type":"rustfs","name":"TARGET"}]'
+    '[{"type":"rustfs","rustfs":null,"name":"TARGET"}]'
+    '[{"type":"rustfs","rustfs":{}}]'
+    '[{"type":"rustfs","name":"","rustfs":{"name":"TARGET"}}]'
+    '[{"type":"rustfs","name":7,"rustfs":{"name":"TARGET"}}]'
+    '[{"type":"rustfs","rustfs":{"name":""}}]'
+    '[{"type":"rustfs","rustfs":{"name":7}}]'
+    '[{"type":"rustfs","name":"TOP","rustfs":{"name":"PROVIDER"}}]'
+    '[{"type":"rustfs","rustfs":{"metadata":{"name":"TARGET"}}}]'
+    '[{"type":"rustfs","rustfs":{"name":"TARGET"}},{"type":"future-provider","future-provider":null}]'
+    '[{"type":"rustfs","rustfs":{"name":"TARGET"}},{"type":"minio","minio":{"name":"TARGET"}}]'
+  )
+  admin_api() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >> "${call_file}"
+    printf '%s' "${mock_status}" > "${ADMIN_API_CODE_FILE}"
+    printf '%s' "${mock_body}"
+  }
+  jq() {
+    printf 'jq\n' >> "${jq_call_file}"
+    command jq "$@"
+  }
+
+  for payload in "${invalid_payloads[@]}"; do
+    mock_body="${payload}"
+    : > "${call_file}"
+    : > "${jq_call_file}"
+    case_resources_reset
+    if tier_is_configured TARGET 2>/dev/null; then actual=0; else actual=$?; fi
+    assert_eq 2 "${actual}" "invalid tier-list payload status (${payload})"
+    assert_eq 1 "$(wc -l < "${call_file}" | tr -d ' ')" "invalid payload request count"
+    assert_eq 1 "$(wc -l < "${jq_call_file}" | tr -d ' ')" "invalid payload jq count"
+    assert_eq tier_list_decode "${CASE_FAILURE_KIND}" "invalid payload failure kind"
+    assert_contains 'response_length=' "${CASE_FAILURE_DETAIL}" "invalid payload response length"
+    assert_contains 'parse_error=' "${CASE_FAILURE_DETAIL}" "invalid payload parser context"
+    assert_contains 'output_excerpt=' "${CASE_FAILURE_DETAIL}" "invalid payload excerpt"
+  done
+)
+
+test_tier_query_failure_diagnostics_are_safe_and_bounded() (
+  reset_harness
+  case_resources_reset
+  ACCESS_KEY=AKIATESTONLY-TIER-LIST
+  SECRET_KEY=secret-tier-list-test-value
+  local mock_status=503 mock_body call_file="${TEST_ROOT}/tier-query-diagnostic-calls"
+  local jq_call_file="${TEST_ROOT}/tier-query-diagnostic-jq-calls"
+  local actual diagnostic="${TEST_ROOT}/tier-query-diagnostic"
+  admin_api() {
+    printf '%s\n' "$1" >> "${call_file}"
+    printf '%s' "${mock_status}" > "${ADMIN_API_CODE_FILE}"
+    printf '%s' "${mock_body}"
+  }
+  jq() {
+    printf 'jq\n' >> "${jq_call_file}"
+    command jq "$@"
+  }
+
+  mock_body="Authorization: credential=${ACCESS_KEY}; secret=${SECRET_KEY}"
+  : > "${call_file}"
+  : > "${jq_call_file}"
+  if tier_is_configured TARGET 2> "${diagnostic}"; then actual=0; else actual=$?; fi
+  assert_eq 2 "${actual}" "HTTP tier-list failure status"
+  assert_eq 1 "$(wc -l < "${call_file}" | tr -d ' ')" "HTTP failure request count"
+  assert_eq 0 "$(wc -l < "${jq_call_file}" | tr -d ' ')" "HTTP failure jq count"
+  assert_eq tier_list_http "${CASE_FAILURE_KIND}" "HTTP failure kind"
+  assert_contains '<redacted: credential-like content>' "${CASE_FAILURE_DETAIL}" "HTTP credential redaction marker"
+  assert_not_contains "${ACCESS_KEY}" "${CASE_FAILURE_DETAIL}$(< "${diagnostic}")" "HTTP access key redaction"
+  assert_not_contains "${SECRET_KEY}" "${CASE_FAILURE_DETAIL}$(< "${diagnostic}")" "HTTP secret key redaction"
+
+  printf -v mock_body 'upstream-error:%0700d' 0
+  : > "${call_file}"
+  : > "${jq_call_file}"
+  case_resources_reset
+  if tier_is_configured TARGET 2> "${diagnostic}"; then actual=0; else actual=$?; fi
+  assert_eq 2 "${actual}" "long HTTP tier-list failure status"
+  assert_eq 1 "$(wc -l < "${call_file}" | tr -d ' ')" "long HTTP failure request count"
+  assert_eq 0 "$(wc -l < "${jq_call_file}" | tr -d ' ')" "long HTTP failure jq count"
+  assert_eq tier_list_http "${CASE_FAILURE_KIND}" "long HTTP failure kind"
+  assert_contains '...<truncated>' "${CASE_FAILURE_DETAIL}" "HTTP response truncation"
+
+  mock_status=200
+  printf -v mock_body '[{"type":"rustfs","rustfs":{"metadata":"%0700d"}}]' 0
+  : > "${call_file}"
+  : > "${jq_call_file}"
+  case_resources_reset
+  if tier_is_configured TARGET 2> "${diagnostic}"; then actual=0; else actual=$?; fi
+  assert_eq 2 "${actual}" "long schema failure status"
+  assert_eq 1 "$(wc -l < "${call_file}" | tr -d ' ')" "long schema failure request count"
+  assert_eq 1 "$(wc -l < "${jq_call_file}" | tr -d ' ')" "long schema failure jq count"
+  assert_eq tier_list_decode "${CASE_FAILURE_KIND}" "long schema failure kind"
+  assert_contains '...<truncated>' "${CASE_FAILURE_DETAIL}" "schema response truncation"
+  [ "${#CASE_FAILURE_DETAIL}" -lt 1400 ] || fail "tier-list schema failure detail is too large"
+
+  mock_body="[{\"type\":\"rustfs\",\"rustfs\":{\"name\":\"TARGET\",\"secretKey\":\"${SECRET_KEY}\"}"
+  : > "${call_file}"
+  : > "${jq_call_file}"
+  case_resources_reset
+  if tier_is_configured TARGET 2> "${diagnostic}"; then actual=0; else actual=$?; fi
+  assert_eq 2 "${actual}" "credential-bearing decode failure status"
+  assert_eq 1 "$(wc -l < "${jq_call_file}" | tr -d ' ')" "credential-bearing decode jq count"
+  assert_eq tier_list_decode "${CASE_FAILURE_KIND}" "credential-bearing decode failure kind"
+  assert_contains '<redacted: credential-like content>' "${CASE_FAILURE_DETAIL}" "decode credential redaction marker"
+  assert_not_contains "${ACCESS_KEY}" "${CASE_FAILURE_DETAIL}$(< "${diagnostic}")" "decode access key redaction"
+  assert_not_contains "${SECRET_KEY}" "${CASE_FAILURE_DETAIL}$(< "${diagnostic}")" "decode secret key redaction"
+)
+
+test_tier_query_rejects_unexpected_parser_output() (
+  reset_harness
+  case_resources_reset
+  local mock_status=200 mock_body='[]' call_file="${TEST_ROOT}/tier-query-parser-output-calls" actual
+  local jq_call_file="${TEST_ROOT}/tier-query-parser-output-jq-calls"
+  admin_api() {
+    printf '%s\n' "$1" >> "${call_file}"
+    printf '%s' "${mock_status}" > "${ADMIN_API_CODE_FILE}"
+    printf '%s' "${mock_body}"
+  }
+  jq() {
+    command cat >/dev/null
+    printf 'jq\n' >> "${jq_call_file}"
+    printf 'maybe\n'
+  }
+
+  : > "${call_file}"
+  : > "${jq_call_file}"
+  if tier_is_configured TARGET 2>/dev/null; then actual=0; else actual=$?; fi
+  assert_eq 2 "${actual}" "unexpected parser output status"
+  assert_eq 1 "$(wc -l < "${call_file}" | tr -d ' ')" "unexpected parser output request count"
+  assert_eq 1 "$(wc -l < "${jq_call_file}" | tr -d ' ')" "unexpected parser output jq count"
+  assert_eq tier_list_decode "${CASE_FAILURE_KIND}" "unexpected parser output failure kind"
+  assert_contains 'unexpected jq result' "${CASE_FAILURE_DETAIL}" "unexpected parser output context"
+)
+
+test_tier_presence_assertion_contract() (
+  reset_harness
+  case_resources_reset
+  local mock_query_status actual
+  tier_is_configured() {
+    if [ "${mock_query_status}" -eq 2 ]; then
+      record_case_failure tier_list_http 'operation=ListTiers; status=503'
+    fi
+    return "${mock_query_status}"
+  }
+
+  mock_query_status=1
+  assert_tier_absent TARGET || fail "valid absence should satisfy assert_tier_absent"
+  assert_eq "" "${CASE_FAILURE_KIND}" "valid absence diagnostic"
+
+  mock_query_status=0
+  case_resources_reset
+  if assert_tier_absent TARGET 2>/dev/null; then actual=0; else actual=$?; fi
+  assert_eq 1 "${actual}" "configured tier violates absence assertion"
+  assert_eq tier_unexpectedly_configured "${CASE_FAILURE_KIND}" "absence mismatch failure kind"
+
+  mock_query_status=2
+  case_resources_reset
+  if assert_tier_absent TARGET 2>/dev/null; then actual=0; else actual=$?; fi
+  assert_eq 1 "${actual}" "query error violates absence assertion"
+  assert_eq tier_list_http "${CASE_FAILURE_KIND}" "absence query failure preserved"
+
+  mock_query_status=0
+  case_resources_reset
+  assert_tier_present TARGET || fail "configured tier should satisfy assert_tier_present"
+  assert_eq "" "${CASE_FAILURE_KIND}" "valid presence diagnostic"
+
+  mock_query_status=1
+  case_resources_reset
+  if assert_tier_present TARGET 2>/dev/null; then actual=0; else actual=$?; fi
+  assert_eq 1 "${actual}" "absent tier violates presence assertion"
+  assert_eq tier_unexpectedly_absent "${CASE_FAILURE_KIND}" "presence mismatch failure kind"
+
+  mock_query_status=2
+  case_resources_reset
+  if assert_tier_present TARGET 2>/dev/null; then actual=0; else actual=$?; fi
+  assert_eq 1 "${actual}" "query error violates presence assertion"
+  assert_eq tier_list_http "${CASE_FAILURE_KIND}" "presence query failure preserved"
+
+  mock_query_status=2
+  query_error_case() { assert_tier_absent TARGET; }
+  run_test TIER-104 query-error query_error_case >/dev/null
+  assert_eq FAIL "$(jq -r .status "${RESULTS_DIR}/single-single--TIER-104.json")" "query error case status"
+  assert_eq 1 "$(jq -r .case_rc "${RESULTS_DIR}/single-single--TIER-104.json")" "query error case rc"
+  assert_eq tier_list_http "$(jq -r .failure_kind "${RESULTS_DIR}/single-single--TIER-104.json")" "query error result failure kind"
+)
+
 test_remote_probe_single_page_success() (
   reset_harness
   case_resources_reset
@@ -447,6 +690,11 @@ test_cleanup_upgrades_pass_and_unsupported
 test_term_uses_cleanup_fallback
 test_rc_provenance_with_spaced_path_and_digest
 test_wire_oracles_reject_http_500
+test_tier_query_valid_contract
+test_tier_query_rejects_invalid_payloads
+test_tier_query_failure_diagnostics_are_safe_and_bounded
+test_tier_query_rejects_unexpected_parser_output
+test_tier_presence_assertion_contract
 test_remote_probe_single_page_success
 test_aws_timeout_wrapper_preserves_exit_and_arguments
 test_remote_probe_command_diagnostics_are_safe_and_bounded
@@ -454,4 +702,4 @@ test_remote_probe_rejects_invalid_key_counts
 test_remote_wait_uses_wall_clock_deadline
 test_remote_wait_hard_timeout_stays_inside_total_budget
 test_failure_result_keeps_primary_and_cleanup_evidence
-printf 'PASS: rustfs-tier-test.sh cleanup, result, signal, provenance, probe, and diagnostic tests\n'
+printf 'PASS: rustfs-tier-test.sh cleanup, result, signal, provenance, tier query, probe, and diagnostic tests\n'

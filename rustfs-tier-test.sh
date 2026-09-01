@@ -1183,21 +1183,116 @@ expected_admin_error_message() {
 }
 
 tier_is_configured() {
-  local name="$1" body code
+  local name="$1" body code membership parse_error response_excerpt
   body="$(admin_api GET /rustfs/admin/v3/tier "")"; code="$(admin_api_code)"
-  [ "${code}" = "200" ] || { echo "tier list -> HTTP ${code}: ${body}" >&2; return 2; }
-  printf '%s' "${body}" | jq -e --arg name "${name}" '.. | objects | select(.name? == $name)' >/dev/null 2>&1
+  if [ "${code}" != "200" ]; then
+    response_excerpt="$(bounded_safe_excerpt "${body}" 512)"
+    record_case_failure tier_list_http \
+      "operation=ListTiers; endpoint=${API_ENDPOINT}; status=${code}; response_length=${#body}; output_excerpt=${response_excerpt}"
+    return 2
+  fi
+
+  if membership="$(printf '%s' "${body}" | jq -r --arg name "${name}" '
+      def nonempty_string: type == "string" and length > 0;
+      if type != "array" then
+        error("tier list is not an array")
+      else
+        map(
+          . as $entry
+          | if ($entry | type) != "object" then
+              error("tier entry is not an object")
+            elif (($entry.type | type) != "string") or (($entry.type | length) == 0) then
+              error("tier type is not a non-empty string")
+            else
+              $entry.type as $provider_type
+              | if (($entry[$provider_type] | type) != "object") then
+                  error("tier provider does not match type")
+                else
+                  ($entry | has("name")) as $has_top_name
+                  | ($entry[$provider_type] | has("name")) as $has_provider_name
+                  | if $has_top_name and (($entry.name | nonempty_string) | not) then
+                      error("top-level tier name is not a non-empty string")
+                    elif $has_provider_name and (($entry[$provider_type].name | nonempty_string) | not) then
+                      error("provider tier name is not a non-empty string")
+                    elif (($has_top_name or $has_provider_name) | not) then
+                      error("tier name is missing")
+                    elif $has_top_name and $has_provider_name and ($entry.name != $entry[$provider_type].name) then
+                      error("top-level and provider tier names conflict")
+                    elif $has_top_name then
+                      $entry.name
+                    else
+                      $entry[$provider_type].name
+                    end
+                end
+            end
+        ) as $names
+        | if ($names | length) != ($names | unique | length) then
+            error("duplicate tier name")
+          else
+            (($names | index($name)) != null)
+          end
+      end
+    ' 2>&1)"; then
+    case "${membership}" in
+      true) return 0 ;;
+      false) return 1 ;;
+      *) parse_error="unexpected jq result: ${membership}" ;;
+    esac
+  else
+    parse_error="${membership}"
+  fi
+
+  response_excerpt="$(bounded_safe_excerpt "${body}" 512)"
+  parse_error="$(bounded_safe_excerpt "${parse_error}" 512)"
+  record_case_failure tier_list_decode \
+    "operation=ListTiers; endpoint=${API_ENDPOINT}; response_length=${#body}; parse_error=${parse_error}; output_excerpt=${response_excerpt}"
+  return 2
 }
 
 assert_tier_absent() {
   local name="$1" rc
   if tier_is_configured "${name}"; then
-    echo "tier ${name} unexpectedly remains configured"
-    return 1
+    rc=0
   else
     rc=$?
-    [ "${rc}" -eq 1 ] || return 1
   fi
+  case "${rc}" in
+    0)
+      record_case_failure tier_unexpectedly_configured \
+        "tier=${name}; expected=absent; actual=configured"
+      return 1
+      ;;
+    1) return 0 ;;
+    2) return 1 ;;
+    *)
+      record_case_failure tier_list_decode \
+        "operation=ListTiers; tier=${name}; unexpected_query_status=${rc}"
+      return 1
+      ;;
+  esac
+}
+
+assert_tier_present() {
+  local name="$1" rc
+  if tier_is_configured "${name}"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "${rc}" in
+    0) return 0 ;;
+    1)
+      record_case_failure tier_unexpectedly_absent \
+        "tier=${name}; expected=configured; actual=absent"
+      return 1
+      ;;
+    2) return 1 ;;
+    *)
+      record_case_failure tier_list_decode \
+        "operation=ListTiers; tier=${name}; unexpected_query_status=${rc}"
+      return 1
+      ;;
+  esac
 }
 
 expect_add_tier_error() {
@@ -1254,7 +1349,7 @@ expect_remove_tier_error() {
   [ "${RC_CODE}" -ne 0 ] || { echo "rc unexpectedly removed protected tier ${name}"; return 1; }
   printf '%s' "${RC_OUT}" | grep -Fq "${expected_code}" \
     || { echo "rc did not surface ${expected_code}: ${RC_OUT}"; return 1; }
-  tier_is_configured "${name}" || { echo "protected tier ${name} disappeared after rejected remove"; return 1; }
+  assert_tier_present "${name}"
 }
 
 remote_key_count() {
