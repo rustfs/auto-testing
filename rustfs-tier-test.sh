@@ -35,12 +35,201 @@ fi
 CASE_ACTIVE=0
 CASE_CLEANUP_RUNNING=0
 CASE_CLEANUP_DONE=0
+LOG_CAPTURE_ACTIVE=0
+LOG_CAPTURE_PID=""
+LOG_CAPTURE_DIR=""
+LOG_PIPE=""
+LOG_CAPTURE_STOP_FILE=""
+LOG_CAPTURE_OUTPUT_REDIRECTED=0
+LOG_CAPTURE_ANCHOR_OPEN=0
+LOG_CAPTURE_SAVED_FDS_OPEN=0
+LOG_CAPTURE_PENDING_STATUS=0
+LOG_CAPTURE_ANCHOR_FD=""
+LOG_CAPTURE_STDOUT_FD=""
+LOG_CAPTURE_STDERR_FD=""
+LOG_CAPTURE_SUCCESS_TICKS=600
+LOG_CAPTURE_FAILURE_TICKS=100
+
+log_capture_phase() { :; }
+
+next_free_log_fd() {
+  local candidate
+  for ((candidate=10; candidate<100; candidate++)); do
+    if ! { : >&"${candidate}"; } 2>/dev/null; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+close_log_fd() {
+  local descriptor="$1"
+  [ -n "${descriptor}" ] || return 0
+  case "${descriptor}" in
+    *[!0-9]*) return 1 ;;
+  esac
+  eval "exec ${descriptor}>&-"
+}
+
+log_capture_job_is_active() {
+  local expected="$1" job_pid snapshot
+  [ -n "${LOG_CAPTURE_DIR:-}" ] && [ -d "${LOG_CAPTURE_DIR}" ] || return 1
+  snapshot="${LOG_CAPTURE_DIR}/jobs"
+  # This must execute in the current shell: only it owns the authoritative job
+  # table. Completed jobs disappear, while running and stopped jobs remain.
+  jobs -p > "${snapshot}" || return 1
+  while IFS= read -r job_pid; do
+    [ "${job_pid}" = "${expected}" ] && return 0
+  done < "${snapshot}"
+  return 1
+}
+
+reap_log_process_if_done() {
+  local pid="$1" process_status
+  log_capture_job_is_active "${pid}" && return 124
+  # If the OS still has this PID but Bash does not own it as an active job, do
+  # not wait or signal: fail bounded instead of risking a recycled PID.
+  kill -0 "${pid}" 2>/dev/null && return 125
+  if wait "${pid}"; then process_status=0; else process_status=$?; fi
+  return "${process_status}"
+}
+
+wait_for_log_process_exit_bounded() {
+  local pid="$1" ticks="$2" i process_status
+  for ((i=0; i<ticks; i++)); do
+    if ! log_capture_job_is_active "${pid}"; then
+      if reap_log_process_if_done "${pid}"; then process_status=0; else process_status=$?; fi
+      return "${process_status}"
+    fi
+    sleep 0.05
+  done
+  return 124
+}
+
+abort_pending_log_start() {
+  local pending_status="${LOG_CAPTURE_PENDING_STATUS:-0}"
+  [ "${pending_status}" -ne 0 ] || return 0
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [ -n "${LOG_CAPTURE_PID:-}" ] \
+    && log_capture_job_is_active "${LOG_CAPTURE_PID}"; then
+    kill -CONT "${LOG_CAPTURE_PID}" 2>/dev/null || true
+    kill -TERM "${LOG_CAPTURE_PID}" 2>/dev/null || true
+  fi
+  exit "${pending_status}"
+}
+
+request_log_capture_stop() {
+  python3 -c '
+import os, sys
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+flags |= getattr(os, "O_CLOEXEC", 0)
+descriptor = os.open(sys.argv[1], flags, 0o600)
+os.close(descriptor)
+' "$1"
+}
+
+finish_log_process_bounded() {
+  local pid="$1" suite_status="$2" stop_status="$3"
+  local ticks="${LOG_CAPTURE_SUCCESS_TICKS}" i process_status
+  [ "${suite_status}" -eq 0 ] || ticks="${LOG_CAPTURE_FAILURE_TICKS}"
+
+  for ((i=0; i<ticks; i++)); do
+    if ! log_capture_job_is_active "${pid}"; then
+      if reap_log_process_if_done "${pid}"; then process_status=0; else process_status=$?; fi
+      [ "${process_status}" -lt 124 ] || return 124
+      [ "${process_status}" -ne 0 ] || process_status="${stop_status}"
+      return "${process_status}"
+    fi
+    sleep 0.05
+  done
+
+  if ! log_capture_job_is_active "${pid}"; then
+    if reap_log_process_if_done "${pid}"; then process_status=0; else process_status=$?; fi
+    [ "${process_status}" -lt 124 ] || return 124
+    [ "${process_status}" -ne 0 ] || process_status="${stop_status}"
+    return "${process_status}"
+  fi
+  kill -CONT "${pid}" 2>/dev/null || true
+  kill -TERM "${pid}" 2>/dev/null || true
+  for ((i=0; i<20; i++)); do
+    if ! log_capture_job_is_active "${pid}"; then
+      reap_log_process_if_done "${pid}" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 0.05
+  done
+  log_capture_job_is_active "${pid}" || return 124
+  kill -CONT "${pid}" 2>/dev/null || true
+  kill -KILL "${pid}" 2>/dev/null || true
+  for ((i=0; i<20; i++)); do
+    if ! log_capture_job_is_active "${pid}"; then
+      reap_log_process_if_done "${pid}" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 0.05
+  done
+  return 124
+}
+
+finish_log_capture() {
+  local suite_status="${1:-0}" logger_status=0 stop_status=0
+  if [ "${LOG_CAPTURE_ACTIVE:-0}" -eq 1 ]; then
+    # Publish the stop request before closing the last shell-owned FIFO writer,
+    # so the logger cannot observe EOF before it sees the authenticated request.
+    if [ -n "${LOG_CAPTURE_PID:-}" ] && [ -n "${LOG_CAPTURE_STOP_FILE:-}" ]; then
+      request_log_capture_stop "${LOG_CAPTURE_STOP_FILE}" || stop_status=74
+    fi
+    if [ "${LOG_CAPTURE_OUTPUT_REDIRECTED:-0}" -eq 1 ]; then
+      exec 1>&- 2>&-
+      LOG_CAPTURE_OUTPUT_REDIRECTED=0
+    fi
+    if [ -n "${LOG_CAPTURE_PID:-}" ] && [ -n "${LOG_CAPTURE_STOP_FILE:-}" ]; then
+      if finish_log_process_bounded \
+        "${LOG_CAPTURE_PID}" "${suite_status}" "${stop_status}"; then
+        logger_status=0
+      else
+        logger_status=$?
+      fi
+    elif [ -n "${LOG_CAPTURE_PID:-}" ]; then
+      logger_status=74
+    fi
+    if [ "${LOG_CAPTURE_ANCHOR_OPEN:-0}" -eq 1 ]; then
+      close_log_fd "${LOG_CAPTURE_ANCHOR_FD}" || true
+      LOG_CAPTURE_ANCHOR_OPEN=0
+    fi
+    if [ "${LOG_CAPTURE_SAVED_FDS_OPEN:-0}" -eq 1 ]; then
+      close_log_fd "${LOG_CAPTURE_STDOUT_FD}" || true
+      close_log_fd "${LOG_CAPTURE_STDERR_FD}" || true
+      LOG_CAPTURE_SAVED_FDS_OPEN=0
+    fi
+    LOG_CAPTURE_ACTIVE=0
+    if [ -n "${LOG_CAPTURE_DIR:-}" ] && [ -d "${LOG_CAPTURE_DIR}" ]; then
+      rm -f -- "${LOG_CAPTURE_DIR}/stream" "${LOG_CAPTURE_DIR}/ready" \
+        "${LOG_CAPTURE_DIR}/stop" "${LOG_CAPTURE_DIR}/jobs" \
+        "${LOG_CAPTURE_DIR}"/ready.*.tmp 2>/dev/null || true
+      rmdir -- "${LOG_CAPTURE_DIR}" 2>/dev/null || true
+    fi
+  fi
+
+  if [ "${suite_status}" -ne 0 ]; then
+    return "${suite_status}"
+  fi
+  return "${logger_status}"
+}
 
 suite_exit() {
   local exit_code="${1:-$?}"
   trap - EXIT INT TERM
+  trap '' PIPE
   if [ "${CASE_ACTIVE:-0}" -eq 1 ] && declare -F case_cleanup >/dev/null 2>&1; then
     case_cleanup "signal-or-exit" >> "${TEST_TMP}/test.out" 2>&1 || true
+  fi
+  if finish_log_capture "${exit_code}"; then
+    exit_code=0
+  else
+    exit_code=$?
   fi
   if [ "${TEST_TMP_OWNED:-0}" -eq 1 ] && [ -n "${TEST_TMP:-}" ] && [ -d "${TEST_TMP}" ]; then
     rm -rf -- "${TEST_TMP}"
@@ -171,6 +360,141 @@ confirm() {
 need_cmd() {
   [ "${DRY_RUN}" -eq 1 ] && return 0
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1 ($2); install it first"
+}
+
+start_log_capture() {
+  local helper ready=0 i logger_status=0
+  [ -n "${LOG_FILE}" ] || return 0
+  command -v python3 >/dev/null 2>&1 || die "missing command: python3 (secure log capture); install it first"
+  helper="$(python3 -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), "rustfs-tier-log-capture.py"))' "${BASH_SOURCE[0]}")"
+  [ -f "${helper}" ] || die "missing secure log capture helper: ${helper}"
+
+  # During initialization, remember INT/TERM and finish constructing a state
+  # that suite_exit can always tear down. The pending status is delivered as
+  # soon as the saved output descriptors have been closed.
+  LOG_CAPTURE_PENDING_STATUS=0
+  trap 'LOG_CAPTURE_PENDING_STATUS=130' INT
+  trap 'LOG_CAPTURE_PENDING_STATUS=143' TERM
+  log_capture_phase begin
+  abort_pending_log_start
+
+  if ! LOG_CAPTURE_DIR="$(mktemp -d "${TEST_TMP}/rustfs-tier-log.XXXXXX")"; then
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if [ "${LOG_CAPTURE_PENDING_STATUS}" -ne 0 ]; then
+      exit "${LOG_CAPTURE_PENDING_STATUS}"
+    fi
+    die "cannot create log capture state under ${TEST_TMP}"
+  fi
+  LOG_CAPTURE_ACTIVE=1
+  log_capture_phase control-dir
+  abort_pending_log_start
+  chmod 700 "${LOG_CAPTURE_DIR}" || die "cannot secure log capture state: ${LOG_CAPTURE_DIR}"
+  LOG_PIPE="${LOG_CAPTURE_DIR}/stream"
+  LOG_CAPTURE_STOP_FILE="${LOG_CAPTURE_DIR}/stop"
+  mkfifo -m 600 "${LOG_PIPE}" || die "cannot create the log synchronization pipe: ${LOG_PIPE}"
+  log_capture_phase fifo
+  abort_pending_log_start
+
+  LOG_CAPTURE_ANCHOR_FD="$(next_free_log_fd)" || die "cannot reserve a descriptor for log capture"
+  eval "exec ${LOG_CAPTURE_ANCHOR_FD}<>\"\${LOG_PIPE}\"" \
+    || die "cannot open the log synchronization pipe"
+  LOG_CAPTURE_ANCHOR_OPEN=1
+  log_capture_phase anchor
+  abort_pending_log_start
+  LOG_CAPTURE_STDOUT_FD="$(next_free_log_fd)" || die "cannot reserve the original stdout"
+  eval "exec ${LOG_CAPTURE_STDOUT_FD}>&1" || die "cannot preserve the original stdout"
+  LOG_CAPTURE_STDERR_FD="$(next_free_log_fd)" || die "cannot reserve the original stderr"
+  eval "exec ${LOG_CAPTURE_STDERR_FD}>&2" || die "cannot preserve the original stderr"
+  LOG_CAPTURE_SAVED_FDS_OPEN=1
+  log_capture_phase saved
+  abort_pending_log_start
+  log_capture_phase active
+  abort_pending_log_start
+
+  (
+    close_log_fd "${LOG_CAPTURE_ANCHOR_FD}"
+    close_log_fd "${LOG_CAPTURE_STDOUT_FD}"
+    close_log_fd "${LOG_CAPTURE_STDERR_FD}"
+    exec python3 -u "${helper}" \
+      --log-file "${LOG_FILE}" \
+      --status-file "${LOG_CAPTURE_DIR}/ready" \
+      --stop-file "${LOG_CAPTURE_STOP_FILE}"
+  ) < "${LOG_PIPE}" 1>&"${LOG_CAPTURE_STDOUT_FD}" 2>&"${LOG_CAPTURE_STDERR_FD}" &
+  LOG_CAPTURE_PID=$!
+  log_capture_phase launched
+  abort_pending_log_start
+
+  for ((i=0; i<100; i++)); do
+    abort_pending_log_start
+    if [ -s "${LOG_CAPTURE_DIR}/ready" ]; then
+      ready=1
+      break
+    fi
+    if ! log_capture_job_is_active "${LOG_CAPTURE_PID}"; then
+      if reap_log_process_if_done "${LOG_CAPTURE_PID}"; then
+        logger_status=0
+      else
+        logger_status=$?
+      fi
+      [ "${logger_status}" -eq 124 ] || LOG_CAPTURE_PID=""
+      break
+    fi
+    sleep 0.05 || true
+  done
+  if [ "${ready}" -ne 1 ]; then
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    [ "${logger_status}" -ne 0 ] || logger_status=124
+    die "secure log capture failed to initialize (status=${logger_status})"
+  fi
+  log_capture_phase ready
+  abort_pending_log_start
+
+  # Bash 3.2 can terminate immediately when a builtin writes to a dead FIFO,
+  # bypassing EXIT. Convert SIGPIPE to an ordinary exit so suite_exit always
+  # runs case cleanup and removes the capture state.
+  trap 'exit 141' PIPE
+  exec > "${LOG_PIPE}" 2>&1
+  LOG_CAPTURE_OUTPUT_REDIRECTED=1
+  close_log_fd "${LOG_CAPTURE_ANCHOR_FD}"
+  LOG_CAPTURE_ANCHOR_OPEN=0
+
+  # The current shell job table is the stable direct-child identity. Never call
+  # wait while that job is running or stopped.
+  if log_capture_job_is_active "${LOG_CAPTURE_PID}"; then
+    logger_status=124
+    kill -CONT "${LOG_CAPTURE_PID}" 2>/dev/null || true
+  else
+    if reap_log_process_if_done "${LOG_CAPTURE_PID}"; then
+      logger_status=0
+    else
+      logger_status=$?
+    fi
+    [ "${logger_status}" -ne 0 ] && [ "${logger_status}" -ne 127 ] || logger_status=74
+    LOG_CAPTURE_PID=""
+    exec 1>&"${LOG_CAPTURE_STDOUT_FD}"
+    exec 2>&"${LOG_CAPTURE_STDERR_FD}"
+    LOG_CAPTURE_OUTPUT_REDIRECTED=0
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    printf '\033[1;31m[ERROR]\033[0m secure log capture exited during startup (status=%s)\n' \
+      "${logger_status}" >&2
+    exit "${logger_status}"
+  fi
+  log_capture_phase redirected
+  abort_pending_log_start
+  close_log_fd "${LOG_CAPTURE_STDOUT_FD}"
+  close_log_fd "${LOG_CAPTURE_STDERR_FD}"
+  LOG_CAPTURE_SAVED_FDS_OPEN=0
+  log_capture_phase saved-closed
+  abort_pending_log_start
+
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [ "${LOG_CAPTURE_PENDING_STATUS}" -ne 0 ]; then
+    exit "${LOG_CAPTURE_PENDING_STATUS}"
+  fi
 }
 
 sha256_file() {
@@ -2315,14 +2639,7 @@ main() {
       *) die "unknown option: ${opt} (see --help)" ;;
     esac
   done
-  if [ -n "${LOG_FILE}" ]; then
-    mkdir -p "$(dirname "${LOG_FILE}")"
-    if ! touch "${LOG_FILE}" 2>/dev/null; then
-      LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/rustfs-tier.XXXXXX.log")"
-      warn "log file not writable; using ${LOG_FILE}"
-    fi
-    exec > >(tee -a "${LOG_FILE}") 2>&1
-  fi
+  start_log_capture
   if [ "${all}" -eq 1 ]; then
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}")
   fi

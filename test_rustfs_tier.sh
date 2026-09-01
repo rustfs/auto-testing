@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-tier-unit.XXXXXX")"
+TEST_ROOT="$(cd -- "${TEST_ROOT}" && pwd -P)"
 export RUSTFS_TIER_TEST_TMP="${TEST_ROOT}/source"
 export TIER_SOURCE_ONLY=1
 # shellcheck source=rustfs-tier-test.sh
@@ -684,6 +685,445 @@ test_failure_result_keeps_primary_and_cleanup_evidence() (
   assert_contains 'BucketNotEmpty' "$(jq -r .cleanup_detail "${result}")" "separate cleanup detail preserved"
 )
 
+LOGGED_OUTPUT=""
+LOGGED_RC=0
+
+run_logged_child() {
+  local requested="$1" token="$2" suite_rc="$3" child_tmp="$4"
+  local mode="${5:-normal}" phase="${6:-}" fallback_dir="${7:-${TEST_ROOT}/fallback}"
+  local output_file="${child_tmp}.output" term_trigger=""
+  if [ "${mode}" = full-stopped-logger ]; then
+    term_trigger="${child_tmp}/full-stopped-ready"
+  fi
+  mkdir -p "${child_tmp}"
+  if [ ! -e "${fallback_dir}" ]; then mkdir -p "${fallback_dir}"; fi
+  set +e
+  TIER_SOURCE_ONLY=1 \
+    RUSTFS_TIER_TEST_TMP="${child_tmp}" \
+    TMPDIR="${fallback_dir}" \
+    LOG_SWAP_TARGET="${LOG_SWAP_TARGET:-}" \
+    python3 -c '
+import errno
+import os
+import signal
+import subprocess
+import sys
+import time
+
+timeout = float(sys.argv[1])
+trigger = sys.argv[2]
+command = sys.argv[3:]
+process = subprocess.Popen(command, pass_fds=(8, 9), start_new_session=True)
+deadline = time.monotonic() + timeout
+
+if trigger:
+    while not os.path.exists(trigger):
+        status = process.poll()
+        if status is not None:
+            raise SystemExit(status if status >= 0 else 128 - status)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    if os.path.exists(trigger) and process.poll() is None:
+        os.kill(process.pid, signal.SIGTERM)
+
+try:
+    remaining = max(deadline - time.monotonic(), 0.001)
+    status = process.wait(timeout=remaining)
+except subprocess.TimeoutExpired:
+    print("[TEST WATCHDOG] logged child exceeded its hard deadline", file=sys.stderr)
+    for action in (signal.SIGCONT, signal.SIGTERM):
+        try:
+            os.killpg(process.pid, action)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        process.wait(timeout=1)
+    raise SystemExit(124)
+
+status = status if status >= 0 else 128 - status
+raise SystemExit(status)
+' "${LOGGED_CHILD_TIMEOUT_SECONDS:-20}" "${term_trigger}" /bin/bash -c '
+      set -Eeuo pipefail
+      source "$1"
+      LOG_FILE="$2"
+      if [ -n "$6" ]; then
+        TEST_LOG_PHASE="$6"
+        log_capture_phase() {
+          if [ "${TEST_LOG_PHASE}" = launched-stopped ] && [ "$1" = launched ]; then
+            kill -STOP "${LOG_CAPTURE_PID}"
+            kill -TERM "$$"
+          elif [ "${TEST_LOG_PHASE}" = ready-dead ] && [ "$1" = ready ]; then
+            kill -TERM "${LOG_CAPTURE_PID}"
+            wait_for_log_process_exit_bounded "${LOG_CAPTURE_PID}" 20 2>/dev/null || true
+          elif [ "${TEST_LOG_PHASE}" = redirected-dead ] && [ "$1" = redirected ]; then
+            kill -TERM "${LOG_CAPTURE_PID}"
+            wait_for_log_process_exit_bounded "${LOG_CAPTURE_PID}" 20 2>/dev/null || true
+          elif [ "$1" = "${TEST_LOG_PHASE}" ]; then
+            kill -TERM "$$"
+          fi
+        }
+      fi
+      start_log_capture
+      printf "fd8-preserved\n" >&8
+      printf "fd9-preserved\n" >&9
+      case "$5" in
+        normal) ;;
+        inherited-writer) sleep 3 & ;;
+        signal-with-writer) sleep 3 & kill -TERM "$$" ;;
+        stopped-logger)
+          kill -STOP "${LOG_CAPTURE_PID}"
+          (sleep 1; kill -CONT "${LOG_CAPTURE_PID}") </dev/null >/dev/null 2>&1 &
+          ;;
+        killed-logger) ;;
+        full-stopped-logger)
+          LOG_CAPTURE_FAILURE_TICKS=20
+          CASE_ACTIVE=1
+          case_cleanup() {
+            printf "full-stopped-cleanup-ran\n" > "${TEST_TMP}/full-stopped-cleanup-ran"
+            CASE_ACTIVE=0
+          }
+          kill -STOP "${LOG_CAPTURE_PID}"
+          python3 -c "import fcntl, os; flags = fcntl.fcntl(1, fcntl.F_GETFL); fcntl.fcntl(1, fcntl.F_SETFL, flags | os.O_NONBLOCK); chunk = b\"x\" * 4096
+while True:
+    try: os.write(1, chunk)
+    except BlockingIOError: break"
+          : > "${TEST_TMP}/full-stopped-ready"
+          while :; do sleep 1; done
+          ;;
+        pipe-cleanup)
+          CASE_ACTIVE=1
+          case_cleanup() {
+            printf "pipe-cleanup-ran\n" > "${TEST_TMP}/pipe-cleanup-ran"
+            CASE_ACTIVE=0
+          }
+          ;;
+        swap-symlink)
+          mv -- "$2" "$2.opened"
+          ln -s -- "${LOG_SWAP_TARGET}" "$2"
+          ;;
+        swap-fifo)
+          mv -- "$2" "$2.opened"
+          mkfifo "$2"
+          ;;
+        *) printf "unknown child mode: %s\n" "$5" >&2; exit 97 ;;
+      esac
+      printf "%s\n" "$3"
+      if [ "$5" = killed-logger ]; then
+        kill -TERM "${LOG_CAPTURE_PID}"
+        sleep 0.1
+      fi
+      exit "$4"
+    ' bash "${SCRIPT_DIR}/rustfs-tier-test.sh" "${requested}" "${token}" \
+      "${suite_rc}" "${mode}" "${phase}" \
+      8>"${child_tmp}.fd8" 9>"${child_tmp}.fd9" >"${output_file}" 2>&1
+  LOGGED_RC=$?
+  set -e
+  LOGGED_OUTPUT="$(< "${output_file}")"
+}
+
+test_log_capture_truncates_and_waits_between_invocations() {
+  local log_file="${TEST_ROOT}/reused-tier.log"
+  printf 'stale-sentinel\n' > "${log_file}"
+
+  run_logged_child "${log_file}" first-run-token 0 "${TEST_ROOT}/log-child-1"
+  assert_eq 0 "${LOGGED_RC}" "first logged invocation exit"
+  assert_contains first-run-token "$(< "${log_file}")" "first logged invocation"
+  assert_not_contains stale-sentinel "$(< "${log_file}")" "stale log truncation"
+  assert_eq fd8-preserved "$(< "${TEST_ROOT}/log-child-1.fd8")" "caller fd8 preservation"
+  assert_eq fd9-preserved "$(< "${TEST_ROOT}/log-child-1.fd9")" "caller fd9 preservation"
+
+  run_logged_child "${log_file}" second-run-token 0 "${TEST_ROOT}/log-child-2"
+  assert_eq 0 "${LOGGED_RC}" "second logged invocation exit"
+  assert_contains second-run-token "$(< "${log_file}")" "second logged invocation"
+  assert_not_contains first-run-token "$(< "${log_file}")" "previous invocation isolation"
+
+  local slow_log="${TEST_ROOT}/slow-tier.log"
+  SECONDS=0
+  run_logged_child "${slow_log}" slow-flush-token 0 \
+    "${TEST_ROOT}/log-child-slow" stopped-logger
+  local elapsed="${SECONDS}"
+  assert_eq 0 "${LOGGED_RC}" "stopped logger invocation exit"
+  [ "${elapsed}" -ge 1 ] || fail "logged invocation returned before the logger resumed and flushed"
+  assert_contains slow-flush-token "$(< "${slow_log}")" "resumed logger persisted output"
+}
+
+test_log_capture_preserves_suite_and_logger_failures() {
+  local log_file="${TEST_ROOT}/status-tier.log"
+  run_logged_child "${log_file}" suite-failed-token 23 "${TEST_ROOT}/log-child-suite-fail"
+  assert_eq 23 "${LOGGED_RC}" "suite failure exit code"
+
+  run_logged_child "${log_file}" logger-failed-token 0 \
+    "${TEST_ROOT}/log-child-logger-fail" killed-logger
+  [ "${LOGGED_RC}" -ne 0 ] || fail "logger failure was not propagated"
+  run_logged_child "${log_file}" both-failed-token 23 \
+    "${TEST_ROOT}/log-child-both-fail" killed-logger
+  assert_eq 23 "${LOGGED_RC}" "suite failure precedence over logger failure"
+}
+
+test_log_capture_does_not_wait_for_inherited_writers() {
+  local log_file="${TEST_ROOT}/inherited-writer.log"
+  SECONDS=0
+  run_logged_child "${log_file}" inherited-writer-token 0 \
+    "${TEST_ROOT}/log-child-inherited" inherited-writer
+  local elapsed="${SECONDS}"
+  assert_eq 0 "${LOGGED_RC}" "inherited writer invocation exit"
+  [ "${elapsed}" -lt 3 ] || fail "inherited FIFO writer delayed normal completion"
+  assert_contains inherited-writer-token "$(< "${log_file}")" "inherited writer log flush"
+
+  SECONDS=0
+  run_logged_child "${log_file}" signal-writer-token 0 \
+    "${TEST_ROOT}/log-child-signal-writer" signal-with-writer
+  elapsed="${SECONDS}"
+  assert_eq 143 "${LOGGED_RC}" "TERM status with inherited writer"
+  [ "${elapsed}" -lt 3 ] || fail "inherited FIFO writer delayed TERM completion"
+}
+
+test_full_fifo_and_stopped_logger_has_bounded_term() {
+  local log_file="${TEST_ROOT}/full-stopped-logger.log" child_tmp
+  child_tmp="${TEST_ROOT}/log-child-full-stopped"
+  SECONDS=0
+  LOGGED_CHILD_TIMEOUT_SECONDS=6 \
+  run_logged_child "${log_file}" unreachable-token 0 \
+    "${child_tmp}" full-stopped-logger
+  local elapsed="${SECONDS}"
+  assert_eq 143 "${LOGGED_RC}" "TERM status with a full FIFO and stopped logger"
+  [ "${elapsed}" -lt 4 ] || fail "full FIFO blocked stop-marker delivery beyond its deadline"
+  assert_eq full-stopped-cleanup-ran \
+    "$(< "${child_tmp}/full-stopped-cleanup-ran")" \
+    "full FIFO TERM case cleanup"
+  if find "${child_tmp}" -maxdepth 1 -type d \
+    -name 'rustfs-tier-log.*' -print -quit | grep -q .; then
+    fail "full FIFO TERM left its control directory behind"
+  fi
+  if pgrep -f -- "${child_tmp}" >/dev/null 2>&1; then
+    fail "full FIFO TERM left a logger process behind"
+  fi
+}
+
+test_full_fifo_stopped_logger_parallel_stress() {
+  local index child_tmp log_file worker
+  local -a workers=()
+  for index in 1 2 3 4 5 6 7 8; do
+    child_tmp="${TEST_ROOT}/log-child-full-stopped-${index}"
+    log_file="${TEST_ROOT}/full-stopped-logger-${index}.log"
+    (
+      LOGGED_CHILD_TIMEOUT_SECONDS=6 \
+        run_logged_child "${log_file}" "unreachable-token-${index}" 0 \
+          "${child_tmp}" full-stopped-logger
+      printf '%s\n' "${LOGGED_RC}" > "${child_tmp}.rc"
+    ) &
+    workers+=("$!")
+  done
+
+  for worker in "${workers[@]}"; do
+    wait "${worker}"
+  done
+  for index in 1 2 3 4 5 6 7 8; do
+    child_tmp="${TEST_ROOT}/log-child-full-stopped-${index}"
+    if [ "$(< "${child_tmp}.rc")" != 143 ]; then
+      fail "parallel full FIFO TERM status ${index}: $(tail -n 20 "${child_tmp}.output")"
+    fi
+    assert_eq full-stopped-cleanup-ran \
+      "$(< "${child_tmp}/full-stopped-cleanup-ran")" \
+      "parallel full FIFO cleanup ${index}"
+    if find "${child_tmp}" -maxdepth 1 -type d \
+      -name 'rustfs-tier-log.*' -print -quit | grep -q .; then
+      fail "parallel full FIFO run ${index} left residue: $(find "${child_tmp}" -maxdepth 2 -print | sort)"
+    fi
+    if pgrep -f -- "${child_tmp}" >/dev/null 2>&1; then
+      fail "parallel full FIFO run ${index} left a logger process behind"
+    fi
+  done
+}
+
+test_log_capture_startup_signal_phases_are_safe() {
+  local phase log_file
+  for phase in begin control-dir fifo anchor saved active launched ready redirected saved-closed; do
+    log_file="${TEST_ROOT}/startup-${phase}.log"
+    SECONDS=0
+    run_logged_child "${log_file}" "startup-${phase}-token" 0 \
+      "${TEST_ROOT}/log-child-startup-${phase}" normal "${phase}"
+    assert_eq 143 "${LOGGED_RC}" "TERM status during ${phase} phase"
+    [ "${SECONDS}" -lt 3 ] || fail "TERM during ${phase} phase was not bounded"
+  done
+
+  log_file="${TEST_ROOT}/startup-launched-stopped.log"
+  SECONDS=0
+  run_logged_child "${log_file}" startup-launched-stopped-token 0 \
+    "${TEST_ROOT}/log-child-startup-launched-stopped" normal launched-stopped
+  assert_eq 143 "${LOGGED_RC}" "TERM status while pre-ready logger is stopped"
+  [ "${SECONDS}" -lt 3 ] || fail "stopped pre-ready logger delayed TERM completion"
+
+  log_file="${TEST_ROOT}/startup-ready-dead.log"
+  SECONDS=0
+  run_logged_child "${log_file}" should-not-enter-workload 0 \
+    "${TEST_ROOT}/log-child-startup-ready-dead" normal ready-dead
+  [ "${LOGGED_RC}" -ne 0 ] || fail "dead post-ready logger did not fail startup"
+  [ "${LOGGED_RC}" -ne 137 ] || fail "dead post-ready logger hit the external hard cutoff"
+  [ "${SECONDS}" -lt 3 ] || fail "dead post-ready logger blocked FIFO writer setup"
+  assert_not_contains should-not-enter-workload "${LOGGED_OUTPUT}" "post-ready crash workload boundary"
+  if find "${TEST_ROOT}/log-child-startup-ready-dead" -maxdepth 1 \
+    -type d -name 'rustfs-tier-log.*' -print -quit | grep -q .; then
+    fail "post-ready logger crash left its control directory behind"
+  fi
+
+  log_file="${TEST_ROOT}/startup-redirected-dead.log"
+  SECONDS=0
+  run_logged_child "${log_file}" should-hit-sigpipe 0 \
+    "${TEST_ROOT}/log-child-startup-redirected-dead" pipe-cleanup redirected-dead
+  assert_eq 141 "${LOGGED_RC}" "SIGPIPE status after post-preflight logger death"
+  [ "${SECONDS}" -lt 3 ] || fail "post-preflight logger death was not bounded"
+  assert_eq pipe-cleanup-ran \
+    "$(< "${TEST_ROOT}/log-child-startup-redirected-dead/pipe-cleanup-ran")" \
+    "SIGPIPE case cleanup"
+  if find "${TEST_ROOT}/log-child-startup-redirected-dead" -maxdepth 1 \
+    -type d -name 'rustfs-tier-log.*' -print -quit | grep -q .; then
+    fail "post-preflight logger crash left its control directory behind"
+  fi
+}
+
+test_log_file_fallback_rejects_unsafe_paths() {
+  local fallback_dir="${TEST_ROOT}/fallback-files" fallback_path
+  local target="${TEST_ROOT}/symlink-target" requested="${TEST_ROOT}/requested-symlink"
+  mkdir -p "${fallback_dir}"
+  printf 'protected-sentinel\n' > "${target}"
+  ln -s "${target}" "${requested}"
+  run_logged_child "${requested}" symlink-fallback-token 0 \
+    "${TEST_ROOT}/log-child-symlink" normal "" "${fallback_dir}"
+  assert_eq 0 "${LOGGED_RC}" "symlink fallback invocation"
+  assert_eq protected-sentinel "$(< "${target}")" "symlink target preservation"
+  [ -L "${requested}" ] || fail "requested symlink was replaced"
+  fallback_path="$(printf '%s\n' "${LOGGED_OUTPUT}" | sed -n 's/.*; using //p' | tail -1)"
+  [ -n "${fallback_path}" ] || fail "symlink fallback warning omitted selected path"
+  [ "${fallback_path}" != "${requested}" ] || fail "symlink path did not use fallback"
+  [ -f "${fallback_path}" ] || fail "selected symlink fallback log was not created"
+  assert_contains symlink-fallback-token "$(< "${fallback_path}")" "symlink fallback output"
+
+  requested="${TEST_ROOT}/requested-directory"
+  mkdir -p "${requested}"
+  run_logged_child "${requested}" directory-fallback-token 0 \
+    "${TEST_ROOT}/log-child-directory" normal "" "${fallback_dir}"
+  assert_eq 0 "${LOGGED_RC}" "directory fallback invocation"
+  assert_contains "${requested}" "${LOGGED_OUTPUT}" "directory fallback warning path"
+
+  requested="${TEST_ROOT}/requested-fifo"
+  mkfifo "${requested}"
+  SECONDS=0
+  run_logged_child "${requested}" fifo-fallback-token 0 \
+    "${TEST_ROOT}/log-child-fifo" normal "" "${fallback_dir}"
+  assert_eq 0 "${LOGGED_RC}" "FIFO fallback invocation"
+  [ "${SECONDS}" -lt 3 ] || fail "substituted FIFO blocked secure open"
+  [ -p "${requested}" ] || fail "requested FIFO was replaced"
+
+  local parent_file="${TEST_ROOT}/parent-is-file"
+  printf 'parent\n' > "${parent_file}"
+  requested="${parent_file}/tier.log"
+  run_logged_child "${requested}" parent-fallback-token 0 \
+    "${TEST_ROOT}/log-child-parent" normal "" "${fallback_dir}"
+  assert_eq 0 "${LOGGED_RC}" "invalid parent fallback invocation"
+  assert_contains "${requested}" "${LOGGED_OUTPUT}" "fallback warning requested path"
+
+  requested="${TEST_ROOT}/fallback-failure-symlink"
+  ln -s "${target}" "${requested}"
+  run_logged_child "${requested}" fallback-failure-token 0 \
+    "${TEST_ROOT}/log-child-fallback-failure" normal "" "${parent_file}"
+  [ "${LOGGED_RC}" -ne 0 ] || fail "fallback creation failure did not fail closed"
+  assert_eq protected-sentinel "$(< "${target}")" "fallback failure target preservation"
+}
+
+test_log_destination_swap_keeps_open_inode() {
+  local target="${TEST_ROOT}/swap-protected" requested="${TEST_ROOT}/swap-requested.log"
+  printf 'protected-sentinel\n' > "${target}"
+  printf 'stale\n' > "${requested}"
+  LOG_SWAP_TARGET="${target}" run_logged_child "${requested}" swap-symlink-token 0 \
+    "${TEST_ROOT}/log-child-swap-symlink" swap-symlink
+  assert_eq 0 "${LOGGED_RC}" "post-open symlink swap invocation"
+  assert_eq protected-sentinel "$(< "${target}")" "post-open symlink target preservation"
+  assert_contains swap-symlink-token "$(< "${requested}.opened")" "open inode received log output"
+  [ -L "${requested}" ] || fail "post-open symlink substitution was followed or replaced"
+
+  rm -- "${requested}"
+  printf 'stale\n' > "${requested}"
+  SECONDS=0
+  run_logged_child "${requested}" swap-fifo-token 0 \
+    "${TEST_ROOT}/log-child-swap-fifo" swap-fifo
+  assert_eq 0 "${LOGGED_RC}" "post-open FIFO swap invocation"
+  [ "${SECONDS}" -lt 3 ] || fail "post-open FIFO substitution blocked logging"
+  assert_contains swap-fifo-token "$(< "${requested}.opened")" "FIFO swap kept open inode"
+  [ -p "${requested}" ] || fail "post-open FIFO substitution was reopened"
+}
+
+test_secure_log_owner_link_and_mode_contract() {
+  python3 - "${SCRIPT_DIR}/rustfs-tier-log-capture.py" "${TEST_ROOT}" <<'PY'
+import importlib.util
+import os
+import stat
+import sys
+from unittest import mock
+
+spec = importlib.util.spec_from_file_location("tier_log_capture", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = sys.argv[2]
+
+mode_path = os.path.join(root, "existing-mode.log")
+with open(mode_path, "wb") as stream:
+    stream.write(b"stale")
+os.chmod(mode_path, 0o644)
+descriptor = module._open_requested(mode_path)
+try:
+    actual_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+    if actual_mode != 0o600:
+        raise AssertionError(f"existing log mode is {actual_mode:o}, expected 600")
+finally:
+    os.close(descriptor)
+
+foreign_path = os.path.join(root, "foreign-owner.log")
+with open(foreign_path, "wb") as stream:
+    stream.write(b"protected-owner")
+actual_uid = os.geteuid()
+with mock.patch.object(module.os, "geteuid", return_value=actual_uid + 1):
+    try:
+        module._open_requested(foreign_path)
+    except module.LogOpenError:
+        pass
+    else:
+        raise AssertionError("foreign-owned log destination was accepted")
+with open(foreign_path, "rb") as stream:
+    if stream.read() != b"protected-owner":
+        raise AssertionError("foreign-owned log was truncated before rejection")
+
+hardlink_target = os.path.join(root, "hardlink-target.log")
+hardlink_path = os.path.join(root, "hardlink-requested.log")
+with open(hardlink_target, "wb") as stream:
+    stream.write(b"protected-hardlink")
+os.link(hardlink_target, hardlink_path)
+try:
+    module._open_requested(hardlink_path)
+except module.LogOpenError:
+    pass
+else:
+    raise AssertionError("multiply-linked log destination was accepted")
+with open(hardlink_target, "rb") as stream:
+    if stream.read() != b"protected-hardlink":
+        raise AssertionError("hard-linked target was truncated before rejection")
+PY
+}
+
+if [ "${RUSTFS_TIER_TEST_MODE:-all}" = log-stress ]; then
+  test_full_fifo_and_stopped_logger_has_bounded_term
+  test_full_fifo_stopped_logger_parallel_stress
+  printf 'PASS: focused full-FIFO/SIGSTOP log lifecycle stress\n'
+  exit 0
+fi
+
 test_pre_registration_before_failed_create
 test_cleanup_order_idempotence_and_drain
 test_cleanup_upgrades_pass_and_unsupported
@@ -702,4 +1142,13 @@ test_remote_probe_rejects_invalid_key_counts
 test_remote_wait_uses_wall_clock_deadline
 test_remote_wait_hard_timeout_stays_inside_total_budget
 test_failure_result_keeps_primary_and_cleanup_evidence
-printf 'PASS: rustfs-tier-test.sh cleanup, result, signal, provenance, tier query, probe, and diagnostic tests\n'
+test_log_capture_truncates_and_waits_between_invocations
+test_log_capture_preserves_suite_and_logger_failures
+test_log_capture_does_not_wait_for_inherited_writers
+test_full_fifo_and_stopped_logger_has_bounded_term
+test_full_fifo_stopped_logger_parallel_stress
+test_log_capture_startup_signal_phases_are_safe
+test_log_file_fallback_rejects_unsafe_paths
+test_log_destination_swap_keeps_open_inode
+test_secure_log_owner_link_and_mode_contract
+printf 'PASS: rustfs-tier-test.sh cleanup, result, signal, provenance, tier query, probe, diagnostic, and log-isolation tests\n'
