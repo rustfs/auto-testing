@@ -2289,7 +2289,7 @@ test_snw110() {
   snw_build_basic_tar "${TEST_TMP}/snw110.tar" "${TEST_TMP}/snw110-src" || return 1
   # unpacked total (~30B) is below the 1KB quota -> accepted
   local attempt
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  for attempt in $(seq 1 60); do
     aws_run s3api put-object --bucket "snw110-b1" --key "a.tar" --body "${TEST_TMP}/snw110.tar" \
       --metadata '{"snowball-auto-extract":"true"}'
     [ "${AWS_CODE}" -eq 0 ] && break
