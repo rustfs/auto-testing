@@ -1287,11 +1287,11 @@ test_kms306() {
   kms_create_key "k306" "env=ci" || return 1
   new_bucket "kms306-b1" || return 1
   make_test_file ${TEST_TMP}/kms-f1 65536
-  local key_b64
-  key_b64="$(printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' | xxd -r -p | base64)"
+  local key
+  key="0123456789abcdef0123456789abcdef"
   aws_run s3api put-object --bucket kms306-b1 --key f --body ${TEST_TMP}/kms-f1 \
     --server-side-encryption aws:kms --ssekms-key-id "${KMS_KEY_ID}" \
-    --sse-customer-algorithm AES256 --sse-customer-key "${key_b64}"
+    --sse-customer-algorithm AES256 --sse-customer-key "${key}"
   assert_aws_fails || { echo "SSE-C + SSE-KMS mutually exclusive not enforced"; return 1; }
   printf '%s' "${AWS_OUT}" | grep -qiE 'InvalidArgument|400|conflict|mutually' || { echo "unexpected error: ${AWS_OUT}"; return 1; }
   rm_bucket kms306-b1
@@ -1800,17 +1800,17 @@ test_kms316() {
     /tmp/kms-select.out
   assert_aws_ok || { echo "select on SSE-KMS object failed: ${AWS_OUT}"; rm_bucket kms316-b1; return 1; }
   grep -q "b,2" /tmp/kms-select.out || { echo "select result missing row: $(head -c 200 /tmp/kms-select.out)"; rm_bucket kms316-b1; return 1; }
-  local key_b64
-  key_b64="$(printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' | xxd -r -p | base64)"
+  local key
+  key="0123456789abcdef0123456789abcdef"
   aws_run s3api put-object --bucket kms316-b1 --key ssec.csv --body /tmp/kms-sel.csv \
-    --sse-customer-algorithm AES256 --sse-customer-key "${key_b64}"
+    --sse-customer-algorithm AES256 --sse-customer-key "${key}"
   assert_aws_ok || { rm_bucket kms316-b1; return 1; }
-  local wrong_b64
-  wrong_b64="$(printf 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' | xxd -r -p | base64)"
+  local wrong_key
+  wrong_key="ffffffffffffffffffffffffffffffff"
   aws_run s3api select-object-content --bucket kms316-b1 --key ssec.csv \
     --expression "SELECT * FROM s3object" --expression-type SQL \
     --input-serialization '{"CSV":{}}' --output-serialization '{"CSV":{}}' \
-    --sse-customer-algorithm AES256 --sse-customer-key "${wrong_b64}" \
+    --sse-customer-algorithm AES256 --sse-customer-key "${wrong_key}" \
     /tmp/kms-select-bad.out
   assert_aws_fails || { echo "select with wrong SSE-C key unexpectedly succeeded"; rm_bucket kms316-b1; return 1; }
   rm -f /tmp/kms-select.out /tmp/kms-select-bad.out
