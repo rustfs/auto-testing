@@ -56,8 +56,12 @@ SIGV4_REGION="us-east-1"
 SIGV4_SERVICE="s3"
 API_REQUEST_TIMEOUT=60
 
-# Main cluster (source site): single-multi on the shared nodes.
-VOLUMES_MAIN="/data/rustfs{1...4}/mnmd"
+# Main cluster (source site): multi-multi across the shared nodes, i.e. one
+# distributed rustfs with an endpoint per node (http://<node>:9000/data/...).
+# A bare local path here would silently form N independent single-node
+# clusters (each node gets its own format.json cluster id), which breaks
+# replication and load-balanced S3 calls.
+VOLUMES_PATH="/data/rustfs{1...4}/mnmd"
 
 # Second instance (target site / bucket-replication target) on the first node.
 # The script drives the nodes over SSH but talks S3/admin over HTTP from the
@@ -222,10 +226,11 @@ ensure_volume_dirs() {
 }
 
 rustfs_config_body() {
+  local volumes="$1"
   cat <<EOF
 RUSTFS_ACCESS_KEY=${ACCESS_KEY}
 RUSTFS_SECRET_KEY=${SECRET_KEY}
-RUSTFS_VOLUMES="${VOLUMES_MAIN}"
+RUSTFS_VOLUMES="${volumes}"
 RUSTFS_ADDRESS="${RUSTFS_ADDRESS}"
 RUSTFS_CONSOLE_ADDRESS="${RUSTFS_CONSOLE_ADDRESS}"
 RUSTFS_CONSOLE_ENABLE=${RUSTFS_CONSOLE_ENABLE}
@@ -297,7 +302,7 @@ service_action() {
 }
 
 cleanup_node() {
-  local node="$1"
+  local node="$1" d
   log "cleanup: replication test residue on ${node}"
   {
     printf 'set -euo pipefail\n'
@@ -306,6 +311,9 @@ cleanup_node() {
     printf '${SUDO} rm -f /etc/systemd/system/%s.service\n' "${SITE2_SERVICE}"
     printf '${SUDO} rm -f %s\n' "${SITE2_CONFIG_FILE}"
     printf '${SUDO} rm -rf %s /var/log/rustfs-rep2\n' "${SITE2_VOLUMES}"
+    printf '${SUDO} systemctl stop %s 2>/dev/null || true\n' "${RUSTFS_SERVICE}"
+    printf '${SUDO} rm -f %s\n' "${RUSTFS_CONFIG_FILE}"
+    printf '${SUDO} rm -rf /data/rustfs[1-9]/mnmd /var/log/rustfs\n'
     printf '${SUDO} systemctl daemon-reload 2>/dev/null || true\n'
   } | run_remote "${node}"
 }
@@ -333,13 +341,16 @@ EOF
 }
 
 env_setup_main_cluster() {
-  local node
-  log "environment setup: main cluster (single-multi, ${NODES[*]})"
+  local node body volumes=""
+  # Multi-multi endpoint list: every node serves the same 4 local drives.
+  for node in "${NODES[@]}"; do
+    volumes+="${volumes:+ }http://${node}:9000${VOLUMES_PATH}"
+  done
+  log "environment setup: main cluster (multi-multi, ${NODES[*]}) volumes: ${volumes}"
   for node in "${NODES[@]}"; do cleanup_node "${node}"; done
   install_package_all
-  local node body
-  for node in "${NODES[@]}"; do ensure_volume_dirs "${node}" "${VOLUMES_MAIN}"; done
-  body="$(rustfs_config_body)"
+  for node in "${NODES[@]}"; do ensure_volume_dirs "${node}" "${VOLUMES_PATH}"; done
+  body="$(rustfs_config_body "${volumes}")"
   for node in "${NODES[@]}"; do
     write_remote_config "${node}" "${RUSTFS_CONFIG_FILE}" "${body}"
   done
