@@ -122,6 +122,7 @@ SELECTED_SUITES=()
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-repl.XXXXXX")"
 trap 'rm -rf "${TEST_TMP}"' EXIT
+SIGNED_CODE_FILE="${TEST_TMP}/signed-api-code"
 
 # ==================== Helpers ====================
 
@@ -409,9 +410,23 @@ sha256_hex()   { printf '%s' "$1" | openssl dgst -sha256 -hex | awk '{print $NF}
 hmac_sha256_hexkey() { printf '%s' "$2" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$1" -hex | awk '{print $NF}'; }
 
 canonical_query() {
-  local q="$1"
-  [ -z "${q}" ] && { printf ''; return 0; }
-  printf '%s' "${q}" | tr '&' '\n' | sort | tr '\n' '&' | sed 's/&$//'
+  # Valueless params (?flag) sign as "key=": the server parses the query into
+  # key/value pairs and rebuilds the canonical form with '=' for every pair,
+  # so a bare "flag" in the canonical request fails with SignatureDoesNotMatch.
+  awk -v q="$1" 'BEGIN {
+    n = split(q, parts, "&")
+    for (i = 1; i <= n; i++) {
+      if (parts[i] !~ /=/) parts[i] = parts[i] "="
+      pairs[i] = parts[i]
+    }
+    # sort pairs by key (text sort of the full pair equals key sort when keys are distinct)
+    for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) {
+      if (pairs[j] < pairs[i]) { tmp = pairs[i]; pairs[i] = pairs[j]; pairs[j] = tmp }
+    }
+    out = ""
+    for (i = 1; i <= n; i++) out = out (i > 1 ? "&" : "") pairs[i]
+    printf "%s", out
+  }'
 }
 
 # signed_request <endpoint> <method> <path> [query] [body] [content_type]
@@ -420,19 +435,18 @@ canonical_query() {
 # x-amz-date whenever a body is sent (curl always emits Content-Type for
 # -d and the server signs every header it sees except the ignored few,
 # so an unsigned Content-Type fails with SignatureDoesNotMatch).
-# Prints the response body; the HTTP code lands in SIGNED_HTTP_CODE.
-SIGNED_HTTP_CODE="000"
+# Prints the response body; the HTTP code lands in the file read by signed_code().
 signed_request() {
   local endpoint="$1" method="$2" path="$3" query="${4:-}" body="${5:-}" content_type="${6:-application/xml}"
   local amz_date date_stamp host_port
   local canonical_headers signed_headers canonical_request string_to_sign
   local scope k_secret k_date k_region k_service k_signing signature auth
-  local url tmp code
+  local url tmp code raw_query
   local curl_body=()
 
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: signed ${method} ${endpoint}${path}${query:+?${query}}"
-    SIGNED_HTTP_CODE="200"
+    printf '200' > "${SIGNED_CODE_FILE}"
     printf '{}'
     return 0
   fi
@@ -442,22 +456,18 @@ signed_request() {
 
   amz_date="$(date -u +%Y%m%dT%H%M%SZ)"
   date_stamp="${amz_date:0:8}"
+  raw_query="${query}"
   query="$(canonical_query "${query}")"
 
-  if [ -n "${body}" ]; then
-    canonical_headers="content-type:${content_type}
+  # The server requires every header actually sent to be signed (it rejects
+  # with "missing signed header: content-type"). Always sign content-type and
+  # always send it explicitly so the signed and sent sets match exactly.
+  canonical_headers="content-type:${content_type}
 host:${host_port}
 x-amz-content-sha256:UNSIGNED-PAYLOAD
 x-amz-date:${amz_date}
 "
-    signed_headers="content-type;host;x-amz-content-sha256;x-amz-date"
-  else
-    canonical_headers="host:${host_port}
-x-amz-content-sha256:UNSIGNED-PAYLOAD
-x-amz-date:${amz_date}
-"
-    signed_headers="host;x-amz-content-sha256;x-amz-date"
-  fi
+  signed_headers="content-type;host;x-amz-content-sha256;x-amz-date"
   canonical_request="${method}
 ${path}
 ${query}
@@ -479,10 +489,10 @@ $(sha256_hex "${canonical_request}")"
   signature="$(hmac_sha256_hexkey "${k_signing}" "${string_to_sign}")"
   auth="AWS4-HMAC-SHA256 Credential=${ACCESS_KEY}/${scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
 
-  url="http://${host_port}${path}${query:+?${query}}"
+  url="http://${host_port}${path}${raw_query:+?${raw_query}}"
   tmp="$(mktemp)"
   if [ -n "${body}" ]; then
-    curl_body=(-d "${body}" -H "Content-Type: ${content_type}")
+    curl_body=(-d "${body}")
   fi
   # Keep whatever -w printed even when curl exits non-zero (e.g. a reset
   # keep-alive connection after the response arrived): the body below is
@@ -490,15 +500,21 @@ $(sha256_hex "${canonical_request}")"
   # to 000 would fail cases that actually succeeded.
   code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -w '%{http_code}' \
     -H "Host: ${host_port}" \
+    -H "Content-Type: ${content_type}" \
     -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
     -H "x-amz-date: ${amz_date}" \
     -H "Authorization: ${auth}" \
     "${curl_body[@]}" -X "${method}" "${url}")"
   [ -n "${code}" ] || code="000"
-  SIGNED_HTTP_CODE="${code}"
+  # Publish via a file, not a variable: callers invoke signed_request inside
+  # $(...) command substitution, and a variable set in that subshell can never
+  # reach the caller's scope.
+  printf '%s' "${code}" > "${SIGNED_CODE_FILE}"
   cat "${tmp}"
   rm -f "${tmp}"
 }
+
+signed_code() { cat "${SIGNED_CODE_FILE}" 2>/dev/null || printf '000'; }
 
 # admin_api <method> <path> [query] [body] — signed_request on the main site.
 admin_api() {
@@ -623,8 +639,8 @@ register_replication_target() {
     --arg ak "${ACCESS_KEY}" --arg sk "${SECRET_KEY}" --arg tb "${dst}" \
     '{endpoint:$ep, credentials:{accessKey:$ak, secretKey:$sk}, targetbucket:$tb, secure:false, skipTlsVerify:false, type:"replication"}')"
   arn="$(admin_api PUT "/rustfs/admin/v3/set-remote-target" "bucket=${src}" "${body}")"
-  if [ "${SIGNED_HTTP_CODE}" != "200" ]; then
-    echo "set-remote-target HTTP ${SIGNED_HTTP_CODE}: ${arn}" >&2
+  if [ "$(signed_code)" != "200" ]; then
+    echo "set-remote-target HTTP $(signed_code): ${arn}" >&2
     return 1
   fi
   # 200 response body is the JSON-encoded ARN string.
@@ -684,13 +700,13 @@ test_rep101() {
     || { rm_bucket_force main rep101-src; rm_bucket_force site2 rep101-dst; return 1; }
   case "${arn}" in arn:*) : ;; *) echo "ARN has unexpected shape: ${arn}"; return 1 ;; esac
   list="$(admin_api GET "/rustfs/admin/v3/list-remote-targets" "bucket=rep101-src")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "list-remote-targets HTTP ${SIGNED_HTTP_CODE}: ${list}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "list-remote-targets HTTP $(signed_code): ${list}"; return 1; }
   printf '%s' "${list}" | jq -e --arg arn "${arn}" '.[0].arn == $arn' >/dev/null 2>&1 \
     || { echo "listing does not contain the ARN: ${list}"; return 1; }
   admin_api DELETE "/rustfs/admin/v3/remove-remote-target" "bucket=rep101-src&arn=${arn}" >/dev/null
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "remove-remote-target HTTP ${SIGNED_HTTP_CODE}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "remove-remote-target HTTP $(signed_code)"; return 1; }
   list="$(admin_api GET "/rustfs/admin/v3/list-remote-targets" "bucket=rep101-src")"
-  if [ "${SIGNED_HTTP_CODE}" = "200" ]; then
+  if [ "$(signed_code)" = "200" ]; then
     printf '%s' "${list}" | jq -e --arg arn "${arn}" '([.[].arn] | index($arn)) == null' >/dev/null 2>&1 \
       || { echo "ARN still listed after removal: ${list}"; return 1; }
   fi
@@ -707,8 +723,8 @@ test_rep102() {
   put_replication_rule rep102-src "${arn}" \
     || { rm_bucket_force main rep102-src; rm_bucket_force site2 rep102-dst; return 1; }
   body="$(signed_request "${API_ENDPOINT}" GET "/rep102-src" "replication-check")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] \
-    || { echo "replication-check HTTP ${SIGNED_HTTP_CODE}: ${body}"; rm_bucket_force main rep102-src; rm_bucket_force site2 rep102-dst; return 1; }
+  [ "$(signed_code)" = "200" ] \
+    || { echo "replication-check HTTP $(signed_code): ${body}"; rm_bucket_force main rep102-src; rm_bucket_force site2 rep102-dst; return 1; }
   printf '%s' "${body}" | jq -e '.Status == "OK"' >/dev/null 2>&1 \
     || { echo "replication-check not OK: ${body}"; rm_bucket_force main rep102-src; rm_bucket_force site2 rep102-dst; return 1; }
   rm_bucket_force main rep102-src
@@ -722,7 +738,7 @@ test_rep103() {
   local body
   body="$(signed_request "${API_ENDPOINT}" GET "/rep103-src" "replication-check")"
   rm_bucket_force main rep103-src
-  [ "${SIGNED_HTTP_CODE}" = "400" ] || { echo "expected 400 for unversioned bucket, got ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "400" ] || { echo "expected 400 for unversioned bucket, got $(signed_code): ${body}"; return 1; }
   printf '%s' "${body}" | grep -qi "versioning" || { echo "error missing 'versioning': ${body}"; return 1; }
 }
 
@@ -787,8 +803,8 @@ test_rep106() {
   # Removing a target still referenced by a replication rule must be rejected
   # with 400 "removal disallowed".
   body="$(admin_api DELETE "/rustfs/admin/v3/remove-remote-target" "bucket=rep106-src&arn=${arn}")"
-  [ "${SIGNED_HTTP_CODE}" = "400" ] \
-    || { echo "expected 400 removing an in-use target, got ${SIGNED_HTTP_CODE}: ${body}"; rm_bucket_force main rep106-src; rm_bucket_force site2 rep106-dst; return 1; }
+  [ "$(signed_code)" = "400" ] \
+    || { echo "expected 400 removing an in-use target, got $(signed_code): ${body}"; rm_bucket_force main rep106-src; rm_bucket_force site2 rep106-dst; return 1; }
   printf '%s' "${body}" | grep -qi "disallowed" \
     || { echo "error missing 'disallowed': ${body}"; rm_bucket_force main rep106-src; rm_bucket_force site2 rep106-dst; return 1; }
   rm_bucket_force main rep106-src
@@ -809,8 +825,8 @@ test_rep107() {
     || { rm_bucket_force main rep107-src; rm_bucket_force site2 rep107-dst; return 1; }
   # Existing-object resync: PUT ?replication-reset, response target[0].arn/resetid.
   body="$(signed_request "${API_ENDPOINT}" PUT "/rep107-src" "replication-reset")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] \
-    || { echo "replication-reset HTTP ${SIGNED_HTTP_CODE}: ${body}"; rm_bucket_force main rep107-src; rm_bucket_force site2 rep107-dst; return 1; }
+  [ "$(signed_code)" = "200" ] \
+    || { echo "replication-reset HTTP $(signed_code): ${body}"; rm_bucket_force main rep107-src; rm_bucket_force site2 rep107-dst; return 1; }
   printf '%s' "${body}" | jq -e '.target[0].arn != null and .target[0].resetid != null' >/dev/null 2>&1 \
     || { echo "replication-reset response missing target[0].arn/resetid: ${body}"; rm_bucket_force main rep107-src; rm_bucket_force site2 rep107-dst; return 1; }
   aws_wait_ep "${SITE2_ENDPOINT}" "existing object replicated after resync" \
@@ -874,16 +890,16 @@ test_site101() {
   local add_endpoint
   add_endpoint="http://$(endpoint_host_prefix)1:9000"
   body="$(signed_request "${add_endpoint}" PUT "/rustfs/admin/v3/site-replication/add" "replicateILMExpiry=false" "$(site_add_payload)")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "site-replication/add HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "site-replication/add HTTP $(signed_code): ${body}"; return 1; }
   printf '%s' "${body}" | jq -e '.success == true' >/dev/null 2>&1 \
     || { echo "site add not successful: ${body}"; return 1; }
   body="$(admin_api GET "/rustfs/admin/v3/site-replication/info")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "site-replication/info HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "site-replication/info HTTP $(signed_code): ${body}"; return 1; }
   printf '%s' "${body}" | jq -e '.enabled == true and (.sites | length == 2)' >/dev/null 2>&1 \
     || { echo "site info does not show 2 enabled sites: ${body}"; return 1; }
   # The peer entry must be visible from site2 as well.
   body="$(site2_admin_api GET "/rustfs/admin/v3/site-replication/info")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "site2 info HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "site2 info HTTP $(signed_code): ${body}"; return 1; }
   printf '%s' "${body}" | jq -e '.enabled == true and (.sites | length == 2)' >/dev/null 2>&1 \
     || { echo "site2 does not show 2 enabled sites: ${body}"; return 1; }
 }
@@ -892,7 +908,7 @@ test_site102() {
   # IAM user created on site1 must converge to site2.
   local body
   body="$(admin_api PUT "/rustfs/admin/v3/add-user" "accessKey=siteuser102" "{\"secretKey\":\"${SECRET_KEY}\",\"status\":\"enabled\"}")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "add-user HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "add-user HTTP $(signed_code): ${body}"; return 1; }
   aws_wait_ep "${SITE2_ENDPOINT}" "user visible on site2" \
     iam list-users --output json --query 'length(Users[?UserName==`siteuser102`]) > `0`' --output text \
     || return 1
@@ -934,15 +950,15 @@ test_site104() {
 test_site105() {
   local body peer
   body="$(admin_api GET "/rustfs/admin/v3/site-replication/status")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "site-replication/status HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "site-replication/status HTTP $(signed_code): ${body}"; return 1; }
   # Pull the remote peer's PeerInfo from /info for the resync body.
   body="$(admin_api GET "/rustfs/admin/v3/site-replication/info")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "site-replication/info HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "site-replication/info HTTP $(signed_code): ${body}"; return 1; }
   peer="$(printf '%s' "${body}" | jq -c --arg ep "${SITE2_ENDPOINT}" '.sites[] | select(.endpoint == $ep)')"
   [ -n "${peer}" ] || { echo "site2 peer missing from info: ${body}"; return 1; }
   # Resync must reject a duplicate start before we can assert on status shape.
   body="$(admin_api PUT "/rustfs/admin/v3/site-replication/resync/op" "operation=start" "${peer}")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "resync start HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "resync start HTTP $(signed_code): ${body}"; return 1; }
   printf '%s' "${body}" | jq -e '.status == "success" and (.id | length > 0)' >/dev/null 2>&1 \
     || { echo "resync start not successful: ${body}"; return 1; }
 }
@@ -950,13 +966,13 @@ test_site105() {
 test_site106() {
   local body
   body="$(admin_api GET "/rustfs/admin/v3/site-replication/info")"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "no site replication configured; SITE-101 must run first: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "no site replication configured; SITE-101 must run first: ${body}"; return 1; }
   body="$(admin_api PUT "/rustfs/admin/v3/site-replication/remove" "" '{"all":true}')"
-  [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "site-replication/remove HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "site-replication/remove HTTP $(signed_code): ${body}"; return 1; }
   printf '%s' "${body}" | jq -e '(.errorDetail // "") == "" and .status != ""' >/dev/null 2>&1 \
     || { echo "site remove reported an error: ${body}"; return 1; }
   body="$(admin_api GET "/rustfs/admin/v3/site-replication/info")"
-  if [ "${SIGNED_HTTP_CODE}" = "200" ]; then
+  if [ "$(signed_code)" = "200" ]; then
     printf '%s' "${body}" | jq -e '.enabled == false and ((.sites // []) | length == 0)' >/dev/null 2>&1 \
       || { echo "sites still present after remove: ${body}"; return 1; }
   fi
