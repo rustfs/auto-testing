@@ -348,6 +348,10 @@ env_setup_main_cluster() {
   for pid in "${pids[@]}"; do wait "${pid}" || die "start failed"; done
   for node in "${NODES[@]}"; do wait_service_active "${node}" "${RUSTFS_SERVICE}"; done
   wait_http_live "${API_ENDPOINT}"
+  export AWS_ACCESS_KEY_ID="${ACCESS_KEY}"
+  export AWS_SECRET_ACCESS_KEY="${SECRET_KEY}"
+  export AWS_DEFAULT_REGION="${REGION}"
+  export AWS_EC2_METADATA_DISABLED=true
 }
 
 env_setup_site2() {
