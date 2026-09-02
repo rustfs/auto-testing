@@ -37,6 +37,16 @@ else
   NODES=(vm000 vm001 vm002)
 fi
 
+# Host prefix used in endpoint expressions (RUSTFS_VOLUMES, replication
+# target, site peers). The names must resolve BOTH from the runner (SSH/S3)
+# and from every node itself (rustfs local-host detection, replication
+# workers dialing peers), so prefer the rustfs-nodeN aliases the shared
+# environment provisions; fall back to the first node's SSH host when absent.
+endpoint_host_prefix() {
+  if getent hosts "rustfs-node1" >/dev/null 2>&1; then printf 'rustfs-node';
+  else printf '%s' "${NODES[0]}"; fi
+}
+
 SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
 SSH_PORT="${RUSTFS_SSH_PORT:-22}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "${SSH_PORT}")
@@ -66,11 +76,14 @@ VOLUMES_PATH="/data/rustfs{1...4}/mnmd"
 # Second instance (target site / bucket-replication target) on the first node.
 # The script drives the nodes over SSH but talks S3/admin over HTTP from the
 # host it runs on, so the endpoint must be the first node's address, not
-# 127.0.0.1 (that only works when node and runner share a host).
+# 127.0.0.1 (that only works when node and runner share a host). The target
+# endpoint is ALSO dialed by the main-cluster nodes themselves (replication
+# workers), so it must use the rustfs-nodeN alias that resolves inside the
+# VMs too.
 SITE2_SERVICE="rustfs-rep2"
 SITE2_ADDRESS=":19000"
 SITE2_CONSOLE_ADDRESS=":19001"
-SITE2_HOSTPORT="${RUSTFS_SITE2_HOST:-${NODES[0]}}:19000"
+SITE2_HOSTPORT="${RUSTFS_SITE2_HOST:-$(endpoint_host_prefix)1}:19000"
 SITE2_ENDPOINT="${RUSTFS_SITE2_ENDPOINT:-http://${SITE2_HOSTPORT}}"
 SITE2_VOLUMES="/data/rustfs-rep2/mnmd"
 SITE1_NAME="site1"
@@ -236,6 +249,7 @@ RUSTFS_CONSOLE_ADDRESS="${RUSTFS_CONSOLE_ADDRESS}"
 RUSTFS_CONSOLE_ENABLE=${RUSTFS_CONSOLE_ENABLE}
 RUSTFS_OBS_LOGGER_LEVEL=${RUSTFS_OBS_LOGGER_LEVEL}
 RUSTFS_OBS_LOG_DIRECTORY="${RUSTFS_OBS_LOG_DIRECTORY}"
+RUSTFS_REPLICATION_ALLOW_LOOPBACK_TARGET=true
 EOF
 }
 
@@ -249,6 +263,7 @@ RUSTFS_CONSOLE_ADDRESS="${SITE2_CONSOLE_ADDRESS}"
 RUSTFS_CONSOLE_ENABLE=${RUSTFS_CONSOLE_ENABLE}
 RUSTFS_OBS_LOGGER_LEVEL=${RUSTFS_OBS_LOGGER_LEVEL}
 RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs-rep2/"
+RUSTFS_REPLICATION_ALLOW_LOOPBACK_TARGET=true
 EOF
 }
 
@@ -338,15 +353,6 @@ ls -lh "${PACKAGES_DIR}/${PACKAGE_FILE}"
 EOF
 )"
   printf '%s\n' "${script}" | run_remote_all
-}
-
-# Host prefix used in the RUSTFS_VOLUMES endpoint expression. The names must
-# resolve BOTH from the runner (SSH/S3) and from every node itself (rustfs
-# local-host detection), so prefer the rustfs-nodeN aliases the shared
-# environment provisions; fall back to the first node's SSH host when absent.
-endpoint_host_prefix() {
-  if getent hosts "rustfs-node1" >/dev/null 2>&1; then printf 'rustfs-node';
-  else printf '%s' "${NODES[0]}"; fi
 }
 
 env_setup_main_cluster() {
