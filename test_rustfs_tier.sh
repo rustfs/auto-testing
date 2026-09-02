@@ -87,6 +87,129 @@ test_cleanup_order_idempotence_and_drain() (
   assert_eq "4" "$(wc -l < "${order}" | tr -d ' ')" "idempotent cleanup call count"
 )
 
+test_source_bucket_cleanup_retries_bucket_not_empty_then_succeeds() (
+  reset_harness
+  case_resources_reset
+  SECONDS=0
+  local bucket=t104-ss-240101000000-1-src delete_calls=0
+  local -a attempt_timeouts=() request_times=()
+  cleanup_aws() { return 0; }
+  cleanup_bucket_data() { return 0; }
+  aws_at_run_with_hard_timeout() {
+    attempt_timeouts+=("$1")
+    request_times+=("${SECONDS}")
+    delete_calls=$((delete_calls + 1))
+    assert_eq \
+      "$(joined_args 5 "${ENDPOINT}" s3api delete-bucket --bucket "${bucket}")" \
+      "$(joined_args "$@")" \
+      "source delete request ${delete_calls}"
+    if [ "${delete_calls}" -le 2 ]; then
+      AWS_OUT='An error occurred (BucketNotEmpty) when calling the DeleteBucket operation: retry later'
+      AWS_CODE=254
+      return 254
+    fi
+    AWS_OUT=""
+    AWS_CODE=0
+    return 0
+  }
+  sleep() { SECONDS=$((SECONDS + $1)); }
+
+  cleanup_source_bucket "${bucket}" || fail "source cleanup should converge"
+  assert_eq 3 "${delete_calls}" "eventual-success delete request count"
+  assert_eq "$(joined_args 5 5 5)" "$(joined_args "${attempt_timeouts[@]}")" "eventual-success attempt timeouts"
+  assert_eq "$(joined_args 0 2 4)" "$(joined_args "${request_times[@]}")" "eventual-success cadence"
+  assert_eq 0 "${#CASE_CLEANUP_ERRORS[@]}" "eventual-success diagnostics"
+)
+
+test_source_bucket_cleanup_stops_at_bucket_not_empty_deadline() (
+  reset_harness
+  case_resources_reset
+  SECONDS=0
+  local bucket=t104-ss-240101000000-1-src delete_calls=0
+  local diagnostic="${TEST_ROOT}/source-delete-deadline-diagnostic"
+  local -a attempt_timeouts=() request_times=()
+  cleanup_aws() { return 0; }
+  cleanup_bucket_data() { return 0; }
+  aws_at_run_with_hard_timeout() {
+    attempt_timeouts+=("$1")
+    request_times+=("${SECONDS}")
+    delete_calls=$((delete_calls + 1))
+    AWS_OUT='An error occurred (BucketNotEmpty) when calling the DeleteBucket operation: retry later'
+    AWS_CODE=254
+    return 254
+  }
+  sleep() { SECONDS=$((SECONDS + $1)); }
+
+  if cleanup_source_bucket "${bucket}" 2> "${diagnostic}"; then
+    fail "persistent BucketNotEmpty should exhaust the source cleanup deadline"
+  fi
+  assert_eq 15 "${delete_calls}" "deadline delete request count"
+  assert_eq \
+    "$(joined_args 5 5 5 5 5 5 5 5 5 5 5 5 5 4 2)" \
+    "$(joined_args "${attempt_timeouts[@]}")" \
+    "remaining-time attempt bounds"
+  assert_eq \
+    "$(joined_args 0 2 4 6 8 10 12 14 16 18 20 22 24 26 28)" \
+    "$(joined_args "${request_times[@]}")" \
+    "deadline request cadence"
+  assert_eq 30 "${SECONDS}" "source cleanup deadline"
+  assert_eq 1 "${#CASE_CLEANUP_ERRORS[@]}" "deadline diagnostic count"
+  assert_eq 1 "$(wc -l < "${diagnostic}" | tr -d ' ')" "deadline stderr diagnostic count"
+  assert_eq 1 "$(wc -l < "${RESIDUE_FILE}" | tr -d ' ')" "deadline residue count"
+  assert_contains 'reason=deadline_exceeded' "${CASE_CLEANUP_ERRORS[0]}" "deadline reason"
+  assert_contains 'error_code=BucketNotEmpty' "${CASE_CLEANUP_ERRORS[0]}" "deadline error code"
+  assert_contains 'attempts=15' "${CASE_CLEANUP_ERRORS[0]}" "deadline attempts"
+  assert_contains 'deadline_seconds=30' "${CASE_CLEANUP_ERRORS[0]}" "deadline budget"
+  assert_contains 'elapsed_seconds=30' "${CASE_CLEANUP_ERRORS[0]}" "deadline elapsed"
+)
+
+test_source_bucket_cleanup_does_not_retry_other_errors() (
+  reset_harness
+  case_resources_reset
+  SECONDS=0
+  local bucket=t104-ss-240101000000-1-src delete_calls=0
+  local diagnostic="${TEST_ROOT}/source-delete-non-retryable-diagnostic"
+  cleanup_aws() { return 0; }
+  cleanup_bucket_data() { return 0; }
+  aws_at_run_with_hard_timeout() {
+    delete_calls=$((delete_calls + 1))
+    AWS_OUT='An error occurred (AccessDenied) when calling the DeleteBucket operation: message mentions BucketNotEmpty'
+    AWS_CODE=254
+    return 254
+  }
+  sleep() { fail "non-retryable source deletion slept before failing"; }
+
+  if cleanup_source_bucket "${bucket}" 2> "${diagnostic}"; then
+    fail "AccessDenied source cleanup should fail"
+  fi
+  assert_eq 1 "${delete_calls}" "non-retryable delete request count"
+  assert_eq 1 "${#CASE_CLEANUP_ERRORS[@]}" "non-retryable diagnostic count"
+  assert_eq 1 "$(wc -l < "${diagnostic}" | tr -d ' ')" "non-retryable stderr diagnostic count"
+  assert_contains 'reason=non_retryable' "${CASE_CLEANUP_ERRORS[0]}" "non-retryable reason"
+  assert_contains 'error_code=AccessDenied' "${CASE_CLEANUP_ERRORS[0]}" "non-retryable exact error code"
+  assert_contains 'attempts=1' "${CASE_CLEANUP_ERRORS[0]}" "non-retryable attempts"
+)
+
+test_source_bucket_cleanup_accepts_no_such_bucket() (
+  reset_harness
+  case_resources_reset
+  SECONDS=0
+  local bucket=t104-ss-240101000000-1-src delete_calls=0
+  cleanup_aws() { return 0; }
+  cleanup_bucket_data() { return 0; }
+  aws_at_run_with_hard_timeout() {
+    delete_calls=$((delete_calls + 1))
+    AWS_OUT='An error occurred (NoSuchBucket) when calling the DeleteBucket operation: already absent'
+    AWS_CODE=254
+    return 254
+  }
+  sleep() { fail "NoSuchBucket source deletion slept before succeeding"; }
+
+  cleanup_source_bucket "${bucket}" || fail "NoSuchBucket should satisfy source cleanup"
+  assert_eq 1 "${delete_calls}" "NoSuchBucket delete request count"
+  assert_eq 0 "${#CASE_CLEANUP_ERRORS[@]}" "NoSuchBucket diagnostics"
+)
+
 test_cleanup_upgrades_pass_and_unsupported() (
   reset_harness
   case_cleanup() {
@@ -1126,6 +1249,10 @@ fi
 
 test_pre_registration_before_failed_create
 test_cleanup_order_idempotence_and_drain
+test_source_bucket_cleanup_retries_bucket_not_empty_then_succeeds
+test_source_bucket_cleanup_stops_at_bucket_not_empty_deadline
+test_source_bucket_cleanup_does_not_retry_other_errors
+test_source_bucket_cleanup_accepts_no_such_bucket
 test_cleanup_upgrades_pass_and_unsupported
 test_term_uses_cleanup_fallback
 test_rc_provenance_with_spaced_path_and_digest
@@ -1151,4 +1278,4 @@ test_log_capture_startup_signal_phases_are_safe
 test_log_file_fallback_rejects_unsafe_paths
 test_log_destination_swap_keeps_open_inode
 test_secure_log_owner_link_and_mode_contract
-printf 'PASS: rustfs-tier-test.sh cleanup, result, signal, provenance, tier query, probe, diagnostic, and log-isolation tests\n'
+printf 'PASS: rustfs-tier-test.sh cleanup retry, result, signal, provenance, tier query, probe, diagnostic, and log-isolation tests\n'
