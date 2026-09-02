@@ -354,7 +354,8 @@ env_setup_main_cluster() {
   # Multi-multi, same form the security/s3 suites write: rustfs expands the
   # {a...b} braces itself at startup, which keeps every node agreeing on the
   # set layout. Pre-expanded endpoint lists are avoided on purpose.
-  local volumes="http://$(endpoint_host_prefix){1...$((${#NODES[@]}))}:9000${VOLUMES_PATH}"
+  local volumes
+  volumes="http://$(endpoint_host_prefix){1...$((${#NODES[@]}))}:9000${VOLUMES_PATH}"
   log "environment setup: main cluster (multi-multi, ${NODES[*]}) volumes: ${volumes}"
   for node in "${NODES[@]}"; do cleanup_node "${node}"; done
   install_package_all
@@ -628,7 +629,8 @@ put_replication_rule() {
 site_add_payload() {
   # Peers must reach each other by a routable address: the site1 endpoint as
   # seen from site2 (running on NODES[0]), not the runner-local API endpoint.
-  local site1_peer="http://$(endpoint_host_prefix)1:9000"
+  local site1_peer
+  site1_peer="http://$(endpoint_host_prefix)1:9000"
   jq -nc \
     --arg n1 "${SITE1_NAME}" --arg e1 "${site1_peer}" \
     --arg n2 "${SITE2_NAME}" --arg e2 "${SITE2_ENDPOINT}" \
