@@ -410,14 +410,17 @@ canonical_query() {
 
 # signed_request <endpoint> <method> <path> [query] [body] [content_type]
 # Signs with the S3 service name (admin endpoints accept the S3 signing
-# chain), UNSIGNED-PAYLOAD, host;x-amz-content-sha256;x-amz-date.
+# chain), UNSIGNED-PAYLOAD, and content-type;host;x-amz-content-sha256;
+# x-amz-date whenever a body is sent (curl always emits Content-Type for
+# -d and the server signs every header it sees except the ignored few,
+# so an unsigned Content-Type fails with SignatureDoesNotMatch).
 # Prints the response body; the HTTP code lands in SIGNED_HTTP_CODE.
 SIGNED_HTTP_CODE="000"
 signed_request() {
   local endpoint="$1" method="$2" path="$3" query="${4:-}" body="${5:-}" content_type="${6:-application/xml}"
   local amz_date date_stamp host_port
   local canonical_headers signed_headers canonical_request string_to_sign
-  local scope k_date k_region k_service k_signing signature auth
+  local scope k_secret k_date k_region k_service k_signing signature auth
   local url tmp code
   local curl_body=()
 
@@ -435,11 +438,20 @@ signed_request() {
   date_stamp="${amz_date:0:8}"
   query="$(canonical_query "${query}")"
 
-  canonical_headers="host:${host_port}
+  if [ -n "${body}" ]; then
+    canonical_headers="content-type:${content_type}
+host:${host_port}
 x-amz-content-sha256:UNSIGNED-PAYLOAD
 x-amz-date:${amz_date}
 "
-  signed_headers="host;x-amz-content-sha256;x-amz-date"
+    signed_headers="content-type;host;x-amz-content-sha256;x-amz-date"
+  else
+    canonical_headers="host:${host_port}
+x-amz-content-sha256:UNSIGNED-PAYLOAD
+x-amz-date:${amz_date}
+"
+    signed_headers="host;x-amz-content-sha256;x-amz-date"
+  fi
   canonical_request="${method}
 ${path}
 ${query}
@@ -453,10 +465,11 @@ ${amz_date}
 ${scope}
 $(sha256_hex "${canonical_request}")"
 
-  k_date="$(hex_of_ascii "AWS4${SECRET_KEY}")"
-  k_region="$(hmac_sha256_hexkey "${k_date}" "${date_stamp}")"
-  k_service="$(hmac_sha256_hexkey "${k_region}" "${SIGV4_REGION}")"
-  k_signing="$(hmac_sha256_hexkey "${k_service}" "${SIGV4_SERVICE}")"
+  k_secret="$(hex_of_ascii "AWS4${SECRET_KEY}")"
+  k_date="$(hmac_sha256_hexkey "${k_secret}" "${date_stamp}")"
+  k_region="$(hmac_sha256_hexkey "${k_date}" "${SIGV4_REGION}")"
+  k_service="$(hmac_sha256_hexkey "${k_region}" "${SIGV4_SERVICE}")"
+  k_signing="$(hmac_sha256_hexkey "${k_service}" "aws4_request")"
   signature="$(hmac_sha256_hexkey "${k_signing}" "${string_to_sign}")"
   auth="AWS4-HMAC-SHA256 Credential=${ACCESS_KEY}/${scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
 
