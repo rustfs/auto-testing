@@ -340,11 +340,22 @@ EOF
   printf '%s\n' "${script}" | run_remote_all
 }
 
+# Hostname used for a node in the RUSTFS_VOLUMES endpoint list. The name must
+# resolve BOTH from the runner (SSH/S3) and from every node itself (rustfs
+# local-host detection), so prefer the rustfs-nodeN aliases the shared
+# environment provisions; fall back to the SSH host when they are absent.
+endpoint_host() {
+  local idx="$1"
+  local alias="rustfs-node$((idx + 1))"
+  if getent hosts "${alias}" >/dev/null 2>&1; then printf '%s' "${alias}";
+  else printf '%s' "${NODES[idx]}"; fi
+}
+
 env_setup_main_cluster() {
-  local node body volumes=""
+  local i node body volumes=""
   # Multi-multi endpoint list: every node serves the same 4 local drives.
-  for node in "${NODES[@]}"; do
-    volumes+="${volumes:+ }http://${node}:9000${VOLUMES_PATH}"
+  for i in "${!NODES[@]}"; do
+    volumes+="${volumes:+ }http://$(endpoint_host "${i}"):9000${VOLUMES_PATH}"
   done
   log "environment setup: main cluster (multi-multi, ${NODES[*]}) volumes: ${volumes}"
   for node in "${NODES[@]}"; do cleanup_node "${node}"; done
@@ -613,8 +624,11 @@ put_replication_rule() {
 # ==================== Site replication helpers ====================
 
 site_add_payload() {
+  # Peers must reach each other by a routable address: the site1 endpoint as
+  # seen from site2 (running on NODES[0]), not the runner-local API endpoint.
+  local site1_peer="http://$(endpoint_host 0):9000"
   jq -nc \
-    --arg n1 "${SITE1_NAME}" --arg e1 "${API_ENDPOINT}" \
+    --arg n1 "${SITE1_NAME}" --arg e1 "${site1_peer}" \
     --arg n2 "${SITE2_NAME}" --arg e2 "${SITE2_ENDPOINT}" \
     --arg ak "${ACCESS_KEY}" --arg sk "${SECRET_KEY}" \
     '[{name:$n1, endpoints:$e1, accessKey:$ak, secretKey:$sk, skipTlsVerify:false, caCertPem:""},
