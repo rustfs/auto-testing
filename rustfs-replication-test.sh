@@ -484,12 +484,17 @@ $(sha256_hex "${canonical_request}")"
   if [ -n "${body}" ]; then
     curl_body=(-d "${body}" -H "Content-Type: ${content_type}")
   fi
+  # Keep whatever -w printed even when curl exits non-zero (e.g. a reset
+  # keep-alive connection after the response arrived): the body below is
+  # authoritative proof the transaction completed, and clobbering the code
+  # to 000 would fail cases that actually succeeded.
   code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -w '%{http_code}' \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
     -H "x-amz-date: ${amz_date}" \
     -H "Authorization: ${auth}" \
-    "${curl_body[@]}" -X "${method}" "${url}")" || code="000"
+    "${curl_body[@]}" -X "${method}" "${url}")"
+  [ -n "${code}" ] || code="000"
   SIGNED_HTTP_CODE="${code}"
   cat "${tmp}"
   rm -f "${tmp}"
@@ -861,7 +866,14 @@ run_all_site_tests() {
 
 test_site101() {
   local body
-  body="$(admin_api PUT "/rustfs/admin/v3/site-replication/add" "replicateILMExpiry=false" "$(site_add_payload)")"
+  # The add request must reach a node directly (not the LB): the server
+  # derives the local site's endpoint from the request Host header, and with
+  # the LB host it no longer matches the payload's site1 endpoint — the local
+  # site is then probed as a remote peer and its own deploymentID comes back
+  # twice ("duplicate deploymentID" InvalidRequest).
+  local add_endpoint
+  add_endpoint="http://$(endpoint_host_prefix)1:9000"
+  body="$(signed_request "${add_endpoint}" PUT "/rustfs/admin/v3/site-replication/add" "replicateILMExpiry=false" "$(site_add_payload)")"
   [ "${SIGNED_HTTP_CODE}" = "200" ] || { echo "site-replication/add HTTP ${SIGNED_HTTP_CODE}: ${body}"; return 1; }
   printf '%s' "${body}" | jq -e '.success == true' >/dev/null 2>&1 \
     || { echo "site add not successful: ${body}"; return 1; }
