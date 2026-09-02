@@ -60,11 +60,14 @@ API_REQUEST_TIMEOUT=60
 VOLUMES_MAIN="/data/rustfs{1...4}/mnmd"
 
 # Second instance (target site / bucket-replication target) on the first node.
+# The script drives the nodes over SSH but talks S3/admin over HTTP from the
+# host it runs on, so the endpoint must be the first node's address, not
+# 127.0.0.1 (that only works when node and runner share a host).
 SITE2_SERVICE="rustfs-rep2"
 SITE2_ADDRESS=":19000"
 SITE2_CONSOLE_ADDRESS=":19001"
-SITE2_ENDPOINT="http://127.0.0.1:19000"
-SITE2_HOSTPORT="127.0.0.1:19000"
+SITE2_HOSTPORT="${RUSTFS_SITE2_HOST:-${NODES[0]}}:19000"
+SITE2_ENDPOINT="${RUSTFS_SITE2_ENDPOINT:-http://${SITE2_HOSTPORT}}"
 SITE2_VOLUMES="/data/rustfs-rep2/mnmd"
 SITE1_NAME="site1"
 SITE2_NAME="site2"
