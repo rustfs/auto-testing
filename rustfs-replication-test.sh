@@ -340,23 +340,21 @@ EOF
   printf '%s\n' "${script}" | run_remote_all
 }
 
-# Hostname used for a node in the RUSTFS_VOLUMES endpoint list. The name must
+# Host prefix used in the RUSTFS_VOLUMES endpoint expression. The names must
 # resolve BOTH from the runner (SSH/S3) and from every node itself (rustfs
 # local-host detection), so prefer the rustfs-nodeN aliases the shared
-# environment provisions; fall back to the SSH host when they are absent.
-endpoint_host() {
-  local idx="$1"
-  local alias="rustfs-node$((idx + 1))"
-  if getent hosts "${alias}" >/dev/null 2>&1; then printf '%s' "${alias}";
-  else printf '%s' "${NODES[idx]}"; fi
+# environment provisions; fall back to the first node's SSH host when absent.
+endpoint_host_prefix() {
+  if getent hosts "rustfs-node1" >/dev/null 2>&1; then printf 'rustfs-node';
+  else printf '%s' "${NODES[0]}"; fi
 }
 
 env_setup_main_cluster() {
-  local i node body volumes=""
-  # Multi-multi endpoint list: every node serves the same 4 local drives.
-  for i in "${!NODES[@]}"; do
-    volumes+="${volumes:+ }http://$(endpoint_host "${i}"):9000${VOLUMES_PATH}"
-  done
+  local node body
+  # Multi-multi, same form the security/s3 suites write: rustfs expands the
+  # {a...b} braces itself at startup, which keeps every node agreeing on the
+  # set layout. Pre-expanded endpoint lists are avoided on purpose.
+  local volumes="http://$(endpoint_host_prefix){1...$((${#NODES[@]}))}:9000${VOLUMES_PATH}"
   log "environment setup: main cluster (multi-multi, ${NODES[*]}) volumes: ${volumes}"
   for node in "${NODES[@]}"; do cleanup_node "${node}"; done
   install_package_all
@@ -626,7 +624,7 @@ put_replication_rule() {
 site_add_payload() {
   # Peers must reach each other by a routable address: the site1 endpoint as
   # seen from site2 (running on NODES[0]), not the runner-local API endpoint.
-  local site1_peer="http://$(endpoint_host 0):9000"
+  local site1_peer="http://$(endpoint_host_prefix)1:9000"
   jq -nc \
     --arg n1 "${SITE1_NAME}" --arg e1 "${site1_peer}" \
     --arg n2 "${SITE2_NAME}" --arg e2 "${SITE2_ENDPOINT}" \
