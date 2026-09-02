@@ -521,6 +521,16 @@ admin_api() {
   signed_request "${API_ENDPOINT}" "$1" "$2" "${3:-}" "${4:-}" "application/json"
 }
 
+# node1_admin_api <method> <path> [query] [body] — signed_request straight to
+# the first node. set-remote-target persists the bucket-targets metadata and
+# updates only the handling node's in-memory target map; peers converge via
+# the 15-minute bucket-metadata refresh loop and get no push notification, so
+# target admin calls and replication-rule writes must stick to one node or
+# they race that refresh window ("replication config has a stale target").
+node1_admin_api() {
+  signed_request "http://$(endpoint_host_prefix)1:9000" "$1" "$2" "${3:-}" "${4:-}" "application/json"
+}
+
 # site2_admin_api <method> <path> [query] [body] — signed_request on site2.
 site2_admin_api() {
   signed_request "${SITE2_ENDPOINT}" "$1" "$2" "${3:-}" "${4:-}" "application/json"
@@ -554,6 +564,14 @@ run_test() {
 
 aws_run() {
   AWS_OUT="$(aws --endpoint-url "${API_ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
+}
+
+# aws_run_node1 <aws args...> — same as aws_run but straight at the first
+# node. put-bucket-replication validates the rule's destination ARN against
+# the handling node's cached bucket-targets, so it must land on the same node
+# where set-remote-target registered the target (see node1_admin_api).
+aws_run_node1() {
+  AWS_OUT="$(aws --endpoint-url "http://$(endpoint_host_prefix)1:9000" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
 }
 
 aws_run_site2() {
@@ -638,7 +656,7 @@ register_replication_target() {
   body="$(jq -nc --arg ep "${SITE2_HOSTPORT}" \
     --arg ak "${ACCESS_KEY}" --arg sk "${SECRET_KEY}" --arg tb "${dst}" \
     '{endpoint:$ep, credentials:{accessKey:$ak, secretKey:$sk}, targetbucket:$tb, secure:false, skipTlsVerify:false, type:"replication"}')"
-  arn="$(admin_api PUT "/rustfs/admin/v3/set-remote-target" "bucket=${src}" "${body}")"
+  arn="$(node1_admin_api PUT "/rustfs/admin/v3/set-remote-target" "bucket=${src}" "${body}")"
   if [ "$(signed_code)" != "200" ]; then
     echo "set-remote-target HTTP $(signed_code): ${arn}" >&2
     return 1
@@ -660,7 +678,7 @@ put_replication_rule() {
       Destination: {Bucket: $dst_arn}
     }]
   }')"
-  aws_run s3api put-bucket-replication --bucket "${src}" --replication-configuration "${cfg_json}"
+  aws_run_node1 s3api put-bucket-replication --bucket "${src}" --replication-configuration "${cfg_json}"
   assert_aws_ok "put-bucket-replication ${src}" || return 1
 }
 
@@ -699,13 +717,13 @@ test_rep101() {
   arn="$(register_replication_target rep101-src rep101-dst)" \
     || { rm_bucket_force main rep101-src; rm_bucket_force site2 rep101-dst; return 1; }
   case "${arn}" in arn:*) : ;; *) echo "ARN has unexpected shape: ${arn}"; return 1 ;; esac
-  list="$(admin_api GET "/rustfs/admin/v3/list-remote-targets" "bucket=rep101-src")"
+  list="$(node1_admin_api GET "/rustfs/admin/v3/list-remote-targets" "bucket=rep101-src")"
   [ "$(signed_code)" = "200" ] || { echo "list-remote-targets HTTP $(signed_code): ${list}"; return 1; }
   printf '%s' "${list}" | jq -e --arg arn "${arn}" '.[0].arn == $arn' >/dev/null 2>&1 \
     || { echo "listing does not contain the ARN: ${list}"; return 1; }
-  admin_api DELETE "/rustfs/admin/v3/remove-remote-target" "bucket=rep101-src&arn=${arn}" >/dev/null
+  node1_admin_api DELETE "/rustfs/admin/v3/remove-remote-target" "bucket=rep101-src&arn=${arn}" >/dev/null
   [ "$(signed_code)" = "200" ] || { echo "remove-remote-target HTTP $(signed_code)"; return 1; }
-  list="$(admin_api GET "/rustfs/admin/v3/list-remote-targets" "bucket=rep101-src")"
+  list="$(node1_admin_api GET "/rustfs/admin/v3/list-remote-targets" "bucket=rep101-src")"
   if [ "$(signed_code)" = "200" ]; then
     printf '%s' "${list}" | jq -e --arg arn "${arn}" '([.[].arn] | index($arn)) == null' >/dev/null 2>&1 \
       || { echo "ARN still listed after removal: ${list}"; return 1; }
@@ -722,7 +740,7 @@ test_rep102() {
     || { rm_bucket_force main rep102-src; rm_bucket_force site2 rep102-dst; return 1; }
   put_replication_rule rep102-src "${arn}" \
     || { rm_bucket_force main rep102-src; rm_bucket_force site2 rep102-dst; return 1; }
-  body="$(signed_request "${API_ENDPOINT}" GET "/rep102-src" "replication-check")"
+  body="$(signed_request "http://$(endpoint_host_prefix)1:9000" GET "/rep102-src" "replication-check")"
   [ "$(signed_code)" = "200" ] \
     || { echo "replication-check HTTP $(signed_code): ${body}"; rm_bucket_force main rep102-src; rm_bucket_force site2 rep102-dst; return 1; }
   printf '%s' "${body}" | jq -e '.Status == "OK"' >/dev/null 2>&1 \
@@ -802,7 +820,7 @@ test_rep106() {
     || { rm_bucket_force main rep106-src; rm_bucket_force site2 rep106-dst; return 1; }
   # Removing a target still referenced by a replication rule must be rejected
   # with 400 "removal disallowed".
-  body="$(admin_api DELETE "/rustfs/admin/v3/remove-remote-target" "bucket=rep106-src&arn=${arn}")"
+  body="$(node1_admin_api DELETE "/rustfs/admin/v3/remove-remote-target" "bucket=rep106-src&arn=${arn}")"
   [ "$(signed_code)" = "400" ] \
     || { echo "expected 400 removing an in-use target, got $(signed_code): ${body}"; rm_bucket_force main rep106-src; rm_bucket_force site2 rep106-dst; return 1; }
   printf '%s' "${body}" | grep -qi "disallowed" \
@@ -824,7 +842,7 @@ test_rep107() {
   put_replication_rule rep107-src "${arn}" \
     || { rm_bucket_force main rep107-src; rm_bucket_force site2 rep107-dst; return 1; }
   # Existing-object resync: PUT ?replication-reset, response target[0].arn/resetid.
-  body="$(signed_request "${API_ENDPOINT}" PUT "/rep107-src" "replication-reset")"
+  body="$(signed_request "http://$(endpoint_host_prefix)1:9000" PUT "/rep107-src" "replication-reset")"
   [ "$(signed_code)" = "200" ] \
     || { echo "replication-reset HTTP $(signed_code): ${body}"; rm_bucket_force main rep107-src; rm_bucket_force site2 rep107-dst; return 1; }
   printf '%s' "${body}" | jq -e '.target[0].arn != null and .target[0].resetid != null' >/dev/null 2>&1 \
