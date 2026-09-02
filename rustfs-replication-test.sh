@@ -73,6 +73,9 @@ RUSTFS_CONFIG_FILE="/etc/default/rustfs"
 SITE2_CONFIG_FILE="/etc/default/rustfs-rep2"
 RUSTFS_SERVICE="rustfs"
 RUSTFS_USER="rustfs"
+# The deb installs the binary at /usr/bin/rustfs; the upstream unit uses the
+# same path. Keep it overridable for source-built deployments.
+RUSTFS_BIN="${RUSTFS_BIN:-/usr/bin/rustfs}"
 RUSTFS_ADDRESS=":9000"
 RUSTFS_CONSOLE_ADDRESS=":9001"
 RUSTFS_CONSOLE_ENABLE=true
@@ -261,25 +264,21 @@ write_site2_unit() {
     printf 'set -euo pipefail\n'
     printf 'SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"\n'
     printf '${SUDO} tee /etc/systemd/system/%s.service >/dev/null <<UNIT_EOF\n' "${SITE2_SERVICE}"
-    cat <<'UNIT'
-[Unit]
-Description=RustFS second site (replication test)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=rustfs
-Group=rustfs
-EnvironmentFile=/etc/default/rustfs-rep2
-ExecStart=/usr/local/bin/rustfs server
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+    printf '[Unit]\n'
+    printf 'Description=RustFS second site (replication test)\n'
+    printf 'After=network-online.target\n'
+    printf 'Wants=network-online.target\n\n'
+    printf '[Service]\n'
+    printf 'Type=simple\n'
+    printf 'User=%s\n' "${RUSTFS_USER}"
+    printf 'Group=%s\n' "${RUSTFS_USER}"
+    printf 'EnvironmentFile=%s\n' "${SITE2_CONFIG_FILE}"
+    printf 'ExecStart=%s server\n' "${RUSTFS_BIN}"
+    printf 'Restart=on-failure\n'
+    printf 'RestartSec=5\n'
+    printf 'LimitNOFILE=65536\n\n'
+    printf '[Install]\n'
+    printf 'WantedBy=multi-user.target\n'
     printf 'UNIT_EOF\n'
     printf '${SUDO} systemctl daemon-reload\n'
   } | run_remote "${node}"
