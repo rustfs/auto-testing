@@ -308,6 +308,9 @@ SIGV4_SERVICE="s3"
 API_REQUEST_TIMEOUT=120
 COMMAND_TIMEOUT=360
 CLEANUP_TIMEOUT=60
+SOURCE_BUCKET_DELETE_TIMEOUT=30
+SOURCE_BUCKET_DELETE_ATTEMPT_TIMEOUT=5
+SOURCE_BUCKET_DELETE_RETRY_INTERVAL=2
 REMOTE_PROBE_TIMEOUT=15
 REMOTE_STATE_TIMEOUT=60
 REMOTE_PROBE_INTERVAL=3
@@ -1249,6 +1252,75 @@ cleanup_bucket_data() {
   return 1
 }
 
+delete_bucket_error_code() {
+  local output="$1"
+  if [[ "${output}" =~ An[[:space:]]error[[:space:]]occurred[[:space:]]\(([[:alnum:]_.-]+)\)[[:space:]]when[[:space:]]calling[[:space:]]the[[:space:]]DeleteBucket[[:space:]]operation: ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+cleanup_delete_source_bucket() {
+  local bucket="$1" started deadline now remaining attempt_timeout sleep_for
+  local attempts=0 error_code="" last_error_code="" last_out="" last_code=0
+  local elapsed error_display output_excerpt
+
+  started="${SECONDS}"
+  deadline=$((started + SOURCE_BUCKET_DELETE_TIMEOUT))
+  while :; do
+    now="${SECONDS}"
+    remaining=$((deadline - now))
+    [ "${remaining}" -gt 0 ] || break
+
+    attempt_timeout="${SOURCE_BUCKET_DELETE_ATTEMPT_TIMEOUT}"
+    if [ "${attempt_timeout}" -gt "${remaining}" ]; then
+      attempt_timeout="${remaining}"
+    fi
+    attempts=$((attempts + 1))
+    if aws_at_run_with_hard_timeout "${attempt_timeout}" "${ENDPOINT}" \
+      s3api delete-bucket --bucket "${bucket}"; then
+      return 0
+    fi
+
+    last_code="${AWS_CODE}"
+    last_out="${AWS_OUT}"
+    error_code=""
+    if error_code="$(delete_bucket_error_code "${AWS_OUT}")"; then
+      last_error_code="${error_code}"
+    fi
+    case "${error_code}" in
+      NoSuchBucket)
+        return 0
+        ;;
+      BucketNotEmpty)
+        ;;
+      *)
+        elapsed=$((SECONDS - started))
+        error_display="${error_code:-unparsed}"
+        output_excerpt="$(bounded_safe_excerpt "${last_out}" 512)"
+        record_cleanup_failure source-bucket "${bucket}" delete-bucket \
+          "reason=non_retryable; error_code=${error_display}; attempts=${attempts}; elapsed_seconds=${elapsed}; exit=${last_code}; output_excerpt=${output_excerpt}"
+        return 1
+        ;;
+    esac
+
+    now="${SECONDS}"
+    remaining=$((deadline - now))
+    [ "${remaining}" -gt 0 ] || break
+    sleep_for="${SOURCE_BUCKET_DELETE_RETRY_INTERVAL}"
+    if [ "${sleep_for}" -gt "${remaining}" ]; then sleep_for="${remaining}"; fi
+    sleep "${sleep_for}"
+  done
+
+  elapsed=$((SECONDS - started))
+  error_display="${last_error_code:-unparsed}"
+  output_excerpt="$(bounded_safe_excerpt "${last_out}" 512)"
+  record_cleanup_failure source-bucket "${bucket}" delete-bucket \
+    "reason=deadline_exceeded; error_code=${error_display}; attempts=${attempts}; deadline_seconds=${SOURCE_BUCKET_DELETE_TIMEOUT}; elapsed_seconds=${elapsed}; exit=${last_code}; output_excerpt=${output_excerpt}"
+  return 1
+}
+
 cleanup_source_bucket() {
   local bucket="$1" out fail=0
   if ! out="$(cleanup_aws "${ENDPOINT}" s3api delete-bucket-lifecycle --bucket "${bucket}" 2>&1)"; then
@@ -1258,12 +1330,7 @@ cleanup_source_bucket() {
     fi
   fi
   cleanup_bucket_data "${ENDPOINT}" "${bucket}" || fail=1
-  if ! out="$(cleanup_aws "${ENDPOINT}" s3api delete-bucket --bucket "${bucket}" 2>&1)"; then
-    if ! printf '%s' "${out}" | grep -qiE 'NoSuchBucket|Not Found|404'; then
-      record_cleanup_failure source-bucket "${bucket}" delete-bucket "${out}"
-      fail=1
-    fi
-  fi
+  cleanup_delete_source_bucket "${bucket}" || fail=1
   return "${fail}"
 }
 
