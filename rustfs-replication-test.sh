@@ -348,7 +348,7 @@ curl -fSL --retry 3 -o "/tmp/${PACKAGE_FILE}" "${url}"
 if [ -n "${PACKAGE_SHA256}" ]; then
   echo "${PACKAGE_SHA256}  ${PACKAGES_DIR}/${PACKAGE_FILE}" | sha256sum -c - || exit 1
 fi
-\${SUDO} dpkg -i "${PACKAGES_DIR}/${PACKAGE_FILE}"
+\${SUDO} DEBIAN_FRONTEND=noninteractive dpkg --force-confnew -i "${PACKAGES_DIR}/${PACKAGE_FILE}"
 \${SUDO} systemctl daemon-reload
 ls -lh "${PACKAGES_DIR}/${PACKAGE_FILE}"
 EOF
