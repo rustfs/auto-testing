@@ -396,6 +396,11 @@ env_teardown() {
 hex_of_ascii() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
 sha256_hex()   { printf '%s' "$1" | openssl dgst -sha256 -hex | awk '{print $NF}'; }
 hmac_sha256_hex() { printf '%s' "$2" | openssl dgst -sha256 -hmac "$(printf '%s' "$1")" -hex | awk '{print $NF}'; }
+# HMAC-SHA256 with the key supplied as hex (decoded to raw bytes). SigV4
+# derives each round's key as raw bytes; feeding the hex string through
+# -hmac would sign with the ASCII of the hex chars and the server rejects
+# the result with SignatureDoesNotMatch.
+hmac_sha256_hexkey() { printf '%s' "$2" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$1" -hex | awk '{print $NF}'; }
 
 canonical_query() {
   local q="$1"
@@ -448,11 +453,11 @@ ${amz_date}
 ${scope}
 $(sha256_hex "${canonical_request}")"
 
-  k_date="$(hmac_sha256_hex "$(hex_of_ascii "AWS4${SECRET_KEY}")" "${date_stamp}")"
-  k_region="$(hmac_sha256_hex "${k_date}" "${SIGV4_REGION}")"
-  k_service="$(hmac_sha256_hex "${k_region}" "${SIGV4_SERVICE}")"
-  k_signing="$(hmac_sha256_hex "${k_service}" "aws4_request")"
-  signature="$(hmac_sha256_hex "${k_signing}" "${string_to_sign}")"
+  k_date="$(hex_of_ascii "AWS4${SECRET_KEY}")"
+  k_region="$(hmac_sha256_hexkey "${k_date}" "${date_stamp}")"
+  k_service="$(hmac_sha256_hexkey "${k_region}" "${SIGV4_REGION}")"
+  k_signing="$(hmac_sha256_hexkey "${k_service}" "${SIGV4_SERVICE}")"
+  signature="$(hmac_sha256_hexkey "${k_signing}" "${string_to_sign}")"
   auth="AWS4-HMAC-SHA256 Credential=${ACCESS_KEY}/${scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
 
   url="http://${host_port}${path}${query:+?${query}}"
