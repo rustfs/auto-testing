@@ -410,22 +410,49 @@ sha256_hex()   { printf '%s' "$1" | openssl dgst -sha256 -hex | awk '{print $NF}
 hmac_sha256_hexkey() { printf '%s' "$2" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$1" -hex | awk '{print $NF}'; }
 
 canonical_query() {
-  # Valueless params (?flag) sign as "key=": the server parses the query into
-  # key/value pairs and rebuilds the canonical form with '=' for every pair,
-  # so a bare "flag" in the canonical request fails with SignatureDoesNotMatch.
+  # The server re-encodes every query pair for the canonical request: valueless
+  # params (?flag) come back as "flag=", and reserved characters in values
+  # (e.g. the colons of a replication ARN) as %XX — both fail with
+  # SignatureDoesNotMatch if signed verbatim.
   awk -v q="$1" 'BEGIN {
     n = split(q, parts, "&")
     for (i = 1; i <= n; i++) {
-      if (parts[i] !~ /=/) parts[i] = parts[i] "="
-      pairs[i] = parts[i]
+      if (parts[i] !~ /=/) { parts[i] = parts[i] "="; continue }
+      eq = index(parts[i], "=")
+      key = substr(parts[i], 1, eq - 1)
+      val = substr(parts[i], eq + 1)
+      val = encode(val)
+      parts[i] = key "=" val
     }
     # sort pairs by key (text sort of the full pair equals key sort when keys are distinct)
     for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) {
-      if (pairs[j] < pairs[i]) { tmp = pairs[i]; pairs[i] = pairs[j]; pairs[j] = tmp }
+      if (parts[j] < parts[i]) { tmp = parts[i]; parts[i] = parts[j]; parts[j] = tmp }
     }
     out = ""
-    for (i = 1; i <= n; i++) out = out (i > 1 ? "&" : "") pairs[i]
+    for (i = 1; i <= n; i++) out = out (i > 1 ? "&" : "") parts[i]
     printf "%s", out
+  }
+  function encode(s,   out, k, ch, lo, hi) {
+    out = ""
+    for (k = 1; k <= length(s); k++) {
+      ch = substr(s, k, 1)
+      if (ch ~ /^[A-Za-z0-9_.~-]$/) out = out ch
+      else {
+        lo = sprintf("%c", ch)
+        # split one byte at a time via UTF-8 aware gsub fallback:
+        # awk on the runner is mawk/gawk; handle ASCII reserved chars explicitly
+        if (ch == ":") out = out "%3A"
+        else if (ch == "/") out = out "%2F"
+        else if (ch == " ") out = out "%20"
+        else if (ch == "+") out = out "%2B"
+        else if (ch == "=") out = out "%3D"
+        else if (ch == "&") out = out "%26"
+        else if (ch == "?") out = out "%3F"
+        else if (ch == "%") out = out "%25"
+        else out = out ch
+      }
+    }
+    return out
   }'
 }
 
