@@ -395,7 +395,6 @@ env_teardown() {
 
 hex_of_ascii() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
 sha256_hex()   { printf '%s' "$1" | openssl dgst -sha256 -hex | awk '{print $NF}'; }
-hmac_sha256_hex() { printf '%s' "$2" | openssl dgst -sha256 -hmac "$(printf '%s' "$1")" -hex | awk '{print $NF}'; }
 # HMAC-SHA256 with the key supplied as hex (decoded to raw bytes). SigV4
 # derives each round's key as raw bytes; feeding the hex string through
 # -hmac would sign with the ASCII of the hex chars and the server rejects
