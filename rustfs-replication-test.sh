@@ -749,7 +749,8 @@ test_rep101() {
   printf '%s' "${list}" | jq -e --arg arn "${arn}" '.[0].arn == $arn' >/dev/null 2>&1 \
     || { echo "listing does not contain the ARN: ${list}"; return 1; }
   node1_admin_api DELETE "/rustfs/admin/v3/remove-remote-target" "bucket=rep101-src&arn=${arn}" >/dev/null
-  [ "$(signed_code)" = "200" ] || { echo "remove-remote-target HTTP $(signed_code)"; return 1; }
+  # The handler replies 204 No Content on success.
+  [ "$(signed_code)" = "200" ] || [ "$(signed_code)" = "204" ] || { echo "remove-remote-target HTTP $(signed_code)"; return 1; }
   list="$(node1_admin_api GET "/rustfs/admin/v3/list-remote-targets" "bucket=rep101-src")"
   if [ "$(signed_code)" = "200" ]; then
     printf '%s' "${list}" | jq -e --arg arn "${arn}" '([.[].arn] | index($arn)) == null' >/dev/null 2>&1 \
