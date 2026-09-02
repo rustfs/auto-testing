@@ -11,6 +11,10 @@ isolated config directory in `provenance.json`, failed-case logs, and a
 credential-safe `failure_kind`/`failure_detail`, a relative `log_path`, and a
 separate `cleanup_detail` so the primary defect is not overwritten by cleanup.
 
+When copying the tier runner outside this checkout, keep
+`rustfs-tier-log-capture.py` beside `rustfs-tier-test.sh`. `--log-file` fails
+closed if that secure log helper is missing.
+
 Use `rustfs_tier_report.py` as the final gate. A complete two-topology run must
 contain 56 unique terminal results; FAIL, RUNNING, missing, duplicate, corrupt,
 or non-allowlisted UNSUPPORTED results make the command exit non-zero while it
