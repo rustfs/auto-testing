@@ -60,11 +60,14 @@ API_REQUEST_TIMEOUT=60
 VOLUMES_MAIN="/data/rustfs{1...4}/mnmd"
 
 # Second instance (target site / bucket-replication target) on the first node.
+# The script drives the nodes over SSH but talks S3/admin over HTTP from the
+# host it runs on, so the endpoint must be the first node's address, not
+# 127.0.0.1 (that only works when node and runner share a host).
 SITE2_SERVICE="rustfs-rep2"
 SITE2_ADDRESS=":19000"
 SITE2_CONSOLE_ADDRESS=":19001"
-SITE2_ENDPOINT="http://127.0.0.1:19000"
-SITE2_HOSTPORT="127.0.0.1:19000"
+SITE2_HOSTPORT="${RUSTFS_SITE2_HOST:-${NODES[0]}}:19000"
+SITE2_ENDPOINT="${RUSTFS_SITE2_ENDPOINT:-http://${SITE2_HOSTPORT}}"
 SITE2_VOLUMES="/data/rustfs-rep2/mnmd"
 SITE1_NAME="site1"
 SITE2_NAME="site2"
@@ -72,6 +75,10 @@ SITE2_NAME="site2"
 RUSTFS_CONFIG_FILE="/etc/default/rustfs"
 SITE2_CONFIG_FILE="/etc/default/rustfs-rep2"
 RUSTFS_SERVICE="rustfs"
+RUSTFS_USER="rustfs"
+# The deb installs the binary at /usr/bin/rustfs; the upstream unit uses the
+# same path. Keep it overridable for source-built deployments.
+RUSTFS_BIN="${RUSTFS_BIN:-/usr/bin/rustfs}"
 RUSTFS_ADDRESS=":9000"
 RUSTFS_CONSOLE_ADDRESS=":9001"
 RUSTFS_CONSOLE_ENABLE=true
@@ -183,6 +190,37 @@ wait_http_live() {
 
 # ==================== Environment setup ====================
 
+# Expand a RUSTFS_VOLUMES expression ("/data/rustfs{1...4}/mnmd" or an
+# http://host:port/path form) into the concrete directory list.
+volume_dirs() {
+  local volumes="$1" expr path prefix suffix i start end
+  for expr in ${volumes}; do
+    path="${expr#*://}"; path="${path#*/}"; path="/${path}"
+    if [[ "${path}" =~ \{([0-9]+)\.\.\.([0-9]+)\} ]]; then
+      start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
+      prefix="${path%%\{*}"; suffix="${path#*\}}"
+      for ((i=start; i<=end; i++)); do printf '%s%s%s\n' "${prefix}" "${i}" "${suffix}"; done
+    else
+      printf '%s\n' "${path}"
+    fi
+  done
+}
+
+ensure_volume_dirs() {
+  local node="$1" volumes="$2" dirs=() d
+  while IFS= read -r d; do dirs+=("${d}"); done < <(volume_dirs "${volumes}" | sort -u)
+  log "${node}: ensuring data dirs (${dirs[*]})"
+  {
+    printf 'set -euo pipefail\n'
+    printf 'SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"\n'
+    printf 'id -u %s >/dev/null 2>&1 || ${SUDO} useradd -r -s /bin/false -d /opt/%s %s\n' "${RUSTFS_USER}" "${RUSTFS_USER}" "${RUSTFS_USER}"
+    for d in "${dirs[@]}"; do
+      printf '${SUDO} mkdir -p %s\n' "${d}"
+      printf '${SUDO} chown -R %s:%s %s\n' "${RUSTFS_USER}" "${RUSTFS_USER}" "${d}"
+    done
+  } | run_remote "${node}"
+}
+
 rustfs_config_body() {
   cat <<EOF
 RUSTFS_ACCESS_KEY=${ACCESS_KEY}
@@ -229,25 +267,21 @@ write_site2_unit() {
     printf 'set -euo pipefail\n'
     printf 'SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"\n'
     printf '${SUDO} tee /etc/systemd/system/%s.service >/dev/null <<UNIT_EOF\n' "${SITE2_SERVICE}"
-    cat <<'UNIT'
-[Unit]
-Description=RustFS second site (replication test)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=rustfs
-Group=rustfs
-EnvironmentFile=/etc/default/rustfs-rep2
-ExecStart=/usr/local/bin/rustfs server
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+    printf '[Unit]\n'
+    printf 'Description=RustFS second site (replication test)\n'
+    printf 'After=network-online.target\n'
+    printf 'Wants=network-online.target\n\n'
+    printf '[Service]\n'
+    printf 'Type=simple\n'
+    printf 'User=%s\n' "${RUSTFS_USER}"
+    printf 'Group=%s\n' "${RUSTFS_USER}"
+    printf 'EnvironmentFile=%s\n' "${SITE2_CONFIG_FILE}"
+    printf 'ExecStart=%s server\n' "${RUSTFS_BIN}"
+    printf 'Restart=on-failure\n'
+    printf 'RestartSec=5\n'
+    printf 'LimitNOFILE=65536\n\n'
+    printf '[Install]\n'
+    printf 'WantedBy=multi-user.target\n'
     printf 'UNIT_EOF\n'
     printf '${SUDO} systemctl daemon-reload\n'
   } | run_remote "${node}"
@@ -303,7 +337,8 @@ env_setup_main_cluster() {
   log "environment setup: main cluster (single-multi, ${NODES[*]})"
   for node in "${NODES[@]}"; do cleanup_node "${node}"; done
   install_package_all
-  local body
+  local node body
+  for node in "${NODES[@]}"; do ensure_volume_dirs "${node}" "${VOLUMES_MAIN}"; done
   body="$(rustfs_config_body)"
   for node in "${NODES[@]}"; do
     write_remote_config "${node}" "${RUSTFS_CONFIG_FILE}" "${body}"
@@ -313,11 +348,16 @@ env_setup_main_cluster() {
   for pid in "${pids[@]}"; do wait "${pid}" || die "start failed"; done
   for node in "${NODES[@]}"; do wait_service_active "${node}" "${RUSTFS_SERVICE}"; done
   wait_http_live "${API_ENDPOINT}"
+  export AWS_ACCESS_KEY_ID="${ACCESS_KEY}"
+  export AWS_SECRET_ACCESS_KEY="${SECRET_KEY}"
+  export AWS_DEFAULT_REGION="${REGION}"
+  export AWS_EC2_METADATA_DISABLED=true
 }
 
 env_setup_site2() {
   local node="${NODES[0]}"
   log "environment setup: second site ${SITE2_SERVICE} on ${node} (${SITE2_ENDPOINT})"
+  ensure_volume_dirs "${node}" "${SITE2_VOLUMES}"
   write_remote_config "${node}" "${SITE2_CONFIG_FILE}" "$(site2_config_body)"
   write_site2_unit "${node}"
   service_action start "${node}" "${SITE2_SERVICE}"
