@@ -465,6 +465,37 @@ wait_endpoint_ready() {
   return 1
 }
 
+node_rustfs_version() {
+  # Print the version string reported by the installed rustfs binary on a
+  # node, e.g. "rustfs 1.0.0-rc.3 (built ...)" -> "1.0.0-rc.3". Falls back to
+  # the dpkg package version when the binary is missing (e.g. installed but
+  # service not on PATH over ssh).
+  local node="$1" out
+  out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" '
+    SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
+    if command -v rustfs >/dev/null 2>&1; then
+      rustfs --version 2>/dev/null || true
+    elif [ -x /usr/local/bin/rustfs ]; then
+      /usr/local/bin/rustfs --version 2>/dev/null || true
+    elif [ -x /opt/rustfs/bin/rustfs ]; then
+      /opt/rustfs/bin/rustfs --version 2>/dev/null || true
+    fi
+  ' 2>/dev/null || true)"
+  if [ -z "${out}" ]; then
+    out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+      "dpkg-query -W -f='\${Version}' ${RUSTFS_PACKAGE_NAME} 2>/dev/null" 2>/dev/null || true)"
+  fi
+  [ -n "${out}" ] || out="unknown"
+  out="$(printf '%s' "${out}" | head -1)"
+  # "rustfs 1.0.0-rc.3 (built ...)" -> "1.0.0-rc.3"; keep the line as-is
+  # for any other shape.
+  if [[ "${out}" == rustfs\ * ]]; then
+    out="$(printf '%s' "${out}" | awk '{print $2}')"
+    [ -n "${out}" ] || out="unknown"
+  fi
+  printf '%s' "${out}"
+}
+
 install_deb_on_nodes() {
   # usage: install_deb_on_nodes "URL" [SHA256] nodes...
   local url="$1" sha="${2:-}"; shift 2
@@ -507,6 +538,9 @@ env_setup_old() {
   start_and_wait_nodes "${nodes[@]}"
   wait_endpoint_ready || die "OLD endpoint ${ENDPOINT} not ready"
 
+  OLD_VERSION_ACTUAL="$(node_rustfs_version "${nodes[0]}")"
+  log "OLD version in place: ${OLD_VERSION_ACTUAL}"
+
   export AWS_ACCESS_KEY_ID="${ACCESS_KEY}"
   export AWS_SECRET_ACCESS_KEY="${SECRET_KEY}"
   export AWS_DEFAULT_REGION="${REGION}"
@@ -533,6 +567,15 @@ upgrade_in_place() {
   # dpkg postinst usually restarts the service; make sure it is up and healthy.
   start_and_wait_nodes "${nodes[@]}"
   wait_endpoint_ready || die "NEW endpoint ${ENDPOINT} not ready after upgrade"
+
+  NEW_VERSION_ACTUAL="$(node_rustfs_version "${nodes[0]}")"
+  log "NEW version in place: ${NEW_VERSION_ACTUAL}"
+  if [ "${OLD_VERSION_ACTUAL}" = "${NEW_VERSION_ACTUAL}" ]; then
+    warn "version reported by rustfs --version did not change across the upgrade (${OLD_VERSION_ACTUAL})"
+  fi
+  printf '\n=== UPGRADE MATRIX ===\n'
+  printf 'old_version: %s\n' "${OLD_VERSION_ACTUAL}"
+  printf 'new_version: %s\n' "${NEW_VERSION_ACTUAL}"
 }
 
 env_teardown() {
@@ -1052,7 +1095,7 @@ TOPO_RESULTS=()
 
 record_topology_result() {
   local label="$1"
-  TOPO_RESULTS+=("${label}: PASS=${PASS} FAIL=${FAIL}")
+  TOPO_RESULTS+=("${label}: PASS=${PASS} FAIL=${FAIL} | ${OLD_VERSION_ACTUAL:-unknown} -> ${NEW_VERSION_ACTUAL:-unknown}")
   if [ "${#FAILED_TESTS[@]}" -gt 0 ]; then
     local t
     for t in "${FAILED_TESTS[@]}"; do TOPO_RESULTS+=("  - ${t}"); done
