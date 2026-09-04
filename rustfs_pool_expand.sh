@@ -137,12 +137,73 @@ RESET=0
 LOG_FILE=""
 SELECTED_STEPS=()
 ACTIVE_WARP_PID=""
+# Set by run_steps; used by the ERR trap to attribute the failure.
+CURRENT_STEP_NUM=""
+CURRENT_STEP_DESC=""
 
 # ==================== Helpers ====================
 
 log()  { printf '\033[1;36m[INFO]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Machine-readable line for the workflow report generator. One per step:
+#   [POOL-STEP] <n> <desc> PASS|FAIL|SKIP
+emit_step_result() {
+  local n="$1" desc="$2" status="$3"
+  printf '[POOL-STEP] %s %s %s\n' "${n}" "${desc}" "${status}"
+}
+
+on_step_err() {
+  # ERR trap: emit the failing step's result and the overall verdict before
+  # the shell exits, so the report always shows where the run died.
+  local rc=$?
+  [ -n "${CURRENT_STEP_NUM}" ] || return "${rc}"
+  emit_step_result "${CURRENT_STEP_NUM}" "${CURRENT_STEP_DESC:-step ${CURRENT_STEP_NUM}}" "FAIL"
+  printf '[POOL-RESULT] FAIL step %s failed\n' "${CURRENT_STEP_NUM}"
+  return "${rc}"
+}
+
+node_rustfs_version() {
+  # Version reported by the installed rustfs binary on a node, e.g.
+  # "rustfs 1.0.0-rc.3 (built ...)" -> "1.0.0-rc.3"; falls back to the dpkg
+  # package version when the binary is not on the ssh PATH.
+  local node="$1" out
+  out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" '
+    if command -v rustfs >/dev/null 2>&1; then
+      rustfs --version 2>/dev/null || true
+    elif [ -x /usr/local/bin/rustfs ]; then
+      /usr/local/bin/rustfs --version 2>/dev/null || true
+    elif [ -x /opt/rustfs/bin/rustfs ]; then
+      /opt/rustfs/bin/rustfs --version 2>/dev/null || true
+    fi
+  ' 2>/dev/null || true)"
+  if [ -z "${out}" ]; then
+    out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+      "dpkg-query -W -f='\${Version}' rustfs 2>/dev/null" 2>/dev/null || true)"
+  fi
+  [ -n "${out}" ] || out="unknown"
+  out="$(printf '%s' "${out}" | head -1)"
+  if [[ "${out}" == rustfs\ * ]]; then
+    out="$(printf '%s' "${out}" | awk '{print $2}')"
+    [ -n "${out}" ] || out="unknown"
+  fi
+  printf '%s' "${out}"
+}
+
+emit_version_line() {
+  # [POOL-VERSION] <version> — captured from the first node that has the
+  # binary installed (after step 2 in a normal run).
+  local node out
+  for node in "${NODES[@]}"; do
+    out="$(node_rustfs_version "${node}")"
+    if [ "${out}" != "unknown" ]; then
+      printf '[POOL-VERSION] %s (node %s)\n' "${out}" "${node}"
+      return 0
+    fi
+  done
+  printf '[POOL-VERSION] unknown\n'
+}
 
 confirm() {
   # $1: prompt text; bypassed with --yes
@@ -1460,22 +1521,51 @@ expand_steps() {
 }
 
 run_steps() {
-  local step
+  local step desc
+  # Step descriptions mirror the stepN_* bodies; the workflow report renders
+  # them next to each step's result.
+  local -A STEP_DESC=(
+    [1]="download package on all nodes"
+    [2]="install the RustFS service on all nodes"
+    [3]="start the first pool on ${NODES[0]}"
+    [4]="write data and monitor storage usage"
+    [5]="expand to the second pool (${NODES[0]} + ${NODES[1]})"
+    [6]="start data rebalance (admin API)"
+    [7]="expand to the third pool (all nodes)"
+    [8]="start data rebalance (admin API)"
+    [9]="decommission pool ${DECOMMISSION_POOL_ID} (admin API)"
+  )
   for step in "${SELECTED_STEPS[@]}"; do
+    CURRENT_STEP_NUM="${step}"
+    CURRENT_STEP_DESC="${STEP_DESC[${step}]:-step ${step}}"
     case "${step}" in
-      1) step1_download ;;
-      2) step2_install ;;
-      3) step3_start_first_pool ;;
-      4) step4_write_data ;;
-      5) step5_expand_pool2 ;;
-      6) step6_rebalance ;;
-      7) step7_expand_pool3 ;;
-      8) step8_rebalance ;;
-      9) step9_decommission ;;
+      1) desc="${STEP_DESC[1]}"; step1_download ;;
+      2) desc="${STEP_DESC[2]}"; step2_install ;;
+      3) desc="${STEP_DESC[3]}"; step3_start_first_pool ;;
+      4) desc="${STEP_DESC[4]}"; step4_write_data ;;
+      5) desc="${STEP_DESC[5]}"; step5_expand_pool2 ;;
+      6) desc="${STEP_DESC[6]}"; step6_rebalance ;;
+      7) desc="${STEP_DESC[7]}"; step7_expand_pool3 ;;
+      8) desc="${STEP_DESC[8]}"; step8_rebalance ;;
+      9) desc="${STEP_DESC[9]}"; step9_decommission ;;
       *) die "unknown step: ${step}" ;;
     esac
+    CURRENT_STEP_NUM=""
     log "step ${step} completed"
+    emit_step_result "${step}" "${desc}" "PASS"
+    if [ "${step}" = "2" ]; then
+      emit_version_line
+    fi
   done
+  # Verdict line: only emitted when the full pipeline was selected and every
+  # step passed (any failing step dies, so reaching here means success).
+  local want_all=1 s
+  for s in 1 2 3 4 5 6 7 8 9; do
+    [[ " ${SELECTED_STEPS[*]} " == *" ${s} "* ]] || want_all=0
+  done
+  if [ "${want_all}" -eq 1 ]; then
+    printf '[POOL-RESULT] PASS all steps passed\n'
+  fi
 }
 
 main() {
@@ -1520,6 +1610,8 @@ main() {
   done
   resolve_endpoints
   trap cleanup_runtime EXIT
+  # Attribute failures to the running step in the report (see on_step_err).
+  trap on_step_err ERR
   if [ -n "${LOG_FILE}" ]; then
     mkdir -p "$(dirname "${LOG_FILE}")"
     if ! touch "${LOG_FILE}" 2>/dev/null; then
