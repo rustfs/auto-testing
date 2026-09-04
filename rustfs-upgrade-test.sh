@@ -749,6 +749,40 @@ golden_get() {
   awk -F '\t' -v k="$1" '$1 == k { print $2; exit }' "${GOLDEN_FILE}"
 }
 
+seed_warp_bucket() {
+  # seed_warp_bucket <bucket> <obj-size> <duration> <min-objects>
+  # Fill a bucket with warp at a fixed object size. warp is duration-driven
+  # (no object-count flag), so the run uses a short duration with
+  # auto-termination and records the actual written count as golden state;
+  # the verification side lists the bucket and compares counts.
+  local bucket="$1" size="$2" duration="$3" min_objects="$4"
+  new_bucket "${bucket}" || die "seed: ${bucket}"
+  log "seeding ${bucket} via warp (obj.size=${size}, duration=${duration})"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: warp put skipped"
+    golden_set "warp:${bucket}" "0"
+    return 0
+  fi
+  warp put --host "${ENDPOINT#http://}" \
+    --bucket "${bucket}" \
+    --access-key "${ACCESS_KEY}" \
+    --secret-key "${SECRET_KEY}" \
+    --obj.size "${size}" \
+    --duration "${duration}" \
+    --autoterm --autoterm.dur 10s \
+    --concurrent 4 \
+    --noprefix --noclear >"${TEST_TMP}/warp-put-${bucket}.log" 2>&1 \
+    || die "seed: warp put ${bucket} failed (see ${TEST_TMP}/warp-put-${bucket}.log)"
+  aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'length(Contents)'
+  assert_aws_ok || die "seed: list ${bucket}"
+  local written
+  written="$(printf '%s' "${AWS_OUT}" | tr -d '[:space:]')"
+  [ "${written}" -ge "${min_objects}" ] \
+    || die "seed: ${bucket}: warp wrote only ${written} objects (wanted >= ${min_objects})"
+  golden_set "warp:${bucket}" "${written}"
+  log "seeded ${bucket}: ${written} objects of ${size} bytes"
+}
+
 # ==================== Golden seed (on OLD version) ====================
 
 seed_golden() {
@@ -830,6 +864,13 @@ seed_golden() {
   aws_run s3api put-object --bucket upg-large --key large --body "${TEST_TMP}/large.bin"
   assert_aws_ok || die "seed: large put"
   log "seeded large object"
+
+  # UPG-108/109/110 warp-written data at mixed object sizes. warp generates
+  # its own content and key names; the golden state records the written
+  # object count per bucket, and the verification side re-reads everything.
+  seed_warp_bucket "upg-warp-1kib"  1KiB   10s 20
+  seed_warp_bucket "upg-warp-1mib"  1MiB   15s 10
+  seed_warp_bucket "upg-warp-100mib" 100MiB 30s 2
 
   # UPG-105 SSE-S3.
   make_test_file "${TEST_TMP}/sse3.bin" 65536
@@ -971,13 +1012,22 @@ verify_context() {
 }
 
 verify_identity_user() {
-  local creds user secret
+  local creds user secret out code
   creds="$(golden_get "creds:user")"
   user="${creds%%|*}"; secret="${creds#*|}"
   aws_run_as "${user}" "${secret}" -- s3api get-object --bucket upg-plain --key plain "${TEST_TMP}/plain-user.bin"
   assert_aws_ok || { echo "pre-upgrade user credential failed after upgrade"; return 1; }
   aws_run_as "${user}" "${secret}" -- s3api put-object --bucket upg-plain --key denied --body "${TEST_TMP}/plain.bin"
   assert_aws_fails || { echo "pre-upgrade user policy boundary lost after upgrade"; return 1; }
+  # The policy itself and its attachment must survive the upgrade.
+  out="$(admin_api GET /rustfs/admin/v3/list-canned-policies "")"; code="$(admin_api_code)"
+  [ "${code}" = "200" ] || { echo "list-canned-policies -> HTTP ${code}: ${out}"; return 1; }
+  printf '%s' "${out}" | jq -e 'has("upgpolicy")' >/dev/null \
+    || { echo "pre-upgrade policy upgpolicy missing after upgrade: ${out}"; return 1; }
+  out="$(admin_api GET "/rustfs/admin/v3/user-info?accessKey=${user}" "")"; code="$(admin_api_code)"
+  [ "${code}" = "200" ] || { echo "user-info -> HTTP ${code}: ${out}"; return 1; }
+  printf '%s' "${out}" | grep -q "upgpolicy" \
+    || { echo "policy upgpolicy no longer attached to ${user} after upgrade: ${out}"; return 1; }
 }
 
 verify_identity_sa() {
@@ -1050,6 +1100,47 @@ verify_smoke_kms_write() {
   assert_aws_ok || { echo "post-upgrade SSE-KMS write failed"; return 1; }
 }
 
+verify_warp_bucket() {
+  # verify_warp_bucket <bucket> — after the upgrade, every warp-written
+  # object must still be there (count matches the seeded golden value) and
+  # readable with an intact ETag (head vs get ETag + full-body download
+  # with S3 checksum validation on the aws CLI side).
+  local bucket="$1" expected listed key etag_head etag_get
+  expected="$(golden_get "warp:${bucket}")"
+  [ -n "${expected}" ] || { echo "${bucket}: no seeded count in golden state"; return 1; }
+  aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'length(Contents)'
+  assert_aws_ok || { echo "${bucket}: list failed after upgrade"; return 1; }
+  listed="$(printf '%s' "${AWS_OUT}" | tr -d '[:space:]')"
+  [ "${listed}" = "${expected}" ] \
+    || { echo "${bucket}: object count changed across the upgrade: seeded=${expected} listed=${listed}"; return 1; }
+
+  # Sample-read every object: full-body GET + ETag comparison between HEAD
+  # and GET. Keys come from one JSON listing (jq emits one per line, with a
+  # trailing newline), so the iteration cannot drop the last key.
+  local keys_json key etag_head etag_get i=0
+  aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'Contents[].Key' --output json
+  assert_aws_ok || { echo "${bucket}: key listing failed after upgrade"; return 1; }
+  keys_json="${AWS_OUT}"
+  while IFS= read -r key; do
+    [ -n "${key}" ] || continue
+    aws_run s3api head-object --bucket "${bucket}" --key "${key}"
+    assert_aws_ok || { echo "${bucket}/${key}: HEAD failed after upgrade"; return 1; }
+    etag_head="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
+    aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${TEST_TMP}/warp-dl.bin"
+    assert_aws_ok || { echo "${bucket}/${key}: GET failed after upgrade"; return 1; }
+    etag_get="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
+    [ "${etag_head}" = "${etag_get}" ] \
+      || { echo "${bucket}/${key}: ETag mismatch HEAD=${etag_head} GET=${etag_get}"; return 1; }
+    i=$((i+1))
+  done < <(printf '%s' "${keys_json}" | jq -r '.[]')
+  log "${bucket}: ${i} objects readable after upgrade (count=${listed})"
+}
+
+verify_warp_1kib()  { verify_warp_bucket "upg-warp-1kib"; }
+verify_warp_1mib()  { verify_warp_bucket "upg-warp-1mib"; }
+verify_warp_100mib() { verify_warp_bucket "upg-warp-100mib"; }
+
+
 # ==================== Harness / runner ====================
 
 PASS=0; FAIL=0
@@ -1090,6 +1181,9 @@ run_verify_cases() {
   run_test UPG-303 "bucket default encryption"       verify_bucket_default_encryption
   run_test UPG-401 "post-upgrade S3 CRUD smoke"      verify_smoke_crud
   run_test UPG-402 "post-upgrade SSE-KMS write"      verify_smoke_kms_write
+  run_test UPG-108 "warp 1KiB objects readable"      verify_warp_1kib
+  run_test UPG-109 "warp 1MiB objects readable"      verify_warp_1mib
+  run_test UPG-110 "warp 100MiB objects readable"    verify_warp_100mib
 }
 
 results_summary() {
@@ -1193,6 +1287,7 @@ main() {
   need_cmd ssh "SSH client"
   need_cmd rc "RustFS client CLI"
   need_cmd aws "AWS CLI (s3api channel)"
+  need_cmd warp "warp benchmark tool (mixed-size data seeding)"
   need_cmd jq "JSON processor"
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4)"
