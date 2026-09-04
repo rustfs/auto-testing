@@ -33,7 +33,7 @@
 #
 # Usage:
 #   ./rustfs-upgrade-test.sh --all-topologies -y \
-#       --from-version 1.0.0-rc.4-preview.1 --to-url <nightly-deb-url>
+#       --from-version 1.0.0-rc.3 --to-url <nightly-deb-url>
 #   ./rustfs-upgrade-test.sh --topology single-single -y \
 #       --from-url <old.deb> --to-url <new.deb>
 #
@@ -51,7 +51,7 @@ SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
 SSH_PORT="${RUSTFS_SSH_PORT:-22}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "${SSH_PORT}")
 
-FROM_VERSION="${FROM_VERSION:-1.0.0-rc.4-preview.1}"
+FROM_VERSION="${FROM_VERSION:-1.0.0-rc.3}"
 FROM_URL="${FROM_URL:-}"
 TO_VERSION="${TO_VERSION:-}"
 TO_URL="${TO_URL:-}"
@@ -1078,7 +1078,7 @@ Usage:
   --topology <topo>         Run one topology (repeatable)
   --backends <list>         Comma-separated KMS backends: local,vault-kv2
                             (default: local,vault-kv2)
-  --from-version <ver>      OLD RustFS release tag (default: 1.0.0-rc.4-preview.1)
+  --from-version <ver>      OLD RustFS release tag (default: 1.0.0-rc.3; must ship a .deb asset)
   --from-url <url>          OLD .deb URL (overrides --from-version)
   --to-version <ver>        NEW RustFS release tag (overrides --to-url default)
   --to-url <url>            NEW .deb URL (default: latest nightly deb)
