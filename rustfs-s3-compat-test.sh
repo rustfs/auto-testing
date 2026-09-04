@@ -125,6 +125,25 @@ run_remote() {
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" 'bash -s' <<<"${script}"
 }
 
+# run_remote_all_of <node>... — run the stdin script on the given nodes in
+# parallel; nonzero if any node fails (like run_remote_all but for a subset,
+# e.g. only the nodes of the current topology).
+run_remote_all_of() {
+  local nodes=("$@") script pids=() i=0 fail=0
+  script="$(cat)"
+  for node in "${nodes[@]}"; do
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      log "DRY-RUN: ssh ${SSH_USER}@${node} <<'REMOTE'"
+      printf '%s\n' "${script}" | sed 's/^/    | /'
+    else
+      ( ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" 'bash -s' <<<"${script}" ) &
+      pids[$i]=$!; i=$((i+1))
+    fi
+  done
+  for pid in "${pids[@]}"; do wait "${pid}" || fail=1; done
+  return "${fail}"
+}
+
 run_remote_all() {
   local script pids=() i=0 fail=0
   script="$(cat)"
@@ -341,6 +360,92 @@ env_teardown() {
   read -r -a nodes <<<"$(topology_nodes "${topo}")"
   log "environment teardown: ${topo}"
   for node in "${NODES[@]}"; do cleanup_node "${node}"; done
+}
+
+# ==================== Server-domain / virtual-hosted-style helpers ====================
+
+# Topology currently under test (set by main; needed by cases that touch
+# every node of the topology, like S3C-1006's config restart).
+CURRENT_TOPOLOGY=""
+
+# Append RUSTFS_SERVER_DOMAINS to the config file on every topology node and
+# restart the service. Empty arg removes the line (restore). The restart
+# preserves the data dirs, so buckets survive; the caller must wait for the
+# endpoint again if it needs readiness.
+set_server_domains() {
+  local domains="$1" nodes=() line
+  read -r -a nodes <<<"$(topology_nodes "${CURRENT_TOPOLOGY}")"
+  if [ -n "${domains}" ]; then line="RUSTFS_SERVER_DOMAINS=\"${domains}\""; fi
+  log "setting RUSTFS_SERVER_DOMAINS='${domains}' on ${nodes[*]} (restart)"
+  {
+    printf 'set -euo pipefail\n'
+    printf 'SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"\n'
+    printf '${SUDO} sed -i "/^RUSTFS_SERVER_DOMAINS=/d" %s\n' "${RUSTFS_CONFIG_FILE}"
+    if [ -n "${domains}" ]; then
+      # Appended via heredoc + tee: the value contains spaces and colons, and
+      # sudo cannot redirect, so sed append and >> are both awkward here.
+      printf '${SUDO} tee -a %s >/dev/null <<"EOF_DOMAINS"\n%s\nEOF_DOMAINS\n' "${RUSTFS_CONFIG_FILE}" "${line}"
+    fi
+    printf '${SUDO} systemctl restart %s\n' "${RUSTFS_SERVICE}"
+  } | run_remote_all_of "${nodes[@]}" || { echo "failed to set RUSTFS_SERVER_DOMAINS"; return 1; }
+  # The overlap crash (#7042) kills the process within ~1s of start, long
+  # before systemd gives up, so poll for real readiness, not just "active".
+  local waited=0 node
+  sleep 3
+  while [ "${waited}" -lt "${SERVICE_TIMEOUT}" ]; do
+    local ready=1
+    for node in "${nodes[@]}"; do
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" "systemctl is-active --quiet ${RUSTFS_SERVICE}" 2>/dev/null || ready=0
+    done
+    if [ "${ready}" -eq 1 ] && curl -fsS --max-time 5 "${ENDPOINT}/minio/health/live" >/dev/null 2>&1; then
+      log "endpoint ready with RUSTFS_SERVER_DOMAINS='${domains}'"
+      return 0
+    fi
+    sleep 5; waited=$((waited+5))
+  done
+  echo "endpoint not ready after RUSTFS_SERVER_DOMAINS='${domains}' restart (waited ${waited}s)"
+  return 1
+}
+
+# Like s3_signed_curl but sends a virtual-hosted-style Host header (<bucket>
+# .<domain>[:port]) so the server must resolve the bucket from the host, not
+# the path. Prints the HTTP status code; body lands in ${TEST_TMP}/curl.out.
+vhost_curl() {
+  local vhost="$1" method="$2" path="$3"
+  local host_port amz_date date_stamp canonical_headers signed_headers
+  local canonical_request string_to_sign scope k_date k_region k_service k_signing signature
+  local p="${path%%\?*}" q="${path#*\?}"
+  [ "${q}" = "${path}" ] && q=""
+  host_port="${ENDPOINT#*://}"
+  amz_date="$(date -u +%Y%m%dT%H%M%SZ)"
+  date_stamp="${amz_date:0:8}"
+  canonical_headers="host:${vhost}
+x-amz-content-sha256:UNSIGNED-PAYLOAD
+x-amz-date:${amz_date}
+"
+  signed_headers="host;x-amz-content-sha256;x-amz-date"
+  canonical_request="${method}
+${p}
+${q}
+${canonical_headers}
+${signed_headers}
+UNSIGNED-PAYLOAD"
+  scope="${date_stamp}/${REGION}/s3/aws4_request"
+  string_to_sign="AWS4-HMAC-SHA256
+${amz_date}
+${scope}
+$(printf '%s' "${canonical_request}" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
+  k_date="$(printf '%s' "${date_stamp}" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(printf 'AWS4%s' "${SECRET_KEY}" | od -An -vtx1 | tr -d ' \n')" -hex 2>/dev/null | awk '{print $NF}')"
+  k_region="$(printf '%s' "${REGION}" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_date}" -hex 2>/dev/null | awk '{print $NF}')"
+  k_service="$(printf '%s' "s3" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_region}" -hex 2>/dev/null | awk '{print $NF}')"
+  k_signing="$(printf '%s' "aws4_request" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_service}" -hex 2>/dev/null | awk '{print $NF}')"
+  signature="$(printf '%s' "${string_to_sign}" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_signing}" -hex 2>/dev/null | awk '{print $NF}')"
+  curl -s -o "${TEST_TMP}/curl.out" -w '%{http_code}' \
+    -H "Host: ${vhost}" \
+    -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
+    -H "x-amz-date: ${amz_date}" \
+    -H "Authorization: AWS4-HMAC-SHA256 Credential=${ACCESS_KEY}/${scope}, SignedHeaders=${signed_headers}, Signature=${signature}" \
+    -X "${method}" "http://${host_port}${path}"
 }
 
 # ==================== Test harness ====================
@@ -571,6 +676,7 @@ run_all_tests() {
   run_test S3C-1003 "PresignedUrl"           test_s3c1003
   run_test S3C-1004 "PostPolicyUpload"       test_s3c1004
   run_test S3C-1005 "AnonymousWrongCreds"    test_s3c1005
+  run_test S3C-1006 "VirtualHostedStyle"    test_s3c1006
   run_test S3C-1101 "ConditionalRead"        test_s3c1101
   run_test S3C-1102 "ConditionalWrite"       test_s3c1102
   run_test S3C-1103 "ContentMd5"             test_s3c1103
@@ -1791,6 +1897,77 @@ test_s3c1005() {
   rm_bucket "s3c1005-b1"
 }
 
+test_s3c1006() {
+  # rustfs/rustfs#7042: a node configured with RUSTFS_SERVER_DOMAINS in the
+  # bare form every proxy-fronted deployment uses (oss.example.com, no port)
+  # crash-looped on rc.5 with "Some subdomains overlap with each other" — the
+  # startup code synthesized a listener-port variant of every domain and s3s
+  # started rejecting port-equivalent entries as overlapping. Fixed in rustfs
+  # PR #7051; this case pins both the startup and the vhost routing.
+  local domain="s3c1006.example.com" bucket="s3c1006-b1" code body
+  [ "${DRY_RUN}" -eq 1 ] && return 0
+
+  new_bucket "${bucket}" || return 1
+  make_test_file ${TEST_TMP}/s3c-v 512
+  aws_run s3api put-object --bucket "${bucket}" --key f --body ${TEST_TMP}/s3c-v
+  assert_aws_ok || { rm_bucket "${bucket}"; return 1; }
+
+  # Restart with domains configured: the bare form plus the listener-port form
+  # of the same host — port-equivalent entries that must not be rejected as
+  # overlapping (and must both route to the same bucket). Comma-separated:
+  # the parser treats a space-separated list as one invalid domain.
+  if ! set_server_domains "${domain},${domain}:9000"; then
+    rm_bucket "${bucket}"; return 1
+  fi
+
+  # The service must have survived the restart (an overlapping-domain config
+  # exits fatally within ~1s of start, so active == not crashed).
+  local node
+  for node in $(topology_nodes "${CURRENT_TOPOLOGY}"); do
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" "systemctl is-active --quiet ${RUSTFS_SERVICE}" 2>/dev/null; then
+      echo "${node}: ${RUSTFS_SERVICE} not active after restart with RUSTFS_SERVER_DOMAINS"
+      set_server_domains ""
+      rm_bucket "${bucket}"
+      return 1
+    fi
+  done
+
+  # Virtual-hosted-style request against the configured domain must resolve
+  # the bucket from the Host header. Signed against the endpoint; curl sends
+  # the vhost Host, which is what the server must honor.
+  code="$(vhost_curl "${bucket}.${domain}" GET "/?list-type=2")"
+  if [ "${code}" != "200" ]; then
+    echo "vhost-style ListObjectsV2 returned HTTP ${code}: $(head -c 300 "${TEST_TMP}/curl.out")"
+    set_server_domains ""
+    rm_bucket "${bucket}"
+    return 1
+  fi
+  body="$(cat "${TEST_TMP}/curl.out")"
+  printf '%s' "${body}" | grep -q "ListBucketResult" \
+    || { echo "vhost-style response is not a bucket listing: ${body}"; set_server_domains ""; rm_bucket "${bucket}"; return 1; }
+  # With the port-carrying form of the same domain, s3s strips the port before
+  # matching, so this must resolve the bucket as well.
+  code="$(vhost_curl "${bucket}.${domain}:9000" GET "/?list-type=2")"
+  if [ "${code}" != "200" ]; then
+    echo "vhost-style (Host with port) ListObjectsV2 returned HTTP ${code}: $(head -c 300 "${TEST_TMP}/curl.out")"
+    set_server_domains ""
+    rm_bucket "${bucket}"
+    return 1
+  fi
+  # Path-style against the plain endpoint must still see this bucket — the
+  # same cluster, addressed the way every other case does.
+  code="$(s3_signed_curl GET "/${bucket}/?list-type=2")"
+  if [ "${code}" != "200" ]; then
+    echo "path-style ListObjectsV2 returned HTTP ${code}: $(head -c 300 "${TEST_TMP}/curl.out")"
+    set_server_domains ""
+    rm_bucket "${bucket}"
+    return 1
+  fi
+
+  set_server_domains ""
+  rm_bucket "${bucket}"
+}
+
 # ---------- 11. Conditional & checksum ----------
 
 test_s3c1101() {
@@ -2431,6 +2608,7 @@ main() {
   local overall_fail=0 topo
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
     log "== topology: ${topo} =="
+    CURRENT_TOPOLOGY="${topo}"
     env_setup "${topo}"
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
     run_all_tests
