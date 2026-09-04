@@ -1055,6 +1055,16 @@ verify_smoke_kms_write() {
 PASS=0; FAIL=0
 FAILED_TESTS=()
 
+emit_topo_result() {
+  # Machine-readable line for the workflow report generator:
+  # [UPG-TOPO] <topology> <backend> <old_version> <new_version> PASS=<n> FAIL=<m>
+  local topo="$1" backend="$2"
+  printf '[UPG-TOPO] %s %s %s %s PASS=%d FAIL=%d\n' \
+    "${topo}" "${backend}" \
+    "${OLD_VERSION_ACTUAL:-unknown}" "${NEW_VERSION_ACTUAL:-unknown}" \
+    "${PASS}" "${FAIL}"
+}
+
 rc_run() {
   RC_OUT="$(rc "$@" 2>&1)"; RC_CODE=$?
   return "${RC_CODE}"
@@ -1207,6 +1217,7 @@ main() {
       run_verify_cases
       results_summary
       record_topology_result "${topo}/${KMS_BACKEND}"
+      emit_topo_result "${topo}" "${KMS_BACKEND}"
       if [ "${KEEP_ENV}" -eq 0 ]; then
         env_teardown "${topo}"
         if [ "${KMS_BACKEND}" = "vault-kv2" ]; then vault_stop; fi
