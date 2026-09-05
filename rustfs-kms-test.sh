@@ -1371,15 +1371,15 @@ kms_admin_user_add() {
 test_kms106() {
   local body code redacted
   body="$(admin_api GET /rustfs/admin/v3/kms/config "")"; code="$(admin_api_code)"
-  [ "${code}" = "200" ] || { echo "GET /v3/kms/config -> HTTP ${code}: ${body}"; return 1; }
+  [ "${code}" = "200" ] || { echo "GET /v3/kms/config -> HTTP ${code}"; return 1; }
   redacted="$(printf '%s' "${body}" | grep -o '\[redacted\]' | wc -l | tr -d ' ')"
-  [ "${redacted}" -ge 6 ] || { echo "expected >=6 [redacted] fields, got ${redacted}: ${body}"; return 1; }
+  [ "${redacted}" -ge 6 ] || { echo "expected >=6 [redacted] fields, got ${redacted}"; return 1; }
   for field in token secret_key secret_id master_key password client_secret; do
     printf '%s' "${body}" | grep -qi "\"${field}\"[[:space:]]*:[[:space:]]*\"\[redacted\]\"" \
       || printf '%s' "${body}" | grep -qi "\"${field}\"[[:space:]]*:[[:space:]]*\[redacted\]" \
-      || { echo "field ${field} not redacted: ${body}"; return 1; }
+      || { echo "field ${field} not redacted"; return 1; }
   done
-  printf '%s' "${body}" | grep -qiE '"backend"|backend_type|"address"' || { echo "non-sensitive config fields missing: ${body}"; return 1; }
+  printf '%s' "${body}" | grep -qiE '"backend"|backend_type|"address"' || { echo "non-sensitive config fields missing"; return 1; }
 }
 
 test_kms107() {

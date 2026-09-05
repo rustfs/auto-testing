@@ -462,7 +462,7 @@ assert_aws_ok() {
 }
 
 assert_aws_fails() {
-  [ "${AWS_CODE}" -ne 0 ] || { echo "aws unexpectedly succeeded: $*"; echo "${AWS_OUT}"; return 1; }
+  [ "${AWS_CODE}" -ne 0 ] || { echo "aws unexpectedly succeeded (exit ${AWS_CODE}): $*"; return 1; }
 }
 
 new_bucket() {
