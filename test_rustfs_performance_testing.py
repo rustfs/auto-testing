@@ -129,11 +129,13 @@ class PerformanceResultTests(unittest.TestCase):
         result, rows = self.run_benchmark(WARP_METHODS="get", WARP_SIZES="1KiB")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(rows), 1)
+        self.assertIn("- Methods: get; sizes: 1KiB\n", (self.results / "summary.md").read_text())
         self.calls.unlink()
         result, rows = self.run_benchmark(WARP_METHODS="all", WARP_SIZES="all")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(rows), 30)
         self.assert_diagnostics(30)
+        self.assertIn("- Methods: get put mixed; sizes: ", (self.results / "summary.md").read_text())
 
     def test_parse_only_rejects_missing_or_incomplete_selected_results(self):
         result, _ = self.run_benchmark()

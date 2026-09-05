@@ -155,7 +155,7 @@ gen_summary_md() {
     echo "- Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
     echo "- Target: ${HOST}"
     echo "- Concurrency: ${CONCURRENCY}; duration: ${DURATION}; sleep: ${SLEEP_BETWEEN_ROUNDS}s; GET objects: ${GET_OBJECTS}"
-    echo "- Methods: GET / PUT / MIXED (warp default mix); sizes: ${SIZES[*]-}"
+    echo "- Methods: ${METHODS[*]-}; sizes: ${SIZES[*]-}"
     echo "- Rounds: selected=${TOTAL_ROUNDS}; parsed=${PARSED_ROUNDS}; failed=${FAILED_ROUNDS}"
     echo ""
   } > "${SUMMARY_MD}"
