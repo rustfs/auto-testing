@@ -251,6 +251,107 @@ test_warp_error_classification() {
   fi
 }
 
+test_package_checksum_before_install() (
+  local script_name="$1" download_step="$2" install_step="$3"
+  local fixture="${TEST_TMP}/${script_name}" expected_hash scenario status expected
+  mkdir -p "${fixture}"
+  export RUSTFS_POOL_SCRIPT_SOURCE_ONLY=1 RUSTFS_HEAL_SCRIPT_SOURCE_ONLY=1 RUSTFS_PERF_SCRIPT_SOURCE_ONLY=1
+  # shellcheck source=/dev/null
+  source "${SCRIPT_DIR}/${script_name}"
+  NODES=(fixture-node)
+  ASSUME_YES=1
+  DRY_RUN=0
+  PACKAGE_URL=https://example.invalid/rustfs.deb
+  printf 'expected package\n' > "${fixture}/download-source"
+  expected_hash="$(openssl dgst -sha256 "${fixture}/download-source" | awk '{print $NF}')"
+
+  write_rustfs_config() { :; }
+  ensure_volume_dirs() { :; }
+  start_and_wait_nodes() { :; }
+  verify_pools() { :; }
+  ssh() {
+    local remote
+    remote="$(cat)"
+    remote="${remote//\/home\/rustfs\/packages/${fixture}/packages}"
+    remote="${remote//\/tmp\/rustfs.deb/${fixture}/download.deb}"
+    (
+      id() { printf '0\n'; }
+      systemctl() { :; }
+      curl() {
+        local output=""
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "-o" ]; then output="$2"; shift; fi
+          shift
+        done
+        printf 'download\n' >> "${fixture}/curl-calls"
+        cp "${fixture}/download-source" "${output}"
+      }
+      dpkg() {
+        if [ "$1" = "-i" ]; then
+          printf 'install\n' >> "${fixture}/dpkg-calls"
+          cp "$2" "${fixture}/installed"
+        fi
+      }
+      if ! command -v sha256sum >/dev/null 2>&1; then
+        sha256sum() { shasum -a 256 "$@"; }
+        export -f sha256sum
+      fi
+      export fixture
+      export -f id systemctl curl dpkg
+      bash -c "${remote}"
+    )
+  }
+
+  for scenario in valid wrong missing old download skip skip-old replaced removed no-checksum checksum-list invalid; do
+    rm -rf "${fixture}/packages"
+    mkdir -p "${fixture}/packages"
+    cp "${fixture}/download-source" "${fixture}/packages/rustfs.deb"
+    : > "${fixture}/curl-calls"
+    : > "${fixture}/dpkg-calls"
+    PACKAGE_SHA256="${expected_hash}"
+    SKIP_DOWNLOAD=0
+    expected=1
+    case "${scenario}" in
+      valid|download|skip|no-checksum) expected=0 ;;
+    esac
+    case "${scenario}" in
+      wrong) PACKAGE_SHA256="$(printf '%064d' 0)" ;;
+      missing) rm "${fixture}/packages/rustfs.deb" ;;
+      old|skip-old|no-checksum) printf 'old package\n' > "${fixture}/packages/rustfs.deb" ;;
+      invalid) PACKAGE_SHA256='$(touch '"${fixture}/injected"')' ;;
+      checksum-list)
+        printf 'old package\n' > "${fixture}/packages/rustfs.deb"
+        PACKAGE_SHA256="${expected_hash}  ${fixture}/download-source"$'\n#'
+        ;;
+    esac
+    [ "${scenario}" != no-checksum ] || PACKAGE_SHA256=""
+    case "${scenario}" in skip|skip-old) SKIP_DOWNLOAD=1 ;; esac
+    set +e
+    (
+      set -e
+      case "${scenario}" in download|skip|skip-old|replaced|removed) "${download_step}" ;; esac
+      [ "${scenario}" != replaced ] || printf 'replaced package\n' > "${fixture}/packages/rustfs.deb"
+      [ "${scenario}" != removed ] || rm "${fixture}/packages/rustfs.deb"
+      "${install_step}"
+    ) > "${fixture}/${scenario}.log" 2>&1
+    status=$?
+    set -e
+    assert_eq "${expected}" "${status}" "${script_name} ${scenario} exit"
+    assert_eq "$((1 - expected))" "$(wc -l < "${fixture}/dpkg-calls" | tr -d ' ')" "${script_name} ${scenario} dpkg calls"
+    case "${scenario}" in
+      download|replaced|removed) assert_eq 1 "$(wc -l < "${fixture}/curl-calls" | tr -d ' ')" "${script_name} ${scenario} download calls" ;;
+      *) assert_eq 0 "$(wc -l < "${fixture}/curl-calls" | tr -d ' ')" "${script_name} ${scenario} download calls" ;;
+    esac
+    [ ! -e "${fixture}/injected" ] || fail "checksum was interpreted as shell code"
+    if [ "${expected}" -eq 0 ]; then
+      cmp "${fixture}/packages/rustfs.deb" "${fixture}/installed" || fail "installed bytes differ"
+    fi
+  done
+)
+
+test_package_checksum_before_install rustfs_heal_test.sh step1_download step2_install_and_start
+test_package_checksum_before_install rustfs_pool_expand.sh step1_download step2_install
+test_package_checksum_before_install rustfs_performance_test.sh step2_download step3_install
 test_endpoint_resolution
 test_independent_routing_and_signing
 test_storageinfo_retry_is_sticky
