@@ -1377,18 +1377,18 @@ test_kms106() {
   # configured secret material.
   local body code field material
   body="$(admin_api GET /rustfs/admin/v3/kms/config "")"; code="$(admin_api_code)"
-  [ "${code}" = "200" ] || { echo "GET /v3/kms/config -> HTTP ${code}: ${body}"; return 1; }
+  [ "${code}" = "200" ] || { echo "GET /v3/kms/config -> HTTP ${code}"; return 1; }
   for field in token secret_key secret_id master_key password client_secret; do
     if printf '%s' "${body}" | grep -qiE "\"([a-z0-9_]*_)?${field}\"[[:space:]]*:"; then
-      echo "sensitive field ${field} exposed in config view: ${body}"; return 1
+      echo "sensitive field ${field} exposed in config view"; return 1
     fi
   done
-  printf '%s' "${body}" | grep -q '"backend"' || { echo "backend field missing from config view: ${body}"; return 1; }
+  printf '%s' "${body}" | grep -q '"backend"' || { echo "backend field missing from config view"; return 1; }
   for material in "${KMS_LOCAL_MASTER_KEY}" "${VAULT_TOKEN:-}"; do
     [ -n "${material}" ] || continue
     if printf '%s' "${body}" | grep -qF -- "${material}"; then echo "config view leaks secret material"; return 1; fi
   done
-  echo "config view sanitized: ${body}"
+  echo "config view sanitized"
 }
 
 test_kms107() {
