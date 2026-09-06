@@ -750,14 +750,17 @@ golden_get() {
 }
 
 seed_warp_bucket() {
-  # seed_warp_bucket <bucket> <obj-size> <duration> <min-objects>
+  # seed_warp_bucket <bucket> <obj-size> <duration> <keep-objects>
   # Fill a bucket with warp at a fixed object size. warp is duration-driven
-  # (no object-count flag), so the run uses a short duration with
-  # auto-termination and records the actual written count as golden state;
-  # the verification side lists the bucket and compares counts.
-  local bucket="$1" size="$2" duration="$3" min_objects="$4"
+  # (no object-count flag) and small sizes write thousands of objects per
+  # second — a 10s 1KiB run produced 22k objects and the per-object post-
+  # upgrade verification then needed 5h per topology. So run warp only long
+  # enough to prove warp semantics (multi-threaded PUTs with warp-chosen
+  # keys/content), then trim the bucket down to <keep-objects> and record
+  # that exact count as golden state; verification lists and compares counts.
+  local bucket="$1" size="$2" duration="$3" keep="$4"
   new_bucket "${bucket}" || die "seed: ${bucket}"
-  log "seeding ${bucket} via warp (obj.size=${size}, duration=${duration})"
+  log "seeding ${bucket} via warp (obj.size=${size}, duration=${duration}, keep=${keep})"
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: warp put skipped"
     golden_set "warp:${bucket}" "0"
@@ -773,14 +776,34 @@ seed_warp_bucket() {
     --concurrent 4 \
     --noprefix --noclear >"${TEST_TMP}/warp-put-${bucket}.log" 2>&1 \
     || die "seed: warp put ${bucket} failed (see ${TEST_TMP}/warp-put-${bucket}.log)"
-  aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'length(Contents)'
+  aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'Contents[].Key' --output json
   assert_aws_ok || die "seed: list ${bucket}"
-  local written
-  written="$(printf '%s' "${AWS_OUT}" | tr -d '[:space:]')"
-  [ "${written}" -ge "${min_objects}" ] \
-    || die "seed: ${bucket}: warp wrote only ${written} objects (wanted >= ${min_objects})"
-  golden_set "warp:${bucket}" "${written}"
-  log "seeded ${bucket}: ${written} objects of ${size} bytes"
+  local keys_json written remaining
+  keys_json="${AWS_OUT}"
+  written="$(printf '%s' "${keys_json}" | jq 'length')"
+  [ "${written}" -gt 0 ] \
+    || die "seed: ${bucket}: warp wrote 0 objects"
+  if [ "${written}" -gt "${keep}" ]; then
+    # Trim to <keep> objects: delete the extras in batches of 1000 (the S3
+    # delete-objects limit). jq builds one compact JSON payload per batch.
+    while IFS= read -r payload; do
+      [ -n "${payload}" ] || continue
+      aws_run s3api delete-objects --bucket "${bucket}" --delete "${payload}"
+      assert_aws_ok || die "seed: trim ${bucket} (delete batch failed)"
+    done < <(printf '%s' "${keys_json}" \
+             | jq -c --argjson k "${keep}" \
+               '.[0:(length - $k)] | _nwise(1000) | {Objects: [.[] | {Key: .}], Quiet: true}')
+    aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'length(Contents)'
+    assert_aws_ok || die "seed: post-trim list ${bucket}"
+    remaining="$(printf '%s' "${AWS_OUT}" | tr -d '[:space:]')"
+    [ "${remaining}" = "${keep}" ] \
+      || die "seed: ${bucket}: trim left ${remaining} objects (wanted exactly ${keep})"
+    golden_set "warp:${bucket}" "${keep}"
+    log "seeded ${bucket}: ${keep} objects of ${size} bytes (warp wrote ${written}, trimmed)"
+  else
+    golden_set "warp:${bucket}" "${written}"
+    log "seeded ${bucket}: ${written} objects of ${size} bytes (warp wrote fewer than keep=${keep}, kept all)"
+  fi
 }
 
 # ==================== Golden seed (on OLD version) ====================
@@ -866,10 +889,12 @@ seed_golden() {
   log "seeded large object"
 
   # UPG-108/109/110 warp-written data at mixed object sizes. warp generates
-  # its own content and key names; the golden state records the written
-  # object count per bucket, and the verification side re-reads everything.
-  seed_warp_bucket "upg-warp-1kib"  1KiB   10s 20
-  seed_warp_bucket "upg-warp-1mib"  1MiB   15s 10
+  # its own content and key names; each bucket is trimmed to a handful of
+  # objects after seeding (see seed_warp_bucket) so post-upgrade per-object
+  # verification stays fast. The golden state records the final count per
+  # bucket, and the verification side re-reads everything.
+  seed_warp_bucket "upg-warp-1kib"  1KiB   2s 5
+  seed_warp_bucket "upg-warp-1mib"  1MiB   2s 5
   seed_warp_bucket "upg-warp-100mib" 100MiB 30s 2
 
   # UPG-105 SSE-S3.
