@@ -345,11 +345,20 @@ vault_remote_bash() {
 }
 
 vault_ensure_config() {
-  vault_remote_bash "
+  # chmod 0777 like the KMS suite: the vault process inside the container
+  # (running as its own uid) must be able to create /vault/data/core on this
+  # host-mounted dir, or `vault operator init` fails with
+  # "failed to persist keyring: mkdir /vault/data/core: permission denied".
+  if vault_local; then
+    heal_run bash -lc "set -e; rm -rf '${VAULT_DATA_DIR}'; mkdir -p '${VAULT_DATA_DIR}'; chmod 0777 '${VAULT_DATA_DIR}'"
+  else
+    vault_remote_bash "
 set -e
 rm -rf '${VAULT_DATA_DIR}'
 mkdir -p '${VAULT_DATA_DIR}'
+chmod 0777 '${VAULT_DATA_DIR}'
 "
+  fi
 }
 
 vault_read_init() {
