@@ -378,9 +378,21 @@ vault_ensure_ready() {
   if [ -z "${init}" ] || [ -z "$(printf '%s' "${init}" | jq -r '.root_token // empty' 2>/dev/null)" ]; then
     log "initializing vault (1-of-1 unseal key)"
     if vault_local; then
+      # Mirror the KMS suite: capture init output in a temp file and its
+      # stderr separately (so a failure shows the real vault error instead
+      # of swallowing it into /dev/null), then write init.json via
+      # heal_run tee — VAULT_DATA_DIR may not be writable by the runner
+      # user directly, but heal_run's sudo path is.
+      local tmp_init tmp_err
+      tmp_init="${TEST_TMP}/vault-init.json"
+      tmp_err="${TEST_TMP}/vault-init.stderr"
       heal_run docker exec -e "VAULT_ADDR=http://127.0.0.1:8200" "${VAULT_CONTAINER}" \
         vault operator init -key-shares=1 -key-threshold=1 -format=json \
-        > "${VAULT_DATA_DIR}/init.json" 2>/dev/null || die "vault init failed"
+        > "${tmp_init}" 2>"${tmp_err}" || {
+          cat "${tmp_err}" >&2 || true
+          die "vault init failed"
+        }
+      cat "${tmp_init}" | heal_run tee "${VAULT_DATA_DIR}/init.json" >/dev/null || die "vault init failed"
     else
       local tmp
       tmp="$(mktemp)"
