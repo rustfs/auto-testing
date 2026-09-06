@@ -87,7 +87,11 @@ heal_run() {
     if docker info >/dev/null 2>&1; then
       "$@"
     else
-      sudo -n docker "$@" 2>/dev/null || sudo docker "$@"
+      # runner user without docker group: run the same command via sudo.
+      # Pass "$@" verbatim (like the KMS suite) — the first word is already
+      # the full binary path; prefixing `docker` here would execute
+      # `docker docker run -d ...` and fail with "unknown shorthand flag".
+      sudo -n "$@" 2>/dev/null || sudo "$@"
     fi
   else
     ssh "${HEAL_SSH_OPTS[@]}" "${HEAL_HOST}" "$(printf '%q ' "$@")"
