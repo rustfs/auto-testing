@@ -513,7 +513,7 @@ make_test_file() {
 # Compressible payload (repeated pattern) of the requested byte size.
 make_compressible_file() {
   local path="$1" size="$2"
-  yes "compressible rustfs storage test pattern. " | head -c "${size}" > "${path}"
+  yes "compressible rustfs storage test pattern. " 2>/dev/null | head -c "${size}" > "${path}"
 }
 
 results_summary() {
@@ -555,7 +555,7 @@ bucket_physical_bytes() {
       printf '0\n'; return 0
     fi
     out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-      "if [ \"\$(id -u)\" -ne 0 ]; then SUDO="sudo -n"; else SUDO=""; fi; \${SUDO} find /data/rustfs*/mnmd/${bucket} -type f -printf '%s\\n' 2>/dev/null | awk '{s+=\$1} END{print s+0}'")"
+      "if [ \"\$(id -u)\" -ne 0 ]; then SUDO=\"sudo -n\"; else SUDO=\"\"; fi; \${SUDO} find /data/rustfs*/mnmd/${bucket} -type f -printf '%s\\n' 2>/dev/null | awk '{s+=\$1} END{print s+0}'")"
     total=$((total + ${out:-0}))
   done
   printf '%s' "${total}"
@@ -570,7 +570,7 @@ bucket_part_count() {
       printf '0\n'; return 0
     fi
     out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-      "if [ \"\$(id -u)\" -ne 0 ]; then SUDO="sudo -n"; else SUDO=""; fi; \${SUDO} find /data/rustfs*/mnmd/${bucket} -name 'part.*' 2>/dev/null | wc -l")"
+      "if [ \"\$(id -u)\" -ne 0 ]; then SUDO=\"sudo -n\"; else SUDO=\"\"; fi; \${SUDO} find /data/rustfs*/mnmd/${bucket} -name 'part.*' 2>/dev/null | wc -l")"
     total=$((total + ${out:-0}))
   done
   printf '%s' "${total}"
