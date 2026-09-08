@@ -45,8 +45,11 @@ else
 fi
 TOTAL_ROUNDS=$(( ${#METHODS[@]} * ${#SIZES[@]} ))
 ROUND=0
+PARSED_ROUNDS=0
+FAILED_ROUNDS=0
 
 # --parse-only <result-dir>: parse an existing result dir (${method}_${size}.txt) without running
+# Only round files with a successful terminal execution status can be certified.
 if [[ "${1:-}" == "--parse-only" && -n "${2:-}" ]]; then
   RESULT_DIR="$2"
 fi
@@ -100,6 +103,10 @@ field() {
 # Parse one round's output and append a row to summary.tsv
 parse_round() {
   local method="$1" size="$2" file="$3"
+  if [[ "$(tail -n 1 "$file")" != "RustFS round status: warp=0 capture=0" ]]; then
+    log "PARSE_FAILED method=${method} size=${size} reason=missing_or_failed_round_status file=${file}"
+    return 1
+  fi
   local line
   if [[ "${method}" == "mixed" ]]; then
     local total get put
@@ -129,6 +136,14 @@ parse_round() {
       "$(field "${stats}" ttfb_p99)" \
       "$(field "${stats}" ttfb_worst)")
   fi
+  # TTFB is optional in warp; throughput and request statistics define a result.
+  if ! printf '%s\n' "${line}" | awk -F '\t' '
+    { last = $1 == "mixed" ? 6 : 8
+      for (i = 3; i <= last; i++) if ($i !~ /[^[:space:]]/) exit 1 }
+  '; then
+    log "PARSE_FAILED method=${method} size=${size} reason=missing_required_metrics file=${file}"
+    return 1
+  fi
   printf '%s\n' "${line}" >> "${SUMMARY_TSV}"
 }
 
@@ -140,7 +155,8 @@ gen_summary_md() {
     echo "- Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
     echo "- Target: ${HOST}"
     echo "- Concurrency: ${CONCURRENCY}; duration: ${DURATION}; sleep: ${SLEEP_BETWEEN_ROUNDS}s; GET objects: ${GET_OBJECTS}"
-    echo "- Methods: GET / PUT / MIXED (warp default mix); sizes: ${SIZES[*]}"
+    echo "- Methods: ${METHODS[*]-}; sizes: ${SIZES[*]-}"
+    echo "- Rounds: selected=${TOTAL_ROUNDS}; parsed=${PARSED_ROUNDS}; failed=${FAILED_ROUNDS}"
     echo ""
   } > "${SUMMARY_MD}"
 
@@ -173,24 +189,34 @@ gen_summary_md() {
 
 # ---- Main flow ----
 
-mkdir -p "${RESULT_DIR}"
-log "CONFIG host=${HOST} bucket=${BUCKET} concurrency=${CONCURRENCY} duration=${DURATION} get_objects=${GET_OBJECTS} sleep_between_rounds=${SLEEP_BETWEEN_ROUNDS}s"
-printf 'method\tsize\tthroughput\tobj_per_s\treq_avg\treq_p50\treq_p90\treq_p99\tttfb_avg\tttfb_p99\tttfb_worst\n' > "${SUMMARY_TSV}"
+mkdir -p "${RESULT_DIR}" || exit 1
+log "CONFIG host=${HOST} bucket=${BUCKET} concurrency=${CONCURRENCY} duration=${DURATION} get_objects=${GET_OBJECTS} sleep_between_rounds=${SLEEP_BETWEEN_ROUNDS}s" || exit 1
+printf 'method\tsize\tthroughput\tobj_per_s\treq_avg\treq_p50\treq_p90\treq_p99\tttfb_avg\tttfb_p99\tttfb_worst\n' > "${SUMMARY_TSV}" || exit 1
+
+if [[ ${TOTAL_ROUNDS} -eq 0 ]]; then
+  log "NO_ROUNDS_SELECTED"
+  gen_summary_md
+  exit 1
+fi
 
 if [[ "${1:-}" == "--parse-only" ]]; then
   for method in "${METHODS[@]}"; do
     for size in "${SIZES[@]}"; do
       outfile="${RESULT_DIR}/${method}_${size}.txt"
-      if [[ -s "${outfile}" ]]; then
-        parse_round "${method}" "${size}" "${outfile}"
+      if [[ -s "${outfile}" ]] && parse_round "${method}" "${size}" "${outfile}"; then
+        PARSED_ROUNDS=$((PARSED_ROUNDS + 1))
+      else
+        FAILED_ROUNDS=$((FAILED_ROUNDS + 1))
+        log "PARSE_FAILED method=${method} size=${size} file=${outfile}"
       fi
     done
   done
-  gen_summary_md
+  gen_summary_md || exit 1
   echo "parsed from ${RESULT_DIR}"
   echo ""
-  cat "${SUMMARY_MD}"
-  exit 0
+  cat "${SUMMARY_MD}" || exit 1
+  [[ ${FAILED_ROUNDS} -eq 0 && ${PARSED_ROUNDS} -eq ${TOTAL_ROUNDS} ]]
+  exit $?
 fi
 
 for method in "${METHODS[@]}"; do
@@ -214,16 +240,20 @@ for method in "${METHODS[@]}"; do
       --concurrent "${CONCURRENCY}" \
       --duration "${DURATION}" \
       --obj.size "${size}" \
-      "${extra_args[@]}" \
+      ${extra_args[@]+"${extra_args[@]}"} \
       --no-color 2>&1 | tee "${outfile}"
-    rc=${PIPESTATUS[0]}
+    round_status=("${PIPESTATUS[@]}")
+    rc=${round_status[0]}
+    capture_rc=${round_status[1]}
     end_epoch=$(date +%s)
+    printf '\nRustFS round status: warp=%s capture=%s\n' "${rc}" "${capture_rc}" >> "${outfile}" || capture_rc=1
 
-    if [[ ${rc} -eq 0 ]]; then
-      parse_round "${method}" "${size}" "${outfile}"
+    if [[ ${rc} -eq 0 && ${capture_rc} -eq 0 ]] && parse_round "${method}" "${size}" "${outfile}"; then
+      PARSED_ROUNDS=$((PARSED_ROUNDS + 1))
       log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} elapsed=$((end_epoch - start_epoch))s parsed=ok"
     else
-      log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} elapsed=$((end_epoch - start_epoch))s parsed=skipped"
+      FAILED_ROUNDS=$((FAILED_ROUNDS + 1))
+      log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} capture_rc=${capture_rc} elapsed=$((end_epoch - start_epoch))s parsed=failed"
     fi
 
     if [[ ${ROUND} -lt ${TOTAL_ROUNDS} ]]; then
@@ -233,8 +263,9 @@ for method in "${METHODS[@]}"; do
   done
 done
 
-gen_summary_md
-log "ALL_ROUNDS_COMPLETE summary_tsv=${SUMMARY_TSV} summary_md=${SUMMARY_MD}"
+gen_summary_md || exit 1
+log "ALL_ROUNDS_COMPLETE selected=${TOTAL_ROUNDS} parsed=${PARSED_ROUNDS} failed=${FAILED_ROUNDS} summary_tsv=${SUMMARY_TSV} summary_md=${SUMMARY_MD}" || exit 1
 echo ""
 echo "==== Results summary ===="
-cat "${SUMMARY_MD}"
+cat "${SUMMARY_MD}" || exit 1
+[[ ${FAILED_ROUNDS} -eq 0 && ${PARSED_ROUNDS} -eq ${TOTAL_ROUNDS} ]]

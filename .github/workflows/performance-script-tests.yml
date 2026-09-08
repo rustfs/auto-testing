@@ -1,0 +1,30 @@
+name: Performance Script Tests
+
+on:
+  pull_request:
+    paths:
+      - rustfs_performance_testing.sh
+      - test_rustfs_performance_testing.py
+      - .github/workflows/performance-script-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - rustfs_performance_testing.sh
+      - test_rustfs_performance_testing.py
+      - .github/workflows/performance-script-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  performance-script-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Validate shell syntax
+        run: bash -n rustfs_performance_testing.sh
+      - name: Test benchmark result contracts without a server
+        run: python3 test_rustfs_performance_testing.py
