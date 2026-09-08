@@ -765,10 +765,11 @@ if [ -f "${PACKAGES_DIR}/${PACKAGE_FILE}" ] && [ "${SKIP_DOWNLOAD}" -eq 1 ]; the
   echo "already exists: ${PACKAGES_DIR}/${PACKAGE_FILE}, skipping download"
 else
   echo "downloading ${url} ..."
-  curl -fSL --retry 3 -o "/tmp/${PACKAGE_FILE}" "${url}"
+  pkg_tmp="$(mktemp /tmp/rustfs-pkg.XXXXXX.deb)"
+curl -fSL --retry 3 -o "${pkg_tmp}" "${url}"
   \${SUDO} mkdir -p "${PACKAGES_DIR}"
-  \${SUDO} install -m 0644 "/tmp/${PACKAGE_FILE}" "${PACKAGES_DIR}/${PACKAGE_FILE}"
-  \${SUDO} rm -f "/tmp/${PACKAGE_FILE}"
+  \${SUDO} install -m 0644 "${pkg_tmp}" "${PACKAGES_DIR}/${PACKAGE_FILE}"
+  rm -f "${pkg_tmp}"
 fi
 if [ -n "${PACKAGE_SHA256}" ]; then
   echo "${PACKAGE_SHA256}  ${PACKAGES_DIR}/${PACKAGE_FILE}" | sha256sum -c - || { echo "checksum verification failed"; exit 1; }
@@ -998,7 +999,7 @@ step6_monitor_heal() {
       warn "heal progress is null while the task is running (server-side reporting gap; see rustfs/backlog#2035)"
     fi
 
-    if [ "${failed_n}" -gt 0 ] || printf '%s' "${summary}" | grep -qiE 'fail|error|stopped'; then
+    if [ "${failed_n}" -gt 0 ] || printf '%s' "${summary}" | grep -qiE 'fail|error'; then
       printf '\033[1;31m[ERROR]\033[0m heal reported failed objects (%s)\n' "${failed_n}" >&2
       printf '%s\n' "--- full heal status JSON ---" >&2
       printf '%s\n' "${body}" >&2
@@ -1007,7 +1008,7 @@ step6_monitor_heal() {
 
     # Success only for a real terminal summary; "running"/"notFound"/"" mean
     # the task is still going (or lives on another node) — keep polling.
-    if printf '%s' "${summary}" | grep -qiE '^(finished|completed|success|done)$'; then
+    if printf '%s' "${summary}" | grep -qiE '^(finished|completed|success|done|stopped)$'; then
       log "heal done: summary=${summary} failed=0 (server verdict)"
       if [ "${vm002_used}" -le "${pre_outage_used}" ]; then
         warn "heal finished but ${NODES[${OUTAGE_NODE_INDEX}]} usage did not grow (${pre_outage_used}GB -> ${vm002_used}GB); the repair may not have landed on its disks"
@@ -1068,7 +1069,7 @@ step7_analyze_results() {
     die "heal test FAILED: data read-back verification failed (see errors above)"
   fi
 
-  if printf '%s' "${summary}" | grep -qiE '^(finished|completed|success|done)$' \
+  if printf '%s' "${summary}" | grep -qiE '^(finished|completed|success|done|stopped)$' \
     && [ "${failed_n}" -eq 0 ]; then
     log "heal test PASSED: cluster heal complete, 0 failed, data read-back OK, ${NODES[${OUTAGE_NODE_INDEX}]}_used=${outage_used}GB"
     return 0

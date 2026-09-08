@@ -2124,8 +2124,8 @@ test_s3c1204() {
 
 test_s3c1205() {
   new_bucket "s3c1205-b1" || return 1
-  printf 'a,1\nb,2\nc,3\n' > /tmp/s3c.csv
-  aws_run s3api put-object --bucket "s3c1205-b1" --key x.csv --body /tmp/s3c.csv
+  printf 'a,1\nb,2\nc,3\n' > "${TEST_TMP}/s3c.csv"
+  aws_run s3api put-object --bucket "s3c1205-b1" --key x.csv --body "${TEST_TMP}/s3c.csv"
   rc_run sql --query "select * from s3object" "local/s3c1205-b1/x.csv"
   if [ "${RC_CODE}" -eq 7 ]; then echo "rc sql gated"; return 2; fi
   assert_rc_ok "rc sql" || return 1
