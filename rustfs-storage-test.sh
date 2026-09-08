@@ -292,10 +292,10 @@ env_setup() {
 set -euo pipefail
 SUDO=""; [ "\$(id -u)" -ne 0 ] && SUDO="sudo -n"
 \${SUDO} mkdir -p "${PACKAGES_DIR}"
-pkg_tmp="$(mktemp /tmp/rustfs-pkg.XXXXXX.deb)"
-curl -fSL --retry 3 -o "${pkg_tmp}" "${url}"
-\${SUDO} install -m 0644 "${pkg_tmp}" "${PACKAGES_DIR}/${PACKAGE_FILE}"
-rm -f "${pkg_tmp}"
+pkg_tmp="\$(mktemp /tmp/rustfs-pkg.XXXXXX.deb)"
+curl -fSL --retry 3 -o "\${pkg_tmp}" "${url}"
+\${SUDO} install -m 0644 "\${pkg_tmp}" "${PACKAGES_DIR}/${PACKAGE_FILE}"
+rm -f "\${pkg_tmp}"
 if [ -n "${PACKAGE_SHA256}" ]; then
   echo "${PACKAGE_SHA256}  ${PACKAGES_DIR}/${PACKAGE_FILE}" | sha256sum -c - || exit 1
 fi

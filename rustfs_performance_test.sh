@@ -314,11 +314,11 @@ if [ -f "${PACKAGES_DIR}/${PACKAGE_FILE}" ] && [ "${SKIP_DOWNLOAD}" -eq 1 ]; the
   echo "already exists: ${PACKAGES_DIR}/${PACKAGE_FILE}, skipping download"
 else
   echo "downloading ${url} ..."
-  pkg_tmp="$(mktemp /tmp/rustfs-pkg.XXXXXX.deb)"
-curl -fSL --retry 3 -o "${pkg_tmp}" "${url}"
+  pkg_tmp="\$(mktemp /tmp/rustfs-pkg.XXXXXX.deb)"
+curl -fSL --retry 3 -o "\${pkg_tmp}" "${url}"
   \${SUDO} mkdir -p "${PACKAGES_DIR}"
-  \${SUDO} install -m 0644 "${pkg_tmp}" "${PACKAGES_DIR}/${PACKAGE_FILE}"
-  rm -f "${pkg_tmp}"
+  \${SUDO} install -m 0644 "\${pkg_tmp}" "${PACKAGES_DIR}/${PACKAGE_FILE}"
+  rm -f "\${pkg_tmp}"
 fi
 if [ -n "${PACKAGE_SHA256}" ]; then
   echo "${PACKAGE_SHA256}  ${PACKAGES_DIR}/${PACKAGE_FILE}" | sha256sum -c - || { echo "checksum verification failed"; exit 1; }
