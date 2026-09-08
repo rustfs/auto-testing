@@ -783,9 +783,15 @@ step2_install_and_start() {
   log "step 2: install rustfs, write the 3x4 config, start all nodes simultaneously"
   confirm "About to dpkg -i and start rustfs on all nodes. Continue?"
   local script
-  script="$(cat <<'EOF'
+  script="$(
+    printf 'PACKAGE_SHA256=%q\n' "${PACKAGE_SHA256}"
+    cat <<'EOF'
 set -euo pipefail
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
+if [ -n "${PACKAGE_SHA256}" ]; then
+  [[ "${PACKAGE_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "invalid package SHA-256"; exit 1; }
+  printf '%s  %s\n' "${PACKAGE_SHA256}" /home/rustfs/packages/rustfs.deb | sha256sum -c - || { echo "checksum verification failed"; exit 1; }
+fi
 ${SUDO} dpkg -i /home/rustfs/packages/rustfs.deb
 ${SUDO} systemctl daemon-reload
 echo "--- installed package ---"

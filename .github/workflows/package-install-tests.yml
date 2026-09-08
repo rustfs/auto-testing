@@ -1,0 +1,37 @@
+name: Package Install Tests
+
+on:
+  pull_request:
+    paths:
+      - rustfs_heal_test.sh
+      - rustfs_pool_expand.sh
+      - rustfs_performance_test.sh
+      - test_rustfs_pool_expand.sh
+      - .github/workflows/package-install-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - rustfs_heal_test.sh
+      - rustfs_pool_expand.sh
+      - rustfs_performance_test.sh
+      - test_rustfs_pool_expand.sh
+      - .github/workflows/package-install-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  package-install-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Validate shell syntax
+        run: |
+          for script in rustfs_heal_test.sh rustfs_pool_expand.sh rustfs_performance_test.sh test_rustfs_pool_expand.sh; do
+            bash -n "${script}"
+          done
+      - name: Test package installation without a server
+        run: bash test_rustfs_pool_expand.sh
