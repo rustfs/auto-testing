@@ -1380,8 +1380,8 @@ abort_stale_multipart_uploads() {
     # Split the one-line XML into one <Upload>...</Upload> block per line.
     while IFS= read -r block; do
       [ -z "${block}" ] && continue
-      key="$(printf '%s' "${block}" | grep -oE '<Key>[^<]+</Key>' | sed 's#</\?Key>##g')"
-      id="$(printf '%s' "${block}" | grep -oE '<UploadId>[^<]+</UploadId>' | sed 's#</\?UploadId>##g')"
+      key="$(printf '%s' "${block}" | grep -oE '<Key>[^<]+</Key>' | sed 's#</\?Key>##g' || true)"
+      id="$(printf '%s' "${block}" | grep -oE '<UploadId>[^<]+</UploadId>' | sed 's#</\?UploadId>##g' || true)"
       if [ -n "${key}" ] && [ -n "${id}" ]; then
         any=1
         log "aborting incomplete multipart upload ${id} for ${key}"
@@ -1391,8 +1391,8 @@ abort_stale_multipart_uploads() {
           || die "abort multipart upload failed (HTTP ${code}) for ${key} ${id}"
       fi
     done < <(printf '%s' "${body}" | sed 's#</Upload>#</Upload>\n#g' | grep '<Upload>')
-    marker_key="$(printf '%s' "${body}" | grep -oE '<NextKeyMarker>[^<]+</NextKeyMarker>' | sed 's#</\?NextKeyMarker>##g' | head -1)"
-    marker_id="$(printf '%s' "${body}" | grep -oE '<NextUploadIdMarker>[^<]+</NextUploadIdMarker>' | sed 's#</\?NextUploadIdMarker>##g' | head -1)"
+    marker_key="$(printf '%s' "${body}" | grep -oE '<NextKeyMarker>[^<]+</NextKeyMarker>' | sed 's#</\?NextKeyMarker>##g' | head -1 || true)"
+    marker_id="$(printf '%s' "${body}" | grep -oE '<NextUploadIdMarker>[^<]+</NextUploadIdMarker>' | sed 's#</\?NextUploadIdMarker>##g' | head -1 || true)"
     [ -n "${marker_key}" ] || break
   done
   # Confirm the bucket has no incomplete uploads left before decommission.
