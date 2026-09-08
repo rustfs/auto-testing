@@ -554,7 +554,7 @@ bucket_physical_bytes() {
       printf '0\n'; return 0
     fi
     out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-      "if [ \"\$(id -u)\" -ne 0 ]; then SUDO=sudo -n; else SUDO=; fi; \${SUDO} find /data/rustfs*/mnmd/${bucket} -type f -printf '%s\\n' 2>/dev/null | awk '{s+=\$1} END{print s+0}'")"
+      "if [ \"\$(id -u)\" -ne 0 ]; then SUDO="sudo -n"; else SUDO=""; fi; \${SUDO} find /data/rustfs*/mnmd/${bucket} -type f -printf '%s\\n' 2>/dev/null | awk '{s+=\$1} END{print s+0}'")"
     total=$((total + ${out:-0}))
   done
   printf '%s' "${total}"
@@ -569,7 +569,7 @@ bucket_part_count() {
       printf '0\n'; return 0
     fi
     out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-      "if [ \"\$(id -u)\" -ne 0 ]; then SUDO=sudo -n; else SUDO=; fi; \${SUDO} find /data/rustfs*/mnmd/${bucket} -name 'part.*' 2>/dev/null | wc -l")"
+      "if [ \"\$(id -u)\" -ne 0 ]; then SUDO="sudo -n"; else SUDO=""; fi; \${SUDO} find /data/rustfs*/mnmd/${bucket} -name 'part.*' 2>/dev/null | wc -l")"
     total=$((total + ${out:-0}))
   done
   printf '%s' "${total}"
@@ -770,10 +770,13 @@ test_stor110() {
   make_compressible_file "${TEST_TMP}/stor110-v" 2048
   aws_run s3api put-object --bucket "stor110-b1" --key c.txt --body "${TEST_TMP}/stor110-v" --content-type text/plain
   assert_aws_ok || return 1
-  local headers body code
+  local headers body code url
   headers="$(mktemp)"
-  code="$(curl -s -D "${headers}" -o "${TEST_TMP}/stor110-body" -H "Accept-Encoding: gzip" \
-    "${ENDPOINT}/stor110-b1/c.txt" -w '%{http_code}')"
+  # plain GET is unsigned and gets 403 on a private bucket; use a presigned URL
+  url="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3 presign "s3://stor110-b1/c.txt" --expires-in 60 2>/dev/null)"
+  [ -n "${url}" ] || { echo "presign produced no URL"; return 1; }
+  code="$(curl -s --max-time 30 -D "${headers}" -o "${TEST_TMP}/stor110-body" -H "Accept-Encoding: gzip" \
+    "${url}" -w '%{http_code}')"
   [ "${code}" = "200" ] || { echo "GET returned ${code}"; return 1; }
   grep -qi '^Content-Encoding: gzip' "${headers}" || { echo "response not gzip-compressed: $(cat "${headers}")"; return 1; }
   gunzip -c "${TEST_TMP}/stor110-body" > "${TEST_TMP}/stor110-decompressed" 2>/dev/null || {
@@ -783,7 +786,8 @@ test_stor110() {
   make_test_file "${TEST_TMP}/stor110-small" 64
   aws_run s3api put-object --bucket "stor110-b1" --key small.txt --body "${TEST_TMP}/stor110-small" --content-type text/plain
   assert_aws_ok || return 1
-  code="$(curl -s -D "${headers}" -o /dev/null -H "Accept-Encoding: gzip" "${ENDPOINT}/stor110-b1/small.txt" -w '%{http_code}')"
+  url="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3 presign "s3://stor110-b1/small.txt" --expires-in 60 2>/dev/null)"
+  code="$(curl -s --max-time 30 -D "${headers}" -o /dev/null -H "Accept-Encoding: gzip" "${url}" -w '%{http_code}')"
   if grep -qi '^Content-Encoding:' "${headers}"; then
     echo "note: small response was compressed (min-size not applied)"
   fi
@@ -905,7 +909,7 @@ test_stor129() {
   body="$(admin_api GET "/rustfs/admin/v3/info" "")"
   code="$(admin_api_code)"
   [ "${code}" = "200" ] || { echo "server info returned HTTP ${code}: ${body}"; return 1; }
-  printf '%s' "${body}" | jq -e '.bitrot_selftest == "passed"' >/dev/null \
+  printf '%s' "${body}" | jq -e '(.bitrotSelftest // .bitrot_selftest) == "passed"' >/dev/null \
     || { echo "bitrot selftest not passed: ${body}"; return 1; }
 }
 
@@ -914,10 +918,10 @@ test_stor130() {
   body="$(admin_api GET "/rustfs/admin/v3/storageinfo" "")"
   code="$(admin_api_code)"
   [ "${code}" = "200" ] || { echo "storageinfo returned HTTP ${code}: ${body}"; return 1; }
-  printf '%s' "${body}" | jq -e '.disks | length > 0' >/dev/null || { echo "no disks in storageinfo: ${body}"; return 1; }
-  printf '%s' "${body}" | jq -e '[.disks[] | select(.state != "ok")] | length == 0' >/dev/null \
+  printf '%s' "${body}" | jq -e '(.info.disks // .disks) | length > 0' >/dev/null || { echo "no disks in storageinfo: ${body}"; return 1; }
+  printf '%s' "${body}" | jq -e '[(.info.disks // .disks)[] | select(.state != "ok")] | length == 0' >/dev/null \
     || { echo "some disks not ok: ${body}"; return 1; }
-  printf '%s' "${body}" | jq -e '[.disks[] | (.totalspace > 0 and .usedspace >= 0 and .availspace >= 0)] | all' >/dev/null \
+  printf '%s' "${body}" | jq -e '[(.info.disks // .disks)[] | ((.totalspace // .total_space) > 0 and (.usedspace // .used_space) >= 0 and (.availspace // .available_space) >= 0)] | all' >/dev/null \
     || { echo "disk capacity fields invalid: ${body}"; return 1; }
 }
 
@@ -926,10 +930,10 @@ test_stor131() {
   body="$(admin_api GET "/rustfs/admin/v3/storageinfo" "")"
   code="$(admin_api_code)"
   [ "${code}" = "200" ] || { echo "storageinfo returned HTTP ${code}"; return 1; }
-  used_api="$(printf '%s' "${body}" | jq '[.disks[].usedspace] | add')"
+  used_api="$(printf '%s' "${body}" | jq '[((.info.disks // .disks)[] | (.usedspace // .used_space))] | add')"
   rc_run admin info storage local --json
   assert_rc_ok "rc admin info storage local" || return 1
-  used_rc="$(printf '%s' "${RC_OUT}" | jq -r '.data.summary.usedCapacityBytes // empty')"
+  used_rc="$(printf '%s' "${RC_OUT}" | jq -r '.data.summary.used_capacity_bytes // .data.summary.usedCapacityBytes // empty')"
   [ -n "${used_rc}" ] || { echo "rc admin info storage output missing usedCapacityBytes: ${RC_OUT}"; return 1; }
   used_rc="${used_rc%.*}"
   tolerance=$(( used_api / 10 + 1 ))
