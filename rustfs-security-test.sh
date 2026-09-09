@@ -526,7 +526,7 @@ case_iam_101_user_crud() {
   printf '%s' "${out}" | grep -q "${user}" || { echo "list-users missing ${user}"; return 1; }
   out="$(admin_api GET "/rustfs/admin/v3/user-info?accessKey=${user}")"; assert_admin_ok 200 "user-info"
   printf '%s' "${out}" | grep -q "${user}" || { echo "user-info missing ${user}"; return 1; }
-  printf '%s' "${out}" | grep -q "${secret}" && { echo "user-info leaked secret"; return 1; }
+  if printf '%s' "${out}" | grep -q "${secret}"; then echo "user-info leaked secret"; return 1; fi
   aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_ok "user credentials can list buckets"
   out="$(admin_user_remove "${user}")"; assert_admin_ok 200 "remove-user"
   out="$(admin_api GET "/rustfs/admin/v3/user-info?accessKey=${user}")"
@@ -574,7 +574,7 @@ case_iam_106_custom_policy_crud() {
   printf '%s' "${out}" | grep -q "s3:GetObject" || { echo "policy body did not round-trip"; return 1; }
   out="$(admin_api DELETE "/rustfs/admin/v3/remove-canned-policy?name=sec106p")"; assert_admin_ok 200 "remove-canned-policy"
   out="$(admin_api GET /rustfs/admin/v3/list-canned-policies)"; assert_admin_ok 200 "list after remove"
-  printf '%s' "${out}" | grep -q sec106p && { echo "policy still listed"; return 1; }
+  if printf '%s' "${out}" | grep -q sec106p; then echo "policy still listed"; return 1; fi
 }
 
 case_iam_107_attach_detach() {
@@ -613,8 +613,8 @@ case_iam_113_access_key_list_hides_secret() {
   local user="sec113u" secret="sec113secret-xyz" out
   out="$(admin_user_add "${user}" "${secret}")"; assert_admin_ok 200 "add-user"
   out="$(admin_api GET "/rustfs/admin/v3/list-access-keys-bulk?all=true")"; assert_admin_ok 200 "list-access-keys-bulk"
-  printf '%s' "${out}" | grep -q '"secretKey"' && { echo "bulk listing exposed secretKey"; return 1; }
-  printf '%s' "${out}" | grep -q "${secret}" && { echo "bulk listing exposed secret"; return 1; }
+  if printf '%s' "${out}" | grep -q '"secretKey"'; then echo "bulk listing exposed secretKey"; return 1; fi
+  if printf '%s' "${out}" | grep -q "${secret}"; then echo "bulk listing exposed secret"; return 1; fi
   admin_user_remove "${user}" >/dev/null
 }
 
