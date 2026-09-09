@@ -2005,7 +2005,7 @@ test_kms501() {
 set -euo pipefail
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
 ${SUDO} cp -a /var/lib/rustfs/kms /var/lib/rustfs/kms.corrupt-backup
-target="$(find /var/lib/rustfs/kms -type f -print -quit)"
+target="$(${SUDO} find /var/lib/rustfs/kms -type f -print -quit)"
 [ -n "${target}" ] || { echo "no key file found under /var/lib/rustfs/kms" >&2; exit 1; }
 ${SUDO} sh -c 'printf garbage > "$1"' _ "${target}"
 EOF
