@@ -355,14 +355,21 @@ EOF
 
 step4_configure_start() {
   log "step 4: write config, start and verify the service on all nodes"
-  local node
+  local node pids=() i=0 fail=0 pid
   for node in "${NODES[@]}"; do
     write_rustfs_config "${node}"
   done
+  # Wait only on the service_action PIDs: a bare `wait` also waits on the
+  # `exec > >(tee ...)` process substitution, deadlocking the step forever.
   for node in "${NODES[@]}"; do
     service_action start "${node}" &
+    pids[$i]=$!
+    i=$((i+1))
   done
-  wait
+  for pid in "${pids[@]}"; do
+    wait "${pid}" || fail=1
+  done
+  [ "${fail}" -eq 0 ] || die "one or more nodes failed to start ${RUSTFS_SERVICE}"
   for node in "${NODES[@]}"; do
     wait_service_active "${node}"
     verify_service_running "${node}"
