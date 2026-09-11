@@ -633,33 +633,41 @@ verify_data_readable() {
   [ "${checked}" -gt 0 ] && [ "${ok}" -eq "${checked}" ]
 }
 
-# Verify the expected number of pools via the admin API (JSON + jq assertions)
+# Verify the expected number of pools via the admin API (JSON + jq assertions).
+# Retries for ~60s: right after systemctl start reports active the S3 listener
+# and peer interconnect may need a few more seconds before pools/list answers
+# 200 with all pools active (observed as HTTP 000 on a cold first start).
 verify_pools() {
   local expected="$1"
   local body code count nonactive
+  local attempt=0 max_attempts=12
   log "verifying pools via admin API (expect at least ${expected} active): GET ${API_ENDPOINT}/rustfs/admin/v3/pools/list"
   if [ "${DRY_RUN}" -eq 1 ]; then return 0; fi
-  body="$(admin_api GET /rustfs/admin/v3/pools/list "")"
-  code="$(admin_api_code)"
-  if [ "${code}" != "200" ]; then
-    printf '\033[1;31m[ERROR]\033[0m pools/list returned HTTP %s\n' "${code}" >&2
-    printf '%s\n' "${body}" >&2
-    die "pools/list failed"
-  fi
-  if ! count="$(printf '%s' "${body}" | jq -e 'length' 2>/dev/null)"; then
-    printf '\033[1;31m[ERROR]\033[0m pools/list returned an unexpected (non-JSON) body:\n%s\n' "${body}" >&2
-    die "pools/list response could not be parsed as JSON"
-  fi
-  nonactive="$(printf '%s' "${body}" | jq '[.[] | select(.status != "active")] | length')"
-  if [ "${count}" -lt "${expected}" ] || [ "${nonactive}" -ne 0 ]; then
-    printf '\033[1;31m[ERROR]\033[0m pool assertion failed: expected >=%s active pools, got %s (non-active: %s)\n' \
-      "${expected}" "${count}" "${nonactive}" >&2
-    printf '%s\n' "--- pool detail ---" >&2
-    printf '%s' "${body}" | jq -r '.[] | "  pool id=\(.id) status=\(.status) decommission=\(.decommissionStatus) rebalance=\(.rebalanceStatus) used=\(.usedSize)/\(.totalSize) cmdline=\(.cmdline)"' >&2
-    printf '%s\n' "--- full JSON ---" >&2
-    printf '%s\n' "${body}" >&2
-    die "pool verification failed"
-  fi
+  while :; do
+    attempt=$((attempt + 1))
+    body="$(admin_api GET /rustfs/admin/v3/pools/list "")"
+    code="$(admin_api_code)"
+    if [ "${code}" = "200" ]; then
+      if ! count="$(printf '%s' "${body}" | jq -e 'length' 2>/dev/null)"; then
+        printf '\033[1;31m[ERROR]\033[0m pools/list returned an unexpected (non-JSON) body:\n%s\n' "${body}" >&2
+        die "pools/list response could not be parsed as JSON"
+      fi
+      nonactive="$(printf '%s' "${body}" | jq '[.[] | select(.status != "active")] | length')"
+      if [ "${count}" -ge "${expected}" ] && [ "${nonactive}" -eq 0 ]; then
+        break
+      fi
+      printf '\033[1;33m[WARN]\033[0m pools not ready (attempt %s/%s): expected >=%s active pools, got %s (non-active: %s)\n' \
+        "${attempt}" "${max_attempts}" "${expected}" "${count}" "${nonactive}" >&2
+    else
+      printf '\033[1;33m[WARN]\033[0m pools/list not ready (attempt %s/%s): HTTP %s\n' "${attempt}" "${max_attempts}" "${code}" >&2
+    fi
+    if [ "${attempt}" -ge "${max_attempts}" ]; then
+      printf '\033[1;31m[ERROR]\033[0m pools/list failed after %s attempts (last HTTP %s)\n' "${attempt}" "${code}" >&2
+      printf '%s\n' "${body}" >&2
+      die "pools/list failed"
+    fi
+    sleep 5
+  done
   log "pools OK: ${count} pools, all active"
   printf '%s' "${body}" | jq -r '.[] | "  pool id=\(.id) status=\(.status) decommission=\(.decommissionStatus) rebalance=\(.rebalanceStatus)"'
 }
