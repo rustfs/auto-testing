@@ -1447,7 +1447,7 @@ test_kms109() {
     local good_cfg
     good_cfg="{\"backend_type\":\"VaultKV2\",\"address\":\"${VAULT_ADDRESS}\",\"auth_method\":{\"Token\":{\"token\":\"${VAULT_TOKEN}\"}},\"kv_mount\":\"${VAULT_KV_MOUNT}\",\"key_path_prefix\":\"${VAULT_KEY_PATH_PREFIX}\",\"default_key_id\":\"${KMS_DEFAULT_KEY_ID}\"}"
     body="$(admin_api POST /rustfs/admin/v3/kms/configure "" "{\"backend_type\":\"VaultKV2\",\"address\":\"http://127.0.0.1:1\",\"auth_method\":{\"Token\":{\"token\":\"x\"}},\"kv_mount\":\"k\",\"key_path_prefix\":\"p\"}")"; code="$(admin_api_code)"
-    if [ "${code}" = "200" ]; then
+    if [ "${code}" = "200" ] && printf '%s' "${body}" | jq -e '.success == true' >/dev/null; then
       echo "configure accepted unreachable vault address (HTTP 200); expecting restart to fail"
       rc_run admin kms restart local --yes || true
       if [ "${RC_CODE}" -eq 7 ]; then

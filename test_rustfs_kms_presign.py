@@ -61,6 +61,35 @@ class PresignCaseTest(unittest.TestCase):
         result = self.run_case('success')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_configure_failure_envelope_is_not_accepted(self):
+        case = SCRIPT[SCRIPT.index('test_kms109() {'):SCRIPT.index('\ntest_kms110() {')]
+        harness = r'''
+set -uo pipefail
+KMS_BACKEND=vault-kv2
+VAULT_ADDRESS=http://fixture:8200
+VAULT_TOKEN=fixture
+VAULT_KV_MOUNT=secret
+VAULT_KEY_PATH_PREFIX=rustfs
+KMS_DEFAULT_KEY_ID=default
+admin_api() {
+  if [[ "$*" == *Bogus* ]]; then
+    printf 400 > "$TEST_TMP/code"; printf 'invalid backend'
+  elif [ "$2" = /rustfs/admin/v3/kms/configure ]; then
+    printf 200 > "$TEST_TMP/code"
+    printf '{"success":false,"message":"Cannot configure KMS while it is running"}'
+  else
+    printf 200 > "$TEST_TMP/code"; printf '{"backend_status":"healthy"}'
+  fi
+}
+admin_api_code() { cat "$TEST_TMP/code"; }
+rc_run() { RC_CODE=0; }
+assert_rc_ok() { [ "$RC_CODE" -eq 0 ]; }
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(['bash', '-c', harness + case + '\nif test_kms109; then exit 0; else exit 1; fi'], env={**os.environ, 'TEST_TMP': tmp}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('configure accepted unreachable', result.stdout)
+
     def test_reject_invalid_uploads(self):
         for scenario in ('missing-url', 'plaintext', 'wrong-key', 'upload-failure'):
             with self.subTest(scenario=scenario):
