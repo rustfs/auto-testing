@@ -832,7 +832,7 @@ test_rep105() {
     || { rm_bucket_force main rep105-src; rm_bucket_force site2 rep105-dst; return 1; }
   aws_wait_ep "${SITE2_ENDPOINT}" "delete marker replicated" \
     s3api list-object-versions --bucket rep105-dst --prefix m.txt --output json \
-      --query 'length(DeleteMarkers // `[]`) > `0`' --output text \
+      --query 'length(DeleteMarkers || `[]`) > `0`' --output text \
     || { rm_bucket_force main rep105-src; rm_bucket_force site2 rep105-dst; return 1; }
   rm_bucket_force main rep105-src
   rm_bucket_force site2 rep105-dst
@@ -950,17 +950,33 @@ test_site101() {
     || { echo "site2 does not show 2 enabled sites: ${body}"; return 1; }
 }
 
+# admin_wait_user <admin_api_fn> <desc> <access_key> — poll the admin
+# list-users endpoint until the user is present. RustFS does not serve the
+# AWS IAM query protocol (`aws iam ...` fails with "unknown service 'iam' in
+# credential scope"), and `aws_wait_ep` only inspects the exit status, so the
+# previous `iam list-users --query` probe could never observe convergence.
+admin_wait_user() {
+  local api_fn="$1" desc="$2" user="$3"
+  local waited=0 body
+  while [ "${waited}" -lt "${CONVERGE_TIMEOUT}" ]; do
+    body="$("${api_fn}" GET "/rustfs/admin/v3/list-users")"
+    if [ "$(signed_code)" = "200" ] \
+      && printf '%s' "${body}" | jq -e --arg u "${user}" 'type == "object" and has($u)' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "${CONVERGE_INTERVAL}"; waited=$((waited+CONVERGE_INTERVAL))
+  done
+  echo "timeout (${CONVERGE_TIMEOUT}s) waiting for: ${desc}"
+  return 1
+}
+
 test_site102() {
   # IAM user created on site1 must converge to site2.
   local body
   body="$(admin_api PUT "/rustfs/admin/v3/add-user" "accessKey=siteuser102" "{\"secretKey\":\"${SECRET_KEY}\",\"status\":\"enabled\"}")"
   [ "$(signed_code)" = "200" ] || { echo "add-user HTTP $(signed_code): ${body}"; return 1; }
-  aws_wait_ep "${SITE2_ENDPOINT}" "user visible on site2" \
-    iam list-users --output json --query 'length(Users[?UserName==`siteuser102`]) > `0`' --output text \
-    || return 1
-  aws_wait_ep "${API_ENDPOINT}" "user visible on site1" \
-    iam list-users --output json --query 'length(Users[?UserName==`siteuser102`]) > `0`' --output text \
-    || return 1
+  admin_wait_user site2_admin_api "user visible on site2" siteuser102 || return 1
+  admin_wait_user admin_api "user visible on site1" siteuser102 || return 1
 }
 
 test_site103() {
