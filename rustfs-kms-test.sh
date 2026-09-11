@@ -1447,7 +1447,7 @@ test_kms109() {
     local good_cfg
     good_cfg="{\"backend_type\":\"VaultKV2\",\"address\":\"${VAULT_ADDRESS}\",\"auth_method\":{\"Token\":{\"token\":\"${VAULT_TOKEN}\"}},\"kv_mount\":\"${VAULT_KV_MOUNT}\",\"key_path_prefix\":\"${VAULT_KEY_PATH_PREFIX}\",\"default_key_id\":\"${KMS_DEFAULT_KEY_ID}\"}"
     body="$(admin_api POST /rustfs/admin/v3/kms/configure "" "{\"backend_type\":\"VaultKV2\",\"address\":\"http://127.0.0.1:1\",\"auth_method\":{\"Token\":{\"token\":\"x\"}},\"kv_mount\":\"k\",\"key_path_prefix\":\"p\"}")"; code="$(admin_api_code)"
-    if [ "${code}" = "200" ]; then
+    if [ "${code}" = "200" ] && printf '%s' "${body}" | jq -e '.success == true' >/dev/null; then
       echo "configure accepted unreachable vault address (HTTP 200); expecting restart to fail"
       rc_run admin kms restart local --yes || true
       if [ "${RC_CODE}" -eq 7 ]; then
@@ -1885,9 +1885,19 @@ test_kms317() {
   curl --noproxy '*' -fsS "${url}" -o ${TEST_TMP}/kms-presign-dl || { echo "presigned GET failed"; rm_bucket kms317-b1; return 1; }
   [ "$(md5_of_file ${TEST_TMP}/kms-presign-dl)" = "$(md5_of_file ${TEST_TMP}/kms-f1)" ] || { echo "presigned GET content mismatch"; rm_bucket kms317-b1; return 1; }
   local purl
-  purl="$(AWS_EC2_METADATA_DISABLED=true aws --endpoint-url "${ENDPOINT}" s3 presign --region "${REGION}" "s3://kms317-b1/up" --expires-in 300 2>/dev/null)"
-  [ -n "${purl}" ] || { echo "presign PUT failed"; rm_bucket kms317-b1; return 1; }
+  aws_run s3api put-bucket-encryption --bucket kms317-b1 \
+    --server-side-encryption-configuration "$(jq -nc --arg kid "${kid}" '{Rules:[{ApplyServerSideEncryptionByDefault:{SSEAlgorithm:"aws:kms",KMSMasterKeyID:$kid}}]}')"
+  assert_aws_ok || { rm_bucket kms317-b1; return 1; }
+  # The AWS CLI presign command signs GET; uploads need a PUT signature.
+  rc_run object share local/kms317-b1/up --upload --expire 5m --json
+  assert_rc_ok || { echo "presign PUT failed"; rm_bucket kms317-b1; return 1; }
+  purl="$(printf '%s' "${RC_OUT}" | jq -er '.url | select(type == "string" and length > 0)')" \
+    || { echo "presign PUT returned no URL"; rm_bucket kms317-b1; return 1; }
   curl --noproxy '*' -fsS -X PUT --data-binary @${TEST_TMP}/kms-f1 "${purl}" || { echo "presigned PUT failed"; rm_bucket kms317-b1; return 1; }
+  aws_run s3api head-object --bucket kms317-b1 --key up
+  assert_aws_ok || { rm_bucket kms317-b1; return 1; }
+  printf '%s' "${AWS_OUT}" | jq -e --arg kid "${kid}" '.ServerSideEncryption == "aws:kms" and .SSEKMSKeyId == $kid' >/dev/null \
+    || { echo "presigned upload did not use the requested KMS key"; rm_bucket kms317-b1; return 1; }
   kms_sse_get kms317-b1 up ${TEST_TMP}/kms-up-dl "${kid}"
   assert_aws_ok || { echo "presigned-uploaded object unreadable"; rm_bucket kms317-b1; return 1; }
   [ "$(md5_of_file ${TEST_TMP}/kms-up-dl)" = "$(md5_of_file ${TEST_TMP}/kms-f1)" ] || { echo "presigned PUT content mismatch"; rm_bucket kms317-b1; return 1; }
