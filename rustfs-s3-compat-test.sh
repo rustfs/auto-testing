@@ -1145,14 +1145,22 @@ test_s3c404() {
 
 test_s3c405() {
   new_bucket "s3c405-b1" || return 1
-  aws_run s3api put-object --bucket "s3c405-b1" --key "a/x" --body /etc/hostname
+  local fixture="${TEST_TMP}/s3c405-object" expected_bytes
+  printf 'usage fixture\n' > "${fixture}"
+  expected_bytes="$(wc -c < "${fixture}" | tr -d ' ')"
+  aws_run s3api put-object --bucket "s3c405-b1" --key "a/x" --body "${fixture}"
+  assert_aws_ok || { rm_bucket "s3c405-b1"; return 1; }
   rc_run tree "local/s3c405-b1" -L 3
   if [ "${RC_CODE}" -eq 7 ]; then echo "rc tree gated"; return 2; fi
   assert_rc_ok "rc tree" || return 1
-  rc_run du "local/s3c405-b1"
+  printf '%s' "${RC_OUT}" | grep -q 'x' || { echo "tree output missing object x"; return 1; }
+  # Prefix usage needs an explicit S3 scan; a fresh bucket has no scanner snapshot yet.
+  rc_run du "local/s3c405-b1/a/" --fallback --json
   if [ "${RC_CODE}" -eq 7 ]; then echo "rc du gated"; return 2; fi
   assert_rc_ok "rc du" || return 1
-  printf '%s' "${RC_OUT}" | grep -q "a" || { echo "du output missing 'a': ${RC_OUT}"; return 1; }
+  printf '%s' "${RC_OUT}" | jq -e --argjson bytes "${expected_bytes}" \
+    '.data.object_count == 1 and .data.total_bytes == $bytes and .data.partial == false' >/dev/null \
+    || { echo "du returned incorrect object count or size: ${RC_OUT}"; return 1; }
   rm_bucket "s3c405-b1"
 }
 
