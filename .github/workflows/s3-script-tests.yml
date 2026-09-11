@@ -1,0 +1,30 @@
+name: S3 Script Tests
+
+on:
+  pull_request:
+    paths:
+      - rustfs-s3-compat-test.sh
+      - test_rustfs_s3_usage.py
+      - .github/workflows/s3-script-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - rustfs-s3-compat-test.sh
+      - test_rustfs_s3_usage.py
+      - .github/workflows/s3-script-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  s3-script-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Validate shell syntax
+        run: bash -n rustfs-s3-compat-test.sh
+      - name: Test fresh-bucket usage case without a server
+        run: python3 -m unittest test_rustfs_s3_usage.py
