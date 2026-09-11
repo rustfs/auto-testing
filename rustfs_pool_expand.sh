@@ -87,9 +87,12 @@ STORAGEINFO_PROBE_RETRY_DELAY="${RUSTFS_STORAGEINFO_PROBE_RETRY_DELAY:-1}"
 VOLUMES_1="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_2="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd http://rustfs-node2:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_3="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd http://rustfs-node2:9000/data/rustfs{1...4}/mnmd http://rustfs-node3:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_4="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 # Topology after decommissioning pool 0 (used by --finalize-decommission)
 VOLUMES_AFTER_DECOMMISSION="http://rustfs-node2:9000/data/rustfs{1...4}/mnmd http://rustfs-node3:9000/data/rustfs{1...4}/mnmd"
-read -r -a NODE_ENDPOINTS <<<"${RUSTFS_NODE_ENDPOINTS:-http://rustfs-node1:9000 http://rustfs-node2:9000 http://rustfs-node3:9000}"
+# 4x4 topology: after decommissioning pool 0, pools 2-4 remain
+VOLUMES_AFTER_DECOMMISSION_4="http://rustfs-node{2...4}:9000/data/rustfs{1...4}/mnmd"
+read -r -a NODE_ENDPOINTS <<<"${RUSTFS_NODE_ENDPOINTS:-http://rustfs-node1:9000 http://rustfs-node2:9000 http://rustfs-node3:9000 http://rustfs-node4:9000}"
 
 # RustFS service configuration (written to /etc/default/rustfs)
 RUSTFS_CONFIG_FILE="/etc/default/rustfs"
@@ -1337,20 +1340,29 @@ step6_rebalance() {
 }
 
 step7_expand_pool3() {
-  log "step 7: expand to the third pool (all nodes)"
-  confirm "About to stop ${NODES[0]} ${NODES[1]} and update all node configs. Continue?"
-  service_action stop "${NODES[0]}"
-  service_action stop "${NODES[1]}"
-  for node in "${NODES[@]}"; do
-    write_rustfs_config "${node}" "${VOLUMES_3}"
+  local pool_count=3 volumes="${VOLUMES_3}" stop_nodes=("${NODES[0]}" "${NODES[1]}")
+  if [ "${#NODES[@]}" -ge 4 ]; then
+    # 4x4 topology: the third expansion brings in node 4 as pool 4
+    pool_count=4
+    volumes="${VOLUMES_4}"
+    stop_nodes=("${NODES[0]}" "${NODES[1]}" "${NODES[2]}")
+  fi
+  log "step 7: expand to ${pool_count} pool(s) (all nodes)"
+  confirm "About to stop ${stop_nodes[*]} and update all node configs. Continue?"
+  local node
+  for node in "${stop_nodes[@]}"; do
+    service_action stop "${node}"
   done
   for node in "${NODES[@]}"; do
-    ensure_volume_dirs "${node}" "${VOLUMES_3}"
+    write_rustfs_config "${node}" "${volumes}"
+  done
+  for node in "${NODES[@]}"; do
+    ensure_volume_dirs "${node}" "${volumes}"
   done
   start_and_wait_nodes "${NODES[@]}"
   verify_stage_readiness "${#NODES[@]}"
   configure_proxy_stage "${#NODES[@]}"
-  verify_pools 3
+  verify_pools "${pool_count}"
 }
 
 step8_rebalance() {
@@ -1448,10 +1460,14 @@ step9_decommission() {
     sleep "${DECOMMISSION_RETRY_DELAY}"
   done
   if [ "${FINALIZE_DECOMMISSION}" -eq 1 ]; then
+    local after_volumes="${VOLUMES_AFTER_DECOMMISSION}"
+    if [ "${#NODES[@]}" -ge 4 ]; then
+      after_volumes="${VOLUMES_AFTER_DECOMMISSION_4}"
+    fi
     log "decommission done; removing pool ${DECOMMISSION_POOL_ID} from all node configs and restarting"
     confirm "About to update all node configs (remove the decommissioned pool) and restart services. Continue?"
     for node in "${NODES[@]}"; do
-      write_rustfs_config "${node}" "${VOLUMES_AFTER_DECOMMISSION}"
+      write_rustfs_config "${node}" "${after_volumes}"
     done
     service_action_all restart
     for node in "${NODES[@]}"; do
@@ -1459,7 +1475,11 @@ step9_decommission() {
     done
     verify_stage_readiness "${#NODES[@]}"
     configure_proxy_stage "${#NODES[@]}"
-    verify_pools 2
+    if [ "${#NODES[@]}" -ge 4 ]; then
+      verify_pools 3
+    else
+      verify_pools 2
+    fi
   fi
 }
 
