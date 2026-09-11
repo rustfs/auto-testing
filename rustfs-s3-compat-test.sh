@@ -27,7 +27,7 @@ trap 'rm -rf "${TEST_TMP}"' EXIT
 
 
 # ==================== Configuration ====================
-NODES=(vm000 vm001 vm002)                    # hardcoded per request
+NODES=(vm000 vm001 vm002 vm003)                    # hardcoded per request
 SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
 SSH_PORT="${RUSTFS_SSH_PORT:-22}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "${SSH_PORT}")
@@ -66,12 +66,12 @@ TOPO_MULTI_MULTI="multi-multi"
 # Endpoint used by the S3 clients for each topology.
 ENDPOINT_SINGLE_SINGLE="http://rustfs-node1:9000"
 ENDPOINT_SINGLE_MULTI="http://rustfs-node1:9000"
-ENDPOINT_MULTI_MULTI="http://127.0.0.1:9000"
+ENDPOINT_MULTI_MULTI="http://rustfs-node1:9000"
 
 # Volumes per topology (from the Obsidian setup note).
 VOLUMES_SINGLE_SINGLE="/data/rustfs1/mnmd"
 VOLUMES_SINGLE_MULTI="/data/rustfs{1...4}/mnmd"
-VOLUMES_MULTI_MULTI="http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_MULTI_MULTI="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 
 SERVICE_TIMEOUT=300
 POLL_INTERVAL=15
