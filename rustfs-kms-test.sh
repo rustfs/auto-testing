@@ -25,7 +25,7 @@ trap 'rm -rf "${TEST_TMP}"' EXIT
 
 
 # ==================== Configuration ====================
-NODES=(vm000 vm001 vm002)
+NODES=(vm000 vm001 vm002 vm003)
 SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
 SSH_PORT="${RUSTFS_SSH_PORT:-22}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "${SSH_PORT}")
@@ -102,7 +102,7 @@ ENDPOINT_MULTI_MULTI="http://rustfs-node1:9000"
 
 VOLUMES_SINGLE_SINGLE="/data/rustfs1/mnmd"
 VOLUMES_SINGLE_MULTI="/data/rustfs{1...4}/mnmd"
-VOLUMES_MULTI_MULTI="http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_MULTI_MULTI="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 
 SERVICE_TIMEOUT=300
 POLL_INTERVAL=15

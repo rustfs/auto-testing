@@ -41,7 +41,7 @@ set -Eeuo pipefail
 if [ -n "${RUSTFS_NODES:-}" ]; then
   read -r -a NODES <<<"${RUSTFS_NODES}"
 else
-  NODES=(vm000 vm001 vm002)
+  NODES=(vm000 vm001 vm002 vm003)
 fi
 
 # SSH user configured on the nodes (azureuser has passwordless sudo on heal's nodes)
@@ -62,7 +62,7 @@ PACKAGE_SHA256="${PACKAGE_SHA256:-}"
 # The legacy endpoint remains a fallback for existing setups, while pool tests
 # can pin control and data traffic to a live node and probe a load balancer
 # independently.
-LEGACY_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://10.0.0.7:9000}}"
+LEGACY_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://rustfs-node1:9000}}"
 ADMIN_ENDPOINT="${RUSTFS_ADMIN_ENDPOINT:-${RUSTFS_CONTROL_ENDPOINT:-}}"
 WARP_ENDPOINT="${RUSTFS_WARP_ENDPOINT:-}"
 PROXY_ENDPOINT="${RUSTFS_PROXY_ENDPOINT:-}"

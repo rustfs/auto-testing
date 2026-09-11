@@ -243,7 +243,7 @@ trap 'exit 143' TERM
 
 
 # ==================== Configuration ====================
-NODES=(vm000 vm001 vm002)
+NODES=(vm000 vm001 vm002 vm003)
 SOURCE_NODE="${NODES[0]}"
 TARGET_NODE="${NODES[1]}"
 SSH_USER="${RUSTFS_SSH_USER:-azureuser}"

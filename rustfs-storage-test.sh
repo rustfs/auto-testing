@@ -34,7 +34,7 @@ set -Eeuo pipefail
 if [ -n "${RUSTFS_NODES:-}" ]; then
   read -r -a NODES <<<"${RUSTFS_NODES}"
 else
-  NODES=(vm000 vm001 vm002)
+  NODES=(vm000 vm001 vm002 vm003)
 fi
 
 SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
@@ -48,7 +48,7 @@ PACKAGES_DIR="/home/rustfs/packages"
 PACKAGE_FILE="rustfs.deb"
 PACKAGE_SHA256="${PACKAGE_SHA256:-}"
 
-API_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://127.0.0.1:9000}}"
+API_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://rustfs-node1:9000}}"
 ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfs@test}"
 SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfs@test}"
 REGION="us-east-1"
@@ -75,11 +75,11 @@ TOPO_MULTI_MULTI="multi-multi"
 
 ENDPOINT_SINGLE_SINGLE="http://rustfs-node1:9000"
 ENDPOINT_SINGLE_MULTI="http://rustfs-node1:9000"
-ENDPOINT_MULTI_MULTI="http://127.0.0.1:9000"
+ENDPOINT_MULTI_MULTI="http://rustfs-node1:9000"
 
 VOLUMES_SINGLE_SINGLE="/data/rustfs1/mnmd"
 VOLUMES_SINGLE_MULTI="/data/rustfs{1...4}/mnmd"
-VOLUMES_MULTI_MULTI="http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_MULTI_MULTI="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 
 SERVICE_TIMEOUT=300
 

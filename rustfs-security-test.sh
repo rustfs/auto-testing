@@ -53,7 +53,7 @@ cleanup_tmp() {
 trap cleanup_tmp EXIT
 
 # ==================== Configuration ====================
-read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
+read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002 vm003}"
 SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
 SSH_PORT="${RUSTFS_SSH_PORT:-22}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "${SSH_PORT}")
@@ -86,12 +86,12 @@ TOPO_MULTI_MULTI="multi-multi"
 # Endpoints used by the S3 clients for each topology (same as the S3 suite).
 ENDPOINT_SINGLE_SINGLE="http://rustfs-node1:9000"
 ENDPOINT_SINGLE_MULTI="http://rustfs-node1:9000"
-ENDPOINT_MULTI_MULTI="http://127.0.0.1:9000"
+ENDPOINT_MULTI_MULTI="http://rustfs-node1:9000"
 
 # Volumes per topology (same as the S3 suite).
 VOLUMES_SINGLE_SINGLE="/data/rustfs1/mnmd"
 VOLUMES_SINGLE_MULTI="/data/rustfs{1...4}/mnmd"
-VOLUMES_MULTI_MULTI="http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_MULTI_MULTI="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 
 SERVICE_TIMEOUT=300
 

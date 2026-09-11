@@ -34,7 +34,7 @@ set -Eeuo pipefail
 if [ -n "${RUSTFS_NODES:-}" ]; then
   read -r -a NODES <<<"${RUSTFS_NODES}"
 else
-  NODES=(vm000 vm001 vm002)
+  NODES=(vm000 vm001 vm002 vm003)
 fi
 
 # Host prefix used in endpoint expressions (RUSTFS_VOLUMES, replication
@@ -58,7 +58,7 @@ PACKAGES_DIR="/home/rustfs/packages"
 PACKAGE_FILE="rustfs.deb"
 PACKAGE_SHA256="${PACKAGE_SHA256:-}"
 
-API_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://127.0.0.1:9000}}"
+API_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://rustfs-node1:9000}}"
 ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfs@test}"
 SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfs@test}"
 REGION="us-east-1"

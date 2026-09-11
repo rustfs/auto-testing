@@ -45,7 +45,7 @@ set -Eeuo pipefail
 if [ -n "${RUSTFS_NODES:-}" ]; then
   read -r -a NODES <<<"${RUSTFS_NODES}"
 else
-  NODES=(vm000 vm001 vm002)
+  NODES=(vm000 vm001 vm002 vm003)
 fi
 
 # SSH user configured on the nodes (azureuser has passwordless sudo on heal's nodes)
@@ -64,7 +64,7 @@ PACKAGE_SHA256="${PACKAGE_SHA256:-}"
 
 # Admin API endpoint and credentials (SigV4-signed requests, no rc needed).
 # RUSTFS_RC_ENDPOINT is honoured as a fallback for existing setups.
-API_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://10.0.0.7:9000}}"
+API_ENDPOINT="${RUSTFS_API_ENDPOINT:-${RUSTFS_RC_ENDPOINT:-http://rustfs-node1:9000}}"
 ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfs@test}"
 SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfs@test}"
 SIGV4_REGION="us-east-1"
@@ -75,8 +75,8 @@ API_REQUEST_TIMEOUT=60
 ADMIN_API_CODE_FILE="${TMPDIR:-/tmp}/rustfs-heal-test-api-code.$$"
 
 # 3x4 topology (3 nodes x 4 disks each), same expression on every node:
-# http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd
-VOLUMES="http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd"
+# http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd
+VOLUMES="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 
 # Node that is stopped during the write phase (index into NODES; 2 = vm002)
 OUTAGE_NODE_INDEX="${RUSTFS_OUTAGE_NODE_INDEX:-2}"
@@ -1102,7 +1102,7 @@ Options:
   --reset                    Reset all nodes (stop services, wipe data dirs + config). Destructive!
   --ssh-user USER            SSH user for the nodes (default azureuser)
   --ssh-port PORT            SSH port for the nodes (default 22)
-  --endpoint URL             Cluster admin API endpoint, e.g. http://10.0.0.7:9000 (default from config)
+  --endpoint URL             Cluster admin API endpoint, e.g. http://rustfs-node1:9000 (default from config)
   --rc-endpoint URL          Deprecated alias for --endpoint
   --stop-node-gb N           Stop the outage node when surviving nodes reach N GiB (default 15)
   --warp-stop-gb N           Stop warp when surviving nodes reach N GiB (default 40)
