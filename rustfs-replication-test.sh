@@ -662,14 +662,21 @@ bucket_exists() {
 
 rm_bucket_force() {
   # Best-effort recursive bucket removal (versions + delete markers).
-  local ep="$1" b="$2" i url="${API_ENDPOINT}"
+  # `delete-objects --delete` needs the {"Objects":[...]} document; the bare
+  # array this used to pass is rejected client-side ("Invalid JSON") before
+  # any request is sent, so every non-empty versioned bucket survived
+  # delete-bucket as BucketNotEmpty and leaked into the next suite
+  # (rustfs/backlog#2479). Batches of 1000 are the delete-objects limit.
+  local ep="$1" b="$2" i url="${API_ENDPOINT}" payload
   [ "${ep}" = "site2" ] && url="${SITE2_ENDPOINT}"
   for i in 1 2 3; do
-    aws --endpoint-url "${url}" --region "${REGION}" s3api delete-objects --bucket "${b}" \
-      --delete "$(aws --endpoint-url "${url}" --region "${REGION}" s3api list-object-versions \
-        --bucket "${b}" --output json \
-        --query '{Objects: (Versions + DeleteMarkers)[].{Key:Key,VersionId:VersionId}}' 2>/dev/null \
-        | jq -c '.Objects // empty')" >/dev/null 2>&1 || true
+    while IFS= read -r payload; do
+      [ -n "${payload}" ] || continue
+      aws --endpoint-url "${url}" --region "${REGION}" s3api delete-objects --bucket "${b}" \
+        --delete "${payload}" >/dev/null 2>&1 || true
+    done < <(aws --endpoint-url "${url}" --region "${REGION}" s3api list-object-versions \
+        --bucket "${b}" --output json 2>/dev/null \
+        | jq -c '[.Versions[]?, .DeleteMarkers[]?] | map({Key, VersionId}) | select(length > 0) | _nwise(1000) | {Objects: ., Quiet: true}')
     aws --endpoint-url "${url}" --region "${REGION}" s3api delete-bucket --bucket "${b}" >/dev/null 2>&1 || true
     bucket_exists "${ep}" "${b}" || return 0
     sleep 2
@@ -677,7 +684,6 @@ rm_bucket_force() {
   return 0
 }
 
-# register_replication_target <src_bucket> <dst_bucket> -> echoes the ARN
 register_replication_target() {
   local src="$1" dst="$2" body arn
   body="$(jq -nc --arg ep "${SITE2_HOSTPORT}" \
@@ -1009,8 +1015,19 @@ test_site104() {
   rm_bucket_force main site104-b1
 }
 
+# site_resync_bucket_status <status_json> <bucket> — print the per-bucket
+# entry of a resync op response as compact JSON (empty when absent).
+site_resync_bucket_status() {
+  printf '%s' "$1" | jq -c --arg b "$2" '(.buckets // [])[] | select(.bucket == $b)'
+}
+
 test_site105() {
-  local body peer
+  # The resync must exercise a bucket this case owns: one live object plus a
+  # delete marker, both already converged to site2 through site replication.
+  # Without a fixture the op runs over zero buckets and reports success
+  # without replicating anything, which hides delete-marker resync failures
+  # (rustfs/backlog#2479 found "target service error" exactly there).
+  local body peer entry
   body="$(admin_api GET "/rustfs/admin/v3/site-replication/status")"
   [ "$(signed_code)" = "200" ] || { echo "site-replication/status HTTP $(signed_code): ${body}"; return 1; }
   # Pull the remote peer's PeerInfo from /info for the resync body.
@@ -1018,11 +1035,49 @@ test_site105() {
   [ "$(signed_code)" = "200" ] || { echo "site-replication/info HTTP $(signed_code): ${body}"; return 1; }
   peer="$(printf '%s' "${body}" | jq -c --arg ep "${SITE2_ENDPOINT}" '.sites[] | select(.endpoint == $ep)')"
   [ -n "${peer}" ] || { echo "site2 peer missing from info: ${body}"; return 1; }
-  # Resync must reject a duplicate start before we can assert on status shape.
+
+  new_versioned_bucket main site105-b1 || return 1
+  make_test_file "${TEST_TMP}/site105-live" 4096
+  aws_run s3api put-object --bucket site105-b1 --key live.bin --body "${TEST_TMP}/site105-live"
+  assert_aws_ok "put-object live.bin" || { rm_bucket_force main site105-b1; return 1; }
+  make_test_file "${TEST_TMP}/site105-gone" 128
+  aws_run s3api put-object --bucket site105-b1 --key gone.txt --body "${TEST_TMP}/site105-gone"
+  assert_aws_ok "put-object gone.txt" || { rm_bucket_force main site105-b1; return 1; }
+  aws_run s3api delete-object --bucket site105-b1 --key gone.txt
+  assert_aws_ok "delete-object gone.txt" || { rm_bucket_force main site105-b1; return 1; }
+  aws_wait_ep "${SITE2_ENDPOINT}" "live object on site2" \
+    s3api head-object --bucket site105-b1 --key live.bin \
+    || { rm_bucket_force main site105-b1; return 1; }
+  aws_wait_ep "${SITE2_ENDPOINT}" "delete marker on site2" \
+    s3api list-object-versions --bucket site105-b1 --prefix gone.txt --output json \
+      --query 'length(DeleteMarkers || `[]`) > `0`' --output text \
+    || { rm_bucket_force main site105-b1; return 1; }
+
   body="$(admin_api PUT "/rustfs/admin/v3/site-replication/resync/op" "operation=start" "${peer}")"
-  [ "$(signed_code)" = "200" ] || { echo "resync start HTTP $(signed_code): ${body}"; return 1; }
+  [ "$(signed_code)" = "200" ] || { echo "resync start HTTP $(signed_code): ${body}"; rm_bucket_force main site105-b1; return 1; }
   printf '%s' "${body}" | jq -e '.status == "success" and (.id | length > 0)' >/dev/null 2>&1 \
-    || { echo "resync start not successful: ${body}"; return 1; }
+    || { echo "resync start not successful: ${body}"; rm_bucket_force main site105-b1; return 1; }
+
+  # Poll the op until this case's bucket reaches a terminal status, then
+  # require a clean completion: the live object and the delete marker both
+  # count as replicated, nothing failed.
+  local waited=0
+  while :; do
+    entry="$(site_resync_bucket_status "${body}" site105-b1)"
+    case "$(printf '%s' "${entry}" | jq -r '.status // ""')" in
+      completed|success|failed|conflict|canceled) break ;;
+    esac
+    if [ "${waited}" -ge "${CONVERGE_TIMEOUT}" ]; then
+      echo "timeout (${CONVERGE_TIMEOUT}s) waiting for resync of site105-b1: ${body}"
+      rm_bucket_force main site105-b1; return 1
+    fi
+    sleep "${CONVERGE_INTERVAL}"; waited=$((waited+CONVERGE_INTERVAL))
+    body="$(admin_api PUT "/rustfs/admin/v3/site-replication/resync/op" "operation=status" "${peer}")"
+    [ "$(signed_code)" = "200" ] || { echo "resync status HTTP $(signed_code): ${body}"; rm_bucket_force main site105-b1; return 1; }
+  done
+  rm_bucket_force main site105-b1
+  printf '%s' "${entry}" | jq -e '(.status == "completed" or .status == "success") and ((.failedObjects // 0) == 0) and ((.replicatedObjects // 0) >= 2)' >/dev/null 2>&1 \
+    || { echo "resync of site105-b1 did not complete cleanly: ${entry}"; return 1; }
 }
 
 test_site106() {
