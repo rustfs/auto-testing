@@ -1115,8 +1115,8 @@ verify_identity_sts() {
 verify_config_persisted() {
   local node="${NODES[0]}" out
   out="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" 'grep -E "^(RUSTFS_ACCESS_KEY|RUSTFS_SECRET_KEY|RUSTFS_VOLUMES)=" /etc/default/rustfs' 2>/dev/null || true)"
-  printf '%s' "${out}" | grep -q "RUSTFS_ACCESS_KEY=${ACCESS_KEY}" || { echo "/etc/default/rustfs lost access key: ${out}"; return 1; }
-  printf '%s' "${out}" | grep -q 'RUSTFS_VOLUMES=' || { echo "/etc/default/rustfs lost volumes: ${out}"; return 1; }
+  printf '%s' "${out}" | grep -q "RUSTFS_ACCESS_KEY=${ACCESS_KEY}" || { echo "/etc/default/rustfs lost access key"; return 1; }
+  printf '%s' "${out}" | grep -q 'RUSTFS_VOLUMES=' || { echo "/etc/default/rustfs lost volumes"; return 1; }
 }
 
 verify_kms_config() {
