@@ -36,9 +36,14 @@ LOG_VERDICT_RE = re.compile(r"^\[(PASS|FAIL|UNSUPPORTED)\]\s+([A-Z][A-Z0-9]*-[0-
 FT_VERDICT_RE = re.compile(r"^FT-CASE:\s+(\S+)\s+verdict=(\S+)")
 # Heal suite step lines carry no case IDs: [HEAL-STEP] 5 start cluster heal PASS
 HEAL_STEP_RE = re.compile(r"^\[HEAL-STEP\]\s+\d+\s+(.+?)\s+(PASS|FAIL|SKIP)\s*$")
-# A failing suite-level verdict (heal steps/results) means the harness reached
-# the product even though no case IDs exist: classify as a suite failure, not env.
-SUITE_LEVEL_FAIL_RE = re.compile(r"^\[(?:HEAL-RESULT|HEAL-STEP)\].*\bFAIL\b", re.M)
+# A failing suite-level verdict (heal steps/results, pool steps) means the
+# harness reached the product even though no case IDs exist: classify as a
+# suite failure, not env.
+SUITE_LEVEL_FAIL_RE = re.compile(r"^\[(?:HEAL-RESULT|HEAL-STEP|POOL-STEP)\].*\bFAIL\b", re.M)
+# A pool script abort goes through die(), which prints [ERROR] <reason>; the
+# aborted step never emits its own [POOL-STEP] FAIL verdict, so the die
+# signature is the only trace of a product-level abort in the log.
+POOL_ABORT_RE = re.compile(r"^\x1b\[[0-9;]*m?\[ERROR\]", re.M)
 
 # Signatures that mean "the harness never reached the product".
 ENV_SIGNATURES = (
@@ -155,8 +160,10 @@ def classify(outcome: str, cases: dict, log: Path | None) -> tuple[str, str]:
     if outcome != "failure":
         return "noop", f"outcome {outcome}: never file or close on cancelled runs"
     if not cases:
-        if log and log.exists() and SUITE_LEVEL_FAIL_RE.search(log.read_text(errors="replace")):
-            return "suite", "suite-level failure verdict without case IDs"
+        if log and log.exists():
+            text = log.read_text(errors="replace")
+            if SUITE_LEVEL_FAIL_RE.search(text) or POOL_ABORT_RE.search(text):
+                return "suite", "suite-level failure verdict without case IDs"
         return "env", "no case results were recorded"
     fail = [c for c, v in cases.items() if "FAIL" in v["statuses"]]
     pas = [c for c, v in cases.items() if "PASS" in v["statuses"] and "FAIL" not in v["statuses"]]
