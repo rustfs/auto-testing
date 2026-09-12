@@ -36,6 +36,9 @@ LOG_VERDICT_RE = re.compile(r"^\[(PASS|FAIL|UNSUPPORTED)\]\s+([A-Z][A-Z0-9]*-[0-
 FT_VERDICT_RE = re.compile(r"^FT-CASE:\s+(\S+)\s+verdict=(\S+)")
 # Heal suite step lines carry no case IDs: [HEAL-STEP] 5 start cluster heal PASS
 HEAL_STEP_RE = re.compile(r"^\[HEAL-STEP\]\s+\d+\s+(.+?)\s+(PASS|FAIL|SKIP)\s*$")
+# A failing suite-level verdict (heal steps/results) means the harness reached
+# the product even though no case IDs exist: classify as a suite failure, not env.
+SUITE_LEVEL_FAIL_RE = re.compile(r"^\[(?:HEAL-RESULT|HEAL-STEP)\].*\bFAIL\b", re.M)
 
 # Signatures that mean "the harness never reached the product".
 ENV_SIGNATURES = (
@@ -152,6 +155,8 @@ def classify(outcome: str, cases: dict, log: Path | None) -> tuple[str, str]:
     if outcome != "failure":
         return "noop", f"outcome {outcome}: never file or close on cancelled runs"
     if not cases:
+        if log and log.exists() and SUITE_LEVEL_FAIL_RE.search(log.read_text(errors="replace")):
+            return "suite", "suite-level failure verdict without case IDs"
         return "env", "no case results were recorded"
     fail = [c for c, v in cases.items() if "FAIL" in v["statuses"]]
     pas = [c for c, v in cases.items() if "PASS" in v["statuses"] and "FAIL" not in v["statuses"]]
@@ -209,8 +214,35 @@ def file_issue(title: str, body: str, labels: list[str], dry: bool) -> None:
         print(f"error filing issue: {proc.stderr.strip()}", file=sys.stderr)
 
 
+def suite_level_matches(category: str) -> list[dict]:
+    """Open issues of this suite that track no case IDs and are not env issues."""
+    out = []
+    for m in search_open([category]):
+        names = {l["name"] for l in m.get("labels", [])}
+        if not any(CASE_ID_RE.match(n) for n in names) and "env" not in names:
+            out.append(m)
+    return out
+
+
 def handle_failure(args, cases, bucket, reason) -> None:
     failing = sorted(cid for cid, v in cases.items() if "FAIL" in v["statuses"])
+    if bucket == "suite":
+        body = (f"Suite-level failure still reproducing: {reason}\n\n"
+                f"- Run: {args.run_url}\n- Suite: `{args.suite}`\n"
+                f"- Detected: {reason}\n")
+        matches = suite_level_matches(args.category)
+        if matches:
+            n = min(m["number"] for m in matches)
+            if not has_comment_with(n, args.run_url):
+                comment_issue(n, body, args.dry_run)
+            else:
+                print(f"#{n} already records run {args.run_id}; skipping comment")
+        else:
+            file_issue(f"[functional][{args.suite}] suite-level failure",
+                       redact(body) + "\nManaged by issue_manager.py: closes automatically "
+                       "on the next fully green run of this suite.\n",
+                       ["functional-test", args.category], args.dry_run)
+        return
     if bucket == "env":
         matches = search_open([args.category, "env"])
         body = (f"Environment/bootstrap failure still reproducing: {reason}\n\n"
@@ -361,9 +393,7 @@ def main() -> int:
 
     if bucket == "success":
         handle_success(args, cases)
-    elif bucket == "env":
-        handle_failure(args, cases, bucket, reason)
-    elif bucket == "case":
+    elif bucket in ("env", "case", "suite"):
         handle_failure(args, cases, bucket, reason)
     else:
         print("noop: no issue actions for this run")
