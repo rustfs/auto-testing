@@ -329,9 +329,11 @@ def handle_success(args, cases) -> None:
 
 
 def main() -> int:
+    global REPO
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
     h = sub.add_parser("handle")
+    h.add_argument("--repo", default=REPO, help="backlog repository (default: %(default)s)")
     h.add_argument("--suite", required=True)
     h.add_argument("--category", required=True)
     h.add_argument("--suite-label", required=True)
@@ -348,6 +350,8 @@ def main() -> int:
     h.add_argument("--date", default="")
     h.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
+
+    REPO = args.repo
 
     cases = parse_cases(Path(args.report) if args.report else None,
                         Path(args.log) if args.log else None)
