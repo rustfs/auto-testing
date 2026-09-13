@@ -334,7 +334,25 @@ def handle_success(args, cases) -> None:
     passing = {cid for cid, v in cases.items()
                if "PASS" in v["statuses"] and "FAIL" not in v["statuses"]}
     if not cases:
-        print("no case results in a green run; nothing to close")
+        # Green run without case results (case-ID-less suites like heal, or an
+        # empty run): close env and suite-level issues, but keep case-labeled
+        # issues open — there is no evidence their cases passed.
+        matches = search_open([args.category])
+        closed = 0
+        for m in matches:
+            labels = issue_labels(m["number"])
+            if "functional-test" not in labels and args.category not in labels:
+                continue
+            if any(CASE_ID_RE.match(l) for l in labels):
+                print(f"#{m['number']}: keeps open (case-labeled, no case results this run)")
+                continue
+            close_issue(m["number"],
+                        f"Suite `{args.suite}` completed a fully green run "
+                        f"([run {args.run_id}]({args.run_url})); closing this issue. "
+                        f"It will be re-filed if the symptom reproduces.", args.dry_run)
+            closed += 1
+        if not closed:
+            print("no case results in a green run; nothing to close")
         return
     matches = search_open([args.category])
     if not matches:
