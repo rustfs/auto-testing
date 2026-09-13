@@ -1,6 +1,24 @@
 # auto-testing
 Auto testing scripts
 
+## Security suite diagnostics
+
+`rustfs-security-test.sh` includes STS-105 request timing, the full revoke
+response headers/body, and the subsequent S3 result in its console output and
+each topology's Markdown report. The existing security workflow uploads both
+outputs. On failure, the suite collects the RustFS version, recent systemd
+journal entries, and the last 64 KiB of up to three log files from each active
+node before cleaning the environment. An unavailable SSH connection is recorded
+without replacing the test failure.
+
+The default log filter is `error,rustfs::admin::auth=debug`; set
+`RUSTFS_OBS_LOGGER_LEVEL` to override it. The report records the test repository
+commit, while console output includes Bash, curl, and AWS CLI versions.
+
+```bash
+python3 -B -m unittest -v test_rustfs_security.py test_sensitive_diagnostics.py
+```
+
 ## Tier suite artifacts
 
 `rustfs-tier-test.sh` can persist machine-readable evidence with
