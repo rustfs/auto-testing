@@ -2010,13 +2010,21 @@ test_kms501() {
   assert_aws_ok || { rm_bucket kms501-b1; return 1; }
   # Quoted heredoc: nothing is expanded locally, so the remote script may use
   # its own quoting freely (a nested single-quoted sh -c used to terminate the
-  # outer quote and trip set -u on $1 in the local shell).
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" bash -s <<'EOF' || { echo "failed to corrupt key file"; rm_bucket kms501-b1; return 1; }
+  # outer quote and trip set -u on $1 in the local shell). The key id travels
+  # as a positional argument for the same reason.
+  #
+  # Corrupt exactly the record of the key the PUT uses. The Local backend keeps
+  # one <key_id>.key file per key and re-reads it on every encrypt, so damaging
+  # that file is what makes the next SSE-KMS PUT fail; the directory also holds
+  # the KDF salt, the default key and every key earlier cases created, and
+  # damaging whichever of those a directory scan yields first leaves k501
+  # intact and the PUT succeeding.
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" bash -s -- "${kid}" <<'EOF' || { echo "failed to corrupt key file"; rm_bucket kms501-b1; return 1; }
 set -euo pipefail
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
+target="/var/lib/rustfs/kms/$1.key"
+${SUDO} test -f "${target}" || { echo "key file ${target} not found (the Local backend stores one <key_id>.key per key)" >&2; exit 1; }
 ${SUDO} cp -a /var/lib/rustfs/kms /var/lib/rustfs/kms.corrupt-backup
-target="$(${SUDO} find /var/lib/rustfs/kms -type f -print -quit)"
-[ -n "${target}" ] || { echo "no key file found under /var/lib/rustfs/kms" >&2; exit 1; }
 ${SUDO} sh -c 'printf garbage > "$1"' _ "${target}"
 EOF
   kms_sse_put kms501-b1 broken ${TEST_TMP}/kms-f1 "${kid}"
