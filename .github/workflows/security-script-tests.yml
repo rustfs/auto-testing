@@ -1,0 +1,30 @@
+name: Security Script Tests
+
+on:
+  pull_request:
+    paths:
+      - rustfs-security-test.sh
+      - test_rustfs_security.py
+      - .github/workflows/security-script-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - rustfs-security-test.sh
+      - test_rustfs_security.py
+      - .github/workflows/security-script-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  security-script-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Validate shell syntax
+        run: bash -n rustfs-security-test.sh
+      - name: Test security contracts without a server
+        run: python3 -m unittest test_rustfs_security.py

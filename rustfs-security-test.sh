@@ -521,14 +521,16 @@ admin_policy_detach() { admin_api POST "/rustfs/admin/v3/idp/builtin/policy/deta
 
 case_iam_101_user_crud() {
   local user="sec101u" secret="sec101secret" out
-  out="$(admin_user_add "${user}" "${secret}")"; assert_admin_ok 200 "add-user"
-  out="$(admin_api GET /rustfs/admin/v3/list-users)"; assert_admin_ok 200 "list-users"
+  out="$(admin_user_add "${user}" "${secret}")"; assert_admin_ok 200 "add-user" || return 1
+  out="$(admin_api GET /rustfs/admin/v3/list-users)"; assert_admin_ok 200 "list-users" || return 1
   printf '%s' "${out}" | grep -q "${user}" || { echo "list-users missing ${user}"; return 1; }
-  out="$(admin_api GET "/rustfs/admin/v3/user-info?accessKey=${user}")"; assert_admin_ok 200 "user-info"
-  printf '%s' "${out}" | grep -q "${user}" || { echo "user-info missing ${user}"; return 1; }
+  out="$(admin_api GET "/rustfs/admin/v3/user-info?accessKey=${user}")"; assert_admin_ok 200 "user-info" || return 1
+  printf '%s' "${out}" | jq -e 'type == "object" and .status == "enabled"' >/dev/null || { echo "user-info must describe an enabled user"; return 1; }
   if printf '%s' "${out}" | grep -q "${secret}"; then echo "user-info leaked secret"; return 1; fi
-  aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_ok "user credentials can list buckets"
-  out="$(admin_user_remove "${user}")"; assert_admin_ok 200 "remove-user"
+  aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_fails "new user without a policy is denied" || return 1
+  out="$(admin_policy_attach "${user}" readonly)"; assert_admin_ok 200 "attach readonly" || return 1
+  aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_ok "user credentials can list buckets after policy attachment" || return 1
+  out="$(admin_user_remove "${user}")"; assert_admin_ok 200 "remove-user" || return 1
   out="$(admin_api GET "/rustfs/admin/v3/user-info?accessKey=${user}")"
   [ "$(admin_api_code)" != "200" ] || { echo "user-info succeeded after delete"; return 1; }
 }
