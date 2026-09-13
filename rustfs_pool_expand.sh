@@ -87,11 +87,11 @@ STORAGEINFO_PROBE_RETRY_DELAY="${RUSTFS_STORAGEINFO_PROBE_RETRY_DELAY:-1}"
 VOLUMES_1="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_2="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd http://rustfs-node2:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_3="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd http://rustfs-node2:9000/data/rustfs{1...4}/mnmd http://rustfs-node3:9000/data/rustfs{1...4}/mnmd"
-VOLUMES_4="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_4="${VOLUMES_3} http://rustfs-node4:9000/data/rustfs{1...4}/mnmd"
 # Topology after decommissioning pool 0 (used by --finalize-decommission)
 VOLUMES_AFTER_DECOMMISSION="http://rustfs-node2:9000/data/rustfs{1...4}/mnmd http://rustfs-node3:9000/data/rustfs{1...4}/mnmd"
 # 4x4 topology: after decommissioning pool 0, pools 2-4 remain
-VOLUMES_AFTER_DECOMMISSION_4="http://rustfs-node{2...4}:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_AFTER_DECOMMISSION_4="${VOLUMES_AFTER_DECOMMISSION} http://rustfs-node4:9000/data/rustfs{1...4}/mnmd"
 read -r -a NODE_ENDPOINTS <<<"${RUSTFS_NODE_ENDPOINTS:-http://rustfs-node1:9000 http://rustfs-node2:9000 http://rustfs-node3:9000 http://rustfs-node4:9000}"
 
 # RustFS service configuration (written to /etc/default/rustfs)

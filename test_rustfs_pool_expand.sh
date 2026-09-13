@@ -29,6 +29,7 @@ reset_endpoint_state() {
   WARP_ENDPOINT=""
   PROXY_ENDPOINT=""
   PROXY_STAGE_HOOK=""
+  NODES=(vm000 vm001 vm002)
   NODE_ENDPOINTS=(
     "http://node1.test:9000"
     "http://node2.test:9000"
@@ -200,6 +201,51 @@ test_stage_readiness_and_exact_pool_count() {
   unset MOCK_POOL_BODY
 }
 
+test_stage_pool_boundaries() (
+  local node_count="$1" stage="$2" expected_count="$1" first_pool=1
+  local fixture="${TEST_TMP}/topology-${node_count}-${stage}" node pool_index
+  local pools=()
+  mkdir -p "${fixture}"
+  NODES=(vm000 vm001 vm002)
+  [ "${node_count}" -ne 4 ] || NODES+=(vm003)
+  ASSUME_YES=1
+  DRY_RUN=1
+  FINALIZE_DECOMMISSION=1
+  DECOMMISSION_POOL_ID=0
+
+  ssh() { fail "topology tests must not contact a node"; }
+  service_action() { :; }
+  service_action_all() { :; }
+  ensure_volume_dirs() { :; }
+  start_and_wait_nodes() { :; }
+  wait_service_active() { :; }
+  wait_decommission() { :; }
+  verify_stage_readiness() { :; }
+  configure_proxy_stage() { :; }
+  write_rustfs_config() { printf '%s\n' "$2" > "${fixture}/$1"; }
+  verify_pools() { printf '%s\n' "$1" > "${fixture}/pool-count"; }
+
+  case "${stage}" in
+    expand) step7_expand_pool3 > "${fixture}/stage.log" ;;
+    decommission)
+      expected_count=$((node_count - 1))
+      first_pool=2
+      step9_decommission > "${fixture}/stage.log"
+      ;;
+    *) fail "unknown topology test stage: ${stage}" ;;
+  esac
+
+  assert_eq "${expected_count}" "$(cat "${fixture}/pool-count")" "${stage} expected pool count"
+  for node in "${NODES[@]}"; do
+    read -r -a pools < "${fixture}/${node}"
+    assert_eq "${expected_count}" "${#pools[@]}" "${stage} ${node} independent pool expressions"
+    for ((pool_index = 0; pool_index < expected_count; pool_index++)); do
+      assert_eq "http://rustfs-node$((first_pool + pool_index)):9000/data/rustfs{1...4}/mnmd" \
+        "${pools[pool_index]}" "${stage} ${node} pool ${pool_index} endpoint order and drive range"
+    done
+  done
+)
+
 test_nginx_stage_rendering() {
   local config
   config="$("${SCRIPT_DIR}/rustfs_pool_nginx_stage.sh" render 2 \
@@ -357,6 +403,10 @@ test_independent_routing_and_signing
 test_storageinfo_retry_is_sticky
 test_warp_must_reach_threshold
 test_stage_readiness_and_exact_pool_count
+test_stage_pool_boundaries 3 expand
+test_stage_pool_boundaries 4 expand
+test_stage_pool_boundaries 3 decommission
+test_stage_pool_boundaries 4 decommission
 test_nginx_stage_rendering
 test_warp_error_classification
 printf 'PASS: rustfs_pool_expand.sh endpoint and probe tests\n'
