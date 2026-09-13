@@ -41,7 +41,9 @@
 #   REPORT_FILE                             markdown report path (default /tmp/rustfs-security-report.md)
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-security.XXXXXX")"
+STS_DIAGNOSTICS_FILE="${TEST_TMP}/sts105-diagnostics.log"
 KEEP_TMP=0
 cleanup_tmp() {
   if [ "${KEEP_TMP}" -eq 1 ]; then
@@ -76,7 +78,7 @@ RUSTFS_USER="rustfs"
 RUSTFS_ADDRESS=":9000"
 RUSTFS_CONSOLE_ADDRESS=":9001"
 RUSTFS_CONSOLE_ENABLE=true
-RUSTFS_OBS_LOGGER_LEVEL=error
+RUSTFS_OBS_LOGGER_LEVEL="${RUSTFS_OBS_LOGGER_LEVEL:-error,rustfs::admin::auth=debug}"
 RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
 
 TOPO_SINGLE_SINGLE="single-single"
@@ -357,7 +359,7 @@ admin_api() {
   local amz_date date_stamp host_port
   local canonical_headers signed_headers canonical_request string_to_sign
   local scope k_date k_region k_service k_signing signature auth
-  local url tmp code
+  local url tmp headers code
 
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '200' > "${ADMIN_API_CODE_FILE}"
@@ -414,18 +416,29 @@ $(sha256_hex "${canonical_request}")"
 
   url="http://${host_port}${path}${query:+?${query}}"
   tmp="$(mktemp)"
+  headers="$(mktemp)"
   local curl_args=()
   [ -n "${body}" ] && curl_args+=(--data-binary "${body}" -H 'Content-Type: application/json')
-  code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -w '%{http_code}' \
+  code="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -D "${headers}" -w '%{http_code}' \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: ${payload_hash}" \
     -H "x-amz-date: ${amz_date}" \
     -H "Authorization: ${auth}" \
-    "${curl_args[@]}" \
+    ${curl_args[@]+"${curl_args[@]}"} \
     -X "${method}" "${url}")" || code="000"
   printf '%s' "${code}" > "${ADMIN_API_CODE_FILE}"
+  if [ "${path}" = /rustfs/admin/v3/revoke-tokens/builtin ]; then
+    {
+      printf 'STS-105 revoke: endpoint=%s http_status=%s signed_at=%s\n' "${API_ENDPOINT}" "${code}" "${amz_date}"
+      printf '%s\n' '--- response headers ---'
+      cat "${headers}"
+      printf '%s\n' '--- response body ---'
+      cat "${tmp}"
+      printf '\n%s\n' '--- end revoke response ---'
+    } >> "${STS_DIAGNOSTICS_FILE}"
+  fi
   cat "${tmp}"
-  rm -f "${tmp}"
+  rm -f "${tmp}" "${headers}"
 }
 
 admin_api_code() { cat "${ADMIN_API_CODE_FILE}"; }
@@ -478,6 +491,33 @@ rm_bucket() {
 
 # ==================== Test harness ====================
 
+collect_sts_server_diagnostics() {
+  local since="$1" node
+  local nodes=()
+  read -r -a nodes <<< "$(topology_nodes "${CURRENT_TOPOLOGY}")"
+  for node in "${nodes[@]}"; do
+    printf 'STS-105 server node: %s\n' "${node}"
+    # Collect before the suite removes the service and its log directory.
+    ssh "${SSH_OPTS[@]}" -o ServerAliveInterval=5 -o ServerAliveCountMax=2 "${SSH_USER}@${node}" \
+      "timeout 25s bash -s -- '${since}'" <<'REMOTE' || printf 'STS-105 server logs unavailable: %s\n' "${node}"
+since="${1/T/ }"
+since="${since%Z} UTC"
+SUDO=()
+[ "$(id -u)" -eq 0 ] || SUDO=(sudo -n)
+date -u +server_time=%Y-%m-%dT%H:%M:%SZ
+rustfs --version
+printf '%s\n' '--- rustfs journal ---'
+"${SUDO[@]}" journalctl -u rustfs --since "${since}" --no-pager -o short-iso -n 200
+printf '%s\n' '--- rustfs log files (recent tails) ---'
+"${SUDO[@]}" bash -o pipefail -c '
+  find /var/log/rustfs -maxdepth 1 -type f -printf "%T@ %p\0" |
+    sort -z -n | tail -z -n 3 | cut -z -d " " -f 2- |
+    xargs -0 -r tail -v -c 65536
+'
+REMOTE
+  done
+}
+
 declare -a FAILED_TESTS=()
 declare -a CASE_RESULTS=()
 PASS=0
@@ -487,10 +527,16 @@ SKIP=0
 run_test() {
   local id="$1" name="$2" fn="$3"
   local out="${TEST_TMP}/${id}.out"
+  local started_at
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     CASE_RESULTS+=("${id}|${name}|PASS")
     return 0
+  fi
+  if [ "${id}" = STS-105 ]; then
+    started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'STS-105 context: topology=%s started_at=%s method=POST path=/rustfs/admin/v3/revoke-tokens/builtin\n' \
+      "${CURRENT_TOPOLOGY}" "${started_at}" > "${STS_DIAGNOSTICS_FILE}"
   fi
   printf '\n--- %s %s ---\n' "${id}" "${name}"
   if "${fn}" > "${out}" 2>&1; then
@@ -501,6 +547,12 @@ run_test() {
     CASE_RESULTS+=("${id}|${name}|FAIL")
     printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
     sed 's/^/      | /' "${out}" | tail -50
+    if [ "${id}" = STS-105 ]; then
+      collect_sts_server_diagnostics "${started_at}" >> "${STS_DIAGNOSTICS_FILE}" 2>&1
+    fi
+  fi
+  if [ "${id}" = STS-105 ]; then
+    cat "${STS_DIAGNOSTICS_FILE}"
   fi
 }
 
@@ -730,9 +782,26 @@ case_sts_105_revoke() {
   creds="$(assume_role)" || { echo "AssumeRole failed"; return 1; }
   local sts_ak sts_sk sts_token sts_exp out
   IFS=$'\t' read -r sts_ak sts_sk sts_token sts_exp <<<"${creds}"
-  aws_run_as "${sts_ak}" "${sts_sk}" "${sts_token}" -- s3 ls; assert_aws_ok "STS creds work before revoke"
-  out="$(admin_api POST "/rustfs/admin/v3/revoke-tokens/builtin?user=${ACCESS_KEY}&fullRevoke=true")"; assert_admin_ok 200 "revoke-tokens"
-  aws_run_as "${sts_ak}" "${sts_sk}" "${sts_token}" -- s3 ls; assert_aws_fails "STS creds invalid after revoke"
+  aws_run_as "${sts_ak}" "${sts_sk}" "${sts_token}" -- s3 ls; assert_aws_ok "STS creds work before revoke" || return 1
+  out="$(admin_api POST "/rustfs/admin/v3/revoke-tokens/builtin?user=${ACCESS_KEY}&fullRevoke=true")"; assert_admin_ok 200 "revoke-tokens" || return 1
+  printf '%s' "${out}" | jq -e '.revoked | numbers | select(. > 0 and floor == .)' >/dev/null 2>&1 || {
+    echo "revoke-tokens did not report a positive revoked count" >&2
+    return 1
+  }
+  aws_run_as "${sts_ak}" "${sts_sk}" "${sts_token}" -- s3 ls
+  {
+    printf 'STS-105 post-revoke: aws_exit=%s\n' "${AWS_CODE}"
+    printf '%s\n' "${AWS_OUT}"
+  } >> "${STS_DIAGNOSTICS_FILE}"
+  assert_aws_fails "STS creds invalid after revoke" || return 1
+  local error_code
+  error_code="$(printf '%s\n' "${AWS_OUT}" | sed -n 's/.*An error occurred (\([A-Za-z]*\)) when calling.*/\1/p' | head -1)"
+  case "${error_code}" in
+    InvalidAccessKeyId|AccessDenied)
+      printf 'STS-105 post-revoke: aws_exit=%s error_code=%s\n' "${AWS_CODE}" "${error_code}" >> "${STS_DIAGNOSTICS_FILE}"
+      ;;
+    *) echo "STS request failed without the expected credential rejection" >&2; return 1 ;;
+  esac
 }
 
 # ==================== OIDC / SSO ====================
@@ -799,6 +868,7 @@ write_report() {
     echo "- Trigger: ${GITHUB_EVENT_NAME:-local}"
     echo "- Package: ${package_source}"
     echo "- RustFS Version: ${RUSTFS_VERSION_INFO:-N/A}"
+    echo "- Test Scripts Commit: ${TEST_SCRIPT_REVISION:-unknown}"
     echo "- Test Step Outcome: ${outcome}"
     echo "- Result: ${PASS} passed / ${FAIL} failed / ${SKIP} skipped"
     echo ""
@@ -839,6 +909,16 @@ record_topology_results() {
     echo "| ${id} | ${desc} | ${result} |" >> "${REPORT_SECTIONS_FILE}"
   done
   echo "" >> "${REPORT_SECTIONS_FILE}"
+  if [ -s "${STS_DIAGNOSTICS_FILE}" ]; then
+    {
+      echo "### STS-105 diagnostics"
+      echo ''
+      echo '```text'
+      cat "${STS_DIAGNOSTICS_FILE}"
+      echo '```'
+      echo ''
+    } >> "${REPORT_SECTIONS_FILE}"
+  fi
 }
 
 # ==================== Runner ====================
@@ -899,10 +979,16 @@ main() {
   need_cmd aws "aws cli"
   need_cmd jq "jq"
   need_cmd python3 "python3"
+  TEST_SCRIPT_REVISION="$(git -C "${SCRIPT_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)"
+  log "test scripts commit: ${TEST_SCRIPT_REVISION}"
+  bash --version | head -1
+  curl --version | head -1
+  aws --version
 
   confirm "Run security suite on topologies: ${SELECTED_TOPOLOGIES[*]}?"
 
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
+    CURRENT_TOPOLOGY="${topo}"
     log "===== topology ${topo} ====="
     env_setup "${topo}"
     if [ -z "${RUSTFS_VERSION_INFO}" ]; then
