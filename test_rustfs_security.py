@@ -12,6 +12,7 @@ HARNESS = r'''
 set -uo pipefail
 admin_user_add() { echo 200 > "$TEST_TMP/code"; }
 admin_user_remove() { touch "$TEST_TMP/deleted"; echo 200 > "$TEST_TMP/code"; }
+admin_policy_add() { echo 200 > "$TEST_TMP/code"; }
 admin_policy_attach() { touch "$TEST_TMP/policy"; echo 200 > "$TEST_TMP/code"; }
 admin_api_code() { cat "$TEST_TMP/code"; }
 assert_admin_ok() { [ "$(admin_api_code)" = "$1" ]; }
@@ -19,6 +20,7 @@ assert_aws_ok() { [ "$AWS_CODE" -eq 0 ]; }
 assert_aws_fails() { [ "$AWS_CODE" -ne 0 ]; }
 admin_api() {
   echo 200 > "$TEST_TMP/code"
+  if [ "$1" = DELETE ]; then return; fi
   if [[ "$2" == */list-users ]]; then echo '{"sec101u":{}}'; return; fi
   if [ -f "$TEST_TMP/deleted" ]; then
     [ "$SCENARIO" = deletion-ineffective ] || echo 404 > "$TEST_TMP/code"
