@@ -601,6 +601,21 @@ aws_run_node1() {
   AWS_OUT="$(aws --endpoint-url "http://$(endpoint_host_prefix)1:9000" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
 }
 
+# node2_admin_api <method> <path> [query] [body] — signed_request straight to
+# the second node. rustfs/backlog#2194: set-remote-target updates only the
+# handling node's in-memory target map; peers historically converged only via
+# the 15-minute bucket-metadata refresh loop. REP-109 asserts the fixed
+# read-your-writes contract instead of pinning calls to node 1.
+node2_admin_api() {
+  signed_request "http://$(endpoint_host_prefix)2:9000" "$1" "$2" "${3:-}" "${4:-}" "application/json"
+}
+
+# aws_run_node2 <aws args...> — same as aws_run but straight at the second
+# node (cross-node rule write for REP-109).
+aws_run_node2() {
+  AWS_OUT="$(aws --endpoint-url "http://$(endpoint_host_prefix)2:9000" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
+}
+
 aws_run_site2() {
   AWS_OUT="$(aws --endpoint-url "${SITE2_ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
 }
@@ -741,6 +756,7 @@ run_all_bucket_tests() {
   run_test REP-106 "RemoveTargetUsedByRule"             test_rep106
   run_test REP-107 "ExistingObjectResync"               test_rep107
   run_test REP-108 "MultipartReplicates"                test_rep108
+  run_test REP-109 "PeerTargetVisibility"               test_rep109
 }
 
 test_rep101() {
@@ -764,6 +780,42 @@ test_rep101() {
   fi
   rm_bucket_force main rep101-src
   rm_bucket_force site2 rep101-dst
+}
+
+# REP-109 asserts the cross-node read-your-writes contract from
+# rustfs/backlog#2194: after set-remote-target returns 200 on one node, a
+# peer node must immediately (a) list the target and (b) accept a
+# put-bucket-replication rule referencing its ARN — without waiting for the
+# 15-minute bucket-metadata refresh loop. The pre-fix behavior was an empty
+# peer list and `InvalidRequest: replication config has a stale target`.
+test_rep109() {
+  new_versioned_bucket main rep109-src || return 1
+  new_versioned_bucket site2 rep109-dst || return 1
+  local arn peer_list cfg_json
+  arn="$(register_replication_target rep109-src rep109-dst)" \
+    || { rm_bucket_force main rep109-src; rm_bucket_force site2 rep109-dst; return 1; }
+  case "${arn}" in arn:*) : ;; *) echo "ARN has unexpected shape: ${arn}"; return 1 ;; esac
+  # (a) the peer node must list the target immediately after registration.
+  peer_list="$(node2_admin_api GET "/rustfs/admin/v3/list-remote-targets" "bucket=rep109-src")"
+  [ "$(signed_code)" = "200" ] || { echo "peer list-remote-targets HTTP $(signed_code): ${peer_list}"; rm_bucket_force main rep109-src; rm_bucket_force site2 rep109-dst; return 1; }
+  printf '%s' "${peer_list}" | jq -e --arg arn "${arn}" '([.[].arn] | index($arn)) != null' >/dev/null 2>&1 \
+    || { echo "peer node 2 does not see the target right after set-remote-target (backlog#2194): ${peer_list}"; rm_bucket_force main rep109-src; rm_bucket_force site2 rep109-dst; return 1; }
+  # (b) a replication-rule write handled by the peer must validate the ARN.
+  cfg_json="$(jq -nc --arg dst_arn "${arn}" '{
+    Role: "",
+    Rules: [{
+      ID: "rule1", Priority: 1, Status: "Enabled",
+      DeleteMarkerReplication: {Status: "Disabled"},
+      Destination: {Bucket: $dst_arn}
+    }]
+  }')"
+  aws_run_node2 s3api put-bucket-replication --bucket rep109-src --replication-configuration "${cfg_json}"
+  assert_aws_ok "cross-node put-bucket-replication (backlog#2194)" \
+    || { rm_bucket_force main rep109-src; rm_bucket_force site2 rep109-dst; return 1; }
+  aws_run s3api delete-bucket-replication --bucket rep109-src
+  node1_admin_api DELETE "/rustfs/admin/v3/remove-remote-target" "bucket=rep109-src&arn=${arn}" >/dev/null 2>&1 || true
+  rm_bucket_force main rep109-src
+  rm_bucket_force site2 rep109-dst
 }
 
 test_rep102() {
