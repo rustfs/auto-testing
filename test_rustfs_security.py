@@ -4,6 +4,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -249,6 +250,30 @@ collect_sts_server_diagnostics '2026-09-13T00:00:00Z'
         self.assertEqual(result.returncode, 0, result.stderr)
         for node in ("node1", "node2"):
             self.assertIn(f"server logs unavailable: {node}", result.stdout)
+
+
+class DryRunTest(unittest.TestCase):
+    def test_preview_does_not_require_runtime_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            # Deliberately omit curl, aws, ssh, openssl, jq, python3, and git.
+            for command in ("bash", "cat", "dirname", "head", "mktemp", "rm", "sed", "sort"):
+                (tools / command).symlink_to(shutil.which(command))
+            report = root / "report.md"
+            result = subprocess.run(
+                [str(tools / "bash"), str(Path(__file__).with_name("rustfs-security-test.sh")),
+                 "--dry-run", "--all-topologies", "-y"],
+                env={**os.environ, "PATH": str(tools), "TMPDIR": directory, "REPORT_FILE": str(report),
+                     "GITHUB_STEP_SUMMARY": str(root / "summary.md"), "RUSTFS_NODES": "fixture-node",
+                     "RUSTFS_ACCESS_KEY": "fixture-root", "RUSTFS_SECRET_KEY": "fixture-secret"},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.count("[DRY-RUN] STS-105"), 3)
+            for topology in ("single-single", "single-multi", "multi-multi"):
+                self.assertIn(f"## Topology: {topology}", report.read_text())
 
 
 if __name__ == "__main__":

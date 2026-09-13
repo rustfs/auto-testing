@@ -981,9 +981,11 @@ main() {
   need_cmd python3 "python3"
   TEST_SCRIPT_REVISION="$(git -C "${SCRIPT_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)"
   log "test scripts commit: ${TEST_SCRIPT_REVISION}"
-  bash --version | head -1
-  curl --version | head -1
-  aws --version
+  if [ "${DRY_RUN}" -eq 0 ]; then
+    bash --version | head -1
+    curl --version | head -1
+    aws --version
+  fi
 
   confirm "Run security suite on topologies: ${SELECTED_TOPOLOGIES[*]}?"
 
