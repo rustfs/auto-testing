@@ -70,6 +70,7 @@ run_test() {
     rc=$?
     if [ "${rc}" -eq 2 ]; then
       UNSUPPORTED=$((UNSUPPORTED+1)); printf '\033[1;33m[UNSUPPORTED]\033[0m %s %s\n' "${id}" "${name}"
+      sed 's/^/      | /' "${TEST_TMP:-/tmp}/table-test.out" | tail -10
     else
       FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
       printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
@@ -171,12 +172,13 @@ CFG"
     for v in "${NODES[@]}"; do
       remote "${v}" "curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:9000/health/ready" >/dev/null 2>&1 && ok=$((ok+1))
     done
-    [ "${ok}" -eq "${#NODES[@]}" ] && { log "cluster ready (${ok}/${#NODES[@]})"; return 0; }
-  # aws cli needs explicit credentials on the runner (no instance profile)
+    # aws cli needs explicit credentials on the runner (no instance profile);
+  # must run BEFORE the success return below or it never executes
   export AWS_ACCESS_KEY_ID="${ACCESS_KEY}"
   export AWS_SECRET_ACCESS_KEY="${SECRET_KEY}"
   export AWS_DEFAULT_REGION="${REGION}"
   export AWS_EC2_METADATA_DISABLED=true
+  [ "${ok}" -eq "${#NODES[@]}" ] && { log "cluster ready (${ok}/${#NODES[@]})"; return 0; }
     sleep 5
   done
   die "cluster did not become ready in 180s"
