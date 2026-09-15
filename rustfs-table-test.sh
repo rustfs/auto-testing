@@ -156,8 +156,14 @@ RUSTFS_OBS_LOGGER_LEVEL=error
 RUSTFS_OBS_LOG_DIRECTORY=\"/var/log/rustfs/\"
 CFG"
   }
-  for v in "${NODES[@]}"; do write_node_config "${v}" & done; wait
-  for v in "${NODES[@]}"; do remote "${v}" "${SUDO[*]} systemctl reset-failed rustfs 2>/dev/null; ${SUDO[*]} systemctl start rustfs" & done; wait
+  local cfg_pids=()
+  for v in "${NODES[@]}"; do write_node_config "${v}" & cfg_pids+=("$!"); done
+  # wait on explicit job pids only: a bare `wait` also waits for the log
+  # process substitution (bash >= 5.1) and would hang forever on tee
+  wait "${cfg_pids[@]}"
+  local start_pids=()
+  for v in "${NODES[@]}"; do remote "${v}" "${SUDO[*]} systemctl reset-failed rustfs 2>/dev/null; ${SUDO[*]} systemctl start rustfs" & start_pids+=("$!"); done
+  wait "${start_pids[@]}"
   local deadline=$(( $(date +%s) + 180 )) i=0 ok
   while [ "$(date +%s)" -lt "${deadline}" ]; do
     ok=0
@@ -172,7 +178,9 @@ CFG"
 
 teardown_environment() {
   local v
-  for v in "${NODES[@]}"; do remote "${v}" "${SUDO[*]} systemctl stop rustfs 2>/dev/null; ${SUDO[*]} dpkg -P rustfs >/dev/null 2>&1; ${SUDO[*]} rm -rf /data/rustfs{1..4}/mnmd /etc/default/rustfs" & done; wait
+  local clean_pids=()
+  for v in "${NODES[@]}"; do remote "${v}" "${SUDO[*]} systemctl stop rustfs 2>/dev/null; ${SUDO[*]} dpkg -P rustfs >/dev/null 2>&1; ${SUDO[*]} rm -rf /data/rustfs{1..4}/mnmd /etc/default/rustfs" & clean_pids+=("$!"); done
+  wait "${clean_pids[@]}"
   log "environment torn down"
 }
 
