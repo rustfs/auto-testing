@@ -1,0 +1,28 @@
+name: Issue Manager Tests
+
+on:
+  pull_request:
+    paths:
+      - scripts/issue_manager.py
+      - test_issue_manager.py
+      - .github/workflows/issue-manager-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/issue_manager.py
+      - test_issue_manager.py
+      - .github/workflows/issue-manager-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  issue-manager-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Verify issue resolution without GitHub writes
+        run: python3 -m unittest test_issue_manager.py

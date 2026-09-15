@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 REPO = "rustfs/backlog"
-CASE_ID_RE = re.compile(r"^[A-Z]{2,6}-[0-9]+$")
+CASE_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 # Case rows in cases.md as produced by scripts/functional_case_report.py:
 # | S3C-101 | CreateBucket (topology:single-single) | PASS |
 TABLE_ROW_RE = re.compile(r"^\|\s*([A-Z][A-Z0-9]*-[0-9]+)\s*\|(.+)\|\s*(PASS|FAIL|UNSUPPORTED|RUNNING|SKIP)\s*\|")
@@ -331,29 +331,12 @@ def handle_failure(args, cases, bucket, reason) -> None:
 
 
 def handle_success(args, cases) -> None:
-    passing = {cid for cid, v in cases.items()
-               if "PASS" in v["statuses"] and "FAIL" not in v["statuses"]}
-    if not cases:
-        # Green run without case results (case-ID-less suites like heal, or an
-        # empty run): close env and suite-level issues, but keep case-labeled
-        # issues open — there is no evidence their cases passed.
-        matches = search_open([args.category])
-        closed = 0
-        for m in matches:
-            labels = issue_labels(m["number"])
-            if "functional-test" not in labels and args.category not in labels:
-                continue
-            if any(CASE_ID_RE.match(l) for l in labels):
-                print(f"#{m['number']}: keeps open (case-labeled, no case results this run)")
-                continue
-            close_issue(m["number"],
-                        f"Suite `{args.suite}` completed a fully green run "
-                        f"([run {args.run_id}]({args.run_url})); closing this issue. "
-                        f"It will be re-filed if the symptom reproduces.", args.dry_run)
-            closed += 1
-        if not closed:
-            print("no case results in a green run; nothing to close")
+    # A green process exit is not execution evidence. In particular, one
+    # topology passing must not hide another topology that never ran the case.
+    if not cases or any(value["statuses"] != {"PASS"} for value in cases.values()):
+        print("no complete all-PASS case evidence; keeping historical issues open")
         return
+    passing = set(cases)
     matches = search_open([args.category])
     if not matches:
         print(f"no open issues labeled {args.category}; nothing to close")
@@ -361,7 +344,7 @@ def handle_success(args, cases) -> None:
     for m in matches:
         number = m["number"]
         labels = issue_labels(number)
-        if "functional-test" not in labels and args.category not in labels:
+        if not {"functional-test", args.category}.issubset(labels):
             continue
         tracked = sorted(l for l in labels if CASE_ID_RE.match(l))
         if tracked:
