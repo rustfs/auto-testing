@@ -203,10 +203,12 @@ cleanup_all() {
 # ==================== TBL-101: PyIceberg end-to-end (product smoke) ====================
 test_tbl101() {
   if [ "${SKIP_SMOKE}" -eq 1 ]; then echo "smoke skipped by flag"; return 2; fi
-  if [ "${SKIP_SMOKE}" -eq 1 ]; then echo "smoke skipped by flag"; return 2; fi
+  if [ "${SKIP_SMOKE}" -eq 1 ]; then echo "tbl101: smoke skipped by flag"; return 2; fi
   if [ -z "${SMOKE_SCRIPT}" ] || [ ! -f "${SMOKE_SCRIPT}" ]; then
-    echo "smoke script not found: '${SMOKE_SCRIPT:-<empty>}' (cwd=$(pwd))"; return 2
+    echo "tbl101: smoke script not found: '${SMOKE_SCRIPT:-<empty>}' (cwd=$(pwd), SKIP_SMOKE=${SKIP_SMOKE})"
+    return 2
   fi
+  echo "tbl101: smoke script ok, creating venv"
   local venv="/tmp/tbl-venv-${RUN_ID}"
   python3 -m venv "${venv}" >/dev/null 2>&1 || return 2
   "${venv}/bin/pip" install -q 'pyiceberg[pyarrow]' boto3 >/dev/null 2>&1 || { echo "pip install failed"; return 2; }
@@ -274,8 +276,15 @@ test_tbl104() {
   # plain S3 write into the reserved prefix of an ENABLED bucket must be rejected
   printf 'x' > "${TEST_TMP}/resv.bin"
   aws_run s3api put-object --bucket "${b}" --key ".rustfs-table/warehouses/default/probe" --body "${TEST_TMP}/resv.bin"
-  [ "${AWS_CODE}" -ne 0 ] && printf '%s' "${AWS_OUT}" | grep -qE 'InvalidRequest|ReservedCatalogObject|reserved' \
-    || { echo "write into reserved prefix was accepted on table bucket: ${AWS_OUT}"; aws_run s3api delete-bucket --bucket "${b}"; return 1; }
+  # any rejection is correct protection: the product answers AccessDenied
+  # (403); InvalidRequest/reserved wording is also fine
+  if [ "${AWS_CODE}" -eq 0 ]; then
+    echo "write into reserved prefix was ACCEPTED on table bucket: ${AWS_OUT}"
+    aws_run s3api delete-bucket --bucket "${b}"
+    return 1
+  fi
+  printf '%s' "${AWS_OUT}" | grep -qE 'AccessDenied|InvalidRequest|ReservedCatalogObject|reserved|Forbidden' \
+    || { echo "rejection reason unclear: ${AWS_OUT}"; aws_run s3api delete-bucket --bucket "${b}"; return 1; }
   # the same write on a NORMAL bucket must stay allowed (protection is table-bucket-scoped)
   aws_run s3api put-object --bucket "${bucket}" --key ".rustfs-table/innocent" --body "${TEST_TMP}/resv.bin"
   [ "${AWS_CODE}" -eq 0 ] || { echo "normal bucket write wrongly rejected: ${AWS_OUT}"; return 1; }
@@ -287,9 +296,12 @@ test_tbl104() {
 # ==================== TBL-105: commit CAS conflict (optimistic concurrency) ====================
 test_tbl105() {
   local ns2="ncas${RUN_ID}" ns_path="${REST_PATH}/v1/${bucket}/namespaces" tbl_path="${ns_path}/${ns2}/tables"
-  REST_OUT="$(signed_rest POST "${ns_path}" '{"namespace":["'"${ns2}"'"]}')" ; [ "$(rest_code)" = "200" ] || { echo "ns create failed"; return 1; }
+  echo "tbl105: creating namespace ${ns2}"
+  REST_OUT="$(signed_rest POST "${ns_path}" '{"namespace":["'"${ns2}"'"]}')" ; [ "$(rest_code)" = "200" ] || { echo "ns create failed: $(rest_body)"; return 1; }
+  echo "tbl105: creating table"
   REST_OUT="$(signed_rest POST "${tbl_path}" '{"name":"cas","schema":{"type":"struct","fields":[{"id":1,"name":"id","required":true,"type":"long"}]}}')"
   [ "$(rest_code)" = "200" ] || { echo "table create failed: $(rest_body)"; return 1; }
+  echo "tbl105: table created, parsing metadata"
   local meta_loc token payload
   meta_loc="$(printf '%s' "$(rest_body)" | jq -r '.["metadata-location"]')"
   token="$(printf '%s' "$(rest_body)" | jq -r '.["version-token"] // .["config"]["version-token"] // empty')"
@@ -350,9 +362,9 @@ run_test TBL-101 "PyIcebergEndToEnd"            test_tbl101
 run_test TBL-102 "EnableAndGetTableBucket"      test_tbl102
 run_test TBL-103 "NamespaceAndTableCrud"        test_tbl103
 run_test TBL-104 "ReservedPrefixProtection"     test_tbl104
-run_test TBL-105 "CommitCasConflict"            test_tbl105
 run_test TBL-106 "CompatPrefixAndConfig"        test_tbl106
 run_test TBL-107 "TableBucketListIsolation"     test_tbl107
+run_test TBL-105 "CommitCasConflict"            test_tbl105
 
 cleanup_all
 log "table suite: ${PASS} passed, ${FAIL} failed, ${UNSUPPORTED} unsupported"
