@@ -64,7 +64,9 @@ run_test() {
   local id="$1" name="$2" fn="$3" rc
   if [ "${DRY_RUN}" -eq 1 ]; then printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"; return 0; fi
   printf '\n--- %s %s ---\n' "${id}" "${name}"
-  if "${fn}" > "${TEST_TMP:-/tmp}/table-test.out" 2>&1; then
+  # live-tee: case output must be visible in the suite log even when the
+  # case dies without a verdict (TBL-105 silent death, runs 4/5)
+  if ( "${fn}"; echo "case-rc=$?" ) 2>&1 | tee "${TEST_TMP:-/tmp}/table-test.out" | grep -v '^case-rc='; then
     PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
   else
     rc=$?
@@ -210,7 +212,12 @@ test_tbl101() {
   fi
   echo "tbl101: smoke script ok, creating venv"
   local venv="/tmp/tbl-venv-${RUN_ID}"
-  python3 -m venv "${venv}" >/dev/null 2>&1 || return 2
+  if ! python3 -m venv "${venv}" >/tmp/tbl-venv-err.log 2>&1; then
+    echo "tbl101: venv create failed, installing python3-venv: $(head -3 /tmp/tbl-venv-err.log)"
+    ${SUDO[*]} apt-get install -y python3-venv >/dev/null 2>&1 || true
+    python3 -m venv "${venv}" >>/tmp/tbl-venv-err.log 2>&1 \
+      || { echo "tbl101: venv create failed twice: $(tail -3 /tmp/tbl-venv-err.log)"; return 2; }
+  fi
   "${venv}/bin/pip" install -q 'pyiceberg[pyarrow]' boto3 >/dev/null 2>&1 || { echo "pip install failed"; return 2; }
   RUSTFS_ACCESS_KEY="${ACCESS_KEY}" RUSTFS_SECRET_KEY="${SECRET_KEY}" RUSTFS_ENDPOINT="${API_ENDPOINT}" \
     "${venv}/bin/python" "${SMOKE_SCRIPT}" \
@@ -285,10 +292,16 @@ test_tbl104() {
   fi
   printf '%s' "${AWS_OUT}" | grep -qE 'AccessDenied|InvalidRequest|ReservedCatalogObject|reserved|Forbidden' \
     || { echo "rejection reason unclear: ${AWS_OUT}"; aws_run s3api delete-bucket --bucket "${b}"; return 1; }
-  # the same write on a NORMAL bucket must stay allowed (protection is table-bucket-scoped)
-  aws_run s3api put-object --bucket "${bucket}" --key ".rustfs-table/innocent" --body "${TEST_TMP}/resv.bin"
-  [ "${AWS_CODE}" -eq 0 ] || { echo "normal bucket write wrongly rejected: ${AWS_OUT}"; return 1; }
-  aws_run s3api delete-object --bucket "${bucket}" --key ".rustfs-table/innocent" >/dev/null 2>&1 || true
+  # the same write on a NORMAL bucket must stay allowed (protection is
+  # table-bucket-scoped): use a freshly created plain bucket - ${bucket}
+  # is a table bucket by now (TBL-102 enabled it)
+  local nb="tblnorm${RUN_ID}"
+  aws_run s3api create-bucket --bucket "${nb}"
+  [ "${AWS_CODE}" -eq 0 ] || { echo "plain bucket create failed: ${AWS_OUT}"; return 1; }
+  aws_run s3api put-object --bucket "${nb}" --key ".rustfs-table/innocent" --body "${TEST_TMP}/resv.bin"
+  [ "${AWS_CODE}" -eq 0 ] || { echo "plain bucket write wrongly rejected: ${AWS_OUT}"; aws_run s3api delete-bucket --bucket "${nb}"; return 1; }
+  aws_run s3api delete-object --bucket "${nb}" --key ".rustfs-table/innocent" >/dev/null 2>&1 || true
+  aws_run s3api delete-bucket --bucket "${nb}" >/dev/null 2>&1 || true
   aws_run s3api delete-bucket --bucket "${b}" >/dev/null 2>&1 || true
   return 0
 }
