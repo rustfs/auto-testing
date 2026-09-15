@@ -1,3 +1,7 @@
+  # Both keys carry a compressible extension: disk compression is decided
+  # from the request key/Content-Type, and aws s3api sends no Content-Type on
+  # put-object or copy-object, so an extension-less key is never compressed
+  # (same include filter as MinIO) and the assertion below would be vacuous.
 #!/usr/bin/env bash
 #
 # rustfs-storage-test.sh
@@ -889,16 +893,20 @@ test_stor119() {
 test_stor125() {
   new_bucket "stor125-b1" || return 1
   make_compressible_file "${TEST_TMP}/stor125-v" 1048576
-  aws_run s3api put-object --bucket "stor125-b1" --key src --body "${TEST_TMP}/stor125-v"
+  # Both keys carry a compressible extension: disk compression is decided from
+  # the request key/Content-Type, and aws s3api sends no Content-Type on
+  # put-object or copy-object, so an extension-less key is never compressed
+  # (same include filter as MinIO) and the assertion below would be vacuous.
+  aws_run s3api put-object --bucket "stor125-b1" --key src.txt --body "${TEST_TMP}/stor125-v"
   assert_aws_ok || return 1
-  aws_run s3api copy-object --bucket "stor125-b1" --key dst --copy-source "stor125-b1/src"
+  aws_run s3api copy-object --bucket "stor125-b1" --key dst.txt --copy-source "stor125-b1/src.txt"
   assert_aws_ok || return 1
-  aws_run s3api get-object --bucket "stor125-b1" --key dst "${TEST_TMP}/stor125-dl"
+  aws_run s3api get-object --bucket "stor125-b1" --key dst.txt "${TEST_TMP}/stor125-dl"
   assert_aws_ok || return 1
   [ "$(md5_of_file "${TEST_TMP}/stor125-dl")" = "$(md5_of_file "${TEST_TMP}/stor125-v")" ] \
     || { echo "copied compressed object mismatch"; return 1; }
   # copy target keeps the compressed representation (physical < logical)
-  aws_run s3api delete-object --bucket "stor125-b1" --key src
+  aws_run s3api delete-object --bucket "stor125-b1" --key src.txt
   local phys
   phys="$(bucket_physical_bytes "stor125-b1")"
   [ "${phys}" -lt 524288 ] || { echo "copy target lost compression (phys=${phys})"; return 1; }
