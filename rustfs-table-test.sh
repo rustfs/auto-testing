@@ -100,8 +100,8 @@ import sys, datetime, hashlib, hmac, urllib.request, urllib.error
 method, url, body = sys.argv[1], sys.argv[2], sys.argv[3]
 ak, sk, region = __import__("os").environ["RUSTFS_ACCESS_KEY"], __import__("os").environ["RUSTFS_SECRET_KEY"], "us-east-1"
 service = "s3"
-def sign(key, msg): return hmac.new(key, msg.encode(), hashlib.sha256).digest()
-def csign(key, msg): return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+def _b(x): return x if isinstance(x, bytes) else x.encode("utf-8")
+def csign(key, msg): return hmac.new(_b(key), _b(msg), hashlib.sha256).digest()
 t = datetime.datetime.now(datetime.timezone.utc)
 amzdate, datestamp = t.strftime("%Y%m%dT%H%M%SZ"), t.strftime("%Y%m%d")
 payload_hash = hashlib.sha256(body.encode() if body else b"").hexdigest()
@@ -132,6 +132,7 @@ except urllib.error.HTTPError as e:
 except Exception as e:
     print(0); print(str(e))
 PYEOF
+  return 0
 }
 rest_code() { sed -n '1p' <<<"${REST_OUT}"; }
 rest_body() { sed -n '2,$p' <<<"${REST_OUT}"; }
@@ -171,6 +172,11 @@ CFG"
       remote "${v}" "curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:9000/health/ready" >/dev/null 2>&1 && ok=$((ok+1))
     done
     [ "${ok}" -eq "${#NODES[@]}" ] && { log "cluster ready (${ok}/${#NODES[@]})"; return 0; }
+  # aws cli needs explicit credentials on the runner (no instance profile)
+  export AWS_ACCESS_KEY_ID="${ACCESS_KEY}"
+  export AWS_SECRET_ACCESS_KEY="${SECRET_KEY}"
+  export AWS_DEFAULT_REGION="${REGION}"
+  export AWS_EC2_METADATA_DISABLED=true
     sleep 5
   done
   die "cluster did not become ready in 180s"
@@ -195,7 +201,10 @@ cleanup_all() {
 # ==================== TBL-101: PyIceberg end-to-end (product smoke) ====================
 test_tbl101() {
   if [ "${SKIP_SMOKE}" -eq 1 ]; then echo "smoke skipped by flag"; return 2; fi
-  if [ -z "${SMOKE_SCRIPT}" ] || [ ! -f "${SMOKE_SCRIPT}" ]; then echo "pyiceberg_smoke.py not provided (pass --smoke-script)"; return 2; fi
+  if [ "${SKIP_SMOKE}" -eq 1 ]; then echo "smoke skipped by flag"; return 2; fi
+  if [ -z "${SMOKE_SCRIPT}" ] || [ ! -f "${SMOKE_SCRIPT}" ]; then
+    echo "smoke script not found: '${SMOKE_SCRIPT:-<empty>}' (cwd=$(pwd))"; return 2
+  fi
   local venv="/tmp/tbl-venv-${RUN_ID}"
   python3 -m venv "${venv}" >/dev/null 2>&1 || return 2
   "${venv}/bin/pip" install -q 'pyiceberg[pyarrow]' boto3 >/dev/null 2>&1 || { echo "pip install failed"; return 2; }
