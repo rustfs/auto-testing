@@ -232,7 +232,7 @@ install_and_start() { # install_and_start <volumes> [extra env line]
     } > "${TMP}/envfile"
     [ "${DRY_RUN}" -eq 1 ] && continue
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" "sudo -n tee ${RUSTFS_CONFIG_FILE} >/dev/null" < "${TMP}/envfile"
-    run_remote "${node}" "sudo -n mkdir -p /data/rustfs{1..4}/mnmd && for i in 1 2 3 4; do sudo -n chown rustfs:rustfs "/data/rustfs${i}" "/data/rustfs${i}/mnmd"; done 2>/dev/null || true"
+    run_remote "${node}" 'sudo -n mkdir -p /data/rustfs{1..4}/mnmd && for i in 1 2 3 4; do sudo -n chown rustfs:rustfs "/data/rustfs${i}" "/data/rustfs${i}/mnmd"; done 2>/dev/null || true'
   done
   if [ "${volumes}" = "${VOLUMES_SNMD}" ]; then
     log "single-node topology: starting ${RUSTFS_SERVICE} on ${SNMD_NODE} only"
