@@ -139,7 +139,10 @@ s3op() {
     S3_RC=0; S3_CODE=""
   else
     S3_RC=$?
-    S3_CODE="$(grep -oE '\(([A-Za-z]+)\) when calling' "${err}" | head -1 | sed 's/ when calling//' | tr -d '()')"
+    # extraction must never kill the suite: with no match the grep pipeline
+    # is empty and pipefail would exit 1 under set -e (observed: the first
+    # degraded-mode aws failure aborted the whole suite with zero FT-CASEs)
+    S3_CODE="$(grep -oE '\(([A-Za-z]+)\) when calling' "${err}" | head -1 | sed 's/ when calling//' | tr -d '()' || true)"
     [ -n "${S3_CODE}" ] || S3_CODE="unknown"
   fi
 }
