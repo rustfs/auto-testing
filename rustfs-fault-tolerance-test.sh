@@ -232,10 +232,15 @@ install_and_start() { # install_and_start <volumes> [extra env line]
     } > "${TMP}/envfile"
     [ "${DRY_RUN}" -eq 1 ] && continue
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" "sudo -n tee ${RUSTFS_CONFIG_FILE} >/dev/null" < "${TMP}/envfile"
-    run_remote "${node}" "sudo -n mkdir -p /data/rustfs{1..4}/mnmd && sudo -n chown -R rustfs:rustfs /data/rustfs 2>/dev/null || true"
+    run_remote "${node}" "sudo -n mkdir -p /data/rustfs{1..4}/mnmd && for i in 1 2 3 4; do sudo -n chown rustfs:rustfs "/data/rustfs${i}" "/data/rustfs${i}/mnmd"; done 2>/dev/null || true"
   done
-  log "starting ${RUSTFS_SERVICE} on ${NODES[*]}"
-  remote_all "sudo -n systemctl start ${RUSTFS_SERVICE}"
+  if [ "${volumes}" = "${VOLUMES_SNMD}" ]; then
+    log "single-node topology: starting ${RUSTFS_SERVICE} on ${SNMD_NODE} only"
+    run_remote "${SNMD_NODE}" "sudo -n systemctl start ${RUSTFS_SERVICE}" || die "start failed on ${SNMD_NODE}"
+  else
+    log "starting ${RUSTFS_SERVICE} on ${NODES[*]}"
+    remote_all "sudo -n systemctl start ${RUSTFS_SERVICE}"
+  fi
   local waited=0
   while [ "${waited}" -lt 180 ]; do
     if curl -fsS --max-time 5 "${EP1}/minio/health/live" >/dev/null 2>&1; then
