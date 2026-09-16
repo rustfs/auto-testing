@@ -64,20 +64,24 @@ run_test() {
   local id="$1" name="$2" fn="$3" rc
   if [ "${DRY_RUN}" -eq 1 ]; then printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"; return 0; fi
   printf '\n--- %s %s ---\n' "${id}" "${name}"
-  # live-tee: case output must be visible in the suite log even when the
-  # case dies without a verdict (TBL-105 silent death, runs 4/5)
-  if ( "${fn}"; echo "case-rc=$?" ) 2>&1 | tee "${TEST_TMP:-/tmp}/table-test.out" | grep -v '^case-rc='; then
+  # live-tee keeps case output visible in the suite log (silent-death
+  # visibility); PIPESTATUS[0] preserves the case's true exit code - a
+  # silent successful case emits nothing and must still count as PASS.
+  local case_rc=0
+  set +e
+  ( "${fn}" ) 2>&1 | tee "${TEST_TMP:-/tmp}/table-test.out"
+  case_rc=${PIPESTATUS[0]}
+  set -e
+  echo "case-rc=${case_rc}"
+  if [ "${case_rc}" -eq 0 ]; then
     PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
+  elif [ "${case_rc}" -eq 2 ]; then
+    UNSUPPORTED=$((UNSUPPORTED+1)); printf '\033[1;33m[UNSUPPORTED]\033[0m %s %s\n' "${id}" "${name}"
+    sed 's/^/      | /' "${TEST_TMP:-/tmp}/table-test.out" | tail -10
   else
-    rc=$?
-    if [ "${rc}" -eq 2 ]; then
-      UNSUPPORTED=$((UNSUPPORTED+1)); printf '\033[1;33m[UNSUPPORTED]\033[0m %s %s\n' "${id}" "${name}"
-      sed 's/^/      | /' "${TEST_TMP:-/tmp}/table-test.out" | tail -10
-    else
-      FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
-      printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
-      sed 's/^/      | /' "${TEST_TMP:-/tmp}/table-test.out" | tail -30
-    fi
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
+    printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
+    sed 's/^/      | /' "${TEST_TMP:-/tmp}/table-test.out" | tail -30
   fi
 }
 
