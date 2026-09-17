@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_TMP="$(mktemp -d)"
-trap 'rm -rf "${TEST_TMP}"' EXIT
+
 
 export TMPDIR="${TEST_TMP}"
 export RUSTFS_POOL_SCRIPT_SOURCE_ONLY=1
@@ -333,9 +333,17 @@ test_package_checksum_before_install() (
         cp "${fixture}/download-source" "${output}"
       }
       dpkg() {
+        local pkg=""
         if [ "$1" = "-i" ]; then
+          shift
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              -*) shift ;;
+              *) pkg="$1"; break ;;
+            esac
+          done
           printf 'install\n' >> "${fixture}/dpkg-calls"
-          cp "$2" "${fixture}/installed"
+          cp "${pkg}" "${fixture}/installed"
         fi
       }
       if ! command -v sha256sum >/dev/null 2>&1; then

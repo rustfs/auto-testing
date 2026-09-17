@@ -142,11 +142,10 @@ run_remote() {
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: ssh ${SSH_USER}@${node} <<'REMOTE'"
     printf '%s\n' "${script}" | sed 's/^/    | /'
-    log "DRY-RUN: ----"
     return 0
   fi
   log "==> ${node}: executing remote script"
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" 'bash -s' <<<"${script}"
+  ( ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" 'bash -s' <<<"${script}" )
 }
 
 # Run the same remote script on all nodes in parallel (script from stdin)
@@ -271,8 +270,62 @@ preflight() {
         || die "cannot ssh to ${node}"
     done
     log "all nodes reachable: ${NODES[*]}"
+    check_hosts_map
   fi
   log "preflight OK"
+}
+
+# The cluster addresses nodes by name (rustfs-node1..4); every node must
+# resolve those names to the same IPs. Other test suites that share these VMs
+# rewrite /etc/hosts mid-run, which silently splits the cluster and makes
+# every node fail storage quorum with a Type=notify timeout. Fail fast with
+# the offending mapping instead.
+check_hosts_map() {
+  local node map bad=0
+  for node in "${NODES[@]}"; do
+    map="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+      "for i in 1 2 3 4; do printf '%s=' \"\$i\"; getent hosts rustfs-node\$i | awk '{printf \"%s,\", \$1}'; echo; done")"
+    if [ -z "${map}" ] || printf '%s' "${map}" | grep -q '=$'; then
+      warn "${node}: incomplete rustfs-node* resolution:"
+      printf '%s\n' "${map}" | sed 's/^/    | /'
+      bad=1
+    elif [ -z "${HOSTS_MAP_REF:-}" ]; then
+      HOSTS_MAP_REF="${map}"
+      log "${node}: rustfs-node map: $(printf '%s' "${map}" | tr '\n' ' ')"
+    elif [ "${map}" != "${HOSTS_MAP_REF}" ]; then
+      warn "${node}: rustfs-node map differs from ${NODES[0]}:"
+      printf 'ref:  %s\nnew:  %s\n' "$(printf '%s' "${HOSTS_MAP_REF}" | tr '\n' ' ')" "$(printf '%s' "${map}" | tr '\n' ' ')" | sed 's/^/    | /'
+      bad=1
+    fi
+  done
+  [ "${bad}" -eq 0 ] || die "rustfs-node1..4 must resolve identically on all nodes (check /etc/hosts)"
+}
+
+# Pin rustfs-node1..4 on every node to the primary address of each VM, so
+# concurrent test suites that rewrite /etc/hosts on shared VMs cannot split
+# the cluster mid-run. Each node contributes its own address; NODES[i] is
+# rustfs-node(i+1) by this suite's fixed topology.
+enforce_hosts_map() {
+  [ "${DRY_RUN}" -eq 1 ] && return 0
+  local node ip block="" i
+  [ "${#NODES[@]}" -eq 4 ] || die "expected 4 nodes for the rustfs-node1..4 mapping, got ${#NODES[@]}"
+  for i in "${!NODES[@]}"; do
+    node="${NODES[$i]}"
+    ip="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" "hostname -I | awk '{print \$1}'")"
+    [ -n "${ip}" ] || die "cannot determine primary address of ${node}"
+    block+="${ip} rustfs-node$((i + 1))\n"
+    log "rustfs-node$((i + 1)) -> ${ip} (${node})"
+  done
+  for node in "${NODES[@]}"; do
+    run_remote "${node}" <<REMOTE
+set -euo pipefail
+SUDO=""; [ "\$(id -u)" -ne 0 ] && SUDO="sudo -n"
+# Drop any conflicting entries for the cluster names (other suites keep
+# re-adding their own), then append the authoritative mapping.
+\${SUDO} sed -i '/[[:space:]]rustfs-node[1-4]\([[:space:]]\|$\)/d' /etc/hosts
+printf '%b' "${block}" | \${SUDO} tee -a /etc/hosts >/dev/null
+REMOTE
+  done
 }
 
 # ==================== Steps ====================
@@ -347,14 +400,31 @@ fi
 # prompts interactively and dies with "end of file on stdin at conffile
 # prompt". Keep the on-disk config -- step 4 rewrites it from scratch anyway.
 ${SUDO} dpkg -i --force-confold /home/rustfs/packages/rustfs.deb
-# A stale /etc/systemd/system/rustfs.service (e.g. restored by ad-hoc node
-# cleanup scripts) shadows the unit shipped in /lib/systemd/system and can
-# point at a binary path that no longer exists -> 203/EXEC on start. The
-# unit shipped by the deb is authoritative; drop the override so it wins.
+# A stale /etc/systemd/system/rustfs.service and/or rustfs.service.d drop-ins
+# (e.g. left by ad-hoc node cleanup or other test suites that share these VMs)
+# shadow the unit shipped in /lib/systemd/system. They can repoint ExecStart
+# at a different binary or strip the server subcommand, so the perf cluster
+# never starts and every node dies with a Type=notify timeout. The unit
+# shipped by the deb is authoritative; drop all overrides so it wins.
 if [ -e /etc/systemd/system/rustfs.service ]; then
   ${SUDO} rm -f /etc/systemd/system/rustfs.service
 fi
+if [ -d /etc/systemd/system/rustfs.service.d ]; then
+  ${SUDO} rm -rf /etc/systemd/system/rustfs.service.d
+fi
 ${SUDO} systemctl daemon-reload
+# Fail fast if anything still overrides the deb unit: the service must run
+# /usr/bin/rustfs server with EnvironmentFile=/etc/default/rustfs. Skipped
+# when systemd cannot describe the unit (no output), e.g. harnesses that
+# stub systemctl out; on perf nodes systemctl cat always emits the unit.
+UNIT_DUMP="$(${SUDO} systemctl cat rustfs 2>/dev/null || true)"
+if [ -n "${UNIT_DUMP}" ]; then
+  printf '%s\n' "${UNIT_DUMP}" | grep -q '^ExecStart=/usr/bin/rustfs server$' \
+    || { echo "unexpected rustfs unit: ExecStart is not /usr/bin/rustfs server"; printf '%s\n' "${UNIT_DUMP}"; exit 1; }
+  printf '%s\n' "${UNIT_DUMP}" | grep -q '^EnvironmentFile=/etc/default/rustfs' \
+    || { echo "unexpected rustfs unit: EnvironmentFile missing"; printf '%s\n' "${UNIT_DUMP}"; exit 1; }
+fi
+unset UNIT_DUMP
 echo "--- installed package ---"
 dpkg -l rustfs | tail -n 1
 EOF
@@ -365,6 +435,7 @@ EOF
 
 step4_configure_start() {
   log "step 4: write config, start and verify the service on all nodes"
+  enforce_hosts_map
   local node pids=() i=0 fail=0 pid
   for node in "${NODES[@]}"; do
     write_rustfs_config "${node}"
