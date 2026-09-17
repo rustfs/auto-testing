@@ -312,7 +312,12 @@ test_tbl104() {
 
 # ==================== TBL-105: commit CAS conflict (optimistic concurrency) ====================
 test_tbl105() {
-  local ns2="ncas${RUN_ID}" ns_path="${REST_PATH}/v1/${bucket}/namespaces" tbl_path="${ns_path}/${ns2}/tables"
+  # split declarations: under set -u a multi-assignment `local` expands all
+  # words before any assignment runs, so tbl_path would read ns_path while
+  # it is still unset ("ns_path: unbound variable") - TBL-105 never ran
+  local ns2="ncas${RUN_ID}"
+  local ns_path="${REST_PATH}/v1/${bucket}/namespaces"
+  local tbl_path="${ns_path}/${ns2}/tables"
   echo "tbl105: creating namespace ${ns2}"
   REST_OUT="$(signed_rest POST "${ns_path}" '{"namespace":["'"${ns2}"'"]}')" ; [ "$(rest_code)" = "200" ] || { echo "ns create failed: $(rest_body)"; return 1; }
   echo "tbl105: creating table"
