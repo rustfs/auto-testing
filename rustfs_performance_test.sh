@@ -343,7 +343,10 @@ if [ -n "${PACKAGE_SHA256}" ]; then
   [[ "${PACKAGE_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "invalid package SHA-256"; exit 1; }
   printf '%s  %s\n' "${PACKAGE_SHA256}" /home/rustfs/packages/rustfs.deb | sha256sum -c - || { echo "checksum verification failed"; exit 1; }
 fi
-${SUDO} dpkg -i /home/rustfs/packages/rustfs.deb
+# 1.0.0+ debs ship /etc/default/rustfs as a conffile; without this flag dpkg
+# prompts interactively and dies with "end of file on stdin at conffile
+# prompt". Keep the on-disk config -- step 4 rewrites it from scratch anyway.
+${SUDO} dpkg -i --force-confold /home/rustfs/packages/rustfs.deb
 ${SUDO} systemctl daemon-reload
 echo "--- installed package ---"
 dpkg -l rustfs | tail -n 1
