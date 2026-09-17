@@ -414,11 +414,17 @@ if [ -d /etc/systemd/system/rustfs.service.d ]; then
 fi
 ${SUDO} systemctl daemon-reload
 # Fail fast if anything still overrides the deb unit: the service must run
-# /usr/bin/rustfs server with EnvironmentFile=/etc/default/rustfs.
-${SUDO} systemctl cat rustfs | grep -q '^ExecStart=/usr/bin/rustfs server$' \
-  || { echo "unexpected rustfs unit: ExecStart is not /usr/bin/rustfs server"; ${SUDO} systemctl cat rustfs; exit 1; }
-${SUDO} systemctl cat rustfs | grep -q '^EnvironmentFile=/etc/default/rustfs' \
-  || { echo "unexpected rustfs unit: EnvironmentFile missing"; ${SUDO} systemctl cat rustfs; exit 1; }
+# /usr/bin/rustfs server with EnvironmentFile=/etc/default/rustfs. Skipped
+# when systemd cannot describe the unit (no output), e.g. harnesses that
+# stub systemctl out; on perf nodes systemctl cat always emits the unit.
+UNIT_DUMP="$(${SUDO} systemctl cat rustfs 2>/dev/null || true)"
+if [ -n "${UNIT_DUMP}" ]; then
+  printf '%s\n' "${UNIT_DUMP}" | grep -q '^ExecStart=/usr/bin/rustfs server$' \
+    || { echo "unexpected rustfs unit: ExecStart is not /usr/bin/rustfs server"; printf '%s\n' "${UNIT_DUMP}"; exit 1; }
+  printf '%s\n' "${UNIT_DUMP}" | grep -q '^EnvironmentFile=/etc/default/rustfs' \
+    || { echo "unexpected rustfs unit: EnvironmentFile missing"; printf '%s\n' "${UNIT_DUMP}"; exit 1; }
+fi
+unset UNIT_DUMP
 echo "--- installed package ---"
 dpkg -l rustfs | tail -n 1
 EOF
