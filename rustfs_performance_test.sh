@@ -347,6 +347,13 @@ fi
 # prompts interactively and dies with "end of file on stdin at conffile
 # prompt". Keep the on-disk config -- step 4 rewrites it from scratch anyway.
 ${SUDO} dpkg -i --force-confold /home/rustfs/packages/rustfs.deb
+# A stale /etc/systemd/system/rustfs.service (e.g. restored by ad-hoc node
+# cleanup scripts) shadows the unit shipped in /lib/systemd/system and can
+# point at a binary path that no longer exists -> 203/EXEC on start. The
+# unit shipped by the deb is authoritative; drop the override so it wins.
+if [ -e /etc/systemd/system/rustfs.service ]; then
+  ${SUDO} rm -f /etc/systemd/system/rustfs.service
+fi
 ${SUDO} systemctl daemon-reload
 echo "--- installed package ---"
 dpkg -l rustfs | tail -n 1
