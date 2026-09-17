@@ -144,6 +144,7 @@ run_remote() {
     printf '%s\n' "${script}" | sed 's/^/    | /'
     return 0
   fi
+  log "==> ${node}: executing remote script"
   ( ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" 'bash -s' <<<"${script}" )
 }
 
