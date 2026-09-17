@@ -1,6 +1,18 @@
 # auto-testing
 Auto testing scripts
 
+## Fault-tolerance suite
+
+`rustfs-fault-tolerance-test.sh` writes a machine-readable completion result
+with `--results-file`. A complete `--all` run contains 38 unique probe results;
+AWS CLI/parser failures, duplicate probes, missing probes, and incomplete runs
+are harness failures rather than RustFS product verdicts.
+
+```bash
+bash -n rustfs-fault-tolerance-test.sh
+python3 -B -m unittest -v test_rustfs_fault_tolerance.py
+```
+
 ## Security suite diagnostics
 
 `rustfs-security-test.sh` includes STS-105 request timing, the full revoke

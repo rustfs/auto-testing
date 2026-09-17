@@ -12,10 +12,10 @@
 #
 # Scenarios:
 #   A  single-node 4 drives (SNMD on vm000)   EC:2  readq 2  writeq 3
-#      hide 1/2/3 drives (tmpfs bind over the drive dir), then restore
+#      revoke access to 1/2/3 drive roots, then restore
 #   B  multi-node 4x1 (1 drive per node)      one set of 4, EC:2
 #      stop 1/2/3 nodes, then restore
-#   C  multi-node 4x4 (16 drives, one set)    EC:4  readq 12 writeq 13
+#   C  multi-node 4x4 (16 drives, one set)    EC:4  readq 12 writeq 12
 #      stop 1 node (12 online == read-quorum boundary), stop 2 nodes, restore
 #   C2 multi-node 4x4 with EC:8               readq 8  writeq 9  lock majority 9
 #      2 nodes down = 8 online: reads satisfy the EC read quorum while the
@@ -26,6 +26,7 @@
 #   pass             observed behavior matches the EC contract
 #   known-divergence read quorum met but read refused (fails only in --strict)
 #   UNEXPECTED       anything else; fails the suite
+#   HARNESS_ERROR    the probe did not reach a trustworthy product verdict
 #
 # Destructive on the shared fleet: always run --cleanup before and after
 # (the workflow does exactly that).
@@ -76,10 +77,15 @@ BASELINE_BUCKET="ft-baseline"
 BASELINE_OBJECTS=(ft-small-16k.bin ft-mid-1m.bin ft-big-8m.bin)
 PROBE_PREFIX="ft-probe"
 
-TMP="$(mktemp -d /tmp/rustfs-ft.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-ft.XXXXXX")"
 EVIDENCE="${EVIDENCE_DIR:-${TMP}/evidence}"
 mkdir -p "${EVIDENCE}"
 REPORT_FILE="${REPORT_FILE:-${TMP}/report.md}"
+RESULTS_FILE="${RESULTS_FILE:-${TMP}/results.json}"
+RESULT_ROWS="${TMP}/results.jsonl"
+HARNESS_ERROR_FILE="${TMP}/harness-errors.txt"
+: > "${RESULT_ROWS}"
+: > "${HARNESS_ERROR_FILE}"
 
 # ---------------------------------------------------------------- helpers ---
 log()  { printf '\033[1;36m[INFO]\033[0m %s\n' "$*"; }
@@ -116,35 +122,160 @@ need_cmd() {
 
 UNEXPECTED=0
 KNOWN_DIVERGENCE=0
+HARNESS_ERRORS=0
+SUITE_FINISHED=0
+RESULTS_ENABLED=0
+RESULT_COMPLETE=0
+declare -a EXPECTED_CASES=()
+declare -a SELECTED_SCENARIOS=()
+declare -A EXPECTED_CASE_SET=()
+declare -A SEEN_CASE_SET=()
+declare -A OBJECT_SHA256=()
+
+CASES_A=(A1/read A1/write A2/read A2/write A3/read A3/write A4/read A4/read-a1-probe A4/write)
+CASES_B=(B1/read B1/read-node2 B1/write B2/read B2/read-node2 B2/write B3/read B3/write B4/read B4/read-b1-probe B4/write)
+CASES_C=(C1/read C1/write C2/read C2/write C3/read C3/write)
+CASES_C2=(C2-1/read C2-1/write C2-2/read C2-2/write C2-3/read C2-3/write)
+CASES_D=(D1/read D1/write D2/read D2/write D3/read D3/write)
+
+register_expected_cases() {
+  local case_id
+  for case_id in "$@"; do
+    [ -z "${EXPECTED_CASE_SET[${case_id}]+x}" ] || die "duplicate expected case: ${case_id}"
+    EXPECTED_CASES+=("${case_id}")
+    EXPECTED_CASE_SET["${case_id}"]=1
+  done
+}
+
+register_scenarios() {
+  local scenario
+  for scenario in "$@"; do
+    SELECTED_SCENARIOS+=("${scenario}")
+    case "${scenario}" in
+      A)  register_expected_cases "${CASES_A[@]}" ;;
+      B)  register_expected_cases "${CASES_B[@]}" ;;
+      C)  register_expected_cases "${CASES_C[@]}" ;;
+      C2) register_expected_cases "${CASES_C2[@]}" ;;
+      D)  register_expected_cases "${CASES_D[@]}" ;;
+      *)  die "unknown scenario: ${scenario}" ;;
+    esac
+  done
+}
+
+add_harness_error() {
+  local detail="$1"
+  HARNESS_ERRORS=$((HARNESS_ERRORS + 1))
+  printf '%s\n' "${detail}" >> "${HARNESS_ERROR_FILE}"
+  warn "harness error: ${detail}"
+}
 
 record() { # record <verdict> <case-id> <detail>
   local verdict="$1" case_id="$2" detail="$3"
+  if [ -z "${EXPECTED_CASE_SET[${case_id}]+x}" ]; then
+    add_harness_error "unregistered case ${case_id}"
+  fi
+  if [ -n "${SEEN_CASE_SET[${case_id}]+x}" ]; then
+    add_harness_error "duplicate case result ${case_id}"
+  else
+    SEEN_CASE_SET["${case_id}"]=1
+  fi
   printf 'FT-CASE: %-28s verdict=%-16s %s\n' "${case_id}" "${verdict}" "${detail}" | tee -a "${REPORT_FILE}"
+  jq -cn --arg case_id "${case_id}" --arg verdict "${verdict}" --arg detail "${detail}" \
+    '{case_id:$case_id, verdict:$verdict, detail:$detail}' >> "${RESULT_ROWS}"
   case "${verdict}" in
     "UNEXPECTED")       UNEXPECTED=$((UNEXPECTED + 1)) ;;
     "known-divergence") KNOWN_DIVERGENCE=$((KNOWN_DIVERGENCE + 1)) ;;
+    "HARNESS_ERROR")    add_harness_error "${case_id}: ${detail}" ;;
   esac
 }
 
-# aws s3 helper: s3op <endpoint> <s3api args...> -> S3_RC, S3_CODE
+write_results() { # write_results <process-exit-code>
+  local process_rc="$1" missing_file="${TMP}/missing-cases.txt" expected_file="${TMP}/expected-cases.txt"
+  local seen_file="${TMP}/seen-cases.txt" selected_file="${TMP}/selected-scenarios.txt"
+  local result_tmp="${RESULTS_FILE}.tmp" case_id scenario
+  : > "${missing_file}"
+  : > "${expected_file}"
+  : > "${seen_file}"
+  : > "${selected_file}"
+  for scenario in "${SELECTED_SCENARIOS[@]}"; do printf '%s\n' "${scenario}" >> "${selected_file}"; done
+  for case_id in "${EXPECTED_CASES[@]}"; do
+    printf '%s\n' "${case_id}" >> "${expected_file}"
+    [ -n "${SEEN_CASE_SET[${case_id}]+x}" ] || printf '%s\n' "${case_id}" >> "${missing_file}"
+  done
+  for case_id in "${!SEEN_CASE_SET[@]}"; do printf '%s\n' "${case_id}"; done | sort > "${seen_file}"
+  RESULT_COMPLETE=0
+  if [ "${SUITE_FINISHED}" -eq 1 ] && [ ! -s "${missing_file}" ] && [ "${HARNESS_ERRORS}" -eq 0 ]; then
+    RESULT_COMPLETE=1
+  fi
+  mkdir -p "$(dirname "${RESULTS_FILE}")"
+  jq -n \
+    --argjson complete "$([ "${RESULT_COMPLETE}" -eq 1 ] && printf true || printf false)" \
+    --argjson process_exit_code "${process_rc}" \
+    --argjson unexpected "${UNEXPECTED}" \
+    --argjson known_divergence "${KNOWN_DIVERGENCE}" \
+    --argjson harness_error_count "${HARNESS_ERRORS}" \
+    --arg auto_testing_sha "${AUTO_TESTING_SHA:-unknown}" \
+    --slurpfile cases "${RESULT_ROWS}" \
+    --rawfile selected "${selected_file}" \
+    --rawfile expected "${expected_file}" \
+    --rawfile seen "${seen_file}" \
+    --rawfile missing "${missing_file}" \
+    --rawfile harness_errors "${HARNESS_ERROR_FILE}" \
+    '{schema_version:1, auto_testing_sha:$auto_testing_sha,
+      selected_scenarios:($selected|split("\n")|map(select(length>0))),
+      complete:$complete, process_exit_code:$process_exit_code,
+      expected_cases:($expected|split("\n")|map(select(length>0))),
+      seen_cases:($seen|split("\n")|map(select(length>0))),
+      missing_cases:($missing|split("\n")|map(select(length>0))),
+      harness_errors:($harness_errors|split("\n")|map(select(length>0))),
+      counts:{expected:($expected|split("\n")|map(select(length>0))|length),
+              seen:($seen|split("\n")|map(select(length>0))|length),
+              unexpected:$unexpected, known_divergence:$known_divergence,
+              harness_errors:$harness_error_count}, cases:$cases}' > "${result_tmp}"
+  mv "${result_tmp}" "${RESULTS_FILE}"
+}
+
+finalize_results() {
+  local process_rc="$1"
+  [ "${RESULTS_ENABLED}" -eq 1 ] || return 0
+  write_results "${process_rc}" || warn "failed to write ${RESULTS_FILE}"
+}
+
+trap 'finalize_results "$?"' EXIT
+
+# aws s3 helper: s3op <operation-id> <endpoint> <s3api args...> -> S3_RC, S3_CODE
 S3_RC=0
 S3_CODE=""
 s3op() {
-  local ep="$1"; shift
+  local operation="$1" ep="$2" safe_operation out err
+  shift 2
+  safe_operation="${operation//\//_}"
+  out="${EVIDENCE}/s3-${safe_operation}.stdout"
+  err="${EVIDENCE}/s3-${safe_operation}.stderr"
   if [ "${DRY_RUN}" -eq 1 ]; then log "DRY-RUN: aws s3api $* @ ${ep}"; S3_RC=0; S3_CODE=""; return 0; fi
-  local err="${TMP}/s3err"
   if AWS_EC2_METADATA_DISABLED=true \
      AWS_ACCESS_KEY_ID="${ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${SECRET_KEY}" AWS_DEFAULT_REGION="${REGION}" \
-     aws s3api "$@" --endpoint-url "${ep}" --output json 2>"${err}"; then
+     aws s3api "$@" --endpoint-url "${ep}" --output json >"${out}" 2>"${err}"; then
     S3_RC=0; S3_CODE=""
   else
     S3_RC=$?
     # extraction must never kill the suite: with no match the grep pipeline
     # is empty and pipefail would exit 1 under set -e (observed: the first
     # degraded-mode aws failure aborted the whole suite with zero FT-CASEs)
-    S3_CODE="$(grep -oE '\(([A-Za-z]+)\) when calling' "${err}" | head -1 | sed 's/ when calling//' | tr -d '()' || true)"
+    S3_CODE="$(grep -oE '\(([^)]+)\) when calling' "${err}" | head -1 | sed 's/ when calling//' | tr -d '()' || true)"
     [ -n "${S3_CODE}" ] || S3_CODE="unknown"
   fi
+}
+
+s3_harness_failed() {
+  [ "${S3_RC}" -eq 252 ] || [ "${S3_RC}" -eq 253 ] || [ "${S3_CODE}" = "unknown" ]
+}
+
+s3_availability_failed() {
+  case "${S3_CODE}" in
+    SlowDown|SlowDownRead|ServiceUnavailable|InternalError|RequestTimeout|InsufficientStorage) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 export AWS_EC2_METADATA_DISABLED=true
 export AWS_ACCESS_KEY_ID="${ACCESS_KEY}"
@@ -162,26 +293,51 @@ capture_health() { # capture_health <label> <endpoint-base>
   log "health snapshot [${label}] saved"
 }
 
-settle() { log "settling ${SETTLE_SECS}s for failure/recovery detection"; sleep "${SETTLE_SECS}"; }
+settle() {
+  log "settling ${SETTLE_SECS}s for failure/recovery detection"
+  [ "${DRY_RUN}" -eq 1 ] || sleep "${SETTLE_SECS}"
+}
 
 expect_read() { # expect_read <case-id> <endpoint> <ok|fail> <key>
   local case_id="$1" ep="$2" expect="$3" key="$4"
-  local got verdict detail
-  s3op "${ep}" get-object --bucket "${BASELINE_BUCKET}" --key "${key}" --outfile "${TMP}/get.out"
-  if [ "${S3_RC}" -eq 0 ]; then
-    got="ok"; detail="sha16=$(sha256sum "${TMP}/get.out" | cut -c1-16)"
-  else
-    got="fail"; detail="code=${S3_CODE}"
+  local got verdict detail actual_sha expected_sha outfile="${TMP}/get-${case_id//\//_}.out"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: ${case_id} expects read=${expect} key=${key} @ ${ep}"
+    return 0
   fi
-  if [ "${got}" = "${expect}" ]; then
+  s3op "${case_id}" "${ep}" get-object --bucket "${BASELINE_BUCKET}" --key "${key}" "${outfile}"
+  if s3_harness_failed; then
+    record "HARNESS_ERROR" "${case_id}" "read ${key}: aws-cli-rc=${S3_RC} code=${S3_CODE}"
+    return 0
+  fi
+  if [ "${S3_RC}" -eq 0 ]; then
+    if [ -z "${OBJECT_SHA256[${key}]+x}" ]; then
+      record "HARNESS_ERROR" "${case_id}" "read ${key}: no expected content digest registered"
+      return 0
+    fi
+    actual_sha="$(sha256sum "${outfile}" | awk '{print $1}')"
+    expected_sha="${OBJECT_SHA256[${key}]}"
+    if [ "${actual_sha}" = "${expected_sha}" ]; then
+      got="ok"; detail="sha256=${actual_sha}"
+    else
+      record "UNEXPECTED" "${case_id}" \
+        "read ${key}: got=corrupt expected-sha256=${expected_sha} actual-sha256=${actual_sha}"
+      return 0
+    fi
+  else
+    got="fail"; detail="aws-cli-rc=${S3_RC} code=${S3_CODE}"
+  fi
+  if [ "${got}" = "ok" ] && [ "${expect}" = "ok" ]; then
     verdict="pass"
   elif [ "${expect}" = "ok" ] && [ "${got}" = "fail" ]; then
-    case "${S3_CODE}" in
-      SlowDown|ServiceUnavailable|InternalError|RequestTimeout|InsufficientStorage)
-        verdict="known-divergence"
-        detail+=" (read quorum met but read refused; article-reported lock-gated read path)" ;;
-      *) verdict="UNEXPECTED" ;;
-    esac
+    if s3_availability_failed; then
+      verdict="known-divergence"
+      detail+=" (read quorum met but read refused; article-reported lock-gated read path)"
+    else
+      verdict="UNEXPECTED"
+    fi
+  elif [ "${expect}" = "fail" ] && [ "${got}" = "fail" ] && s3_availability_failed; then
+    verdict="pass"
   else
     verdict="UNEXPECTED"
   fi
@@ -191,17 +347,40 @@ expect_read() { # expect_read <case-id> <endpoint> <ok|fail> <key>
 expect_write() { # expect_write <case-id> <endpoint> <ok|fail> <key>
   local case_id="$1" ep="$2" expect="$3" key="$4"
   local got verdict detail probe="${TMP}/probe.bin"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: ${case_id} expects write=${expect} key=${key} @ ${ep}"
+    return 0
+  fi
   head -c 4096 /dev/zero > "${probe}"
-  s3op "${ep}" put-object --bucket "${BASELINE_BUCKET}" --key "${key}" --body "${probe}"
-  if [ "${S3_RC}" -eq 0 ]; then got="ok"; detail=""; else got="fail"; detail="code=${S3_CODE}"; fi
-  if [ "${got}" = "${expect}" ]; then verdict="pass"; else verdict="UNEXPECTED"; fi
+  s3op "${case_id}" "${ep}" put-object --bucket "${BASELINE_BUCKET}" --key "${key}" --body "${probe}"
+  if s3_harness_failed; then
+    record "HARNESS_ERROR" "${case_id}" "write ${key}: aws-cli-rc=${S3_RC} code=${S3_CODE}"
+    return 0
+  fi
+  if [ "${S3_RC}" -eq 0 ]; then
+    got="ok"; detail=""
+    OBJECT_SHA256["${key}"]="$(sha256sum "${probe}" | awk '{print $1}')"
+  else
+    got="fail"; detail="aws-cli-rc=${S3_RC} code=${S3_CODE}"
+  fi
+  if [ "${got}" = "ok" ] && [ "${expect}" = "ok" ]; then
+    verdict="pass"
+  elif [ "${got}" = "fail" ] && [ "${expect}" = "fail" ] && s3_availability_failed; then
+    verdict="pass"
+  else
+    verdict="UNEXPECTED"
+  fi
   record "${verdict}" "${case_id}" "write ${key}: got=${got} ${detail}"
 }
 
 seed_baseline() { # seed_baseline <endpoint>
   local ep="$1" o
   log "seeding baseline bucket + objects on ${ep}"
-  s3op "${ep}" create-bucket --bucket "${BASELINE_BUCKET}"
+  s3op "setup-create-bucket" "${ep}" create-bucket --bucket "${BASELINE_BUCKET}"
+  if s3_harness_failed; then
+    add_harness_error "create-bucket: aws-cli-rc=${S3_RC} code=${S3_CODE}"
+    die "create-bucket harness failure"
+  fi
   if [ "${S3_RC}" -ne 0 ] && [ "${S3_CODE}" != "BucketAlreadyOwnedByYou" ] && [ "${S3_CODE}" != "BucketAlreadyExists" ]; then
     die "create-bucket failed: ${S3_CODE}"
   fi
@@ -209,7 +388,12 @@ seed_baseline() { # seed_baseline <endpoint>
   head -c 1048576 /dev/urandom > "${TMP}/ft-mid-1m.bin"
   head -c 8388608 /dev/urandom > "${TMP}/ft-big-8m.bin"
   for o in "${BASELINE_OBJECTS[@]}"; do
-    s3op "${ep}" put-object --bucket "${BASELINE_BUCKET}" --key "${o}" --body "${TMP}/${o}"
+    OBJECT_SHA256["${o}"]="$(sha256sum "${TMP}/${o}" | awk '{print $1}')"
+    s3op "setup-seed-${o}" "${ep}" put-object --bucket "${BASELINE_BUCKET}" --key "${o}" --body "${TMP}/${o}"
+    if s3_harness_failed; then
+      add_harness_error "baseline put ${o}: aws-cli-rc=${S3_RC} code=${S3_CODE}"
+      die "baseline put ${o} harness failure"
+    fi
     [ "${S3_RC}" -eq 0 ] || die "baseline put ${o} failed: ${S3_CODE}"
   done
 }
@@ -244,6 +428,10 @@ install_and_start() { # install_and_start <volumes> [extra env line]
     log "starting ${RUSTFS_SERVICE} on ${NODES[*]}"
     remote_all "sudo -n systemctl start ${RUSTFS_SERVICE}"
   fi
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: skipping cluster readiness polling"
+    return 0
+  fi
   local waited=0
   while [ "${waited}" -lt 180 ]; do
     if curl -fsS --max-time 5 "${EP1}/minio/health/live" >/dev/null 2>&1; then
@@ -255,16 +443,64 @@ install_and_start() { # install_and_start <volumes> [extra env line]
 }
 
 stop_node()  { log "stopping ${RUSTFS_SERVICE} on $1"; run_remote "$1" "sudo -n systemctl stop ${RUSTFS_SERVICE}"; }
-start_node() { log "starting ${RUSTFS_SERVICE} on $1"; run_remote "$1" "sudo -n systemctl start ${RUSTFS_SERVICE}"; }
+start_nodes() {
+  local pids=() i=0 fail=0 node pid
+  for node in "$@"; do
+    log "starting ${RUSTFS_SERVICE} on ${node} without waiting for READY"
+    run_remote "${node}" "sudo -n systemctl start --no-block ${RUSTFS_SERVICE}" &
+    pids[$i]=$!; i=$((i + 1))
+  done
+  for pid in "${pids[@]}"; do wait "${pid}" || fail=1; done
+  [ "${fail}" -eq 0 ] || die "one or more node starts could not be submitted"
 
-drop_drive()   { log "${SNMD_NODE}: hiding drive $1 (empty tmpfs bind)"; run_remote "${SNMD_NODE}" "sudo -n mount -t tmpfs -o size=8m tmpfs '$1'"; }
-restore_drive(){ log "${SNMD_NODE}: restoring drive $1";                 run_remote "${SNMD_NODE}" "sudo -n umount '$1' 2>/dev/null || true"; }
+  pids=(); i=0; fail=0
+  for node in "$@"; do
+    run_remote "${node}" \
+      "for attempt in \$(seq 1 36); do sudo -n systemctl is-active --quiet ${RUSTFS_SERVICE} && exit 0; sleep 5; done; exit 1" &
+    pids[$i]=$!; i=$((i + 1))
+  done
+  for pid in "${pids[@]}"; do wait "${pid}" || fail=1; done
+  [ "${fail}" -eq 0 ] || die "one or more restored nodes did not become active within 180s"
+}
+
+drive_state_file() {
+  local drive="$1" parent
+  parent="$(basename "$(dirname "${drive}")")"
+  printf '/run/rustfs-ft-%s.mode\n' "${parent}"
+}
+
+drop_drive() {
+  local drive="$1" state
+  state="$(drive_state_file "${drive}")"
+  log "${SNMD_NODE}: revoking access to ${drive}"
+  # RustFS pins the opened mount through /proc/self/fd. Changing the inode mode
+  # reaches that lease; covering the configured path with a new mount does not.
+  run_remote "${SNMD_NODE}" \
+    "sudo -n sh -c 'set -eu; [ -d \"${drive}\" ] && [ ! -L \"${drive}\" ]; if [ ! -e \"${state}\" ]; then stat -Lc \"%a\" \"${drive}\" > \"${state}\"; fi; chmod 000 \"${drive}\"; [ \"\$(stat -Lc \"%a\" \"${drive}\")\" = \"0\" ]'"
+}
+
+restore_drive() {
+  local drive="$1" state
+  state="$(drive_state_file "${drive}")"
+  log "${SNMD_NODE}: restoring access to ${drive}"
+  run_remote "${SNMD_NODE}" \
+    "sudo -n sh -c 'set -eu; [ -d \"${drive}\" ] && [ ! -L \"${drive}\" ] && [ -f \"${state}\" ]; mode=\$(cat \"${state}\"); case \"\${mode}\" in \"\"|*[!0-7]*) exit 1;; esac; chmod \"\${mode}\" \"${drive}\"; unlink \"${state}\"'"
+}
+
+clear_drive_faults() {
+  local drive state
+  for drive in "${SNMD_DRIVES[@]}"; do
+    state="$(drive_state_file "${drive}")"
+    run_remote "${SNMD_NODE}" \
+      "sudo -n sh -c 'set -eu; if [ \"\$(findmnt -n -o FSTYPE -M \"${drive}\" 2>/dev/null || true)\" = tmpfs ]; then umount \"${drive}\"; fi; if [ -f \"${state}\" ]; then [ -d \"${drive}\" ] && [ ! -L \"${drive}\" ]; mode=\$(cat \"${state}\"); case \"\${mode}\" in \"\"|*[!0-7]*) exit 1;; esac; chmod \"\${mode}\" \"${drive}\"; unlink \"${state}\"; fi'"
+  done
+}
 
 do_cleanup() {
-  log "cleanup: stopping services, unmounting hidden drives, purging data"
-  for node in "${NODES[@]}"; do
-    run_remote "${node}" "sudo -n systemctl stop ${RUSTFS_SERVICE} 2>/dev/null; sudo -n systemctl stop rustfs-rep2 2>/dev/null; for d in ${SNMD_DRIVES[*]}; do sudo -n umount \"\$d\" 2>/dev/null || true; done; sudo -n rm -rf /data/rustfs{1..4}/mnmd /data/rustfs-rep2 2>/dev/null; true"
-  done
+  log "cleanup: stopping services, restoring drive access, purging data"
+  remote_all "sudo -n systemctl stop ${RUSTFS_SERVICE} 2>/dev/null; sudo -n systemctl stop rustfs-rep2 2>/dev/null; true"
+  clear_drive_faults
+  remote_all "sudo -n rm -rf /data/rustfs{1..4}/mnmd /data/rustfs-rep2 2>/dev/null; true"
   log "cleanup complete"
 }
 
@@ -321,8 +557,7 @@ scenario_b() {
   expect_read  "B3/read"  "${EP1}" "fail" "ft-big-8m.bin"
   expect_write "B3/write" "${EP1}" "fail" "${PROBE_PREFIX}-b3"
 
-  start_node "${NODES[1]}"; start_node "${NODES[2]}"; start_node "${NODES[3]}"
-  settle                                              # B4: recovery
+  start_nodes "${NODES[1]}" "${NODES[2]}" "${NODES[3]}" # B4: recovery
   capture_health "B4-recovered" "${EP1}"
   expect_read  "B4/read"          "${EP1}" "ok" "ft-mid-1m.bin"
   expect_read  "B4/read-b1-probe" "${EP1}" "ok" "${PROBE_PREFIX}-b1"
@@ -332,21 +567,21 @@ scenario_b() {
 
 # ---------------------------------------------------------------- scenario C
 scenario_c() {
-  log "=== C: multi-node 4x4 (16 drives, one set), EC:4 (readq 12, writeq 13) ==="
+  log "=== C: multi-node 4x4 (16 drives, one set), EC:4 (readq 12, writeq 12) ==="
   install_and_start "${VOLUMES_4X4}"
   seed_baseline "${EP1}"
 
   stop_node "${NODES[3]}"; settle                     # C1: 12 online == readq
   capture_health "C1" "${EP1}"
   expect_read  "C1/read"  "${EP1}" "ok"   "ft-small-16k.bin"
-  expect_write "C1/write" "${EP1}" "fail" "${PROBE_PREFIX}-c1"
+  expect_write "C1/write" "${EP1}" "ok" "${PROBE_PREFIX}-c1"
 
   stop_node "${NODES[2]}"; settle                     # C2: 8 online
   capture_health "C2" "${EP1}"
   expect_read  "C2/read"  "${EP1}" "fail" "ft-mid-1m.bin"
   expect_write "C2/write" "${EP1}" "fail" "${PROBE_PREFIX}-c2"
 
-  start_node "${NODES[2]}"; start_node "${NODES[3]}"; settle
+  start_nodes "${NODES[2]}" "${NODES[3]}"
   capture_health "C3-recovered" "${EP1}"
   expect_read  "C3/read"  "${EP1}" "ok" "ft-small-16k.bin"
   expect_write "C3/write" "${EP1}" "ok" "${PROBE_PREFIX}-c3"
@@ -370,7 +605,7 @@ scenario_c2() {
   expect_read  "C2-2/read"  "${EP1}" "ok"   "ft-mid-1m.bin"
   expect_write "C2-2/write" "${EP1}" "fail" "${PROBE_PREFIX}-c2-2"
 
-  start_node "${NODES[2]}"; start_node "${NODES[3]}"; settle
+  start_nodes "${NODES[2]}" "${NODES[3]}"
   capture_health "C2-3-recovered" "${EP1}"
   expect_read  "C2-3/read"  "${EP1}" "ok" "ft-mid-1m.bin"
   expect_write "C2-3/write" "${EP1}" "ok" "${PROBE_PREFIX}-c2-3"
@@ -398,7 +633,7 @@ scenario_d() {
   expect_read  "D2/read"  "${EP1}" "ok"   "ft-small-16k.bin"
   expect_write "D2/write" "${EP1}" "fail" "${PROBE_PREFIX}-d2"
 
-  start_node "${NODES[2]}"; start_node "${NODES[3]}"; settle
+  start_nodes "${NODES[2]}" "${NODES[3]}"
   capture_health "D3-recovered" "${EP1}"
   expect_read  "D3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
   expect_write "D3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-d3"
@@ -410,9 +645,10 @@ usage() {
   cat <<EOF
 Usage: $0 [options]
   --cleanup              stop services, unhide drives, purge data, then exit
-  --scenario A|B|C|C2    run one scenario
-  --all                  run all scenarios (A, B, C, C2)
+  --scenario A|B|C|C2|D  run one scenario
+  --all                  run all scenarios (A, B, C, C2, D)
   --package-url URL      .deb to install (required for test runs)
+  --results-file FILE    write the machine-readable completeness result
   -y                     assume yes
   --dry-run              print planned actions only
   --log-file FILE        also tee output into FILE
@@ -431,6 +667,7 @@ main() {
       --scenario)    scenario="$1"; shift ;;
       --all)         all=1 ;;
       --package-url) PACKAGE_URL="$1"; shift ;;
+      --results-file) RESULTS_FILE="$1"; shift ;;
       -y)            ASSUME_YES=1 ;;
       --dry-run)     DRY_RUN=1 ;;
       --log-file)    LOG_FILE="$1"; shift ;;
@@ -454,10 +691,13 @@ main() {
     [ -n "${PACKAGE_URL}" ] || die "--package-url is required for test runs"
   fi
 
+  RESULTS_ENABLED=1
   printf 'FT-REPORT: fault-tolerance suite\n' > "${REPORT_FILE}"
   if [ "${all}" -eq 1 ]; then
+    register_scenarios A B C C2 D
     scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d
   elif [ -n "${scenario}" ]; then
+    register_scenarios "${scenario}"
     case "${scenario}" in
       A)  scenario_a  ;;
       B)  scenario_b  ;;
@@ -470,8 +710,20 @@ main() {
     usage; exit 0
   fi
 
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    RESULTS_ENABLED=0
+    log "fault-tolerance dry-run complete"
+    return 0
+  fi
+  SUITE_FINISHED=1
+  write_results 0
+  printf 'FT-COMPLETE: complete=%s expected=%s seen=%s harness-errors=%s\n' \
+    "${RESULT_COMPLETE}" "${#EXPECTED_CASES[@]}" "${#SEEN_CASE_SET[@]}" "${HARNESS_ERRORS}" | tee -a "${REPORT_FILE}"
   printf 'FT-SUMMARY: unexpected=%s known-divergence=%s strict=%s\n' \
     "${UNEXPECTED}" "${KNOWN_DIVERGENCE}" "${FT_STRICT}" | tee -a "${REPORT_FILE}"
+  if [ "${RESULT_COMPLETE}" -ne 1 ]; then
+    die "fault-tolerance harness did not complete"
+  fi
   if [ "${UNEXPECTED}" -gt 0 ]; then
     die "fault-tolerance suite: ${UNEXPECTED} unexpected result(s)"
   fi
@@ -481,4 +733,6 @@ main() {
   log "fault-tolerance suite complete: ${KNOWN_DIVERGENCE} known divergence(s) reported"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
