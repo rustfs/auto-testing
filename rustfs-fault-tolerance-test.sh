@@ -377,6 +377,34 @@ scenario_c2() {
   do_cleanup
 }
 
+# --------------------------------------------------------------- scenario D
+# Multi-NODE outage on the 4x1 fleet (EC:2, readq 2 / writeq 3) — node-level
+# failure, not drive-level. Mirrors the migration-review finding that MinIO
+# serves degraded reads with two of four nodes down while RustFS was reported
+# to brick. The article notes this may be intentional design; the case exists
+# to make the behavior explicit and regression-tracked.
+scenario_d() {
+  log "=== D: multi-node 4x1 outage, EC:2 (readq 2, writeq 3) ==="
+  install_and_start "${VOLUMES_4X1}"
+  seed_baseline "${EP1}"
+
+  stop_node "${NODES[2]}"; settle                     # D1: 3 nodes online
+  capture_health "D1" "${EP1}"
+  expect_read  "D1/read"  "${EP1}" "ok"   "ft-small-16k.bin"
+  expect_write "D1/write" "${EP1}" "ok"   "${PROBE_PREFIX}-d1"
+
+  stop_node "${NODES[3]}"; settle                     # D2: 2 nodes == readq, writeq lost
+  capture_health "D2" "${EP1}"
+  expect_read  "D2/read"  "${EP1}" "ok"   "ft-small-16k.bin"
+  expect_write "D2/write" "${EP1}" "fail" "${PROBE_PREFIX}-d2"
+
+  start_node "${NODES[2]}"; start_node "${NODES[3]}"; settle
+  capture_health "D3-recovered" "${EP1}"
+  expect_read  "D3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
+  expect_write "D3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-d3"
+  do_cleanup
+}
+
 # ------------------------------------------------------------------- main ---
 usage() {
   cat <<EOF
@@ -428,13 +456,14 @@ main() {
 
   printf 'FT-REPORT: fault-tolerance suite\n' > "${REPORT_FILE}"
   if [ "${all}" -eq 1 ]; then
-    scenario_a; scenario_b; scenario_c; scenario_c2
+    scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d
   elif [ -n "${scenario}" ]; then
     case "${scenario}" in
       A)  scenario_a  ;;
       B)  scenario_b  ;;
       C)  scenario_c  ;;
       C2) scenario_c2 ;;
+      D)  scenario_d  ;;
       *)  die "unknown scenario: ${scenario}" ;;
     esac
   else
