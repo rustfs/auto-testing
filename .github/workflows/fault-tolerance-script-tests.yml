@@ -1,0 +1,30 @@
+name: Fault-tolerance script tests
+
+on:
+  pull_request:
+    paths:
+      - rustfs-fault-tolerance-test.sh
+      - test_rustfs_fault_tolerance.py
+      - .github/workflows/fault-tolerance-script-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - rustfs-fault-tolerance-test.sh
+      - test_rustfs_fault_tolerance.py
+      - .github/workflows/fault-tolerance-script-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Check shell syntax
+        run: bash -n rustfs-fault-tolerance-test.sh
+      - name: Run contract tests
+        run: python3 -B -m unittest -v test_rustfs_fault_tolerance.py
