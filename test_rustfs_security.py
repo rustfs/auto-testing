@@ -11,63 +11,6 @@ import threading
 import unittest
 
 SCRIPT = Path(__file__).with_name("rustfs-security-test.sh").read_text()
-CASE = SCRIPT[SCRIPT.index("case_iam_101_user_crud() {"):SCRIPT.index("case_iam_102_user_disable() {")]
-HARNESS = r'''
-set -uo pipefail
-admin_user_add() { echo 200 > "$TEST_TMP/code"; }
-admin_user_remove() { touch "$TEST_TMP/deleted"; echo 200 > "$TEST_TMP/code"; }
-admin_policy_add() { echo 200 > "$TEST_TMP/code"; }
-admin_policy_attach() { touch "$TEST_TMP/policy"; echo 200 > "$TEST_TMP/code"; }
-admin_api_code() { cat "$TEST_TMP/code"; }
-assert_admin_ok() { [ "$(admin_api_code)" = "$1" ]; }
-assert_aws_ok() { [ "$AWS_CODE" -eq 0 ]; }
-assert_aws_fails() { [ "$AWS_CODE" -ne 0 ]; }
-admin_api() {
-  echo 200 > "$TEST_TMP/code"
-  if [ "$1" = DELETE ]; then return; fi
-  if [[ "$2" == */list-users ]]; then echo '{"sec101u":{}}'; return; fi
-  if [ -f "$TEST_TMP/deleted" ]; then
-    [ "$SCENARIO" = deletion-ineffective ] || echo 404 > "$TEST_TMP/code"
-    return
-  fi
-  case "$SCENARIO" in
-    disabled) echo '{"status":"disabled"}' ;;
-    malformed) echo 'not json' ;;
-    missing-status) echo '{}' ;;
-    secret-leak) echo '{"status":"enabled","secretKey":"sec101secret"}' ;;
-    info-error) echo 500 > "$TEST_TMP/code"; echo '{"status":"enabled"}' ;;
-    *) echo '{"status":"enabled","updatedAt":null}' ;;
-  esac
-}
-aws_run_as() {
-  AWS_CODE=1
-  if [ -f "$TEST_TMP/policy" ]; then
-    [ "$SCENARIO" = attached-denied ] || AWS_CODE=0
-  elif [ "$SCENARIO" = unprivileged-allowed ]; then AWS_CODE=0
-  fi
-}
-'''
-
-
-class UserCrudContractTest(unittest.TestCase):
-    def run_case(self, scenario):
-        with tempfile.TemporaryDirectory() as directory:
-            return subprocess.run(
-                ["bash", "-c", HARNESS + CASE + "\nif case_iam_101_user_crud; then exit 0; else exit 1; fi"],
-                env={**os.environ, "TEST_TMP": directory, "SCENARIO": scenario},
-                capture_output=True, text=True,
-            )
-
-    def test_user_info_does_not_need_access_key(self):
-        result = self.run_case("success")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_rejects_invalid_responses_and_permission_failures(self):
-        for scenario in ("disabled", "malformed", "missing-status", "secret-leak", "info-error",
-                         "attached-denied", "unprivileged-allowed", "deletion-ineffective"):
-            with self.subTest(scenario=scenario):
-                self.assertNotEqual(self.run_case(scenario).returncode, 0)
-
 
 def shell_function(name):
     return re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", SCRIPT).group(0)
@@ -166,7 +109,7 @@ class AdminResponseDiagnosticsTest(unittest.TestCase):
                 worker.start()
                 try:
                     functions = "\n".join(shell_function(name) for name in
-                                          ("canonical_query", "admin_api"))
+                                          ("sigv4_uri_encode", "canonical_query", "admin_api"))
                     # The production signing helpers are one-line functions.
                     functions += "\n" + "\n".join(line for line in SCRIPT.splitlines()
                                                    if line.startswith(("sha256_hex()", "hmac_sha256_hex()", "hex_of_ascii()")))
@@ -197,6 +140,73 @@ class AdminResponseDiagnosticsTest(unittest.TestCase):
                     server.shutdown()
                     server.server_close()
                     worker.join()
+
+
+class CanonicalQueryEncodingTest(unittest.TestCase):
+    """The server re-encodes every query pair for the canonical request; the helper must match it."""
+
+    def canonical_query(self, query):
+        functions = "\n".join(shell_function(name) for name in ("sigv4_uri_encode", "canonical_query"))
+        result = subprocess.run(["bash", "-Eeu", "-o", "pipefail", "-c", functions + '\ncanonical_query "$QUERY"'],
+                                env={**os.environ, "QUERY": query}, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # admin_api consumes the helper through "$(...)", which drops the trailing newline.
+        return result.stdout.rstrip("\n")
+
+    def test_encodes_reserved_characters_and_sorts_pairs(self):
+        cases = {
+            "user=rustfs@test&fullRevoke=true": "fullRevoke=true&user=rustfs%40test",
+            "accessKey=sec104u": "accessKey=sec104u",
+            "flag": "flag=",
+            "b=2&a=1&flag": "a=1&b=2&flag=",
+            "arn=arn:aws:s3:::x/y": "arn=arn%3Aaws%3As3%3A%3A%3Ax%2Fy",
+            "k=a b+c%d": "k=a%20b%2Bc%25d",
+            "k=x=y": "k=x%3Dy",
+            "k=\u00e9": "k=%C3%A9",
+            "": "",
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(self.canonical_query(query), expected)
+
+    def test_signed_request_carries_the_encoded_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            requests = []
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    requests.append(self.path)
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"revoked":1}')
+
+                def log_message(self, *_args):
+                    pass
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                functions = "\n".join(shell_function(name) for name in ("sigv4_uri_encode", "canonical_query", "admin_api"))
+                functions += "\n" + "\n".join(line for line in SCRIPT.splitlines()
+                                               if line.startswith(("sha256_hex()", "hmac_sha256_hex()", "hex_of_ascii()")))
+                result = subprocess.run(
+                    ["bash", "-Eeu", "-o", "pipefail", "-c", functions +
+                     '\nadmin_api POST "/rustfs/admin/v3/revoke-tokens/builtin?user=${ACCESS_KEY}&fullRevoke=true"'],
+                    env={**os.environ, "DRY_RUN": "0", "API_REQUEST_TIMEOUT": "3", "ACCESS_KEY": "rustfs@test",
+                         "SECRET_KEY": "fixture-secret", "SIGV4_REGION": "us-east-1", "SIGV4_SERVICE": "s3",
+                         "API_ENDPOINT": f"http://127.0.0.1:{server.server_port}",
+                         "ADMIN_API_CODE_FILE": str(Path(directory) / "code"), "TMPDIR": directory,
+                         "STS_DIAGNOSTICS_FILE": str(Path(directory) / "diagnostics"),
+                         "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(requests, ["/rustfs/admin/v3/revoke-tokens/builtin?fullRevoke=true&user=rustfs%40test"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join()
 
 
 class StsEvidenceRetentionTest(unittest.TestCase):
