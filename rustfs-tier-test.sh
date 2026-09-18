@@ -768,12 +768,38 @@ sha256_hex() { printf '%s' "$1" | openssl dgst -sha256 -hex 2>/dev/null | awk '{
 hmac_sha256_hex() { printf '%s' "$2" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$1" -hex 2>/dev/null | awk '{print $NF}'; }
 hex_of_ascii() { printf '%s' "$1" | od -An -vtx1 | tr -d ' \n'; }
 
+# SigV4 URI-encode one query name or value: keep RFC 3986 unreserved
+# characters, percent-encode every other byte as uppercase %XX.
+sigv4_uri_encode() {
+  local LC_ALL=C
+  local s="$1" out="" i c
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "${c}" in
+      [A-Za-z0-9_.~-]) out+="${c}" ;;
+      *) out+="$(printf '%%%02X' "$(( $(printf '%d' "'${c}") & 255 ))")" ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
 canonical_query() {
   local q="$1"
   [ -z "${q}" ] && return 0
-  printf '%s\n' "${q}" | tr '&' '\n' | while IFS= read -r pair; do
-    printf '%s=%s\n' "${pair%%=*}" "${pair#*=}"
-  done | sort | paste -sd '&' -
+  # The server percent-decodes the raw query and re-encodes every pair for
+  # the canonical request (name and value, RFC 3986 unreserved only), and a
+  # valueless param (?flag) comes back as "flag=". Callers pass raw values,
+  # so encode here and send the same encoded string on the wire; anything
+  # signed verbatim (e.g. "@" in an access key, ":" in an ARN) fails with
+  # SignatureDoesNotMatch.
+  local pairs=() pair name value
+  IFS='&' read -r -a pairs <<< "${q}"
+  for pair in "${pairs[@]}"; do
+    [ -n "${pair}" ] || continue
+    name="${pair%%=*}"
+    if [ "${name}" = "${pair}" ]; then value=""; else value="${pair#*=}"; fi
+    printf '%s=%s\n' "$(sigv4_uri_encode "${name}")" "$(sigv4_uri_encode "${value}")"
+  done | LC_ALL=C sort | paste -sd '&' -
 }
 
 admin_api() {

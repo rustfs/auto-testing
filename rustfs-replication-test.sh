@@ -409,51 +409,38 @@ sha256_hex()   { printf '%s' "$1" | openssl dgst -sha256 -hex | awk '{print $NF}
 # the result with SignatureDoesNotMatch.
 hmac_sha256_hexkey() { printf '%s' "$2" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$1" -hex | awk '{print $NF}'; }
 
+# SigV4 URI-encode one query name or value: keep RFC 3986 unreserved
+# characters, percent-encode every other byte as uppercase %XX.
+sigv4_uri_encode() {
+  local LC_ALL=C
+  local s="$1" out="" i c
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "${c}" in
+      [A-Za-z0-9_.~-]) out+="${c}" ;;
+      *) out+="$(printf '%%%02X' "$(( $(printf '%d' "'${c}") & 255 ))")" ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
 canonical_query() {
-  # The server re-encodes every query pair for the canonical request: valueless
-  # params (?flag) come back as "flag=", and reserved characters in values
-  # (e.g. the colons of a replication ARN) as %XX — both fail with
-  # SignatureDoesNotMatch if signed verbatim.
-  awk -v q="$1" 'BEGIN {
-    n = split(q, parts, "&")
-    for (i = 1; i <= n; i++) {
-      if (parts[i] !~ /=/) { parts[i] = parts[i] "="; continue }
-      eq = index(parts[i], "=")
-      key = substr(parts[i], 1, eq - 1)
-      val = substr(parts[i], eq + 1)
-      val = encode(val)
-      parts[i] = key "=" val
-    }
-    # sort pairs by key (text sort of the full pair equals key sort when keys are distinct)
-    for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) {
-      if (parts[j] < parts[i]) { tmp = parts[i]; parts[i] = parts[j]; parts[j] = tmp }
-    }
-    out = ""
-    for (i = 1; i <= n; i++) out = out (i > 1 ? "&" : "") parts[i]
-    printf "%s", out
-  }
-  function encode(s,   out, k, ch, lo, hi) {
-    out = ""
-    for (k = 1; k <= length(s); k++) {
-      ch = substr(s, k, 1)
-      if (ch ~ /^[A-Za-z0-9_.~-]$/) out = out ch
-      else {
-        lo = sprintf("%c", ch)
-        # split one byte at a time via UTF-8 aware gsub fallback:
-        # awk on the runner is mawk/gawk; handle ASCII reserved chars explicitly
-        if (ch == ":") out = out "%3A"
-        else if (ch == "/") out = out "%2F"
-        else if (ch == " ") out = out "%20"
-        else if (ch == "+") out = out "%2B"
-        else if (ch == "=") out = out "%3D"
-        else if (ch == "&") out = out "%26"
-        else if (ch == "?") out = out "%3F"
-        else if (ch == "%") out = out "%25"
-        else out = out ch
-      }
-    }
-    return out
-  }'
+  local q="$1"
+  [ -z "${q}" ] && return 0
+  # The server percent-decodes the raw query and re-encodes every pair for
+  # the canonical request (name and value, RFC 3986 unreserved only), and a
+  # valueless param (?flag) comes back as "flag=". Callers pass raw values,
+  # so encode here and send the same encoded string on the wire; anything
+  # signed verbatim (e.g. "@" in an access key, ":" in an ARN) fails with
+  # SignatureDoesNotMatch.
+  local pairs=() pair name value
+  IFS='&' read -r -a pairs <<< "${q}"
+  for pair in "${pairs[@]}"; do
+    [ -n "${pair}" ] || continue
+    name="${pair%%=*}"
+    if [ "${name}" = "${pair}" ]; then value=""; else value="${pair#*=}"; fi
+    printf '%s=%s\n' "$(sigv4_uri_encode "${name}")" "$(sigv4_uri_encode "${value}")"
+  done | LC_ALL=C sort | paste -sd '&' -
 }
 
 # signed_request <endpoint> <method> <path> [query] [body] [content_type]
