@@ -1863,6 +1863,24 @@ wait_transition_job() {
   return 1
 }
 
+wait_transition_job_terminal() {
+  local job_id="$1" body code waited=0 state
+  while [ "${waited}" -lt 180 ]; do
+    body="$(admin_api GET "/rustfs/admin/v3/ilm/transition/jobs/${job_id}" "")"; code="$(admin_api_code)"
+    if [ "${code}" = "200" ]; then
+      state="$(printf '%s' "${body}" | jq -r '.status // .state // empty' 2>/dev/null)"
+      if [ "${state}" = "completed" ] || [ "${state}" = "partial" ] \
+        || [ "${state}" = "failed" ] || [ "${state}" = "error" ]; then
+        printf '%s' "${body}"
+        return 0
+      fi
+    fi
+    sleep 3; waited=$((waited+3))
+  done
+  echo "transition job ${job_id} did not reach a terminal state: ${body}" >&2
+  return 1
+}
+
 results_summary() {
   printf '\n========================================\n'
   printf 'RESULTS: PASS=%d FAIL=%d UNSUPPORTED=%d\n' "${PASS}" "${FAIL}" "${UNSUPPORTED}"
@@ -2086,19 +2104,38 @@ test_tier106() {
   assert_aws_ok || return 1
   rc_run ilm rule add local/t106-b1 --storage-class "${TIER_NAME}" --transition-days 0
   assert_rc_ok || return 1
-  local out job body code
-  out="$(run_transition t106-b1)" || return 1
-  job="$(printf '%s' "${out}" | jq -r '.job_id // empty' 2>/dev/null)"
-  if [ -n "${job}" ]; then
-    body="$(wait_transition_job "${job}")" || return 1
-    printf '%s' "${body}" | grep -q "${job}" || { echo "job status missing job id: ${body}"; return 1; }
-    body="$(admin_api DELETE "/rustfs/admin/v3/ilm/transition/jobs/${job}" "")"; code="$(admin_api_code)"
-    [ "${code}" = "200" ] || [ "${code}" = "204" ] || { echo "job delete -> HTTP ${code}: ${body}"; return 1; }
-  else
-    # small synchronous runs complete inline and return a report without job_id
-    printf '%s' "${out}" | grep -q '"state":"completed"' || { echo "transition run did not complete: ${out}"; return 1; }
-    printf '%s' "${out}" | grep -q 'report' || { echo "transition run missing report: ${out}"; return 1; }
-  fi
+  local out job body code state skipped_in_flight attempt=0
+  while [ "${attempt}" -lt 5 ]; do
+    out="$(run_transition t106-b1)" || return 1
+    job="$(printf '%s' "${out}" | jq -r '.job_id // empty' 2>/dev/null)"
+    if [ -n "${job}" ]; then
+      body="$(wait_transition_job_terminal "${job}")" || return 1
+      printf '%s' "${body}" | grep -q "${job}" || { echo "job status missing job id: ${body}"; return 1; }
+      state="$(printf '%s' "${body}" | jq -r '.status // .state // empty')"
+      out="${body}"
+      body="$(admin_api DELETE "/rustfs/admin/v3/ilm/transition/jobs/${job}" "")"; code="$(admin_api_code)"
+      [ "${code}" = "200" ] || [ "${code}" = "204" ] || { echo "job delete -> HTTP ${code}: ${body}"; return 1; }
+    else
+      # Small synchronous runs complete inline and return a report without job_id.
+      state="$(printf '%s' "${out}" | jq -r '.state // empty')"
+      printf '%s' "${out}" | grep -q 'report' || { echo "transition run missing report: ${out}"; return 1; }
+    fi
+
+    [ "${state}" = "completed" ] && break
+    [ "${state}" = "partial" ] || { echo "transition run failed: ${out}"; return 1; }
+    skipped_in_flight="$(printf '%s' "${out}" | jq -r '.report.skipped_already_in_flight // 0')"
+    [ "${skipped_in_flight}" -gt 0 ] || { echo "transition run returned unexpected partial state: ${out}"; return 1; }
+    printf '%s' "${out}" | jq -e '
+      (.report.skipped_queue_full // 0) == 0 and
+      (.report.skipped_queue_closed // 0) == 0 and
+      (.report.skipped_queue_timeout // 0) == 0 and
+      (.report.tier_failure // 0) == 0 and
+      (.report.transition_failed // 0) == 0
+    ' >/dev/null || { echo "transition run returned non-retryable partial state: ${out}"; return 1; }
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+  [ "${state}" = "completed" ] || { echo "transition run remained partial after retries: ${out}"; return 1; }
   rm_bucket t106-b1
 }
 
