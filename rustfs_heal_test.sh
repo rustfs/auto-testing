@@ -233,14 +233,38 @@ hex_of_ascii() {
 # Sort a "k=v&k2=v2" query string by key (values are used verbatim, matching
 # the RustFS signer). The same canonical form is used in the URL and in the
 # SigV4 canonical request so the server-side verification always agrees.
+# SigV4 URI-encode one query name or value: keep RFC 3986 unreserved
+# characters, percent-encode every other byte as uppercase %XX.
+sigv4_uri_encode() {
+  local LC_ALL=C
+  local s="$1" out="" i c
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "${c}" in
+      [A-Za-z0-9_.~-]) out+="${c}" ;;
+      *) out+="$(printf '%%%02X' "$(( $(printf '%d' "'${c}") & 255 ))")" ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
 canonical_query() {
   local q="$1"
   [ -z "${q}" ] && return 0
-  # The trailing newline matters: `while read` drops the last item when the
-  # input has no final newline (e.g. "a=1&b=2" without a trailing '&').
-  printf '%s\n' "${q}" | tr '&' '\n' | while IFS= read -r pair; do
-    printf '%s=%s\n' "${pair%%=*}" "${pair#*=}"
-  done | sort | paste -sd '&' -
+  # The server percent-decodes the raw query and re-encodes every pair for
+  # the canonical request (name and value, RFC 3986 unreserved only), and a
+  # valueless param (?flag) comes back as "flag=". Callers pass raw values,
+  # so encode here and send the same encoded string on the wire; anything
+  # signed verbatim (e.g. "@" in an access key, ":" in an ARN) fails with
+  # SignatureDoesNotMatch.
+  local pairs=() pair name value
+  IFS='&' read -r -a pairs <<< "${q}"
+  for pair in "${pairs[@]}"; do
+    [ -n "${pair}" ] || continue
+    name="${pair%%=*}"
+    if [ "${name}" = "${pair}" ]; then value=""; else value="${pair#*=}"; fi
+    printf '%s=%s\n' "$(sigv4_uri_encode "${name}")" "$(sigv4_uri_encode "${value}")"
+  done | LC_ALL=C sort | paste -sd '&' -
 }
 
 # Issue an admin API request. Prints the response body on stdout and writes the
