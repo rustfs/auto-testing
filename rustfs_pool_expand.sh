@@ -1239,7 +1239,7 @@ if [ -n "${PACKAGE_SHA256}" ]; then
   [[ "${PACKAGE_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]] || { echo "invalid package SHA-256"; exit 1; }
   printf '%s  %s\n' "${PACKAGE_SHA256}" /home/rustfs/packages/rustfs.deb | sha256sum -c - || { echo "checksum verification failed"; exit 1; }
 fi
-${SUDO} dpkg -i /home/rustfs/packages/rustfs.deb
+${SUDO} dpkg -i --force-confold /home/rustfs/packages/rustfs.deb
 ${SUDO} systemctl daemon-reload
 echo "--- installed package ---"
 dpkg -l rustfs | tail -n 1

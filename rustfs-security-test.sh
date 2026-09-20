@@ -304,7 +304,7 @@ rm -f "\${PKG_TMP}"
 if [ -n "${PACKAGE_SHA256}" ]; then
   echo "${PACKAGE_SHA256}  ${PACKAGES_DIR}/${PACKAGE_FILE}" | sha256sum -c - || exit 1
 fi
-\${SUDO} dpkg -i "${PACKAGES_DIR}/${PACKAGE_FILE}"
+\${SUDO} dpkg -i --force-confold "${PACKAGES_DIR}/${PACKAGE_FILE}"
 \${SUDO} systemctl daemon-reload
 EOF
 )"
