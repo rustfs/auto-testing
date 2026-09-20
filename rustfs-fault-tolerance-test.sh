@@ -71,6 +71,7 @@ EP1="http://rustfs-node1:9000"
 EP2="http://rustfs-node2:9000"
 VOLUMES_SNMD="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_4X1="http://rustfs-node{1...4}:9000/data/rustfs1/mnmd"
+VOLUMES_3X4="http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_4X4="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 
 BASELINE_BUCKET="ft-baseline"
@@ -640,6 +641,32 @@ scenario_d() {
   do_cleanup
 }
 
+# --------------------------------------------------------------- scenario E
+# Multi-NODE outage on the 3x4 fleet (12 drives one set, EC:4, readq 8 /
+# writeq 8): the 1.0 article-style degraded boundary one node earlier than
+# the 4x1 case - 3 nodes is the minimum for this parity scheme.
+scenario_e() {
+  log "=== E: multi-node 3x4 (12 drives one set), EC:4 (readq 8, writeq 8) ==="
+  install_and_start "${VOLUMES_3X4}"
+  seed_baseline "${EP1}"
+
+  stop_node "${NODES[2]}"; settle                     # E1: 8 drives == readq
+  capture_health "E1" "${EP1}"
+  expect_read  "E1/read"  "${EP1}" "ok"   "ft-small-16k.bin"
+  expect_write "E1/write" "${EP1}" "ok"   "${PROBE_PREFIX}-e1"
+
+  stop_node "${NODES[1]}"; settle                     # E2: 4 drives < readq
+  capture_health "E2" "${EP1}"
+  expect_read  "E2/read"  "${EP1}" "fail" "ft-big-8m.bin"
+  expect_write "E2/write" "${EP1}" "fail" "${PROBE_PREFIX}-e2"
+
+  start_node "${NODES[1]}"; start_node "${NODES[2]}"; settle
+  capture_health "E3-recovered" "${EP1}"
+  expect_read  "E3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
+  expect_write "E3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-e3"
+  do_cleanup
+}
+
 # ------------------------------------------------------------------- main ---
 usage() {
   cat <<EOF
@@ -695,7 +722,7 @@ main() {
   printf 'FT-REPORT: fault-tolerance suite\n' > "${REPORT_FILE}"
   if [ "${all}" -eq 1 ]; then
     register_scenarios A B C C2 D
-    scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d
+    scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d; scenario_e
   elif [ -n "${scenario}" ]; then
     register_scenarios "${scenario}"
     case "${scenario}" in
@@ -704,6 +731,7 @@ main() {
       C)  scenario_c  ;;
       C2) scenario_c2 ;;
       D)  scenario_d  ;;
+      E)  scenario_e  ;;
       *)  die "unknown scenario: ${scenario}" ;;
     esac
   else
