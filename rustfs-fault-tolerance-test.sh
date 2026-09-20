@@ -71,6 +71,7 @@ EP1="http://rustfs-node1:9000"
 EP2="http://rustfs-node2:9000"
 VOLUMES_SNMD="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_4X1="http://rustfs-node{1...4}:9000/data/rustfs1/mnmd"
+VOLUMES_3X4="http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_4X4="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 
 BASELINE_BUCKET="ft-baseline"
@@ -640,6 +641,32 @@ scenario_d() {
   do_cleanup
 }
 
+# --------------------------------------------------------------- scenario E
+# Multi-NODE outage on the 3x4 fleet (12 drives one set, EC:4, readq 8 /
+# writeq 8): the 1.0 article-style degraded boundary one node earlier than
+# the 4x1 case - 3 nodes is the minimum for this parity scheme.
+scenario_e() {
+  log "=== E: multi-node 3x4 (12 drives one set), EC:4 (readq 8, writeq 8) ==="
+  install_and_start "${VOLUMES_3X4}"
+  seed_baseline "${EP1}"
+
+  stop_node "${NODES[2]}"; settle                     # E1: 8 drives == readq
+  capture_health "E1" "${EP1}"
+  expect_read  "E1/read"  "${EP1}" "ok"   "ft-small-16k.bin"
+  expect_write "E1/write" "${EP1}" "ok"   "${PROBE_PREFIX}-e1"
+
+  stop_node "${NODES[1]}"; settle                     # E2: 4 drives < readq
+  capture_health "E2" "${EP1}"
+  expect_read  "E2/read"  "${EP1}" "fail" "ft-big-8m.bin"
+  expect_write "E2/write" "${EP1}" "fail" "${PROBE_PREFIX}-e2"
+
+  start_node "${NODES[1]}"; start_node "${NODES[2]}"; settle
+  capture_health "E3-recovered" "${EP1}"
+  expect_read  "E3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
+  expect_write "E3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-e3"
+  do_cleanup
+}
+
 # ------------------------------------------------------------------- main ---
 usage() {
   cat <<EOF
@@ -657,9 +684,77 @@ Environment: RUSTFS_NODES, RUSTFS_SSH_USER, FT_SETTLE_SECS, FT_STRICT
 EOF
 }
 
+# ── matrix: topology x EC exhaustive outage sweep ───────────────────────────
+# For each topology (nodes x drives-per-node) and each EC level P in 1..N/2:
+#   install + seed, full-capacity read/write asserts, then stop nodes one by
+#   one. Per-phase expectations derive from quorum arithmetic:
+#     online drives D >= data (N-P)      -> reads OK
+#     online drives D >= data + 1        -> writes OK
+#     otherwise                          -> reads and writes fail
+# Case ids: M-<topo>EC<P>-full | -n<k> | -rec. Register new topologies by
+# appending to MATRIX_TOPOS.
+MATRIX_TOPOS=("1x2" "1x4" "2x2" "2x4" "3x2" "3x4" "4x1" "4x2" "4x3" "4x4")
+
+matrix_volumes_expr() { # <nodes> <drives-per>
+  local list="" i
+  for ((i = 1; i <= $1; i++)); do
+    list+="${list:+ }http://rustfs-node${i}:9000/data/rustfs{1...$2}/mnmd"
+  done
+  printf '%s' "$list"
+}
+
+matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
+  local key="$1" nodes="$2" per="$3" parity="$4"
+  local total=$(( nodes * per )) data=$(( total - parity ))
+  local readq=$(( data )) writeq=$(( data + 1 ))
+  local tag="M-${key}EC${parity}"
+  log "matrix[${tag}]: total=${total} readq=${readq} writeq=${writeq}"
+  install_and_start "$(matrix_volumes_expr "${nodes}" "${per}")"
+  seed_baseline "${EP1}"
+
+  # full capacity
+  expect_read  "${tag}-full/read"  "${EP1}" "ok"   "ft-small-16k.bin"
+  expect_write "${tag}-full/write" "${EP1}" "ok"   "${PROBE_PREFIX}-${tag}-f"
+
+  # progressive node outages
+  local k online exp_read exp_write
+  for ((k = nodes - 1; k >= 0; k--)); do
+    online=$(( k * per ))
+    exp_read="fail"; exp_write="fail"
+    if [ "${online}" -ge "${writeq}" ]; then exp_read="ok"; exp_write="ok"
+    elif [ "${online}" -ge "${readq}" ]; then exp_read="ok"; fi
+    if [ "${k}" -gt 0 ]; then stop_node "${NODES[$((k-1))]}"; fi
+    settle
+    if [ "${online}" -ge "${readq}" ]; then
+      expect_read  "${tag}-n${k}/read"  "${EP2:-$EP1}" "ok"   "ft-small-16k.bin"
+      expect_write "${tag}-n${k}/write" "${EP2:-$EP1}" "${exp_write}" "${PROBE_PREFIX}-${tag}-n${k}"
+    else
+      record "UNEXPECTED" "${tag}-n${k}" "quorum unexpectedly lost with ${online} drives online (readq=${readq})"
+      break
+    fi
+  done
+
+  # recovery: bring every stopped node back
+  local idx
+  for ((idx = 0; idx < nodes; idx++)); do start_node "${NODES[$((idx))]}"; done
+  settle
+  expect_read  "${tag}-rec/read"  "${EP1}" "ok" "ft-small-16k.bin"
+  expect_write "${tag}-rec/write" "${EP1}" "ok" "${PROBE_PREFIX}-${tag}-rec"
+  do_cleanup
+}
+
+run_matrix() { # [topo-filter like 4x2]
+  local filter="${1:-}" spec key per
+  for spec in "${MATRIX_TOPOS[@]}"; do
+    key="${spec%x*}"
+    [ -n "${filter}" ] && [ "${spec}" != "${filter}" ] && continue
+    matrix_run_case "${spec}" "${key%x}" "${key#*x}" "${MATRIX_EC:-$(( key#*x ))}"
+  done
+}
+
 main() {
   [ "$#" -eq 0 ] && { usage; exit 0; }
-  local opt scenario="" all=0 cleanup=0
+  local opt scenario="" all=0 cleanup=0 matrix=0 matrix_topo="" MATRIX_EC="${MATRIX_EC:-}"
   while [ "$#" -gt 0 ]; do
     opt="$1"; shift
     case "${opt}" in
@@ -672,6 +767,8 @@ main() {
       --dry-run)     DRY_RUN=1 ;;
       --log-file)    LOG_FILE="$1"; shift ;;
       --strict)      FT_STRICT=1 ;;
+      --matrix)      matrix=1 ;;
+      --matrix-topo) matrix_topo="$1"; MATRIX_EC="${2:-}"; shift ;;
       -h|--help)     usage; exit 0 ;;
       *)             die "unknown option: ${opt}" ;;
     esac
@@ -695,7 +792,7 @@ main() {
   printf 'FT-REPORT: fault-tolerance suite\n' > "${REPORT_FILE}"
   if [ "${all}" -eq 1 ]; then
     register_scenarios A B C C2 D
-    scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d
+    scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d; scenario_e
   elif [ -n "${scenario}" ]; then
     register_scenarios "${scenario}"
     case "${scenario}" in
@@ -704,6 +801,9 @@ main() {
       C)  scenario_c  ;;
       C2) scenario_c2 ;;
       D)  scenario_d  ;;
+      E)  scenario_e  ;;
+      E)  scenario_e  ;;
+      M)  run_matrix "${matrix_topo}" ;;
       *)  die "unknown scenario: ${scenario}" ;;
     esac
   else
