@@ -544,7 +544,7 @@ install_deb_on_nodes() {
       if [ -n "${sha}" ]; then
         printf 'echo "%s  %s/%s" | sha256sum -c - || exit 1\n' "${sha}" "${PACKAGES_DIR}" "${PACKAGE_FILE}"
       fi
-      printf '${SUDO} dpkg -i "%s/%s"\n' "${PACKAGES_DIR}" "${PACKAGE_FILE}"
+      printf '${SUDO} dpkg -i --force-confold "%s/%s"\n' "${PACKAGES_DIR}" "${PACKAGE_FILE}"
       printf '${SUDO} systemctl daemon-reload\n'
     } | run_remote "${node}"
   done

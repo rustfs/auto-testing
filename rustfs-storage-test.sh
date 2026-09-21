@@ -311,7 +311,7 @@ EOF
   script="$(cat <<'EOF'
 set -euo pipefail
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
-${SUDO} dpkg -i /home/rustfs/packages/rustfs.deb
+${SUDO} dpkg -i --force-confold /home/rustfs/packages/rustfs.deb
 ${SUDO} systemctl daemon-reload
 EOF
 )"
