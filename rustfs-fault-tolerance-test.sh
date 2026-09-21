@@ -660,7 +660,7 @@ scenario_e() {
   expect_read  "E2/read"  "${EP1}" "fail" "ft-big-8m.bin"
   expect_write "E2/write" "${EP1}" "fail" "${PROBE_PREFIX}-e2"
 
-  start_node "${NODES[1]}"; start_node "${NODES[2]}"; settle
+  start_nodes "${NODES[1]}" "${NODES[2]}"; settle
   capture_health "E3-recovered" "${EP1}"
   expect_read  "E3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
   expect_write "E3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-e3"
@@ -736,7 +736,7 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
 
   # recovery: bring every stopped node back
   local idx
-  for ((idx = 0; idx < nodes; idx++)); do start_node "${NODES[$((idx))]}"; done
+  for ((idx = 0; idx < nodes; idx++)); do start_nodes "${NODES[$((idx))]}"; done
   settle
   expect_read  "${tag}-rec/read"  "${EP1}" "ok" "ft-small-16k.bin"
   expect_write "${tag}-rec/write" "${EP1}" "ok" "${PROBE_PREFIX}-${tag}-rec"
@@ -801,7 +801,6 @@ main() {
       C)  scenario_c  ;;
       C2) scenario_c2 ;;
       D)  scenario_d  ;;
-      E)  scenario_e  ;;
       E)  scenario_e  ;;
       M)  run_matrix "${matrix_topo}" ;;
       *)  die "unknown scenario: ${scenario}" ;;
