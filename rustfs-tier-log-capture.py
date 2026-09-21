@@ -8,6 +8,7 @@ import errno
 import os
 import secrets
 import select
+import signal
 import stat
 import sys
 import tempfile
@@ -135,23 +136,43 @@ def _stop_requested(path: str) -> bool:
 def _fan_out(log_descriptor: int, stop_file: str) -> None:
     input_descriptor = sys.stdin.fileno()
     os.set_blocking(input_descriptor, False)
-    while True:
+    # Orphaned producers that inherited the FIFO write end can keep the inner
+    # read loop busy indefinitely; a terminal signal is the only way out then.
+    stopped = {"requested": False}
+
+    def _on_terminate(_signum, _frame):
+        stopped["requested"] = True
+
+    previous_term = signal.signal(signal.SIGTERM, _on_terminate)
+    previous_int = signal.signal(signal.SIGINT, _on_terminate)
+    try:
         while True:
-            try:
-                chunk = os.read(input_descriptor, 65536)
-            except BlockingIOError:
-                break
-            if not chunk:
+            for _ in range(64):
+                try:
+                    chunk = os.read(input_descriptor, 65536)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    if _stop_requested(stop_file):
+                        os.fsync(log_descriptor)
+                        return
+                    raise OSError(
+                        errno.EPIPE, "log stream ended before stop was requested"
+                    )
+                _write_all(log_descriptor, chunk)
+                _write_all(sys.stdout.fileno(), chunk)
+                # Drain in bounded batches so a busy producer cannot starve
+                # the stop-file poll below.
                 if _stop_requested(stop_file):
                     os.fsync(log_descriptor)
                     return
-                raise OSError(errno.EPIPE, "log stream ended before stop was requested")
-            _write_all(log_descriptor, chunk)
-            _write_all(sys.stdout.fileno(), chunk)
-        if _stop_requested(stop_file):
-            os.fsync(log_descriptor)
-            return
-        select.select([input_descriptor], [], [], 0.1)
+            if stopped["requested"] or _stop_requested(stop_file):
+                os.fsync(log_descriptor)
+                return
+            select.select([input_descriptor], [], [], 0.1)
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
 
 
 def main() -> int:
