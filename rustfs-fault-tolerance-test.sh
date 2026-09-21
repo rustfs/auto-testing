@@ -138,6 +138,7 @@ CASES_B=(B1/read B1/read-node2 B1/write B2/read B2/read-node2 B2/write B3/read B
 CASES_C=(C1/read C1/write C2/read C2/write C3/read C3/write)
 CASES_C2=(C2-1/read C2-1/write C2-2/read C2-2/write C2-3/read C2-3/write)
 CASES_D=(D1/read D1/write D2/read D2/write D3/read D3/write)
+CASES_E=(E1/read E1/write E2/read E2/write E3/read E3/write)
 
 register_expected_cases() {
   local case_id
@@ -158,6 +159,7 @@ register_scenarios() {
       C)  register_expected_cases "${CASES_C[@]}" ;;
       C2) register_expected_cases "${CASES_C2[@]}" ;;
       D)  register_expected_cases "${CASES_D[@]}" ;;
+      E)  register_expected_cases "${CASES_E[@]}" ;;
       *)  die "unknown scenario: ${scenario}" ;;
     esac
   done
@@ -705,10 +707,23 @@ matrix_volumes_expr() { # <nodes> <drives-per>
 
 matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   local key="$1" nodes="$2" per="$3" parity="$4"
-  local total=$(( nodes * per )) data=$(( total - parity ))
-  local readq=$(( data )) writeq=$(( data + 1 ))
+  # Split declarations: in one `local` line the later expansion would read
+  # the earlier variable before its assignment lands (set -u unbound).
+  local total=$(( nodes * per ))
+  local data=$(( total - parity ))
+  local readq=$(( data ))
+  local writeq=$(( data + 1 ))
   local tag="M-${key}EC${parity}"
   log "matrix[${tag}]: total=${total} readq=${readq} writeq=${writeq}"
+  # Register this combination's case ids up front: unregistered verdicts
+  # would count as harness errors and invalidate the results file.
+  local mc=() k
+  mc+=("${tag}-full/read" "${tag}-full/write")
+  for ((k = nodes - 1; k >= 1; k--)); do
+    mc+=("${tag}-n${k}/read" "${tag}-n${k}/write")
+  done
+  mc+=("${tag}-rec/read" "${tag}-rec/write")
+  register_expected_cases "${mc[@]}"
   install_and_start "$(matrix_volumes_expr "${nodes}" "${per}")"
   seed_baseline "${EP1}"
 
@@ -716,22 +731,21 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   expect_read  "${tag}-full/read"  "${EP1}" "ok"   "ft-small-16k.bin"
   expect_write "${tag}-full/write" "${EP1}" "ok"   "${PROBE_PREFIX}-${tag}-f"
 
-  # progressive node outages
+  # progressive node outages: stop the highest-index node first and probe
+  # after each stop, so phase k is asserted with exactly k*per drives online.
+  # NODES[0] never stops and stays the probe endpoint (EP1). Below readq the
+  # probes assert the expected unavailability instead of flagging an anomaly -
+  # quorum math says those states must fail, and a pass there is the finding.
   local k online exp_read exp_write
-  for ((k = nodes - 1; k >= 0; k--)); do
+  for ((k = nodes - 1; k >= 1; k--)); do
+    stop_node "${NODES[$((k))]}"
+    settle
     online=$(( k * per ))
     exp_read="fail"; exp_write="fail"
     if [ "${online}" -ge "${writeq}" ]; then exp_read="ok"; exp_write="ok"
     elif [ "${online}" -ge "${readq}" ]; then exp_read="ok"; fi
-    if [ "${k}" -gt 0 ]; then stop_node "${NODES[$((k-1))]}"; fi
-    settle
-    if [ "${online}" -ge "${readq}" ]; then
-      expect_read  "${tag}-n${k}/read"  "${EP2:-$EP1}" "ok"   "ft-small-16k.bin"
-      expect_write "${tag}-n${k}/write" "${EP2:-$EP1}" "${exp_write}" "${PROBE_PREFIX}-${tag}-n${k}"
-    else
-      record "UNEXPECTED" "${tag}-n${k}" "quorum unexpectedly lost with ${online} drives online (readq=${readq})"
-      break
-    fi
+    expect_read  "${tag}-n${k}/read"  "${EP1}" "${exp_read}"  "ft-small-16k.bin"
+    expect_write "${tag}-n${k}/write" "${EP1}" "${exp_write}" "${PROBE_PREFIX}-${tag}-n${k}"
   done
 
   # recovery: bring every stopped node back
@@ -743,12 +757,16 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   do_cleanup
 }
 
-run_matrix() { # [topo-filter like 4x2]
-  local filter="${1:-}" spec key per
+run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (38 combos)
+  local filter="${1:-}" spec nodes_n per parity
   for spec in "${MATRIX_TOPOS[@]}"; do
-    key="${spec%x*}"
     [ -n "${filter}" ] && [ "${spec}" != "${filter}" ] && continue
-    matrix_run_case "${spec}" "${key%x}" "${key#*x}" "${MATRIX_EC:-$(( key#*x ))}"
+    nodes_n="${spec%x*}"
+    per="${spec#*x}"
+    for ((parity = 1; parity * 2 <= nodes_n * per; parity++)); do
+      [ -n "${MATRIX_EC}" ] && [ "${parity}" != "${MATRIX_EC}" ] && continue
+      matrix_run_case "${spec}" "${nodes_n}" "${per}" "${parity}"
+    done
   done
 }
 
@@ -768,7 +786,11 @@ main() {
       --log-file)    LOG_FILE="$1"; shift ;;
       --strict)      FT_STRICT=1 ;;
       --matrix)      matrix=1 ;;
-      --matrix-topo) matrix_topo="$1"; MATRIX_EC="${2:-}"; shift ;;
+      --matrix-topo)
+        matrix_topo="$1"
+        if [ "$#" -ge 2 ]; then MATRIX_EC="$2"; shift; fi
+        matrix=1
+        shift ;;
       -h|--help)     usage; exit 0 ;;
       *)             die "unknown option: ${opt}" ;;
     esac
@@ -791,8 +813,13 @@ main() {
   RESULTS_ENABLED=1
   printf 'FT-REPORT: fault-tolerance suite\n' > "${REPORT_FILE}"
   if [ "${all}" -eq 1 ]; then
-    register_scenarios A B C C2 D
+    # E must be registered, not just executed: unregistered verdicts land in
+    # harness_errors and fail the evidence contract (#96 ran scenario_e via
+    # --all but never registered its cases).
+    register_scenarios A B C C2 D E
     scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d; scenario_e
+  elif [ "${matrix}" -eq 1 ]; then
+    run_matrix "${matrix_topo}"
   elif [ -n "${scenario}" ]; then
     register_scenarios "${scenario}"
     case "${scenario}" in
