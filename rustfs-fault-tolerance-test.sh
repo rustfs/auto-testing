@@ -750,9 +750,13 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
     expect_write "${tag}-n${k}/write" "${EP1}" "${exp_write}" "${PROBE_PREFIX}-${tag}-n${k}"
   done
 
-  # recovery: bring every stopped node back
-  local idx
-  for ((idx = 0; idx < nodes; idx++)); do start_nodes "${NODES[$((idx))]}"; done
+  # recovery: hand start_nodes the whole stopped set in one call. It starts
+  # its arguments concurrently and dies on the first failed wait, so per-node
+  # calls leave later nodes unstarted while an earlier one waits with its
+  # peers still down. NODES[0] never stops and stays the probe endpoint.
+  local idx restart=()
+  for ((idx = 1; idx < nodes; idx++)); do restart+=("${NODES[$((idx))]}"); done
+  if [ "${#restart[@]}" -gt 0 ]; then start_nodes "${restart[@]}"; fi
   settle
   expect_read  "${tag}-rec/read"  "${EP1}" "ok" "ft-small-16k.bin"
   expect_write "${tag}-rec/write" "${EP1}" "ok" "${PROBE_PREFIX}-${tag}-rec"
