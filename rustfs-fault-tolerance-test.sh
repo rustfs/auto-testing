@@ -674,15 +674,17 @@ usage() {
   cat <<EOF
 Usage: $0 [options]
   --cleanup              stop services, unhide drives, purge data, then exit
-  --scenario A|B|C|C2|D  run one scenario
-  --all                  run all scenarios (A, B, C, C2, D)
+  --scenario A|B|C|C2|D|E|M  run one scenario (M = matrix sweep)
+  --all                  run all scenarios (A, B, C, C2, D, E)
   --package-url URL      .deb to install (required for test runs)
   --results-file FILE    write the machine-readable completeness result
   -y                     assume yes
   --dry-run              print planned actions only
   --log-file FILE        also tee output into FILE
   --strict               known-divergence also fails the suite (FT_STRICT=1)
-Environment: RUSTFS_NODES, RUSTFS_SSH_USER, FT_SETTLE_SECS, FT_STRICT
+  --matrix               full topology x EC outage sweep (38 combinations)
+  --matrix-topo KEY [EC] sweep one topology (like 4x2), optionally one EC level
+Environment: RUSTFS_NODES, RUSTFS_SSH_USER, FT_SETTLE_SECS, FT_STRICT, MATRIX_EC
 EOF
 }
 
@@ -758,7 +760,7 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
 }
 
 run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (38 combos)
-  local filter="${1:-}" spec nodes_n per parity
+  local filter="${1:-}" spec nodes_n per parity combos=0
   for spec in "${MATRIX_TOPOS[@]}"; do
     [ -n "${filter}" ] && [ "${spec}" != "${filter}" ] && continue
     nodes_n="${spec%x*}"
@@ -766,8 +768,11 @@ run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (38 combo
     for ((parity = 1; parity * 2 <= nodes_n * per; parity++)); do
       [ -n "${MATRIX_EC}" ] && [ "${parity}" != "${MATRIX_EC}" ] && continue
       matrix_run_case "${spec}" "${nodes_n}" "${per}" "${parity}"
+      combos=$((combos + 1))
     done
   done
+  # A filter typo would otherwise run nothing and report a clean sweep.
+  [ "${combos}" -gt 0 ] || die "matrix filters matched no combinations (topo=${filter:-any} EC=${MATRIX_EC:-any})"
 }
 
 main() {
@@ -787,10 +792,18 @@ main() {
       --strict)      FT_STRICT=1 ;;
       --matrix)      matrix=1 ;;
       --matrix-topo)
-        matrix_topo="$1"
-        if [ "$#" -ge 2 ]; then MATRIX_EC="$2"; shift; fi
-        matrix=1
-        shift ;;
+        [ "$#" -ge 1 ] || die "--matrix-topo requires a topology like 4x2"
+        case "$1" in
+          ''|-*) die "--matrix-topo requires a topology like 4x2" ;;
+        esac
+        matrix_topo="$1"; shift
+        # A purely numeric follower is the optional EC level; anything else is
+        # the next option and must not be swallowed as EC.
+        case "${1:-}" in
+          ''|*[!0-9]*) ;;
+          *) MATRIX_EC="$1"; shift ;;
+        esac
+        matrix=1 ;;
       -h|--help)     usage; exit 0 ;;
       *)             die "unknown option: ${opt}" ;;
     esac
