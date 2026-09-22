@@ -513,53 +513,84 @@ assert_aws_fails_with() {
 # SigV4-signed raw HTTP request (for cases aws CLI validates client-side, or
 # when we need custom headers such as conditional writes). Uses the S3
 # UNSIGNED-PAYLOAD marker. Prints the HTTP status code.
-# usage: s3_signed_curl <method> <path> [<extra -H args...>] [--data <file>]
+# usage: s3_signed_curl <method> <path> [-H <header>...] [--data <file>] [--presign]
 s3_signed_curl() {
-  local method="$1" path="$2" extra=() data=""
-  shift 2
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -H) extra+=("-H" "$2"); shift 2 ;;
-      --data) data="$2"; shift 2 ;;
-      *) die "s3_signed_curl: unknown arg $1" ;;
-    esac
-  done
-  local host_port amz_date date_stamp canonical_headers signed_headers
-  local canonical_request string_to_sign scope k_date k_region k_service k_signing signature
-  local p="${path%%\?*}" q="${path#*\?}"
-  [ "${q}" = "${path}" ] && q=""
-  host_port="${ENDPOINT#*://}"
-  amz_date="$(date -u +%Y%m%dT%H%M%SZ)"
-  date_stamp="${amz_date:0:8}"
-  canonical_headers="host:${host_port}
-x-amz-content-sha256:UNSIGNED-PAYLOAD
-x-amz-date:${amz_date}
-"
-  signed_headers="host;x-amz-content-sha256;x-amz-date"
-  canonical_request="${method}
-${p}
-${q}
-${canonical_headers}
-${signed_headers}
-UNSIGNED-PAYLOAD"
-  scope="${date_stamp}/${REGION}/s3/aws4_request"
-  string_to_sign="AWS4-HMAC-SHA256
-${amz_date}
-${scope}
-$(printf '%s' "${canonical_request}" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
-  k_date="$(printf '%s' "${date_stamp}" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(printf 'AWS4%s' "${SECRET_KEY}" | od -An -vtx1 | tr -d ' \n')" -hex 2>/dev/null | awk '{print $NF}')"
-  k_region="$(printf '%s' "${REGION}" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_date}" -hex 2>/dev/null | awk '{print $NF}')"
-  k_service="$(printf '%s' "s3" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_region}" -hex 2>/dev/null | awk '{print $NF}')"
-  k_signing="$(printf '%s' "aws4_request" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_service}" -hex 2>/dev/null | awk '{print $NF}')"
-  signature="$(printf '%s' "${string_to_sign}" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k_signing}" -hex 2>/dev/null | awk '{print $NF}')"
-  local curl_data=()
-  [ -n "${data}" ] && curl_data=(--data-binary "@${data}")
-  curl -s -o "${TEST_TMP}/curl.out" -w '%{http_code}' "${extra[@]}" "${curl_data[@]}" \
-    -H "Host: ${host_port}" \
-    -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
-    -H "x-amz-date: ${amz_date}" \
-    -H "Authorization: AWS4-HMAC-SHA256 Credential=${ACCESS_KEY}/${scope}, SignedHeaders=${signed_headers}, Signature=${signature}" \
-    -X "${method}" "${ENDPOINT}${path}"
+  S3_ACCESS_KEY="${ACCESS_KEY}" S3_SECRET_KEY="${SECRET_KEY}" \
+    python3 - "${ENDPOINT}" "${REGION}" "${TEST_TMP}/curl.out" "$@" <<'PY_SIGN'
+import argparse
+import datetime
+import hashlib
+import hmac
+import os
+import subprocess
+from urllib.parse import parse_qsl, quote, urlsplit
+
+parser = argparse.ArgumentParser()
+parser.add_argument('endpoint')
+parser.add_argument('region')
+parser.add_argument('output')
+parser.add_argument('method')
+parser.add_argument('path')
+parser.add_argument('-H', dest='headers', action='append', default=[])
+parser.add_argument('--data')
+parser.add_argument('--presign', action='store_true')
+args = parser.parse_args()
+amz_date = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+date_stamp = amz_date[:8]
+scope = f'{date_stamp}/{args.region}/s3/aws4_request'
+headers = {'host': urlsplit(args.endpoint).netloc}
+if not args.presign:
+    headers.update({'x-amz-content-sha256': 'UNSIGNED-PAYLOAD', 'x-amz-date': amz_date})
+for header in args.headers:
+    name, separator, value = header.partition(':')
+    name = name.strip().lower()
+    if not separator or not name or name in ('host', 'authorization', 'x-amz-date', 'x-amz-content-sha256'):
+        parser.error(f'invalid or signer-owned header: {name}')
+    value = ' '.join(value.split())
+    headers[name] = f'{headers[name]},{value}' if name in headers else value
+signed_headers = ';'.join(sorted(headers))
+canonical_headers = ''.join(f'{name}:{headers[name]}\n' for name in sorted(headers))
+path, _, raw_query = args.path.partition('?')
+query = parse_qsl(raw_query, keep_blank_values=True)
+if args.presign:
+    query.extend([
+        ('X-Amz-Algorithm', 'AWS4-HMAC-SHA256'),
+        ('X-Amz-Credential', f'{os.environ["S3_ACCESS_KEY"]}/{scope}'),
+        ('X-Amz-Date', amz_date),
+        ('X-Amz-Expires', '60'),
+        ('X-Amz-SignedHeaders', signed_headers),
+    ])
+# Sort encoded pairs and send exactly the query that is signed, including
+# extension parameters and credentials containing characters such as '@'.
+canonical_query = '&'.join(f'{key}={value}' for key, value in sorted(
+    (quote(key, safe='~'), quote(value, safe='~')) for key, value in query
+))
+canonical_request = '\n'.join([
+    args.method, path, canonical_query, canonical_headers, signed_headers, 'UNSIGNED-PAYLOAD',
+])
+string_to_sign = '\n'.join([
+    'AWS4-HMAC-SHA256', amz_date, scope, hashlib.sha256(canonical_request.encode()).hexdigest(),
+])
+key = ('AWS4' + os.environ['S3_SECRET_KEY']).encode()
+for value in (date_stamp, args.region, 's3', 'aws4_request'):
+    key = hmac.new(key, value.encode(), hashlib.sha256).digest()
+signature = hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+if args.presign:
+    canonical_query += '&X-Amz-Signature=' + signature
+else:
+    headers['authorization'] = (
+        f'AWS4-HMAC-SHA256 Credential={os.environ["S3_ACCESS_KEY"]}/{scope}, '
+        f'SignedHeaders={signed_headers}, Signature={signature}'
+    )
+url = args.endpoint + path + ('?' + canonical_query if canonical_query else '')
+command = ['curl', '-sS', '--max-time', '30', '-o', args.output, '-w', '%{http_code}']
+for name, value in headers.items():
+    command.extend(['-H', f'{name}: {value}'])
+if args.data:
+    command.extend(['--data-binary', '@' + args.data])
+command.extend(['-X', args.method, url])
+raise SystemExit(subprocess.call(command))
+PY_SIGN
 }
 
 md5_of_file() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
@@ -2535,11 +2566,23 @@ test_snw114() {
   assert_aws_ok || return 1
   etag="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
   [ "${etag}" = "\"${archive_md5}\"" ] || { echo "extract ETag ${etag} != archive MD5 ${archive_md5}"; return 1; }
-  # x-rustfs-max-content-length is rejected for extract uploads
+  # Sign the size capability and extraction header before presigning so this
+  # reaches the archive-extraction guard, rather than a signature/auth error.
   local code
-  code="$(s3_signed_curl PUT "/snw114-b1/fixture2.tar?x-rustfs-max-content-length=1" \
+  code="$(s3_signed_curl PUT "/snw114-b1/fixture2.tar?x-rustfs-max-content-length=1" --presign \
     -H "x-amz-meta-snowball-auto-extract: true" --data "${TEST_TMP}/snw114.tar")"
   [ "${code}" = "400" ] || { echo "max-content-length extract returned ${code}: $(head -c 200 "${TEST_TMP}/curl.out")"; return 1; }
+  python3 - "${TEST_TMP}/curl.out" <<'PY_ERROR' || return 1
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+# Accept the optional S3 XML namespace without weakening the error assertion.
+fields = {node.tag.rsplit('}', 1)[-1]: node.text for node in root}
+if (fields.get('Code') != 'InvalidRequest' or
+        fields.get('Message') != 'x-rustfs-max-content-length is not supported for archive extraction'):
+    raise SystemExit(f'unexpected extraction error: {fields}')
+PY_ERROR
   rm_bucket "snw114-b1"
 }
 
