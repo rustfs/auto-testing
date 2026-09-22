@@ -102,6 +102,11 @@ WARP_LOG_FILE="${RUSTFS_WARP_LOG_FILE:-}"
 # Disk-usage thresholds (per surviving node, GiB, via df -B1G | grep /data/rustfs)
 STOP_NODE_AT_GB="${RUSTFS_STOP_NODE_AT_GB:-15}"   # stop the outage node when surviving nodes reach this
 WARP_STOP_AT_GB="${RUSTFS_WARP_STOP_AT_GB:-40}"   # stop warp when surviving nodes reach this
+# warp defaults to a 5m run and exits on its own regardless of written volume;
+# at fleet throughput that lands the surviving nodes short of WARP_STOP_AT_GB
+# ("warp exited early"). The monitor below is the terminator - keep warp's own
+# duration well above WARP_TIMEOUT.
+WARP_DURATION="${RUSTFS_WARP_DURATION:-180m}"
 POLL_INTERVAL=15                # status polling interval (seconds)
 
 # Timeouts (seconds)
@@ -862,6 +867,7 @@ step3_write_data_with_node_outage() {
     --secret-key "${SECRET_KEY}" \
     --obj.size "${WARP_OBJ_SIZE}" \
     --concurrent "${WARP_CONCURRENT}" \
+    --duration "${WARP_DURATION}" \
     --noprefix --noclear >"${warp_log}" 2>&1 &
   warp_pid=$!
   log "warp PID=${warp_pid}"
@@ -1130,6 +1136,7 @@ Options:
   --rc-endpoint URL          Deprecated alias for --endpoint
   --stop-node-gb N           Stop the outage node when surviving nodes reach N GiB (default 15)
   --warp-stop-gb N           Stop warp when surviving nodes reach N GiB (default 40)
+  --warp-duration D          warp run duration; the usage monitor is the real stop (default 180m)
   --heal-token TOKEN         clientToken of a heal started earlier (for steps 6/7 reruns)
   --warp-timeout N           Write phase timeout in seconds (default 3600)
   --heal-timeout N           Heal wait timeout in seconds (default 86400)
@@ -1229,6 +1236,7 @@ main() {
       --rc-endpoint) API_ENDPOINT="$1"; shift ;;
       --stop-node-gb) STOP_NODE_AT_GB="$1"; shift ;;
       --warp-stop-gb) WARP_STOP_AT_GB="$1"; shift ;;
+      --warp-duration) WARP_DURATION="$1"; shift ;;
       --heal-token) HEAL_CLIENT_TOKEN="$1"; shift ;;
       --warp-timeout) WARP_TIMEOUT="$1"; shift ;;
       --heal-timeout) HEAL_TIMEOUT="$1"; shift ;;
