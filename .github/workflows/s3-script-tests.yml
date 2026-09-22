@@ -5,12 +5,14 @@ on:
     paths:
       - rustfs-s3-compat-test.sh
       - test_rustfs_s3_usage.py
+      - test_rustfs_s3_signing.py
       - .github/workflows/s3-script-tests.yml
   push:
     branches: [main]
     paths:
       - rustfs-s3-compat-test.sh
       - test_rustfs_s3_usage.py
+      - test_rustfs_s3_signing.py
       - .github/workflows/s3-script-tests.yml
 
 permissions:
@@ -26,5 +28,7 @@ jobs:
           persist-credentials: false
       - name: Validate shell syntax
         run: bash -n rustfs-s3-compat-test.sh
-      - name: Test fresh-bucket usage case without a server
-        run: python3 -m unittest test_rustfs_s3_usage.py
+      - name: Install independent SigV4 verifier
+        run: python3 -m pip install botocore==1.43.19
+      - name: Test S3 cases and signatures without a cluster
+        run: python3 -m unittest test_rustfs_s3_usage.py test_rustfs_s3_signing.py
