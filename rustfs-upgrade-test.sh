@@ -486,11 +486,24 @@ topology_nodes() {
   esac
 }
 
-wait_endpoint_ready() {
-  local waited=0
+wait_cluster_ready() {
+  # Liveness only proves that a process is running. Upgrade reads need every
+  # participating node to have joined the cluster and passed its read quorum
+  # checks before the endpoint is considered usable.
+  local nodes=("$@") waited=0 node all_ready
+  [ "${DRY_RUN}" -eq 1 ] && return 0
   while [ "${waited}" -lt "${SERVICE_TIMEOUT}" ]; do
-    if curl -fsS --max-time 5 "${ENDPOINT}/minio/health/live" >/dev/null 2>&1; then
-      log "S3 endpoint ready: ${ENDPOINT}"; return 0
+    all_ready=1
+    for node in "${nodes[@]}"; do
+      if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+          "curl -fsS --max-time 5 http://127.0.0.1:9000/minio/health/ready >/dev/null" 2>/dev/null; then
+        all_ready=0
+        break
+      fi
+    done
+    if [ "${all_ready}" -eq 1 ] && curl -fsS --max-time 5 "${ENDPOINT}/minio/health/ready" >/dev/null 2>&1; then
+      log "S3 cluster ready: ${ENDPOINT} (nodes: ${nodes[*]})"
+      return 0
     fi
     sleep 5; waited=$((waited+5))
   done
@@ -568,7 +581,7 @@ env_setup_old() {
   done
 
   start_and_wait_nodes "${nodes[@]}"
-  wait_endpoint_ready || die "OLD endpoint ${ENDPOINT} not ready"
+  wait_cluster_ready "${nodes[@]}" || die "OLD cluster ${ENDPOINT} not ready"
 
   OLD_VERSION_ACTUAL="$(node_rustfs_version "${nodes[0]}")"
   log "OLD version in place: ${OLD_VERSION_ACTUAL}"
@@ -598,7 +611,7 @@ upgrade_in_place() {
   install_deb_on_nodes "${to_url}" "${TO_SHA256}" "${nodes[@]}"
   # dpkg postinst usually restarts the service; make sure it is up and healthy.
   start_and_wait_nodes "${nodes[@]}"
-  wait_endpoint_ready || die "NEW endpoint ${ENDPOINT} not ready after upgrade"
+  wait_cluster_ready "${nodes[@]}" || die "NEW cluster ${ENDPOINT} not ready after upgrade"
 
   NEW_VERSION_ACTUAL="$(node_rustfs_version "${nodes[0]}")"
   log "NEW version in place: ${NEW_VERSION_ACTUAL}"
