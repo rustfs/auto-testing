@@ -1970,6 +1970,7 @@ run_all_tests() {
   run_test TIER-111 "TransitionEvents"     test_tier111
   run_test TIER-112 "TieredObjectDelete"   test_tier112
   run_test TIER-113 "EmptyPrefixAddAfterTransition" test_tier113
+  run_test TIER-114 "ReferencedTierForceRemove"     test_tier114
   run_test EVT-101 "TargetCrud"            test_evt101
   run_test EVT-102 "BucketRuleCrud"        test_evt102
   run_test EVT-103 "ObjectCreatedDelivery" test_evt103
@@ -2426,6 +2427,35 @@ test_tier113() {
   assert_rc_ok || return 1
   assert_tier_absent "${prefix_ok}" || return 1
   expect_add_tier_error "${prefix_bad}" "${prefix_remote}" occupied/ 409 XMinioAdminTierBackendInUse
+}
+
+test_tier114() { # force=true must override a lifecycle-only tier reference; non-force stays blocked (#6832)
+  local topo_tag token ref_remote ref_source ref_tier status
+  token="${RUN_TOKEN//-/}"
+  case "${CURRENT_TOPOLOGY}" in single-single) topo_tag=ss ;; single-multi) topo_tag=sm ;; *) topo_tag=na ;; esac
+  ref_remote="t114-${topo_tag}-${RUN_TOKEN}-ref"
+  ref_source="t114-${topo_tag}-${RUN_TOKEN}-src"
+  ref_tier="T114R${token}"
+
+  new_remote_bucket "${ref_remote}" || return 1
+  wait_remote_state "${ref_remote}" "" empty || return 1
+  add_tier rustfs "${ref_tier}" "${TARGET_ENDPOINT}" "${ref_remote}" "${ACCESS_KEY}" "${SECRET_KEY}"
+  assert_rc_ok || return 1
+  new_bucket "${ref_source}" || return 1
+  rc_run ilm rule add "local/${ref_source}" --storage-class "${ref_tier}" --transition-days 0
+  assert_rc_ok || return 1
+
+  # The lifecycle-only reference blocks an ordinary remove (fail-closed).
+  expect_remove_tier_error "${ref_tier}" 409 XMinioAdminTierBackendInUse || return 1
+
+  # force=true is the explicit decommission override and must succeed while
+  # the lifecycle rule still references the tier (#6832).
+  admin_api DELETE "/rustfs/admin/v3/tier/${ref_tier}" "force=true" >/dev/null
+  status="$(admin_api_code)"
+  [ "${status}" = "200" ] || { echo "force remove returned HTTP ${status}"; return 1; }
+  assert_tier_absent "${ref_tier}" || return 1
+
+  delete_lifecycle_and_assert_absent "${ref_source}" || return 1
 }
 
 test_evt101() {

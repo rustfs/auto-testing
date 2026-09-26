@@ -629,6 +629,55 @@ run_all_tests() {
   run_test STOR-131 "RcInfoConsistency"             test_stor131
   run_test STOR-132 "CompressedPhysicalVsLogical"   test_stor132
   run_test STOR-133 "InlineCapacity"                test_stor133
+  run_test STOR-134 "AdminUsageConverges"           test_stor134
+}
+
+test_stor134() { # admin usage APIs must respond promptly and converge to actual object counts (#1858 #2232 #5116)
+  local bucket="stor134-usage" i waited code body_file apid
+  new_bucket "${bucket}" || return 1
+  for i in $(seq 1 20); do
+    make_test_file "${TEST_TMP}/stor134-${i}" $((1024 + i))
+    aws_run s3api put-object --bucket "${bucket}" --key "obj-${i}" --body "${TEST_TMP}/stor134-${i}"
+    assert_aws_ok || { echo "put obj-${i} failed"; rm_bucket "${bucket}"; return 1; }
+  done
+
+  # The API must answer within 30s; a multi-minute hang is the #1858 signature.
+  body_file="${TEST_TMP}/stor134-usage.json"
+  admin_api GET "/rustfs/admin/v3/datausageinfo" "" "" > "${body_file}" 2>&1 &
+  apid=$!
+  waited=0
+  while kill -0 "${apid}" 2>/dev/null && [ "${waited}" -lt 30 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "${apid}" 2>/dev/null; then
+    kill "${apid}" 2>/dev/null || true
+    echo "datausageinfo did not respond within 30s (hang)"
+    rm_bucket "${bucket}"
+    return 1
+  fi
+  wait "${apid}" || true
+  code="$(admin_api_code)"
+  [ "${code}" = "200" ] || { echo "datausageinfo returned HTTP ${code}"; rm_bucket "${bucket}"; return 1; }
+
+  # Usage is scanner-derived and eventually consistent: poll until this
+  # bucket's own entry accounts for the seeded objects, or fail the way
+  # #2232/#5116 did (stale 0/0).
+  waited=0
+  while [ "${waited}" -lt 300 ]; do
+    if jq -e --arg b "${bucket}" \
+      '[.. | objects | select(has($b)) | .[$b]] | map((.objects? // .Objects? // -1) >= 20) | any' \
+      "${body_file}" >/dev/null 2>&1; then
+      rm_bucket "${bucket}"
+      return 0
+    fi
+    sleep 15
+    waited=$((waited + 15))
+    admin_api GET "/rustfs/admin/v3/datausageinfo" "" "" > "${body_file}" 2>&1 || true
+  done
+  echo "usage never accounted for the 20 seeded objects (stale/zero usage signature)"
+  rm_bucket "${bucket}"
+  return 1
 }
 
 test_stor101() {

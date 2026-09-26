@@ -641,6 +641,90 @@ final_summary() {
 
 # ==================== Test cases ====================
 
+test_s3c1401() { # COPY-directive CopyObject keeps source metadata, ignores request-only fields (regression #5511)
+  local code
+  new_bucket "s3c1401-src" || return 1
+  new_bucket "s3c1401-dst" || return 1
+  make_test_file "${TEST_TMP}/s3c1401" 65536
+  aws_run s3api put-object --bucket "s3c1401-src" --key f --body "${TEST_TMP}/s3c1401" \
+    --content-type "application/x-rustfs-src" --cache-control "max-age=60" --metadata src=1
+  assert_aws_ok || { echo "put src failed"; return 1; }
+  code="$(s3_signed_curl PUT "/s3c1401-dst/f" \
+    -H "x-amz-copy-source: /s3c1401-src/f" \
+    -H "content-type: application/x-request-only" \
+    -H "x-amz-meta-request-only: ignored")"
+  [ "${code}" = "200" ] || { echo "COPY with metadata-like headers returned ${code}: $(head -c 200 "${TEST_TMP}/curl.out")"; return 1; }
+  aws_run s3api head-object --bucket "s3c1401-dst" --key f
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e \
+    '.ContentType == "application/x-rustfs-src" and .Metadata.src == "1" and .Metadata.requestonly == null' >/dev/null \
+    || { echo "COPY did not preserve source metadata / drop request-only metadata: ${AWS_OUT}"; return 1; }
+  rm_bucket "s3c1401-src"; rm_bucket "s3c1401-dst"
+}
+
+test_s3c1402() { # Content-Encoding: aws-chunked without decoded-content-length is a normal signed upload (regression #4962)
+  local code
+  new_bucket "s3c1402-b" || return 1
+  make_test_file "${TEST_TMP}/s3c1402" 65536
+  code="$(s3_signed_curl PUT "/s3c1402-b/f" -H "content-encoding: aws-chunked" --data "${TEST_TMP}/s3c1402")"
+  [ "${code}" = "200" ] || { echo "aws-chunked PUT returned ${code}: $(head -c 200 "${TEST_TMP}/curl.out")"; return 1; }
+  aws_run s3api head-object --bucket "s3c1402-b" --key f
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e '.ContentLength == 65536' >/dev/null \
+    || { echo "wrong stored size: ${AWS_OUT}"; return 1; }
+  aws_run s3api get-object --bucket "s3c1402-b" --key f "${TEST_TMP}/s3c1402-dl"
+  assert_aws_ok || return 1
+  [ "$(md5_of_file "${TEST_TMP}/s3c1402-dl")" = "$(md5_of_file "${TEST_TMP}/s3c1402")" ] \
+    || { echo "content mismatch"; return 1; }
+  rm_bucket "s3c1402-b"
+}
+
+test_s3c1403() { # concurrent UploadPart must not fail while write quorum is met (regressions #6133 #6350)
+  local bucket="s3c1403-b" parts=32 psize=5242880 up_id i rc=0
+  local pids expected_md5 actual_md5
+  new_bucket "${bucket}" || return 1
+  aws_run s3api create-multipart-upload --bucket "${bucket}" --key big
+  assert_aws_ok || return 1
+  up_id="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId // empty')"
+  [ -n "${up_id}" ] || { echo "no UploadId"; return 1; }
+  for ((i = 1; i <= parts; i++)); do make_test_file "${TEST_TMP}/s3c1403-p${i}" "${psize}"; done
+  for ((i = 1; i <= parts; i++)); do
+    aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3api upload-part \
+      --bucket "${bucket}" --key big --upload-id "${up_id}" --part-number "${i}" \
+      --body "${TEST_TMP}/s3c1403-p${i}" >"${TEST_TMP}/s3c1403-up${i}.json" 2>&1 &
+    pids[${i}]=$!
+  done
+  for ((i = 1; i <= parts; i++)); do
+    wait "${pids[${i}]}" || { echo "part ${i} failed:"; head -c 300 "${TEST_TMP}/s3c1403-up${i}.json"; rc=1; }
+  done
+  if [ "${rc}" -ne 0 ]; then
+    aws_run s3api abort-multipart-upload --bucket "${bucket}" --key big --upload-id "${up_id}"
+    rm_bucket "${bucket}"
+    return 1
+  fi
+  {
+    printf '{"Parts":['
+    for ((i = 1; i <= parts; i++)); do
+      if [ "${i}" -gt 1 ]; then printf ','; fi
+      jq -c --argjson n "${i}" '{PartNumber: $n, ETag: .ETag}' "${TEST_TMP}/s3c1403-up${i}.json"
+    done
+    printf ']}'
+  } > "${TEST_TMP}/s3c1403-complete.json"
+  aws_run s3api complete-multipart-upload --bucket "${bucket}" --key big --upload-id "${up_id}" \
+    --multipart-upload "file://${TEST_TMP}/s3c1403-complete.json"
+  assert_aws_ok || { echo "complete failed: ${AWS_OUT}"; return 1; }
+  aws_run s3api head-object --bucket "${bucket}" --key big
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e --argjson n "$((parts * psize))" '.ContentLength == $n' >/dev/null \
+    || { echo "wrong object size: ${AWS_OUT}"; return 1; }
+  aws_run s3api get-object --bucket "${bucket}" --key big "${TEST_TMP}/s3c1403-dl"
+  assert_aws_ok || return 1
+  expected_md5="$({ for ((i = 1; i <= parts; i++)); do cat "${TEST_TMP}/s3c1403-p${i}"; done; } | md5sum | awk '{print $1}')"
+  actual_md5="$(md5_of_file "${TEST_TMP}/s3c1403-dl")"
+  [ "${actual_md5}" = "${expected_md5}" ] || { echo "assembled content mismatch"; return 1; }
+  rm_bucket "${bucket}"
+}
+
 run_all_tests() {
   run_test S3C-101 "CreateBucket"            test_s3c101
   run_test S3C-102 "HeadBucket"              test_s3c102
@@ -724,6 +808,9 @@ run_all_tests() {
   run_test S3C-1303 "HugeKeyMetadata"        test_s3c1303
   run_test S3C-1304 "MalformedXmlParams"     test_s3c1304
   run_test S3C-1305 "ConcurrentOverwrite"    test_s3c1305
+  run_test S3C-1401 "CopyMetadataOnCopy"     test_s3c1401
+  run_test S3C-1402 "AwsChunkedNoDecodedLen" test_s3c1402
+  run_test S3C-1403 "ConcurrentUploadPart"   test_s3c1403
   run_test SNW-101 "BasicTarExtract"         test_snw101
   run_test SNW-102 "PrefixNormalization"     test_snw102
   run_test SNW-103 "IgnoreDirs"              test_snw103
