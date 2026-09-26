@@ -426,10 +426,24 @@ install_and_start() { # install_and_start <volumes> [extra env line]
   done
   if [ "${volumes}" = "${VOLUMES_SNMD}" ]; then
     log "single-node topology: starting ${RUSTFS_SERVICE} on ${SNMD_NODE} only"
-    run_remote "${SNMD_NODE}" "sudo -n systemctl start ${RUSTFS_SERVICE}" || die "start failed on ${SNMD_NODE}"
+    if run_remote "${SNMD_NODE}" "sudo -n systemctl start ${RUSTFS_SERVICE}"; then
+      :
+    else
+      dump_service_diagnostics "${SNMD_NODE}"
+      die "start failed on ${SNMD_NODE}"
+    fi
   else
     log "starting ${RUSTFS_SERVICE} on ${NODES[*]}"
-    remote_all "sudo -n systemctl start ${RUSTFS_SERVICE}"
+    local start_pids=() start_i=0 start_pid start_fail=0
+    for node in "${NODES[@]}"; do
+      run_remote "${node}" "sudo -n systemctl start ${RUSTFS_SERVICE}" &
+      start_pids[${start_i}]=$!; start_i=$((start_i+1))
+    done
+    for start_pid in "${start_pids[@]}"; do wait "${start_pid}" || start_fail=1; done
+    if [ "${start_fail}" -ne 0 ]; then
+      dump_service_diagnostics "${NODES[@]}"
+      die "cluster start failed on one or more nodes"
+    fi
   fi
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: skipping cluster readiness polling"
@@ -443,6 +457,14 @@ install_and_start() { # install_and_start <volumes> [extra env line]
     sleep 5; waited=$((waited + 5))
   done
   die "cluster endpoint not ready after 180s"
+}
+
+dump_service_diagnostics() { # best-effort journal tail after a failed service start
+  local node
+  for node in "$@"; do
+    log "collecting ${RUSTFS_SERVICE} journal tail on ${node}"
+    run_remote "${node}" "sudo -n journalctl -u ${RUSTFS_SERVICE} -n 80 --no-pager 2>&1 | tail -n 80" || true
+  done
 }
 
 stop_node()  { log "stopping ${RUSTFS_SERVICE} on $1"; run_remote "$1" "sudo -n systemctl stop ${RUSTFS_SERVICE}"; }
@@ -463,7 +485,10 @@ start_nodes() {
     pids[$i]=$!; i=$((i + 1))
   done
   for pid in "${pids[@]}"; do wait "${pid}" || fail=1; done
-  [ "${fail}" -eq 0 ] || die "one or more restored nodes did not become active within 180s"
+  if [ "${fail}" -ne 0 ]; then
+    dump_service_diagnostics "$@"
+    die "one or more restored nodes did not become active within 180s"
+  fi
 }
 
 drive_state_file() {
