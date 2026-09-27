@@ -675,6 +675,12 @@ test_stor134() { # admin usage APIs must respond promptly and converge to actual
     waited=$((waited + 15))
     admin_api GET "/rustfs/admin/v3/datausageinfo" "" "" > "${body_file}" 2>&1 || true
   done
+  echo "STOR-134 observed datausageinfo (first 600 bytes):"
+  head -c 600 "${body_file}" 2>/dev/null || true
+  printf '\n'
+  echo "STOR-134 observed entries for ${bucket}:"
+  jq -c --arg b "${bucket}" '[.. | objects | select(has($b)) | .[$b]]' "${body_file}" 2>&1 | head -c 400 || true
+  printf '\n'
   echo "usage never accounted for the 20 seeded objects (stale/zero usage signature)"
   rm_bucket "${bucket}"
   return 1
