@@ -25,6 +25,7 @@ CASES = (
     ("TIER-111", "TransitionEvents"),
     ("TIER-112", "TieredObjectDelete"),
     ("TIER-113", "EmptyPrefixAddAfterTransition"),
+    ("TIER-114", "ReferencedTierForceRemove"),
     ("EVT-101", "TargetCrud"),
     ("EVT-102", "BucketRuleCrud"),
     ("EVT-103", "ObjectCreatedDelivery"),
