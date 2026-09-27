@@ -722,7 +722,12 @@ EOF
 #     otherwise                          -> reads and writes fail
 # Case ids: M-<topo>EC<P>-full | -n<k> | -rec. Register new topologies by
 # appending to MATRIX_TOPOS.
-MATRIX_TOPOS=("1x2" "1x4" "2x2" "2x4" "3x2" "3x4" "4x1" "4x2" "4x3" "4x4")
+# 4x1 (one drive per node) is excluded: the product rejects a distributed
+# pool whose nodes do not all have at least 2 drive endpoints - startup
+# dies with FATAL "Incorrect number of endpoints provided, size 1"
+# (BelowMinimum) before any case can run (see runs 36204915029 and
+# 36239607351). Revisit if the startup constraint is lifted.
+MATRIX_TOPOS=("1x2" "1x4" "2x2" "2x4" "3x2" "3x4" "4x2" "4x3" "4x4")
 
 matrix_volumes_expr() { # <nodes> <drives-per>
   local list="" i
@@ -788,7 +793,7 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   do_cleanup
 }
 
-run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (38 combos)
+run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (36 combos)
   local filter="${1:-}" spec nodes_n per parity combos=0
   for spec in "${MATRIX_TOPOS[@]}"; do
     [ -n "${filter}" ] && [ "${spec}" != "${filter}" ] && continue
