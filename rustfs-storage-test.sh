@@ -666,7 +666,7 @@ test_stor134() { # admin usage APIs must respond promptly and converge to actual
   waited=0
   while [ "${waited}" -lt 300 ]; do
     if jq -e --arg b "${bucket}" \
-      '[.. | objects | select(has($b)) | .[$b]] | map((.objects? // .Objects? // -1) >= 20) | any' \
+      '[.. | objects | select(has($b)) | .[$b]] | map((.objects_count? // .objects? // .Objects? // -1) >= 20) | any' \
       "${body_file}" >/dev/null 2>&1; then
       rm_bucket "${bucket}"
       return 0
