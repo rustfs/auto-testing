@@ -55,7 +55,13 @@ def audit_summary(values: list[dict], bucket: str, key: str) -> dict:
         if secret and secret.lower() in serialized:
             raise ValueError(f"audit payload exposes {name}")
     matches: dict[str, dict] = {}
+    entries = []
     for value in values:
+        batch = value.get("Records", [value])
+        if not isinstance(batch, list) or any(not isinstance(entry, dict) for entry in batch):
+            raise ValueError("audit Records must be an array of objects")
+        entries.extend(batch)
+    for value in entries:
         api = value.get("api") or {}
         if api.get("bucket") != bucket or api.get("object") != key:
             continue

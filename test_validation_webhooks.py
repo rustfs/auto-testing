@@ -55,6 +55,10 @@ class ValidationWebhooksTest(unittest.TestCase):
         get = entry("s3:GetObject", "get-id")
         result = audit_summary([put, get], "bucket", "key")
         self.assertEqual(result["operations"]["GetObject"]["api_name"], "s3:GetObject")
+        wrapped = [{"Records": [put]}, {"Records": [get]}]
+        self.assertEqual(audit_summary(wrapped, "bucket", "key"), result)
+        with self.assertRaisesRegex(ValueError, "array of objects"):
+            audit_summary([{"Records": [put, "invalid"]}], "bucket", "key")
         with self.assertRaisesRegex(ValueError, "not both delivered"):
             audit_summary([put, entry("s3:GetObject", "other-id", "other-key")], "bucket", "key")
         with self.assertRaisesRegex(ValueError, "not both delivered"):
@@ -62,6 +66,8 @@ class ValidationWebhooksTest(unittest.TestCase):
         with patch.dict(os.environ, {"RUSTFS_SECRET_KEY": "private-value"}):
             with self.assertRaisesRegex(ValueError, "exposes RUSTFS_SECRET_KEY"):
                 audit_summary([put, {**get, "accessKey": "private-value"}], "bucket", "key")
+            with self.assertRaisesRegex(ValueError, "exposes RUSTFS_SECRET_KEY"):
+                audit_summary([{"Records": [put, {**get, "accessKey": "private-value"}]}], "bucket", "key")
 
 
 if __name__ == "__main__":
