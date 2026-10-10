@@ -139,7 +139,7 @@ def read_interference(before, after, plan):
                     "GET produced a target with incorrect shard bytes")
             reconstructed.append({"node": identity[0], "disk": identity[1], "relativePath": identity[2]})
     return {"readRepairObserved": bool(reconstructed), "reconstructedTargets": reconstructed,
-            "manualRepairClaimed": False, "readRepairRuntimeEnabled": False,
+            "manualRepairClaimed": False, "manualStartIssuedForReadBranch": False,
             "note": "Any unexpected reconstruction is retained as interference; this GET never certifies the separate manual branch."}
 
 
