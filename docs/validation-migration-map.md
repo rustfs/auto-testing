@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 109 currently dispatchable IDs include all 74 non-Heal cases and thirty-five Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 110 currently dispatchable IDs include all 74 non-Heal cases and thirty-six Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -627,3 +627,28 @@ completed outcome and all user files and remains idle. This proves durable
 admission replay, and makes no cursor-resume or record-disk failover claim.
 Local owner/budget/process-birth/exit/old-token/journal negatives passed;
 full live evidence remains pending.
+
+
+B06 `heal.read-quorum-boundary` now dispatches all three source branches on
+H1/H2 with three independent 5MiB+123-byte never-versioned ACK objects. Its
+read and write quorums come from the recognized candidate artifact and actual
+decoded geometry; the reviewed candidate lock policy counts pool host:port
+clients, so four H2 hosts have exclusive quorum three, not nine disk locks.
+The exact-R GET archives read-repair interference and never certifies manual
+repair. The separate exact-R manual object must reconstruct every missing
+original shard and return exact completed responsibility. F1 only isolates
+payload files: all drives, metadata and locks remain online, so it cannot
+represent insufficient writable-drive or lock quorum. That condition is
+explicitly non-applicable here; B08 retains its independent real fault
+requirements. The restored-W branch first proves the candidate's exact R-1
+read refusal with no physical changes, then restores only W-(R-1) original
+backups. Those sources never count as product repairs. A distinct manual
+token must reconstruct all N-W remaining targets, followed by full physical,
+streaming checksum and all-peer S3 checks. Live evidence is pending.
+
+A08 `heal.admin-authorization` passed live in RustFS Actions run
+`38069648003`, harness `0789743d439fd91b967c2d6fba85c06e29f844c5`. All five
+source branches passed independently on H1 and H2; the canonical gate,
+complete summary, cleanup and workflow all passed with the fixed candidate.
+The prior A08 failures remain recorded. Forty-eight Heal executors remain
+to be migrated; automatic dispatch and local tests do not claim live PASS.

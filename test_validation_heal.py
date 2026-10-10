@@ -52,6 +52,7 @@ from scripts.validation_heal.cancel_restart import validate_journal, BRANCHES as
 from scripts.validation_heal.fleet_node import task_records as node_task_records
 from scripts.validation_heal import overlap
 from scripts.validation_heal import root_restart, fleet_node
+from scripts.validation_heal import quorum_boundary
 import errno
 import stat
 
@@ -2419,6 +2420,120 @@ class HealRootRestartOracleTest(unittest.TestCase):
         fleet.remote = stale; calls.clear()
         self.assertFalse(fleet.cleanup())
         self.assertFalse(any(action == "cleanup" for action, _ in calls))
+
+
+class HealReadQuorumBoundaryTest(unittest.TestCase):
+    contract = {"recognized": True, "writeQuorumRule": "data-plus-one-if-equal-parity"}
+    bucket = "rv-heal-0123456789abcdef"
+
+    def scene(self, branch="exact-r-read", *, total=4, data=2):
+        original = HealShardOracleTest().snapshot()["node1"]
+        snapshot = {}
+        disk_ids = [f"disk-{index}" for index in range(total)]
+        key = "boundary/" + branch + ".bin"
+        for slot in range(total):
+            node, disk = "node" + str(slot // 4 + 1), slot % 4
+            value = snapshot.setdefault(node, {"formats": [], "files": []})
+            value["formats"].append({"disk": disk, "value": {"format": "xl", "id": "pool",
+                "xl": {"sets": [disk_ids], "this": disk_ids[slot]}}})
+            metadata = copy.deepcopy(original["files"][0]["metadata"])
+            metadata["key"] = key
+            version = metadata["versions"][0]
+            version["role"] = "data" if slot < data else "parity"
+            version["erasure"].update(index=slot + 1, data_blocks=data, parity_blocks=total - data,
+                                       distribution=list(range(1, total + 1)))
+            value["files"].extend([
+                {"disk": disk, "path": f"{self.bucket}/{key}/xl.meta", "size": 600,
+                 "sha256": "metadata-" + str(slot), "metadata": metadata},
+                {"disk": disk, "path": f"{self.bucket}/{key}/{version['dataDir']}/part.1", "size": 82,
+                 "sha256": "shard-" + str(slot)}])
+        expected = [{"key": key, "versionId": "null", "deleteMarker": False, "isLatest": True,
+                     "payload": {"size": 100, "sha256": "acknowledged"}}]
+        return snapshot, expected
+
+    def plan(self, branch="exact-r-read", **kwargs):
+        snapshot, expected = self.scene(branch, **kwargs)
+        return snapshot, quorum_boundary.boundary_plan(branch, snapshot, self.bucket, expected, self.contract)
+
+    def missing(self, snapshot, targets):
+        changed = copy.deepcopy(snapshot)
+        for target in targets:
+            changed[target["node"]]["files"] = [entry for entry in changed[target["node"]]["files"]
+                if (entry["disk"], entry["path"]) != (target["disk"], target["relativePath"])]
+        return changed
+
+    def test_source_quorum_is_distinct_from_writable_drives_and_host_locks(self):
+        for total, data, write, clients in ((4, 2, 3, 1), (16, 12, 12, 4), (16, 8, 9, 4)):
+            snapshot, plan = self.plan("exact-r-heal-write-limited", total=total, data=data)
+            self.assertEqual((plan["readQuorum"], plan["writeQuorum"], plan["writableTargets"]), (data, write, total))
+            self.assertEqual(plan["lock"]["clientCount"], clients)
+            self.assertEqual(plan["lock"]["exclusiveQuorum"], clients // 2 + 1)
+            self.assertFalse(plan["insufficientWriteOrLockApplicable"])
+            witness = quorum_boundary.source_witness(self.missing(snapshot, plan["faults"]), plan, plan["faults"])
+            self.assertEqual(witness["sameVersionPayloadSources"], data)
+
+    def test_restore_to_w_leaves_real_targets_and_does_not_count_restored_sources_as_heal(self):
+        for total, data, restored, remaining in ((4, 2, 2, 1), (16, 12, 1, 4), (16, 8, 2, 7)):
+            snapshot, plan = self.plan("restored-w", total=total, data=data)
+            self.assertEqual(len(plan["retained"]), data - 1)
+            self.assertEqual(plan["restoreCount"], restored)
+            targets = plan["faults"][restored:]
+            self.assertEqual(len(targets), remaining)
+            after = self.missing(snapshot, targets)
+            self.assertEqual(quorum_boundary.source_witness(after, plan, targets)["sameVersionPayloadSources"], plan["writeQuorum"])
+
+    def test_source_witness_rejects_changed_generation_extra_sources_and_good_shard_mutation(self):
+        snapshot, plan = self.plan()
+        faulted = self.missing(snapshot, plan["faults"])
+        for kind in ("reappeared", "retained-bytes", "metadata", "foreign-target", "duplicate-target"):
+            changed, targets = copy.deepcopy(faulted), copy.deepcopy(plan["faults"])
+            if kind == "reappeared": changed = self.missing(snapshot, targets[1:])
+            elif kind == "retained-bytes": next(entry for entry in changed["node1"]["files"] if entry["path"].endswith("/part.1"))["sha256"] = "corrupt"
+            elif kind == "metadata": changed["node1"]["files"][0]["sha256"] = "another-generation"
+            elif kind == "foreign-target": targets[0]["relativePath"] += ".wrong-version"
+            else: targets.append(copy.deepcopy(targets[0]))
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                quorum_boundary.source_witness(changed, plan, targets)
+
+    def test_read_boundary_requires_complete_acknowledged_body_and_records_interference(self):
+        snapshot, plan = self.plan()
+        expected = plan["expected"][0]
+        good = {"acknowledged": True, "resultUnknown": False, "payload": expected["payload"],
+                "response": {"ResponseMetadata": {"HTTPStatusCode": 200}}}
+        quorum_boundary.read_observation(good, expected)
+        for field, value in (("acknowledged", False), ("resultUnknown", True), ("payload", {"size": 0, "sha256": "empty"})):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                quorum_boundary.read_observation({**good, field: value}, expected)
+        faulted = self.missing(snapshot, plan["faults"])
+        self.assertFalse(quorum_boundary.read_interference(faulted, faulted, plan)["readRepairObserved"])
+        proof = quorum_boundary.read_interference(faulted, snapshot, plan)
+        self.assertTrue(proof["readRepairObserved"])
+        self.assertFalse(proof["manualRepairClaimed"])
+        changed = copy.deepcopy(snapshot)
+        target = plan["faults"][0]
+        next(entry for entry in changed[target["node"]]["files"] if entry["disk"] == target["disk"]
+             and entry["path"] == target["relativePath"])["sha256"] = "bad-reconstruction"
+        with self.assertRaises(ValueError): quorum_boundary.read_interference(faulted, changed, plan)
+
+    def test_recovery_keeps_unresolved_registration_when_backup_oracle_is_rejected(self):
+        registration = ("node1", {"disk": 0, "faultId": "B06-exact-r-read-0"})
+        fleet = Mock(faults=[registration])
+        fleet.remote.return_value = {"physicalRepairPassAllowed": False, "restoredFromBackup": True}
+        fleet.record.side_effect = lambda label, value: value
+        registrations = [registration]
+        quorum_boundary.recover_registered(fleet, registrations, "rescue")
+        self.assertFalse(fleet.faults or registrations)
+        fleet.faults, registrations = [registration], [registration]
+        fleet.remote.return_value = {"physicalRepairPassAllowed": True}
+        with self.assertRaises(ValueError): quorum_boundary.recover_registered(fleet, registrations, "rescue")
+        self.assertEqual(fleet.faults, registrations)
+
+    def test_branch_and_geometry_contract_cannot_be_weakened(self):
+        self.assertEqual(list(quorum_boundary.BRANCHES), select("B06")[0]["variants"])
+        snapshot, expected = self.scene()
+        for contract in ({}, {"recognized": True, "writeQuorumRule": "unknown"}):
+            with self.assertRaises(ValueError): quorum_boundary.boundary_plan("exact-r-read", snapshot, self.bucket, expected, contract)
+        with self.assertRaises(ValueError): quorum_boundary.boundary_plan("exact-r-read", snapshot, self.bucket, expected * 2, self.contract)
 
 
 if __name__ == "__main__":
