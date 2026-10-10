@@ -74,10 +74,9 @@ The report's full implemented-case gate is intentionally not enabled by these
 runs. Run it with `--gate-status implemented` only after all 66
 implemented source cases have verified executors and live results.
 
-S3, scanner, KMS, and tiering have live PASS evidence against nightly build
-`37958901959` attempt `1` on the current auto-testing fleet. Events and audit
-have local executor tests but still need live verification. IAM also awaits a
-live run.
+S3, scanner, KMS, tiering, and IAM have live PASS evidence against nightly
+build `37958901959` attempt `1` on the current auto-testing fleet. Events and
+audit have local executor tests but still need live verification.
 
 ## Fault-tolerance suite
 

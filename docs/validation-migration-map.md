@@ -51,7 +51,8 @@ still require live candidate evidence before being counted as verified.
 `iam.policy-enforcement` has a dedicated executor on the Security suite's
 `single-single` deployment. It uses one principal with a policy that allows
 PUT/GET and explicitly denies DELETE, then checks the denied DELETE did not
-remove the object. Live candidate evidence is pending.
+remove the object. Its live candidate run passed in RustFS Actions run
+`38043548625`.
 
 "Existing validation environment" means the fleet used by `auto-testing`
 and the RustFS `smoke-testing` workflows, with `RUSTFS_NODES` and
@@ -74,8 +75,8 @@ executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
 case evidence. The seven currently dispatchable IDs are the S3, scanner, KMS,
-tiering, events, audit, and IAM cases above. Four have live PASS evidence; the other
-154 IDs remain unverified.
+tiering, events, audit, and IAM cases above. Five have live PASS evidence; the
+other 153 IDs remain unverified.
 
 The eight planned cases have these concrete reuse candidates:
 
@@ -86,7 +87,7 @@ The eight planned cases have these concrete reuse candidates:
 | `tiering.transition-and-restore` | TIER-105, TIER-107 | Dedicated executor and live PASS evidence. |
 | `events.delivery` | EVT-103, EVT-104 | Dedicated executor; live evidence pending. |
 | `audit.request-correlation` | AUD-102, AUD-104, AUD-106 | Dedicated executor; live evidence pending. |
-| `iam.policy-enforcement` | IAM-105, IAM-109 | Dedicated executor; live evidence pending. |
+| `iam.policy-enforcement` | IAM-105, IAM-109 | Dedicated executor and live PASS evidence. |
 | `oidc.login-and-session` | OIDC-103 | The live Keycloak path can be skipped by the old suite; validation requires an actual session-boundary result. |
 | `s3.basic-object-round-trip` | S3C-101, 201, 203, 205, 206, 207 | Dedicated executor and live PASS evidence. |
 

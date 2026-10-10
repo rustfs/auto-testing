@@ -122,7 +122,7 @@ VALIDATION_CANDIDATE_MANIFEST=""
 VALIDATION_TESTING_COMMIT=""
 VALIDATION_BINARY_SHA256=""
 VALIDATION_OBJECT_CLEANUP_STATUS=PASS
-RUN_TOKEN="$(date -u +%y%m%d%H%M%S)-$$"
+RUN_TOKEN=""
 
 # ==================== Helpers ====================
 
@@ -1043,6 +1043,7 @@ parse_args() {
   done
   if [ -n "${VALIDATION_CASE}" ]; then
     [ "${VALIDATION_CASE}" = iam.policy-enforcement ] || die "unknown validation case: ${VALIDATION_CASE}"
+    RUN_TOKEN="$(date -u +%y%m%d%H%M%S)-$$"
     [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its topology"
     [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}")
