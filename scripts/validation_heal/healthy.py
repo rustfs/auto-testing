@@ -147,6 +147,7 @@ class Fleet:
         self.sequence = 0
         self.reserved = []
         self.faults = []
+        self.bucket_record_faults = []
         self.drive_gates = set()
         self.secret_values = set()
         self.frozen_processes = {}
@@ -181,9 +182,13 @@ class Fleet:
         if action == "mrf-records":
             source += "\nimport types\nmrf = types.ModuleType('mrf_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("mrf_records.py").read_text()) + ", mrf.__dict__)\n"
-        if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline"}:
+        if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
+                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
+        if action.startswith("bucket-record-"):
+            source += "\nimport types\nbucket_records = types.ModuleType('bucket_records')\nexec(" + repr(
+                NODE_SOURCE.with_name("bucket_records.py").read_text()) + ", bucket_records.__dict__)\n"
         replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot"}
         if action in {"drive-gate", "drive-gate-probe", "drive-gate-activate", "gate-state", "drive-gate-release-live"} | replacement_actions:
             source += "\nimport types\ngate = types.ModuleType('drive_gate')\nexec(" + repr(
@@ -298,11 +303,13 @@ class Fleet:
                 self.record("logs", {"node": node, **self.remote(node, "logs")})
             except Exception as exc:
                 self.record("logs-error", {"node": node, "error": str(exc)})
-        if self.faults and not failures:
+        if (self.faults or self.bucket_record_faults) and not failures:
             try:
                 self.stop()
                 for node, params in self.faults:
                     self.record("fault-recovery", {"node": node, **self.remote(node, "recover-fault", **params)})
+                for node, params in self.bucket_record_faults:
+                    self.record("bucket-record-rescue", {"node": node, **self.remote(node, "bucket-record-recover", **params)})
             except Exception as exc:
                 failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
         if not failures:

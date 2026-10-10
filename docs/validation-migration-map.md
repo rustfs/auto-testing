@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 121 currently dispatchable IDs include all 74 non-Heal cases and forty-seven Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
+case evidence. The 122 currently dispatchable IDs include all 74 non-Heal cases and forty-eight Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 37 Heal cases remain
+The other 36 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -985,3 +985,36 @@ GET or unselected-control backup rescue. Rescue cannot certify product repair.
 Both complete S3 manifests through every peer and a final unchanged physical
 scene are required. A02 has no live PASS claim yet. Ten scope/topology/receipt/
 control negatives join the focused local checks; 226 checks now pass.
+
+
+D11 now dispatches all four source branches separately on H1/H2 (eight fresh
+instances). Its dedicated node backend derives only two owned bucket-config
+object paths and their incarnation controls. It never widens the general
+user-object fault allowlist, walks IAM records, or prints bucket-policy/inline
+payload bytes from physical metadata. A fresh namespace with no persisted IAM
+subtree is required before and after execution. Exact system object geometry
+binds each shard index to the original disk UUID/set slot; current inline or
+external bytes require candidate-bound streaming verification.
+
+The fixture preserves Enabled versioning, bucket-only policy, tags, an Object
+Lock default set after fixture writes, and all acknowledged historical business
+versions. One config-envelope replica is missing or truncated for positive
+recovery; the candidate's startup/config reads and explicit bucket Heal are
+recorded as allowed mechanisms. Every original system file must be restored
+byte-for-byte before backup rescue or business GET, while incarnation/control
+records, business files and formats remain unchanged. The unknown-record
+negative changes only outer XL2 major 1 to 2 on the exact primary config
+replicas; it claims no inner msgpack schema coverage. It requires structured
+public refusal, zero successful repair responsibility, preserved unknown
+bytes and healthy control-bucket APIs. A startup/readiness failure alone is
+not safe-refusal evidence. Rescue archives remain separate from product
+repair, and an unrecognized config rewrite retains the stopped namespace.
+D11 still requires live evidence.
+
+F02 corrected-budget run `38088240693` retained FAIL/cleanup PASS in both H2
+DB/DV branches: neither reached partial-rebuild interruption because the
+candidate did not expose a distinct new replacement UUID. F03 corrected-budget
+run `38088777413` also retained FAIL/cleanup PASS in both H2 DB/DV branches:
+replacement source status was partial, unknown or incompatible. The bounded
+file census no longer prevented either run; these product/evidence failures
+are not converted into successful restart coverage.

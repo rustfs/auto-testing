@@ -742,6 +742,30 @@ def logs(request):
     return {"unit": owner["unit"], "journal": command("journalctl", "-u", owner["unit"], "--no-pager", "-n", "2000").stdout}
 
 
+def bucket_record_operation(request):
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    module, fault = globals()["bucket_records"], fault_module()
+    if request["action"] == "bucket-record-snapshot":
+        tool = checked(state / "heal-meta-inspect", state)
+        require(owner.get("inspectorSha256") and digest(tool) == owner["inspectorSha256"],
+                "bucket-config inspector identity differs")
+        return module.snapshot(roots, {**owner, "bucketPrefix": owner["bucket"]}, request, checked, digest, tool, command)
+    root, owner = fault_root(request)
+    with fault.directory(root) as fd:
+        marker = root / "fault-owner.json"
+        if request["action"] == "bucket-record-apply" and not marker.exists():
+            fault.new_file(fd, marker.name, fault.encode({"schemaVersion": 1, "runId": owner["runId"],
+                "bucketPrefix": owner["bucket"], "mountId": fault.mount_id(fd), "device": os.fstat(fd).st_dev,
+                "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()}))
+        # Retain the common owner/mount/lease checks without widening its
+        # generic target allowlist to include any system path.
+        binding = fault.checked_owner(fd, owner["runId"], recovery=request["action"] == "bucket-record-recover")
+        if request["action"] == "bucket-record-apply":
+            return module.apply(fd, binding, fault, request)
+        return module.recover(fd, binding, fault, request)
+
+
 def cleanup(request):
     state, roots, owner = owned(request["runId"])
     command("systemctl", "stop", owner["unit"], check=False)
@@ -844,6 +868,8 @@ def main(request):
                "drive-gate-activate": drive_gate_activate, "gate-state": drive_gate_state,
                "drive-gate-release-live": drive_gate_release_live}
     actions["task-records"] = task_records
+    for action in ("bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover"):
+        actions[action] = bucket_record_operation
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
     actions.update({"process": process, "process-metrics": process_metrics, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})
