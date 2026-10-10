@@ -111,9 +111,10 @@ def token(state: dict, client_id: str, secret_name: str) -> tuple[str, dict]:
     payload = encoded.split(".")[1]
     claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
     audience = claims["aud"] if isinstance(claims["aud"], list) else [claims["aud"]]
-    if claims["iss"] != state["issuer"] or client_id not in audience or claims["sub"] != state["subject"]:
+    if (claims["iss"] != state["issuer"] or client_id not in audience or claims["sub"] != state["subject"]
+            or claims.get("preferred_username") != "validation-user"):
         raise RuntimeError("Keycloak identity claims differ from the configured fixture")
-    return encoded, {name: claims[name] for name in ("iss", "sub", "aud", "exp")}
+    return encoded, {name: claims[name] for name in ("iss", "sub", "aud", "exp", "preferred_username")}
 
 
 def sts(endpoint: str, identity_token: str, subject: str, policy: dict | None = None) -> tuple[dict, dict]:
@@ -175,7 +176,9 @@ def test(directory: Path, endpoint: str) -> None:
             aws(endpoint, root, "put-object", "--bucket", bucket, "--key", "object.bin", "--body", str(source))
         encoded, claims = token(state, "rustfs-validation", "client_secret")
         observations["identity"] = claims
-        identity_credentials, identity_session = sts(endpoint, encoded, state["subject"])
+        # RustFS exposes the configured username claim as the STS session identity.
+        # The JWT's issuer-scoped subject was independently checked above.
+        identity_credentials, identity_session = sts(endpoint, encoded, claims["preferred_username"])
         observations["identity_session"] = identity_session
         identity_read = directory / "oidc-identity-read.bin"
         aws(endpoint, identity_credentials, "get-object", "--bucket", buckets[0], "--key", "object.bin", str(identity_read))
@@ -188,7 +191,7 @@ def test(directory: Path, endpoint: str) -> None:
         observations["checks"]["identity_write_denied"] = identity_denial
         policy = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject",
                    "Resource": f"arn:aws:s3:::{buckets[0]}/*"}]}
-        session, session_observation = sts(endpoint, encoded, state["subject"], policy)
+        session, session_observation = sts(endpoint, encoded, claims["preferred_username"], policy)
         observations["session"] = session_observation
         received = directory / "oidc-read.bin"
         aws(endpoint, session, "get-object", "--bucket", buckets[0], "--key", "object.bin", str(received))
