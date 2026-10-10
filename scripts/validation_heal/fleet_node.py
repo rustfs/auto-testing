@@ -238,7 +238,8 @@ def apply_fault(request):
                 "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()}))
         binding = module.checked_owner(fd, owner["runId"])
         return module.apply_fault(fd, binding, request["relativePath"], request["faultId"], request["kind"],
-                                  request["expectedSha256"], request.get("offset"))
+                                  request["expectedSha256"], request.get("offset"),
+                                  donor_relative=request.get("donorRelativePath"), donor_sha=request.get("donorSha256"))
 
 
 def recover_fault(request):

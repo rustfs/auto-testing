@@ -21,7 +21,7 @@ import sys
 
 LIMIT = 64 * 1024**2
 ROOT_PATTERN = re.compile(r"/data/rustfs[1-9][0-9]*/heal-validation/((?:gh|manual)-[a-z0-9-]{5,60})")
-FAULTS = ("missing", "bitflip", "truncate", "zero", "header")
+FAULTS = ("missing", "bitflip", "truncate", "zero", "header", "replace-part")
 
 
 def bounded_fault_id(code: str, branch: str, index: int) -> str:
@@ -119,6 +119,7 @@ def encode(value: dict) -> bytes:
 
 def mutation(value: bytes, kind: str, offset: int | None = None) -> bytes | None:
     require(kind in FAULTS, "unknown fault")
+    require(kind != "replace-part", "replacement requires a verified owned donor")
     if kind == "missing":
         return None
     require(bool(value), "empty file cannot witness this fault")
@@ -150,20 +151,36 @@ def checked_owner(root_fd: int, run_id: str, recovery: bool = False) -> dict:
 
 
 def apply_fault(root_fd: int, owner: dict, relative: str, fault_id: str, kind: str,
-                expected_sha: str, offset: int | None = None) -> dict:
+                expected_sha: str, offset: int | None = None, *, donor_relative: str | None = None,
+                donor_sha: str | None = None) -> dict:
     parts = target_parts(relative, owner["bucketPrefix"])
     require(bool(re.fullmatch(r"[A-J][0-9]{2}-[a-z0-9-]{1,48}", fault_id)), "invalid fault ID")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", expected_sha)), "baseline SHA-256 required")
     with parent(root_fd, ["data", *parts[:-1]]) as target_fd, parent(root_fd, ["quarantine"]) as backup_fd:
         before = read_file(target_fd, parts[-1])
         require(digest(before) == expected_sha, "target differs from frozen baseline")
-        changed = mutation(before, kind, offset)
+        donor = None
+        if kind == "replace-part":
+            require(offset is None and isinstance(donor_relative, str) and isinstance(donor_sha, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", donor_sha), "verified replacement donor required")
+            source = target_parts(donor_relative, owner["bucketPrefix"])
+            require(source[-1] == parts[-1] and source[-1].startswith("part.") and source != parts,
+                    "replacement must use another owned generation's same-number part")
+            with parent(root_fd, ["data", *source[:-1]]) as source_fd:
+                changed = read_file(source_fd, source[-1])
+            require(digest(changed) == donor_sha and changed != before, "donor changed or is identical to target")
+            donor = {"relativePath": donor_relative, "sha256": donor_sha, "size": len(changed)}
+        else:
+            require(donor_relative is None and donor_sha is None, "donor parameters require replace-part")
+            changed = mutation(before, kind, offset)
         receipt = {"schemaVersion": 1, "runId": owner["runId"], "faultId": fault_id,
                    "relativePath": relative, "kind": kind, "offset": offset,
                    "before": {"sha256": digest(before), "size": len(before)},
                    "fault": None if changed is None else {"sha256": digest(changed), "size": len(changed)},
                    "createdAt": datetime.now(UTC).isoformat(), "backup": fault_id + ".original",
                    "backend": "logical-file-fault", "requiresQuiescentService": True}
+        if donor is not None:
+            receipt["donor"] = donor
         # Intent and recoverable bytes precede the mutation. An interrupted
         # apply remains recoverable even when no completion receipt was emitted.
         new_file(backup_fd, fault_id + ".intent.json", encode(receipt))
@@ -275,6 +292,8 @@ def main() -> int:
     apply.add_argument("--kind", choices=FAULTS, required=True)
     apply.add_argument("--expected-sha256", required=True)
     apply.add_argument("--offset", type=int)
+    apply.add_argument("--donor-path")
+    apply.add_argument("--donor-sha256")
     apply.add_argument("--service-quiescent", action="store_true", required=True)
     recover = sub.add_parser("recover")
     recover.add_argument("--fault-id", required=True)
@@ -311,7 +330,8 @@ def main() -> int:
                 result = {"runId": args.run_id, "path": args.path, "size": len(value), "sha256": digest(value)}
             elif args.action == "apply":
                 result = apply_fault(root_fd, owner, args.path, args.fault_id, args.kind,
-                                     args.expected_sha256, args.offset)
+                                     args.expected_sha256, args.offset,
+                                     donor_relative=args.donor_path, donor_sha=args.donor_sha256)
             else:
                 result = recover_fault(root_fd, owner, args.fault_id)
     print(json.dumps(result, ensure_ascii=False))

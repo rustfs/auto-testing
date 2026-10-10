@@ -55,11 +55,61 @@ BRANCHES = {
     "heal.special-keys-and-pagination": ("unicode-space-percent", "encoded-slash", "adjacent-prefixes", "multi-page-list"),
     "heal.object-size-boundaries": SIZE_BRANCHES,
     "heal.object-lock-retention": LOCK_BRANCHES,
+    "heal.metadata-payload-mismatch": ("length-mismatch", "payload-mismatch", "insufficient-authority"),
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
 SPECIAL_KEYS = ("中文/空 格%25.bin", "space key/object.bin", "literal%2Fslash/object.bin",
                 "literal/slash/object.bin", "a/object.bin", "ab/object.bin", "b/object.bin", "nested/a/b/object.bin")
+
+
+def seed_mismatch(recorder, bucket):
+    recorder.call("create_bucket", {"Bucket": bucket})
+    recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})
+    expected = []
+    for branch in BRANCHES["heal.metadata-payload-mismatch"]:
+        key = "mismatch/" + branch + ".bin"
+        for nonce, size in enumerate((VERSION_SIZE, VERSION_SIZE, 2 * 1024**2 + 147)):
+            body = payload(f"{bucket}/{key}/{nonce}", size)
+            response = recorder.call("put_object", {"Bucket": bucket, "Key": key,
+                "Metadata": {"heal-fixture": "metadata-payload-mismatch", "generation": str(nonce)},
+                "Tagging": f"suite=heal&generation=v{nonce}"}, body)
+            version = response.get("VersionId")
+            require(version not in {None, "", "null"}, "mismatch fixture omitted a real version ACK")
+            expected.append({"key": key, "versionId": version, "isLatest": nonce == 2, "deleteMarker": False,
+                             "payload": {"size": size, "sha256": hashlib.sha256(body).hexdigest()}})
+    return expected
+
+
+def mismatch_plan(branch, snapshot, bucket, expected):
+    key = "mismatch/" + branch + ".bin"
+    selected = [entry for entry in expected if entry["key"] == key]
+    require(len(selected) == 3 and len({entry["versionId"] for entry in selected}) == 3
+            and all(not entry["deleteMarker"] for entry in selected), "mismatch fixture lacks three distinct data versions")
+    target = choose_target(snapshot, bucket, selected[0], "data")
+    donor = choose_target(snapshot, bucket, selected[2 if branch == "length-mismatch" else 1], "data")
+    wanted_size = selected[0]["payload"]["size"]
+    require((selected[2]["payload"]["size"] != wanted_size) and selected[1]["payload"]["size"] == wanted_size,
+            "mismatch donor sizes do not distinguish length and payload faults")
+    erasure = target["logical"]["erasure"]
+    require(erasure == donor["logical"]["erasure"], "mismatch donor has a different EC layout")
+    read = erasure["data_blocks"]
+    ordered = sorted(target["cohort"], key=lambda shard: shard["index"])
+    negative = branch == "insufficient-authority"
+    replaced = ordered[read - 1:] if negative else [target]
+    faults = []
+    for shard in replaced:
+        source = next(item for item in donor["cohort"] if (item["node"], item["disk"]) == (shard["node"], shard["disk"]))
+        require(source["index"] == shard["index"] and source["role"] == shard["role"]
+                and source["dataDir"] != shard["dataDir"] and source["sha256"] != shard["sha256"]
+                and (source["size"] != shard["size"] if branch == "length-mismatch" else source["size"] == shard["size"]),
+                "mismatch donor is not the frozen same-role distinct-generation part")
+        faults.append({**target, **shard, "donorRelativePath": source["relativePath"], "donorSha256": source["sha256"],
+                       "donorSize": source["size"]})
+    return {"scope": {"bucket": bucket, "key": key}, "recursive": True, "expected": selected,
+            "faults": faults, "proofs": [target], "donorProof": donor, "kind": "replace-part",
+            "requiredRepairs": set() if negative else {version_identity(target)}, "metadataRepairs": set(),
+            "negative": negative, "readQuorum": read, "retainedShards": ordered[:read - 1] if negative else []}
 
 
 def seed_special_keys(recorder, bucket):
@@ -449,6 +499,8 @@ def reenable_and_verify(recorder, fleet, bucket, baseline):
 
 def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
     """Plans are derived from ACK order and decoded physical roles, never disk numbers."""
+    if case_id == "heal.metadata-payload-mismatch":
+        return mismatch_plan(branch, snapshot, bucket, expected)
     if case_id == "heal.object-lock-retention":
         index = LOCK_BRANCHES.index(branch)
         key = LOCK_KEYS[index]
@@ -611,7 +663,8 @@ def run_topology(args, topology, nodes, fixture):
     fleet = Fleet(nodes, directory, run_id, args.tool_directory)
     candidate = json.loads(args.candidate.read_text())
     tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
-    contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id == "heal.below-read-quorum" else None
+    contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id in {
+        "heal.below-read-quorum", "heal.metadata-payload-mismatch"} else None
     size_rule = verify_size_contract(tool_manifest, candidate) if args.case_id == "heal.object-size-boundaries" else None
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
@@ -650,6 +703,8 @@ def run_topology(args, topology, nodes, fixture):
             expected += extra
         elif lock_context is not None:
             expected = seed_locked(recorder, fleet, bucket, lock_context)
+        elif args.case_id == "heal.metadata-payload-mismatch":
+            expected = seed_mismatch(recorder, bucket)
         elif fixture == "DK":
             expected = seed_special_keys(recorder, bucket)
         elif fixture == "DS":
@@ -697,6 +752,8 @@ def run_topology(args, topology, nodes, fixture):
                                                      "metadataRepairs": sorted(plan["metadataRepairs"])})
                 for target in plan["proofs"]:
                     verify_proof(fleet, target, "baseline-bitrot-" + branch)
+                if plan.get("donorProof"):
+                    verify_proof(fleet, plan["donorProof"], "baseline-donor-bitrot-" + branch)
                 prior = before
                 for index, target in enumerate(plan["faults"]):
                     params = {"disk": target["disk"], "faultId": bounded_fault_id(recipe["code"], branch, index)}
@@ -705,7 +762,14 @@ def run_topology(args, topology, nodes, fixture):
                     registrations.append(registration)
                     receipt = fleet.record("fault-" + branch, fleet.remote(target["node"], "apply-fault",
                         **params, relativePath=target["relativePath"], expectedSha256=target["sha256"],
-                        kind=plan.get("kind", "missing"), offset=plan.get("offset")))
+                        kind=plan.get("kind", "missing"), offset=plan.get("offset"),
+                        **({"donorRelativePath": target["donorRelativePath"], "donorSha256": target["donorSha256"]}
+                           if plan.get("donorProof") else {})))
+                    if plan.get("donorProof"):
+                        require(receipt.get("donor") == {"relativePath": target["donorRelativePath"],
+                            "sha256": target["donorSha256"], "size": target["donorSize"]}
+                            and receipt.get("fault") == {"sha256": target["donorSha256"], "size": target["donorSize"]},
+                            "replacement receipt did not witness the exact frozen donor bytes")
                     if target["relativePath"].endswith("/xl.meta") and receipt.get("fault"):
                         metadata_faults.setdefault(target["node"], {})[target["relativePath"]] = receipt["fault"]
                     witnessed = fleet.snapshot("physical-fault-" + branch, quiescent=True, metadata_faults=metadata_faults)

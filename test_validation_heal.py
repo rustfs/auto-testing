@@ -31,6 +31,41 @@ from scripts.validation_heal.node_outage import quorum_plan, put_ack, delete_ack
 from scripts.validation_heal.fleet_node import runtime_config, BACKGROUND_CONFIG
 from scripts.validation_heal.object_lock import (validate_protection, validate_protected_delete, cleanup_locked_fleet,
     seed_locked, BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, CLEANUP_SECONDS)
+from scripts.validation_heal.versions import mismatch_plan, seed_mismatch
+from scripts.validation_heal import heal_fault
+
+
+def versioned_scene(keys, sizes=(100, 100, 61)):
+    base = HealShardOracleTest().snapshot()
+    bucket = "rv-heal-0123456789abcdef"
+    expected = []
+    snapshot = {"node1": {"formats": base["node1"]["formats"], "files": []}}
+    for key in keys:
+        for entry in base["node1"]["files"]:
+            if "/control/" in entry["path"]: continue
+            cloned = copy.deepcopy(entry)
+            cloned["path"] = cloned["path"].replace("objects/0008.bin", key)
+            if "metadata" in cloned:
+                cloned["metadata"]["key"] = key
+                versions = []
+                for nonce, size in enumerate(sizes):
+                    version = copy.deepcopy(cloned["metadata"]["versions"][0])
+                    version.update(versionId=f"v{nonce}", isLatest=nonce == 2, size=size,
+                                   dataDir=f"12345678-1234-1234-1234-{nonce:012d}")
+                    version["parts"][0].update(size=size, actualSize=size)
+                    versions.append(version)
+                cloned["metadata"]["versions"] = versions
+                snapshot["node1"]["files"].append(cloned)
+            else:
+                for nonce, size in enumerate(sizes):
+                    part = copy.deepcopy(cloned)
+                    part["path"] = part["path"].replace("12345678-1234-1234-1234-123456789abc", f"12345678-1234-1234-1234-{nonce:012d}")
+                    part["sha256"] += f"v{nonce}"
+                    part["size"] = (size + 1) // 2 + 32
+                    snapshot["node1"]["files"].append(part)
+        expected.extend({"key": key, "versionId": f"v{nonce}", "deleteMarker": False, "isLatest": nonce == 2,
+                         "payload": {"size": size}} for nonce, size in enumerate(sizes))
+    return snapshot, bucket, expected
 
 
 class HealContractTest(unittest.TestCase):
@@ -951,6 +986,106 @@ class HealNodeOutageTest(unittest.TestCase):
                 with self.subTest(version=version), self.assertRaises(ValueError): validate_deleted_read(changed, version)
 
 
+class HealPayloadMismatchTest(unittest.TestCase):
+    def test_length_and_payload_donors_keep_original_metadata_and_exact_same_role(self):
+        branches = VERSION_BRANCHES["heal.metadata-payload-mismatch"]
+        scene, bucket, expected = versioned_scene(["mismatch/" + branch + ".bin" for branch in branches])
+        original = copy.deepcopy(scene)
+        for branch in branches:
+            plan = mismatch_plan(branch, scene, bucket, expected)
+            self.assertEqual(len(plan["expected"]), 3)
+            self.assertEqual(plan["proofs"][0]["versionId"], "v0")
+            self.assertEqual(plan["donorProof"]["versionId"], "v2" if branch == "length-mismatch" else "v1")
+            self.assertEqual(len(plan["faults"]), 3 if plan["negative"] else 1)
+            if plan["negative"]:
+                self.assertEqual(len(plan["retainedShards"]), plan["readQuorum"] - 1)
+                self.assertTrue({shard["index"] for shard in plan["retainedShards"]}.isdisjoint(
+                    {shard["index"] for shard in plan["faults"]}))
+            for fault in plan["faults"]:
+                self.assertNotEqual(fault["donorSha256"], fault["sha256"])
+                self.assertNotEqual(fault["donorRelativePath"], fault["relativePath"])
+                self.assertEqual(fault["donorSize"] != fault["size"], branch == "length-mismatch")
+        self.assertEqual(scene, original)
+        broken = copy.deepcopy(scene)
+        for item in broken["node1"]["files"]:
+            if "metadata" in item:
+                for version in item["metadata"]["versions"]:
+                    if version["versionId"] == "v1":
+                        version["erasure"]["block_size"] //= 2
+        with self.assertRaisesRegex(ValueError, "different EC layout"):
+            mismatch_plan("payload-mismatch", broken, bucket, expected)
+
+    def replacement(self, directory, *, invalid=None):
+        root = Path(directory).resolve()
+        prefix = "rv-heal-mismatch-unit"
+        target = prefix + "/key/old/part.1"
+        donor = prefix + "/key/new/part.1"
+        before, replacement = b"authoritative-old-shard", b"other-generation-shard"
+        (root / "quarantine").mkdir()
+        for relative, value in ((target, before), (donor, replacement)):
+            path = root / "data" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(value)
+        sha = hashlib.sha256(replacement).hexdigest()
+        if invalid == "hash": sha = "0" * 64
+        elif invalid == "traversal": donor = prefix + "/key/../new/part.1"
+        elif invalid == "bucket": donor = donor.replace(prefix, "unowned-bucket")
+        elif invalid == "metadata": donor = donor.removesuffix("part.1") + "xl.meta"
+        elif invalid == "symlink":
+            link = root / "data" / donor
+            link.unlink()
+            link.symlink_to(root / "data" / target)
+        elif invalid == "hardlink":
+            import os
+            os.link(root / "data" / donor, root / "second-link")
+        elif invalid == "identical": donor = target
+        owner = {"runId": "manual-mismatch-unit", "bucketPrefix": prefix}
+        with patch.object(heal_fault, "mount_id", return_value=1), heal_fault.directory(root) as fd:
+            if invalid:
+                with self.assertRaises((ValueError, OSError)):
+                    heal_fault.apply_fault(fd, owner, target, "C08-test", "replace-part", hashlib.sha256(before).hexdigest(),
+                                           donor_relative=donor, donor_sha=sha)
+                self.assertEqual((root / "data" / target).read_bytes(), before)
+                self.assertFalse(list((root / "quarantine").iterdir()))
+                return
+            receipt = heal_fault.apply_fault(fd, owner, target, "C08-test", "replace-part", hashlib.sha256(before).hexdigest(),
+                                             donor_relative=donor, donor_sha=sha)
+            self.assertEqual((root / "data" / target).read_bytes(), replacement)
+            self.assertEqual((root / "data" / donor).read_bytes(), replacement)
+            self.assertEqual(receipt["donor"]["sha256"], sha)
+            self.assertEqual((root / "quarantine" / "C08-test.original").read_bytes(), before)
+            # A later generation is preserved instead of overwritten by rescue.
+            (root / "data" / target).write_bytes(b"new-committed-generation")
+            with self.assertRaisesRegex(ValueError, "changed after fault"):
+                heal_fault.recover_fault(fd, owner, "C08-test")
+            (root / "data" / target).write_bytes(replacement)
+            restored = heal_fault.recover_fault(fd, owner, "C08-test")
+            self.assertFalse(restored["physicalRepairPassAllowed"])
+            self.assertEqual((root / "data" / target).read_bytes(), before)
+
+    def test_replacement_is_recoverable_and_cannot_escape_owned_part_files(self):
+        for invalid in (None, "hash", "traversal", "bucket", "metadata", "symlink", "hardlink", "identical"):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as directory:
+                self.replacement(directory, invalid=invalid)
+
+    def test_three_version_fixture_has_real_different_length_and_content_acks(self):
+        observed = []
+        def invoke(operation, params, body=None):
+            observed.append((operation, params, body))
+            return {"VersionId": str(len(observed))} if operation == "put_object" else {}
+        with patch("scripts.validation_heal.versions.payload", side_effect=lambda identity, size: identity.encode()):
+            expected = seed_mismatch(types.SimpleNamespace(call=invoke), "rv-heal-mismatch")
+        self.assertEqual(len(expected), 9)
+        self.assertEqual(sum(entry["isLatest"] for entry in expected), 3)
+        for key in {entry["key"] for entry in expected}:
+            group = [entry for entry in expected if entry["key"] == key]
+            self.assertEqual(group[0]["payload"]["size"], group[1]["payload"]["size"])
+            self.assertNotEqual(group[0]["payload"]["size"], group[2]["payload"]["size"])
+            self.assertNotEqual(group[0]["payload"]["sha256"], group[1]["payload"]["sha256"])
+        with self.assertRaises(ValueError):
+            seed_mismatch(types.SimpleNamespace(call=lambda *args: {"VersionId": "null"}), "rv-heal-mismatch")
+
+
 class HealObjectLockTest(unittest.TestCase):
     def seed(self, *, fail_after=None):
         calls, context = [], {}
@@ -993,33 +1128,7 @@ class HealObjectLockTest(unittest.TestCase):
             self.assertTrue(partial["user"].startswith("rvheal"))
 
     def test_protected_plan_freezes_all_versions_on_the_lost_metadata_drive(self):
-        base = HealShardOracleTest().snapshot()
-        bucket = "rv-heal-0123456789abcdef"
-        expected = []
-        snapshot = {"node1": {"formats": base["node1"]["formats"], "files": []}}
-        for key in LOCK_KEYS:
-            for entry in base["node1"]["files"]:
-                if "/control/" in entry["path"]: continue
-                cloned = copy.deepcopy(entry)
-                cloned["path"] = cloned["path"].replace("objects/0008.bin", key)
-                if "metadata" in cloned:
-                    cloned["metadata"]["key"] = key
-                    versions = []
-                    for nonce in range(3):
-                        version = copy.deepcopy(cloned["metadata"]["versions"][0])
-                        version.update(versionId=f"v{nonce}", isLatest=nonce == 2,
-                                       dataDir=f"12345678-1234-1234-1234-{nonce:012d}")
-                        versions.append(version)
-                    cloned["metadata"]["versions"] = versions
-                    snapshot["node1"]["files"].append(cloned)
-                else:
-                    for nonce in range(3):
-                        part = copy.deepcopy(cloned)
-                        part["path"] = part["path"].replace("12345678-1234-1234-1234-123456789abc", f"12345678-1234-1234-1234-{nonce:012d}")
-                        part["sha256"] += f"v{nonce}"
-                        snapshot["node1"]["files"].append(part)
-            expected.extend({"key": key, "versionId": f"v{nonce}", "deleteMarker": False, "isLatest": nonce == 2,
-                             "payload": {"size": 100}} for nonce in range(3))
+        snapshot, bucket, expected = versioned_scene(LOCK_KEYS, (100, 100, 100))
         for index, branch in enumerate(LOCK_BRANCHES):
             plan = branch_plan("heal.object-lock-retention", branch, snapshot, bucket, expected, "DO")
             self.assertEqual({item["key"] for item in plan["expected"]}, {LOCK_KEYS[index]})

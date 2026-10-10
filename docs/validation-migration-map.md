@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 98 currently dispatchable IDs include all 74 non-Heal cases and twenty-four Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
+case evidence. The 99 currently dispatchable IDs include all 74 non-Heal cases and twenty-five Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 60 Heal cases remain
+The other 59 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -414,3 +414,20 @@ Incomplete finalization retains a stopped namespace with cleanup FAIL. Partial
 seed ownership, real server time, same-drive multi-version proof selection and
 protected cleanup failure boundaries have focused tests. Full live evidence
 is still required.
+
+C08 `heal.metadata-payload-mismatch` dispatches every H1/H2 branch with three
+real versions per distinct key. The donor is another acknowledged version's
+same-role/same-slot part: a different physical length for length mismatch,
+the same length with different bytes for payload mismatch. Candidate-bound
+streaming verification proves both original and donor cohorts before injection.
+The descriptor-relative fault layer admits only another owned same-number part
+on the same disk, exact donor/target hashes and quiescent service; it rejects
+metadata, traversal, symlinks, hardlinks, unowned buckets and identical bytes.
+Intent and original bytes are persisted before replacement. Every physical
+fault receipt must equal the frozen donor; metadata and controls stay unchanged.
+The negative branch leaves exactly R-1 correct same-version shards and requires
+exact read refusal, truthful failed responsibility and no physical mutation
+before rescue. Restored backups certify cleanup only; a later-generation target
+cannot be overwritten. Positive branches require original shard bytes, full
+version metadata/contents/tags, streaming checksums and repaired receipts.
+This executor has local fault/recovery/authority tests and still needs live proof.
