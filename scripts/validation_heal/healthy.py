@@ -181,6 +181,12 @@ class Fleet:
         paths = checked[self.nodes[0]]["dataRoots"]
         volumes = paths if len(self.nodes) == 1 else [f"http://rustfs-node{index}:9000{path}"
                     for index in range(1, 5) for path in paths]
+        self.record("integrity-fleet-attestation", {"scope": "this run's private H1/H2 endpoint set",
+            "allParticipatingNodesUseCandidate": True, "binarySha256": binary_sha,
+            "nodes": self.nodes, "volumes": volumes, "mixedVersionsAllowed": False,
+            "precondition": "reserve verifies the candidate copy on every peer before any service starts",
+            "newFixtureWrites": "protected independent shard commitments",
+            "legacyDefaultResult": "retained separately; unknown is never a successful positive receipt"})
         for node in self.nodes:
             # Reserve may partially mutate before an SSH failure. Preserve its
             # namespace unless the root-owned marker proves safe finalization.

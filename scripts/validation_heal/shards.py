@@ -34,6 +34,14 @@ except ImportError:
 # Every branch uses a distinct object. Positions refer to physical bytes,
 # including the checksum header; multipart numbers come from decoded metadata.
 BRANCHES = {
+    "heal.range-head-and-conditions": [
+        ("head", "objects/0008.bin", "data", 1, "missing", None, 2),
+        ("range-valid", "multipart/0000.bin", "data", 2, "bitflip", "middle", 2),
+        ("range-outside", "objects/0017.bin", "data", 1, "missing", None, 2),
+        ("if-match", "objects/0026.bin", "data", 1, "bitflip", "middle", 2),
+        ("if-none-match", "objects/0035.bin", "data", 1, "missing", None, 2),
+        ("if-modified-since", "objects/0044.bin", "data", 1, "bitflip", "middle", 2),
+        ("if-unmodified-since", "objects/0053.bin", "data", 1, "missing", None, 2)],
     "heal.admin-dry-run": [
         ("missing-remove0-recreate0", "objects/0008.bin", "data", 1, "missing", None, 2),
         ("missing-remove1-recreate0", "objects/0017.bin", "data", 1, "missing", None, 2),
@@ -185,6 +193,13 @@ def validate_repaired_physical(before, after, target):
         require(before[node]["formats"] == after[node]["formats"], "repair changed disk format")
     for identity, entry in left.items():
         actual = right.get(identity)
+        # Complete MPU commits the authoritative part manifest into xl.meta.
+        # A healed target directory can discard only its stale per-part sidecars;
+        # other versions, drives, pending uploads and payload files stay exact.
+        completed_sidecars = {f"{target['bucket']}/{target['key']}/{target['dataDir']}/part.{part['number']}.meta"
+                              for part in target["logical"]["parts"]}
+        if actual is None and identity[:2] == (target["node"], target["disk"]) and identity[2] in completed_sidecars:
+            continue
         require(actual is not None, "repair lost a baseline file or control")
         if identity[2] != meta_path:
             require(actual == entry, "repair did not restore exact part bytes or changed a control")
@@ -340,6 +355,53 @@ def verify_ranges(probe, fleet, bucket, key, *, version_id="null", expected_body
     return proofs
 
 
+def validate_conditional_response(observed, status, baseline, *, code=None, full_body=False):
+    response = observed.get("response") or {}
+    require(response.get("ResponseMetadata", {}).get("HTTPStatusCode") == status,
+            f"conditional request expected HTTP {status}")
+    if status >= 300:
+        require(observed.get("acknowledged") is False and observed.get("resultUnknown") is False
+                and "payload" not in observed, "conditional denial returned success data or unknown transport outcome")
+        if code is not None:
+            require(response.get("Error", {}).get("Code") == code, "conditional response has the wrong structured error")
+    else:
+        require(observed.get("acknowledged") is True and response.get("ETag") == baseline["properties"]["ETag"],
+                "conditional request returned the wrong object ETag")
+        if full_body:
+            require(observed.get("payload") == baseline["payload"], "conditional GET returned wrong full content")
+
+
+def verify_conditions(probe, fleet, branch, baseline, head, label):
+    name, key = branch[:2]
+    entry = next(entry for entry in baseline["entries"] if entry["key"] == key)
+    params = {"Bucket": baseline["bucket"], "Key": key, "VersionId": entry["versionId"]}
+    etag, modified = head["ETag"], head["LastModified"]
+    require(isinstance(modified, datetime) and modified.tzinfo is not None, "baseline LastModified must be server time")
+    requests = {
+        "head": [("head_object", {}, 200, None)],
+        "range-outside": [("get_object", {"Range": f"bytes={entry['payload']['size']}-"}, 416, "InvalidRange")],
+        "if-match": [("get_object", {"IfMatch": etag}, 200, None),
+                     ("get_object", {"IfMatch": '"00000000000000000000000000000000"'}, 412, "PreconditionFailed")],
+        "if-none-match": [("get_object", {"IfNoneMatch": etag}, 304, None),
+                          ("get_object", {"IfNoneMatch": '"00000000000000000000000000000000"'}, 200, None)],
+        "if-modified-since": [("get_object", {"IfModifiedSince": modified + timedelta(seconds=2)}, 304, None),
+                              ("get_object", {"IfModifiedSince": modified - timedelta(seconds=2)}, 200, None)],
+        "if-unmodified-since": [("get_object", {"IfUnmodifiedSince": modified - timedelta(seconds=2)}, 412, "PreconditionFailed"),
+                                ("get_object", {"IfUnmodifiedSince": modified + timedelta(seconds=2)}, 200, None)]}
+    if name == "range-valid":
+        return verify_ranges(probe, fleet, baseline["bucket"], key)
+    results = []
+    for operation, extra, status, code in requests[name]:
+        observed = fleet.record(label + "-" + name, probe.s3(operation, {**params, **extra}))
+        validate_conditional_response(observed, status, entry, code=code, full_body=operation == "get_object" and status == 200)
+        if operation == "head_object":
+            require(observed["response"].get("LastModified") == modified
+                    and all(observed["response"].get(field) == value for field, value in entry["properties"].items()),
+                    "HEAD content properties or server LastModified changed")
+        results.append({"operation": operation, "status": status, "condition": list(extra)})
+    return results
+
+
 def run_topology(args, topology, nodes, *, fixture="DB"):
     directory = args.evidence / topology
     directory.mkdir()
@@ -375,10 +437,12 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
         baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         pending = fleet.record("mpu-baseline", pending_inventory(probe, bucket)) if needs_multipart else None
+        heads = {}
         for entry in baseline["entries"]:
             if entry["deleteMarker"]:
                 continue
             head = recorder.call("head_object", {"Bucket": bucket, "Key": entry["key"], "VersionId": entry["versionId"]})
+            heads[entry["key"]] = head
             require(all(head.get(name) == value for name, value in entry["properties"].items()), "HEAD differs from GET baseline")
         fleet.stop()
         original = fleet.snapshot("physical-baseline", quiescent=True)
@@ -388,8 +452,14 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
                 "endpoints": binding["endpoints"], "stableEndpointKind": "fixed current auto-testing node address",
                 "faultTargetExcludesCoordinator": True})
         dry_run = args.case_id == "heal.admin-dry-run"
+        conditions = args.case_id == "heal.range-head-and-conditions"
         selected_branches = [branch for branch in BRANCHES[args.case_id]
                             if not dry_run or branch[0].startswith("versioned-") == (fixture == "DV")]
+        if conditions:
+            fleet.start()
+            for branch in selected_branches:
+                verify_conditions(probe, fleet, branch, baseline, heads[branch[1]], "baseline-condition")
+            fleet.stop()
         targets = []
         for branch in selected_branches:
             version = next(entry for entry in expected if entry["key"] == branch[1] and not entry["deleteMarker"])
@@ -444,8 +514,6 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
                 else:
                     physical = validate_repaired_physical(before, repaired, target)
                 bitrot = verify_cohort(fleet, target, ("recovered-bitrot-" if dry_run else "repaired-bitrot-") + name)
-                if not dry_run:
-                    validate_repaired_status(status, target)
                 fleet.start()
                 current = fleet.record("s3-after-" + name, probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
                 comparison = compare_inventories(baseline, current)
@@ -456,11 +524,16 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
                         compare_inventories(baseline, peer_s3)
                 ranges = verify_ranges(probe, fleet, bucket, key, version_id=target["versionId"],
                     expected_body=payload(f"{bucket}/{key}/0", 5 * 1024**2 + 123) if fixture == "DV" else None)
+                condition_proof = verify_conditions(probe, fleet, branch, baseline, heads[key], "repaired-condition") if conditions else None
                 if pending is not None:
                     require(fleet.record("mpu-after-" + name, pending_inventory(probe, bucket)) == pending,
                             "repair changed pending MPU identities or parts")
+                if not dry_run:
+                    validate_repaired_status(status, target)
                 result["branches"][name] = {"verdict": "PASS", "physical": physical, "bitrot": bitrot,
                     "s3": comparison, "ranges": ranges, "trigger": "manual-normal" if mode == 1 else "manual-deep"}
+                if condition_proof is not None:
+                    result["branches"][name]["conditions"] = condition_proof
             except (Exception, KeyboardInterrupt) as exc:
                 result["branches"][name] = {"verdict": "FAIL", "failure": {"type": type(exc).__name__, "message": str(exc)}}
                 try:

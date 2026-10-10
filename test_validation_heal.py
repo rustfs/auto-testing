@@ -15,6 +15,7 @@ from scripts.validation_heal.fleet_node import paths, stopped
 from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
+from scripts.validation_heal.shards import validate_conditional_response
 
 
 class HealContractTest(unittest.TestCase):
@@ -171,6 +172,18 @@ class HealHealthyOracleTest(unittest.TestCase):
 
 
 class HealShardOracleTest(unittest.TestCase):
+    def test_condition_denial_is_not_a_transport_failure_or_success_payload(self):
+        baseline = {"properties": {"ETag": '"etag"'}, "payload": {"size": 3, "sha256": "correct"}}
+        good = {"response": {"ResponseMetadata": {"HTTPStatusCode": 412}, "Error": {"Code": "PreconditionFailed"}},
+                "acknowledged": False, "resultUnknown": False}
+        validate_conditional_response(good, 412, baseline, code="PreconditionFailed")
+        for changed in ({**good, "payload": {"size": 3}}, {**good, "resultUnknown": True}, {**good, "acknowledged": True}):
+            with self.assertRaises(ValueError): validate_conditional_response(changed, 412, baseline, code="PreconditionFailed")
+        success = {"response": {"ResponseMetadata": {"HTTPStatusCode": 200}, "ETag": '"etag"'},
+                   "acknowledged": True, "payload": baseline["payload"]}
+        validate_conditional_response(success, 200, baseline, full_body=True)
+        with self.assertRaisesRegex(ValueError, "full content"):
+            validate_conditional_response({**success, "payload": {"size": 3, "sha256": "wrong"}}, 200, baseline, full_body=True)
     def test_ssh_script_compiles_with_fault_module_and_keeps_structured_request(self):
         observed = []
         def invoke(args, **params):
@@ -268,6 +281,18 @@ class HealShardOracleTest(unittest.TestCase):
         changed["node1"]["files"][-1]["sha256"] = "control changed"
         with self.assertRaisesRegex(ValueError, "changed a control"):
             validate_repaired_physical(before, changed, target)
+
+    def test_completed_mpu_sidecar_cleanup_is_bound_to_target_drive_and_manifest(self):
+        before = self.snapshot()
+        target = self.target(before)
+        path = target["relativePath"] + ".meta"
+        before["node1"]["files"].append({"disk": target["disk"], "path": path, "size": 100, "sha256": "old staging"})
+        after = copy.deepcopy(before)
+        after["node1"]["files"].pop()
+        validate_repaired_physical(before, after, target)
+        before["node1"]["files"][-1]["disk"] = 0
+        with self.assertRaisesRegex(ValueError, "lost a baseline file"):
+            validate_repaired_physical(before, after, target)
 
     def test_unknown_or_wrong_version_receipt_cannot_certify_physical_repair(self):
         target = self.target(self.snapshot())

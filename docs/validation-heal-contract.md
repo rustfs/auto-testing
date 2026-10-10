@@ -6,7 +6,7 @@
 
 入口为 `scripts/validation_heal/matrix.py`、[逐例操作卡](validation-heal-cases.md) 和 [执行手册](validation-heal-operations.md)。运行环境是当前 auto-testing 的 Heal 节点；候选及 rc 使用当前 validation lane 的不可变包和实际二进制摘要。源仓库历史 pilot 结果不能计入本次通过数量。
 
-11 个用例已接入自动分发：A01、A03、A04、A07、C01–C04、D02、E01、E02。分片执行器保留新增 7 项的全部 24 个源分支和 H1/H2 拓扑，使用实际盘角色、停止服务后的文件故障、原始同角色分片摘要与逐块 HighwayHash 校验。A03 的两个分支只执行 H2，比较协调者、独立 peer 和固定节点入口的任务身份、终态及完整 outcome。A04 保留四个 DB 参数组合及两个 DV 分支，每个拓扑分别创建完整 DB/DV 环境；dry-run 不要求 incarnation，但必须有完整 dry_run_observed 集合且无对象修改。其余 73 项保留源 `operator-assisted` 方式。每项的实际执行状态见 [迁移映射](validation-migration-map.md)。方案、计划或完整文件归档均不能代替 live PASS。
+12 个用例已接入自动分发：A01、A03、A04、A07、C01–C04、D02、D07、E01、E02。分片执行器保留新增 7 项的全部 24 个源分支和 H1/H2 拓扑，使用实际盘角色、停止服务后的文件故障、原始同角色分片摘要与逐块 HighwayHash 校验。A03 的两个分支只执行 H2，比较协调者、独立 peer 和固定节点入口的任务身份、终态及完整 outcome。A04 保留四个 DB 参数组合及两个 DV 分支，每个拓扑分别创建完整 DB/DV 环境；dry-run 不要求 incarnation，但必须有完整 dry_run_observed 集合且无对象修改。D07 保留七个 HEAD/Range/ETag/时间条件分支，先冻结健康请求的具体 200/206/304/412/416 预期，再在物理修复后重复真实请求。其余 72 项保留源 `operator-assisted` 方式。每项的实际执行状态见 [迁移映射](validation-migration-map.md)。方案、计划或完整文件归档均不能代替 live PASS。
 
 H07 的单 set 两个分支只属于 H3，双 set 两个分支只属于 H4；四个不匹配组合记为 `nonApplicableCombinations`。缺少机器属于资源阻塞。
 
@@ -302,3 +302,6 @@ fault-plan 至少包含 run/case/variant ID、拓扑指纹、对象/版本/incar
 Functional Chain 在共享节点并发锁内调用 auto-testing 的 canonical dispatcher。普通 live 执行消费候选 deb 和工具产物，无需 RustFS checkout；只读 metadata inspector 和原生屏障测试须在构建阶段绑定精确候选源码，单独留证。
 
 尚未自动化的分支由 `matrix.py plan` 固定全部适用拓扑、源断言、操作顺序、参数绑定与恢复步骤。`matrix.py audit` 校验九类证据的摘要和分支完整性，结果仍须逐项审阅，绝不自行生成 canonical PASS。
+
+
+正向 H1/H2 夹具显式启用 `RUSTFS_SHARD_INTEGRITY_WRITE=true` 和 `RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED=true`。该确认只针对本例私有 endpoint 集合：所有参与节点先安装并校验同一候选二进制，再启动专用服务；配置从真实进程环境读回。候选默认值为 false，默认 legacy 对象的 unknown 回执已单独保留为失败证据，不能改写为 repaired，也不从保护模式推断默认部署已满足这些正向证明契约。

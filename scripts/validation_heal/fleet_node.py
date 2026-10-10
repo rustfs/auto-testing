@@ -23,7 +23,8 @@ MOUNTS = tuple(Path(f"/data/rustfs{index}") for index in range(1, 5))
 STATE_ROOT = Path("/var/lib/rustfs-auto-testing/heal")
 RUN_PATTERN = re.compile(r"gh-[1-9][0-9]*-[1-9][0-9]*-(?:h1|h2)")
 BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "true",
-                     "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "false", "RUSTFS_HEAL_MRF_ENABLE": "false"}
+                     "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "false", "RUSTFS_HEAL_MRF_ENABLE": "false",
+                     "RUSTFS_SHARD_INTEGRITY_WRITE": "true", "RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED": "true"}
 
 
 def require(condition, message):
