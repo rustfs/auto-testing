@@ -186,9 +186,10 @@ def validate_fault(before, after, target, receipt):
             "file fault changed metadata, controls or another shard")
 
 
-def validate_repaired_physical(before, after, target):
+def validate_repaired_physical(before, after, target, *, repair_targets=None):
     left, right = files(before), files(after)
-    meta_path = f"{target['bucket']}/{target['key']}/xl.meta"
+    repair_targets = repair_targets or [target]
+    meta_paths = {f"{item['bucket']}/{item['key']}/xl.meta" for item in repair_targets}
     for node in before:
         require(before[node]["formats"] == after[node]["formats"], "repair changed disk format")
     for identity, entry in left.items():
@@ -196,12 +197,13 @@ def validate_repaired_physical(before, after, target):
         # Complete MPU commits the authoritative part manifest into xl.meta.
         # A healed target directory can discard only its stale per-part sidecars;
         # other versions, drives, pending uploads and payload files stay exact.
-        completed_sidecars = {f"{target['bucket']}/{target['key']}/{target['dataDir']}/part.{part['number']}.meta"
-                              for part in target["logical"]["parts"]}
-        if actual is None and identity[:2] == (target["node"], target["disk"]) and identity[2] in completed_sidecars:
+        completed_sidecars = {(item["node"], item["disk"],
+                              f"{item['bucket']}/{item['key']}/{item['dataDir']}/part.{part['number']}.meta")
+                             for item in repair_targets for part in item["logical"]["parts"]}
+        if actual is None and identity in completed_sidecars:
             continue
         require(actual is not None, "repair lost a baseline file or control")
-        if identity[2] != meta_path:
+        if identity[2] not in meta_paths:
             require(actual == entry, "repair did not restore exact part bytes or changed a control")
         else:
             def semantics(metadata):
@@ -211,9 +213,10 @@ def validate_repaired_physical(before, after, target):
             require(actual.get("metadata") and semantics(actual["metadata"]) == semantics(entry["metadata"]),
                     "repair changed decoded version/part identity")
     for identity in set(right) - set(left):
-        original = left.get((identity[0], identity[1], meta_path))
-        allowed = f"{target['bucket']}/{target['key']}/{target['dataDir']}/xl.meta.bkp"
-        require(identity[2] == allowed and original
+        allowed = {(item["node"], item["disk"], f"{item['bucket']}/{item['key']}/{item['dataDir']}/xl.meta.bkp")
+                   for item in repair_targets}
+        original = left.get((identity[0], identity[1], identity[2].rsplit("/", 2)[0] + "/xl.meta"))
+        require(identity in allowed and original
                 and right[identity]["sha256"] == original["sha256"] and right[identity]["size"] == original["size"],
                 "repair created an unexpected physical file")
     return {"targetLengthAndFullSha256Restored": True, "controlFilesUnchanged": True,
@@ -276,13 +279,15 @@ def peer_status_equal(coordinator, peer):
             and peer.get("truncated", False) is False)
 
 
-def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_overrides=None):
+def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_overrides=None, admissions=None):
     path = "/rustfs/admin/v3/heal/" + quote(target["bucket"], safe="") + "/" + quote(target["key"], safe="/")
     started = fleet.record("trigger", probe.admin(path, [], json.dumps(
         {**BASE_OPTIONS, "scanMode": mode, **(option_overrides or {})}).encode()))
     require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict), "repair admission failed")
     token = started["response"].get("clientToken")
     require(isinstance(token, str) and token, "repair admission omitted token")
+    if admissions is not None:
+        admissions.append({"path": path, "clientToken": token})
     active.append((path, token))
     deadline = time.monotonic() + 180
     while True:
@@ -490,7 +495,8 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
                         "ATTRIBUTION_NOT_OBSERVED: fault changed before the manual task")
                 status = run_task(probe, fleet, target, mode, active,
                     status_endpoints=("node2", "node3") if cross_node else (),
-                    option_overrides={"dryRun": True, "remove": "remove1" in name, "recreate": "recreate1" in name}
+                    option_overrides={"dryRun": True, "recursive": fixture == "DV",
+                                      "remove": "remove1" in name, "recreate": "recreate1" in name}
                     if dry_run else None)
                 listing = fleet.record("dry-run-version-list", probe.s3("list_object_versions", {"Bucket": bucket})) if dry_run else None
                 fleet.stop()

@@ -19,6 +19,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "${case_id}" in
   heal.admin-healthy-noop|heal.admin-invalid-request) ;;
+  heal.historical-versions|heal.repeat-idempotency) driver=versions.py ;;
   heal.admin-token-cross-node-status|heal.admin-dry-run|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.range-head-and-conditions|heal.manual-normal-attribution|heal.manual-deep-attribution)
     driver=shards.py ;;
   *) die "automatic Heal executor is not migrated: ${case_id}" ;;
@@ -43,7 +44,7 @@ tool_args=()
 if [ -n "${VALIDATION_HEAL_TOOL_DIRECTORY:-}" ]; then
   tool_args=(--tool-directory "${VALIDATION_HEAL_TOOL_DIRECTORY}")
 fi
-[ "${driver}" != shards.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "external-shard cases require candidate-bound bitrot tools"
+[ "${driver}" = healthy.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "physical Heal cases require candidate-bound bitrot tools"
 evidence="${artifacts}/evidence/${case_id}"
 mkdir -p "${artifacts}/cases" "${evidence}"
 python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \

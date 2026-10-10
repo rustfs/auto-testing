@@ -16,6 +16,7 @@ from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
 from scripts.validation_heal.shards import validate_conditional_response
+from scripts.validation_heal.versions import BRANCHES as VERSION_BRANCHES, validate_version_receipts, branch_plan
 
 
 class HealContractTest(unittest.TestCase):
@@ -225,6 +226,8 @@ class HealShardOracleTest(unittest.TestCase):
             self.assertEqual(len({branch[1] for branch in branches}), len(branches))
             self.assertEqual(inventory[case_id]["contract"]["probes"]["topology"],
                              "H2" if case_id == "heal.admin-token-cross-node-status" else "H1,H2")
+        for case_id, branches in VERSION_BRANCHES.items():
+            self.assertEqual(list(branches), inventory[case_id]["variants"])
 
     def test_peer_status_cannot_converge_with_wrong_task_unknown_or_incomplete_receipts(self):
         coordinator = {**HealHealthyOracleTest().receipt("repaired"), "startTime": "exact-task-start"}
@@ -338,6 +341,105 @@ class HealShardOracleTest(unittest.TestCase):
         for length in (-1, 6, True):
             with self.assertRaisesRegex(ValueError, "truncate length"):
                 mutation(b"abcdef", "truncate", length)
+
+
+class HealVersionOracleTest(unittest.TestCase):
+    def fixture(self):
+        expected = [{"key": "object", "versionId": version, "deleteMarker": version == "marker"}
+                    for version in ("old", "middle", "current", "marker")]
+        status = HealHealthyOracleTest().receipt()
+        original = status["outcome"]["objects"][0]
+        original["identity"].update(bucket="fixture", object="object")
+        status["outcome"]["objects"] = [copy.deepcopy(original) for _ in expected]
+        for receipt, entry in zip(status["outcome"]["objects"], expected):
+            receipt["identity"]["versionId"] = entry["versionId"]
+            receipt["disposition"]["state"] = "metadata_healthy" if entry["deleteMarker"] else "verified_healthy"
+        status["outcome"]["counters"].update(processed=4, unchanged=4)
+        return status, expected
+
+    def test_all_version_receipts_and_counters_are_required(self):
+        status, expected = self.fixture()
+        status["outcome"]["objects"][0]["disposition"]["state"] = "repaired"
+        status["outcome"]["counters"].update(healed=1, unchanged=3)
+        validate_version_receipts(status, "fixture", expected, 2, required_repairs={("object", "old")})
+        for kind in ("missing-marker", "duplicate", "wrong-version", "unknown", "incarnation", "boolean-counter", "healthy-fault"):
+            bad = copy.deepcopy(status)
+            objects = bad["outcome"]["objects"]
+            if kind == "missing-marker": objects.pop()
+            elif kind == "duplicate": objects[-1] = copy.deepcopy(objects[0])
+            elif kind == "wrong-version": objects[0]["identity"]["versionId"] = "another"
+            elif kind == "unknown": objects[0]["disposition"]["state"] = "unknown"
+            elif kind == "incarnation": objects[0]["identity"]["bucketIncarnationId"] = "other"
+            elif kind == "boolean-counter": bad["outcome"]["counters"]["healed"] = True
+            else: objects[0]["disposition"]["state"] = "verified_healthy"
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                validate_version_receipts(bad, "fixture", expected, 2, required_repairs={("object", "old")})
+
+    def test_repeat_requires_mode_specific_health_and_zero_repairs(self):
+        status, expected = self.fixture()
+        validate_version_receipts(status, "fixture", expected, 2)
+        with self.assertRaises(ValueError): validate_version_receipts(status, "fixture", expected, 1)
+        for entry in status["outcome"]["objects"]: entry["disposition"]["state"] = "metadata_healthy"
+        validate_version_receipts(status, "fixture", expected, 1)
+        with self.assertRaises(ValueError): validate_version_receipts(status, "fixture", expected, 2)
+        status["outcome"]["objects"][0]["disposition"]["state"] = "repaired"
+        status["outcome"]["counters"].update(healed=1, unchanged=3)
+        with self.assertRaises(ValueError): validate_version_receipts(status, "fixture", expected, 1)
+
+    def test_metadata_repair_may_repair_all_receipts_but_marker_cannot_claim_deep_payload(self):
+        status, expected = self.fixture()
+        with self.assertRaisesRegex(ValueError, "never attributed"):
+            validate_version_receipts(status, "fixture", expected, 2, metadata_repairs={"object"})
+        for entry in status["outcome"]["objects"]: entry["disposition"]["state"] = "repaired"
+        status["outcome"]["counters"].update(healed=4, unchanged=0)
+        validate_version_receipts(status, "fixture", expected, 2, metadata_repairs={"object"})
+        status["outcome"]["objects"][-1]["disposition"]["state"] = "verified_healthy"
+        status["outcome"]["counters"].update(healed=3, unchanged=1)
+        with self.assertRaises(ValueError):
+            validate_version_receipts(status, "fixture", expected, 2, metadata_repairs={"object"})
+
+    def test_version_fault_plan_uses_ack_versions_distinct_disks_and_exact_recursive_scope(self):
+        original = HealShardOracleTest().snapshot()
+        observation = original["node1"]
+        templates = {entry["disk"]: entry for entry in observation["files"] if "metadata" in entry}
+        shards = {entry["disk"]: entry for entry in observation["files"] if entry["path"].endswith("part.1")}
+        snapshot = {"node1": {"formats": observation["formats"], "files": []}}
+        bucket, expected = "rv-heal-0123456789abcdef", []
+        for key_index in range(4):
+            key = f"objects/{key_index:04d}.bin"
+            version_ids = [f"00000000-0000-0000-0000-{key_index * 3 + index + 1:012d}" for index in range(3)]
+            for index, version in enumerate(version_ids):
+                expected.append({"key": key, "versionId": version, "deleteMarker": False,
+                                 "isLatest": index == 2 and key_index % 2 == 1})
+            if key_index % 2 == 0:
+                expected.append({"key": key, "versionId": "marker-" + str(key_index), "deleteMarker": True, "isLatest": True})
+            for disk in range(4):
+                meta = copy.deepcopy(templates[disk])
+                meta["path"] = f"{bucket}/{key}/xl.meta"
+                meta["metadata"]["key"] = key
+                version_template = meta["metadata"]["versions"][0]
+                meta["metadata"]["versions"] = []
+                for index, version in enumerate(version_ids):
+                    value = copy.deepcopy(version_template)
+                    value.update(versionId=version, dataDir=version, isLatest=index == 2 and key_index % 2 == 1)
+                    meta["metadata"]["versions"].append(value)
+                    shard = copy.deepcopy(shards[disk])
+                    shard.update(path=f"{bucket}/{key}/{version}/part.1", sha256=f"{key_index}-{index}-{disk}")
+                    snapshot["node1"]["files"].append(shard)
+                snapshot["node1"]["files"].append(meta)
+        for branch in VERSION_BRANCHES["heal.historical-versions"]:
+            plan = branch_plan("heal.historical-versions", branch, snapshot, bucket, expected, "DV")
+            self.assertTrue(plan["recursive"])
+            if branch == "recursive-all-versions":
+                self.assertEqual(plan["scope"]["key"], "")
+                self.assertEqual(plan["expected"], expected)
+                self.assertTrue(any(item["relativePath"].endswith("xl.meta") for item in plan["faults"]))
+            if len(plan["faults"]) == 2:
+                self.assertEqual(len({(item["node"], item["disk"]) for item in plan["faults"]}), 2)
+        plan = branch_plan("heal.repeat-idempotency", "versioned-repeat", snapshot, bucket, expected, "DV")
+        self.assertEqual(len(plan["expected"]), 4)
+        self.assertEqual(len(plan["proofs"]), 3)
+        self.assertTrue(any(entry["deleteMarker"] for entry in plan["expected"]))
 
 
 if __name__ == "__main__":

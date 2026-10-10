@@ -23,7 +23,8 @@ TOPOLOGIES = {"H1", "H2", "H3", "H4", "H5", "H6"}
 STAGES = {"preflight", "baseline", "fault", "trigger", "control", "physical", "s3", "recovery", "logs"}
 AUTOMATIC_CASES = {"heal.admin-healthy-noop", "heal.admin-invalid-request", "heal.admin-token-cross-node-status", "heal.admin-dry-run", "heal.missing-part-file",
                    "heal.data-shard-bitrot", "heal.parity-shard-bitrot", "heal.truncated-and-zeroed-shard",
-                   "heal.completed-multipart-object", "heal.range-head-and-conditions", "heal.manual-normal-attribution", "heal.manual-deep-attribution"}
+                   "heal.completed-multipart-object", "heal.range-head-and-conditions", "heal.manual-normal-attribution", "heal.manual-deep-attribution",
+                   "heal.historical-versions", "heal.repeat-idempotency"}
 
 
 def require(condition: bool, message: str) -> None:
