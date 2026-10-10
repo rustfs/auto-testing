@@ -603,7 +603,7 @@ def logs(request):
         cursor = request.get("afterCursor")
         require(cursor is None or isinstance(cursor, str) and re.fullmatch(r"[A-Za-z0-9=;_-]{1,512}", cursor),
                 "invalid journal cursor")
-        args = ["journalctl", "-u", owner["unit"], "--quiet", "--no-pager", "-o", "json",
+        args = ["journalctl", "-u", owner["unit"], "--quiet", "--no-pager", "--all", "-o", "json",
                 "--output-fields=__CURSOR,MESSAGE"]
         # +N selects the FIRST N entries after the cursor. A plain -n N
         # selects the tail and could silently drop the beginning of a window.
@@ -616,6 +616,8 @@ def logs(request):
             require(isinstance(entry_cursor, str) and re.fullmatch(r"[A-Za-z0-9=;_-]{1,512}", entry_cursor)
                     and entry_cursor not in {cursor, observed_cursor}, "journal page repeated or omitted its exact entry cursor")
             message = row.get("MESSAGE")
+            if isinstance(message, list) and all(type(value) is int and 0 <= value <= 255 for value in message):
+                message = bytes(message).decode("utf-8")
             require(isinstance(message, str), "journal message is not complete text")
             entries += 1
             require(entries <= 10000, "journal page exceeds its bound; source attribution is incomplete")

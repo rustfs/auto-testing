@@ -1349,9 +1349,15 @@ class HealScannerSourceTest(unittest.TestCase):
             self.assertEqual(value["afterCursor"], "s=abc;i=def")
             self.assertIn("--after-cursor", command.call_args.args)
             self.assertIn("+10000", command.call_args.args)
+            self.assertIn("--all", command.call_args.args)
             self.assertFalse(value["hasMore"])
             with self.assertRaisesRegex(ValueError, "invalid journal cursor"):
                 node_logs({"runId": "unit", "afterCursor": "invalid\n--help"})
+            command.return_value = types.SimpleNamespace(stdout=json.dumps({"MESSAGE": list('完整消息'.encode()),
+                "__CURSOR": "s=abc;i=bytes"}) + "\n")
+            self.assertEqual(node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})["journal"], '完整消息')
+            command.return_value = types.SimpleNamespace(stdout=json.dumps({"MESSAGE": None, "__CURSOR": "s=abc;i=omitted"}) + "\n")
+            with self.assertRaisesRegex(ValueError, "complete text"): node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})
             rows = [json.dumps({"MESSAGE": "row", "__CURSOR": f"s=abc;i={index}"}) for index in range(10000)]
             command.return_value = types.SimpleNamespace(stdout="\n".join(rows))
             page = node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})
