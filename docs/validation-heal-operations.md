@@ -287,7 +287,7 @@ WINDOW 的必要证据是 running 且 `0<processed<预先冻结对象总数`，�
 
 CURSOR 逐响应保存 nextSeq/minSeq/truncated/items；过旧 cursor 的 gap 是预期观测项，不可静默丢弃。跨节点和重启后按 task/epoch分组，有界窗口之外用完整manifest补证。DX 257 是起始数据量；若仍过快，下一批预注册增加负载或受限故障层，而不是本批临时改分母。
 
-固定候选的 `sinceSeq` 是排他游标，`nextSeq` 是下一待分配序号，因此完整响应之后传 `nextSeq - 1`。上例只适用于本次 items 完整返回；若 payload 本身裁剪了 items，只推进到 `max(sinceSeq + 1, minSeq) + 实际收到项数 - 1`，继续读取未返回后缀。不要把响应裁剪或保留缺口隐藏在 nextSeq 跳跃中。J03 自动执行器预注册 1025 个 1MiB+73 字节的外部对象，实际越过该候选 1024 项的 item retention；128 项 outcome 诊断窗口另行验证。每节点物理清单显式限制 12288 文件，每批独立 streaming 校验最多 128 个 part。未观察到两个有效 running 增量窗口时记录 NOT_OBSERVED，完整用例不能 PASS。H1 的跨节点分支明确不适用，H2 查询所有四个实际节点。
+固定候选的 `sinceSeq` 是排他游标，`nextSeq` 是下一待分配序号，因此完整响应之后传 `nextSeq - 1`。上例只适用于本次 items 完整返回；若 payload 本身裁剪了 items，只推进到 `max(sinceSeq + 1, minSeq) + 实际收到项数 - 1`，继续读取未返回后缀。不要把响应裁剪或保留缺口隐藏在 nextSeq 跳跃中。J03 自动执行器预注册 1025 个 1MiB+73 字节的外部对象，实际越过该候选 1024 项的 item retention；128 项 outcome 诊断窗口另行验证。每节点物理清单显式限制 16384 文件，每批独立 streaming 校验最多 128 个 part。未观察到两个有效 running 增量窗口时记录 NOT_OBSERVED，完整用例不能 PASS。H1 的跨节点分支明确不适用，H2 查询所有四个实际节点。
 
 <a id="IAM"></a>
 

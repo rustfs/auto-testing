@@ -15,9 +15,9 @@ class FullRestartTests(unittest.TestCase):
     token = "12345678-1234-4234-8234-123456789abc"
 
     def test_combined_fixture_has_explicit_bounded_physical_census_budget(self):
-        # Four roots, each with an xl.meta, its backup and an external part
-        # for every DX/DB/DV object. MPU adds up to three independent parts.
-        conservative_files = 4 * (3 * (1025 + 128 + 16) + 5)
+        # Four roots retain xl.meta, an external part and its integrity
+        # sidecar, plus a possible metadata backup. MPU adds three parts.
+        conservative_files = 4 * (4 * (1025 + 128 + 16) + 7)
         self.assertGreater(conservative_files, resource_limits("cursor")["maxSnapshotFiles"])
         limits = resource_limits("full-restart")
         self.assertLess(conservative_files, limits["maxSnapshotFiles"])

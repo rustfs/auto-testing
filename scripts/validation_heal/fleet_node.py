@@ -126,10 +126,13 @@ def mounts():
 
 def resource_limits(profile):
     require(profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
+    # DX has 1,025 external objects on four local roots. The candidate keeps
+    # an xl.meta, part and integrity sidecar for each: 12,300 files even
+    # without backups. Retain every sidecar within an explicit allowance.
     # F05 combines the 1,025-object cursor fixture with DB, DV and completed
     # MPU objects. Each of four local roots also retains metadata backups.
     # Its combined census needs a distinct, still bounded file allowance.
-    return {"maxSnapshotFiles": {"standard": 4096, "cursor": 12288, "full-restart": 24576}[profile],
+    return {"maxSnapshotFiles": {"standard": 4096, "cursor": 16384, "full-restart": 24576}[profile],
             "minimumDriveFreeBytes": (1 if profile == "standard" else 2) * 1024**3,
             "runtimeMaxSeconds": 1800 if profile == "standard" else 2700}
 

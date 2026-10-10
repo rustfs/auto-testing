@@ -1994,7 +1994,9 @@ class HealCursorOracleTest(unittest.TestCase):
 
     def test_cursor_resources_are_explicit_bounded_and_source_branches_preserved(self):
         self.assertEqual(resource_limits("standard")["maxSnapshotFiles"], 4096)
-        self.assertEqual(resource_limits("cursor")["maxSnapshotFiles"], 12288)
+        # The live candidate writes a part integrity sidecar on every root.
+        self.assertGreater(resource_limits("cursor")["maxSnapshotFiles"], 1025 * 4 * 3)
+        self.assertEqual(resource_limits("cursor")["maxSnapshotFiles"], 16384)
         self.assertEqual(resource_limits("cursor")["minimumDriveFreeBytes"], 2 * 1024**3)
         self.assertEqual(list(CURSOR_BRANCHES), select("J03")[0]["variants"])
         with self.assertRaises(ValueError): resource_limits("unbounded")

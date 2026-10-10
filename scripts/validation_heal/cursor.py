@@ -25,6 +25,7 @@ try:
     from .heal_fault import bounded_fault_id
     from .shards import files, map_target, validate_repaired_physical
     from .versions import public_version_id
+    from .fleet_node import resource_limits
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, require, save
     from heal_workload import Recorder, seed, verify_seed
@@ -34,6 +35,7 @@ except ImportError:
     from heal_fault import bounded_fault_id
     from shards import files, map_target, validate_repaired_physical
     from versions import public_version_id
+    from fleet_node import resource_limits
 
 
 CASE_ID = "heal.incremental-cursor-and-truncation"
@@ -313,7 +315,7 @@ def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANC
     fleet.record("binding", binding)
     fleet.record("pre-registered-budget", {"fixture": "DX", "objects": count, "objectBytes": SIZE,
         "logicalBytes": count * SIZE, "taskSeconds": TASK_SECONDS, "sourceLimitReference": policy_reference,
-        "maxSnapshotFilesPerNode": 12288, "snapshotSecondsPerNode": 600, "verificationBatchItems": 128,
+        "maxSnapshotFilesPerNode": resource_limits("cursor")["maxSnapshotFiles"], "snapshotSecondsPerNode": 600, "verificationBatchItems": 128,
         "missingIndices": missing_indices, "taskScope": "frozen prefix scopes; one result per ACK",
         "faultLeaseMinutes": 30, "serviceRuntimeSeconds": 2700, "topologyLeaseMinutes": 45})
     recipe = select(args.case_id)[0]

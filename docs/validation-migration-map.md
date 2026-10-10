@@ -544,7 +544,7 @@ counters must cover all 1025 ACKs with the exact 17 real missing-shard repairs,
 no failures/unknowns, and complete traversal. Bounded diagnostic receipts remain
 explicitly incomplete. Full physical manifests, every original same-role shard
 and streaming checksum, and all-peer S3 manifests independently cover every
-object before PASS. The case has a fixed 12288-file snapshot budget, 128-part
+object before PASS. The case has a fixed 16384-file snapshot budget, 128-part
 verification batches, a 45-minute service/lease budget and 2GiB free per drive.
 Local cursor/gap/counter/scope/part-omission negatives passed; live evidence
 remains pending.
