@@ -131,8 +131,8 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement"}, "unsupported Heal runtime profile")
-        require(resource_profile in {"standard", "cursor"}, "unsupported Heal resource profile")
+        require(runtime_profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement"}, "unsupported Heal runtime profile")
+        require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
         self.runtime_profile = runtime_profile
@@ -172,6 +172,9 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
+        if action == "mrf-records":
+            source += "\nimport types\nmrf = types.ModuleType('mrf_records')\nexec(" + repr(
+                NODE_SOURCE.with_name("mrf_records.py").read_text()) + ", mrf.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
@@ -183,7 +186,7 @@ class Fleet:
             source += "\nimport sys\nsys.modules['drive_gate'] = gate\nreplacement = types.ModuleType('replace_drive')\nexec(" + repr(
                 NODE_SOURCE.with_name("replace_drive.py").read_text()) + ", replacement.__dict__)\n"
         source += "\nmain(" + repr(value) + ")\n"
-        timeout = 600 if self.resource_profile == "cursor" and action == "snapshot" else 180
+        timeout = 600 if self.resource_profile in {"cursor", "full-restart"} and action == "snapshot" else 180
         result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
                                 input=source, capture_output=True, text=True, timeout=timeout)
         require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")

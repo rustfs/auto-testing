@@ -170,7 +170,7 @@ def run_topology(args, nodes):
     directory = args.evidence / "H2"
     directory.mkdir()
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-h2"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory, resource_profile="cursor", runtime_profile="root-restart")
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory, resource_profile="full-restart", runtime_profile="root-restart")
     candidate = json.loads(args.candidate.read_text())
     fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]

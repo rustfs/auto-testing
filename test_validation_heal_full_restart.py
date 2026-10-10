@@ -8,11 +8,22 @@ from unittest.mock import patch
 
 from scripts.validation_heal import full_restart as restart
 from scripts.validation_heal.matrix import select, AUTOMATIC_CASES
-from scripts.validation_heal.fleet_node import PROCESS_FIELDS, snapshot_buckets, verify_part_owned
+from scripts.validation_heal.fleet_node import PROCESS_FIELDS, resource_limits, snapshot_buckets, verify_part_owned
 
 
 class FullRestartTests(unittest.TestCase):
     token = "12345678-1234-4234-8234-123456789abc"
+
+    def test_combined_fixture_has_explicit_bounded_physical_census_budget(self):
+        # Four roots, each with an xl.meta, its backup and an external part
+        # for every DX/DB/DV object. MPU adds up to three independent parts.
+        conservative_files = 4 * (3 * (1025 + 128 + 16) + 5)
+        self.assertGreater(conservative_files, resource_limits("cursor")["maxSnapshotFiles"])
+        limits = resource_limits("full-restart")
+        self.assertLess(conservative_files, limits["maxSnapshotFiles"])
+        self.assertEqual(limits["runtimeMaxSeconds"], 2700)
+        self.assertEqual(limits["minimumDriveFreeBytes"], 2 * 1024**3)
+        with self.assertRaises(ValueError): resource_limits("unbounded")
 
     def wanted(self):
         wanted = {("db", f"objects/{index:04d}", "null"): {"deleteMarker": False, "payload": {"size": 17}}

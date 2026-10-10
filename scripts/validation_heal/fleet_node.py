@@ -32,7 +32,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target"}, "unsupported Heal runtime profile")
+    if profile == "durable-mrf":
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
     if profile in {"replacement", "replacement-target"}:
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "true" if profile == "replacement" else "false", "RUSTFS_HEAL_INTERVAL_SECS": "10",
                 "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
@@ -122,10 +124,13 @@ def mounts():
 
 
 def resource_limits(profile):
-    require(profile in {"standard", "cursor"}, "unsupported Heal resource profile")
-    return {"maxSnapshotFiles": 12288 if profile == "cursor" else 4096,
-            "minimumDriveFreeBytes": (2 if profile == "cursor" else 1) * 1024**3,
-            "runtimeMaxSeconds": 2700 if profile == "cursor" else 1800}
+    require(profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
+    # F05 combines the 1,025-object cursor fixture with DB, DV and completed
+    # MPU objects. Each of four local roots also retains metadata backups.
+    # Its combined census needs a distinct, still bounded file allowance.
+    return {"maxSnapshotFiles": {"standard": 4096, "cursor": 12288, "full-restart": 24576}[profile],
+            "minimumDriveFreeBytes": (1 if profile == "standard" else 2) * 1024**3,
+            "runtimeMaxSeconds": 1800 if profile == "standard" else 2700}
 
 
 def preflight(request):
@@ -733,9 +738,23 @@ def task_records(request):
     return {"taskId": token, "binarySha256": owner["binarySha256"], "readOnly": True, "records": records}
 
 
+def mrf_records(request):
+    require(set(request) <= {"runId", "action", "quiescent"}, "MRF observer does not accept paths or mutation options")
+    state, roots, owner = owned(request["runId"])
+    if request.get("quiescent") is True:
+        stopped(owner)
+    else:
+        pid = int(command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"]).stdout.strip() or "0")
+        require(pid > 0 and Path(f"/proc/{pid}/exe").resolve(strict=True) == state / "rustfs", "MRF observer requires its owned process")
+    module = globals().get("mrf")
+    require(module is not None, "MRF observer source missing")
+    return module.read_records(state, roots, owner, checked)
+
+
 def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
+               "mrf-records": mrf_records,
                "logs": logs, "cleanup": cleanup, "audit-finalize": audit_finalize, "install-inspector": install_inspector,
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part, "verify-parts": verify_parts,
                "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe,

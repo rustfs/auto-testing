@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 117 currently dispatchable IDs include all 74 non-Heal cases and forty-three Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
+case evidence. The 118 currently dispatchable IDs include all 74 non-Heal cases and forty-four Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 41 Heal cases remain
+The other 40 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -834,3 +834,34 @@ missed physical window cannot PASS. External target verification uses bounded
 B03 bounded run `38084312163` retained FAIL/cleanup PASS in all four instances:
 the candidate still did not initialize the replacement format within 90 seconds.
 That explicit acceptance failure is not relabeled as a completed reconstruction.
+
+
+E05 `heal.mrf-offline-write-replay` now has a dedicated H2 executor for all
+three source branches: unique version PUT, exact historical-version DELETE,
+and marker creation while the original fourth peer is stopped and its endpoint
+refuses connections. Every ACK must have a fresh active durable responsibility
+in the candidate's committed MRF snapshot and matching lifecycle companion.
+The read-only observer opens only six exact snapshot/commit/lifecycle filenames
+per private root. It validates full journal CRCs, both commit SHA-256 bindings,
+owner/sequence, responsibility ID and bucket incarnation; it never enumerates
+IAM or credential records, changes journals, or accepts operator risk.
+
+After the same node and disk identities rejoin, fresh manager admission with
+source `mrf`, an exact-version automatic object task, complete successful
+responsibility and `repaired`/`verified_healthy`/`authoritatively_absent` must
+agree with committed responsibility retirement. Missing/held/unknown results,
+queue emptiness, copied backup bytes or a manual verifier cannot certify this
+case. All 16 replicas, retained same-role bytes, deleted data directories,
+streaming checks and complete all-peer S3 ACK inventories precede PASS. The
+record/proof decoder is explicitly bound to candidate source
+`072b57b37559fbe626aeda8abf61617fdcbdd926` and reviewed source file digests;
+ordinary execution consumes package/tools without a RustFS source checkout.
+E05 has no live PASS claim yet.
+
+F05 run `38084904969` retained FAIL/cleanup PASS before any restart because its
+combined DB/DV/DM/DX physical census exceeded the cursor resource profile. It
+now registers a distinct bounded 24,576-file census with the original 2 GiB
+per-drive free-space requirement and 45-minute service lease. E04
+`38085241447` verified complete journal collection on the corrected `--all`
+reader, then failed its healthy task's missing public pool/set responsibility
+identity; cleanup passed. The original failed runs remain unchanged.
