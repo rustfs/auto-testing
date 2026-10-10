@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute every A01 normal/deep branch on the current H1 and H2 Heal fleet."""
+"""Execute A01 healthy and A07 invalid-request branches on the current H1/H2 fleet."""
 
 from __future__ import annotations
 
@@ -23,9 +23,11 @@ import xml.etree.ElementTree as ET
 try:
     from .heal_probe import Probe, canonical, compare_inventories, require, save
     from .heal_workload import Recorder, seed, verify_seed
+    from .inspector import verify as verify_inspector
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, require, save
     from heal_workload import Recorder, seed, verify_seed
+    from inspector import verify as verify_inspector
 
 
 NODE_SOURCE = Path(__file__).with_name("fleet_node.py")
@@ -128,8 +130,9 @@ def validate_healthy(status, bucket, key, disposition):
 
 
 class Fleet:
-    def __init__(self, nodes, evidence, run_id):
+    def __init__(self, nodes, evidence, run_id, tool_directory=None):
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
+        self.tool_directory = tool_directory
         self.sequence = 0
         self.reserved = []
 
@@ -138,13 +141,16 @@ class Fleet:
         save(self.evidence / f"{self.sequence:05d}-{label}.json", value)
         return value
 
+    def ssh(self, node):
+        return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
+                "-p", os.environ.get("RUSTFS_SSH_PORT", "22"),
+                os.environ.get("RUSTFS_SSH_USER", "azureuser") + "@" + node]
+
     def remote(self, node, action, **params):
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text() + "\nmain(" + repr(value) + ")\n"
-        result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                                 "-o", "StrictHostKeyChecking=accept-new", "-p", os.environ.get("RUSTFS_SSH_PORT", "22"),
-                                 os.environ.get("RUSTFS_SSH_USER", "azureuser") + "@" + node,
-                                 "sudo -n python3 -"], input=source, capture_output=True, text=True, timeout=180)
+        result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
+                                input=source, capture_output=True, text=True, timeout=180)
         require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")
         return json.loads(result.stdout)
 
@@ -161,9 +167,20 @@ class Fleet:
             # Reserve may partially mutate before an SSH failure. Preserve its
             # namespace unless the root-owned marker proves safe finalization.
             self.reserved.append(node)
+            inspector_sha = hashlib.sha256((self.tool_directory / "heal-meta-inspect").read_bytes()).hexdigest() \
+                if self.tool_directory else None
             value = self.remote(node, "reserve", hostname=checked[node]["hostname"], mounts=checked[node]["mounts"],
-                                binarySha256=binary_sha, bucket=bucket, volumes=volumes, access=access, secret=secret)
+                                binarySha256=binary_sha, bucket=bucket, volumes=volumes, access=access, secret=secret,
+                                inspectorSha256=inspector_sha)
             self.record("reserved", {"node": node, **value})
+            if self.tool_directory:
+                tool = self.tool_directory / "heal-meta-inspect"
+                target = "/var/lib/rustfs-auto-testing/heal/" + self.run_id + "/heal-meta-inspect"
+                transfer = subprocess.run([*self.ssh(node), "sudo -n dd of=" + target
+                                           + " conv=excl,fsync oflag=nofollow bs=1M status=none"],
+                                          input=tool.read_bytes(), capture_output=True, timeout=120)
+                require(transfer.returncode == 0, "exclusive inspector upload failed: " + transfer.stderr.decode()[-800:])
+                self.record("inspector-upload", {"node": node, **self.remote(node, "install-inspector")})
         with ThreadPoolExecutor(max_workers=len(self.nodes)) as executor:
             results = list(executor.map(lambda node: self.remote(node, "start"), self.nodes))
         self.record("started", {node: value for node, value in zip(self.nodes, results, strict=True)})
@@ -201,11 +218,13 @@ def run_topology(args, topology, nodes):
     directory = args.evidence / topology
     directory.mkdir()
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    fleet = Fleet(nodes, directory, run_id)
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory)
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
     candidate = json.loads(args.candidate.read_text())
+    if args.tool_directory:
+        fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,
                "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
                "bucketPrefix": bucket, "endpoints": {f"node{index}": f"http://rustfs-node{index}:9000"
@@ -301,6 +320,7 @@ def main():
     parser.add_argument("--binary-sha", required=True)
     parser.add_argument("--rc-bin", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--tool-directory", type=Path)
     args = parser.parse_args()
     nodes = os.environ.get("RUSTFS_NODES", "vm000 vm001 vm002 vm003").split()
     require(len(nodes) >= 4 and len(set(nodes)) == len(nodes)

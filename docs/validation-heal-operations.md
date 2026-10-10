@@ -18,6 +18,8 @@ python scripts/validation_heal/matrix.py plan --selection A01,A04,C01,C02,C04,J0
 
 `plan` 只冻结选择/分支和对应操作，不部署、不评分。`show` 同时给出步骤、命令入口、验收和恢复要求。不同拓扑是不同实例；未选拓扑会保留 `scopeExclusions`，不能据局部结果声称全矩阵通过。
 
+自动用例通过 RustFS Functional Chain 的 `validation_case` 和精确 `auto_testing_sha` 分发。先用同一不可变候选的 `build_run_id`/`build_run_attempt`、`validation_tools_only=true` 构建只读 metadata inspector；live 分发提供该成功构建的 `validation_tools_run_id` 与 `validation_tools_run_attempt`。工具的 candidate/helper SHA、Linux 二进制 SHA 和独立 Cargo.lock 摘要均须通过检查，再复制到本例节点。普通 live 执行消费构建产物，不需要 RustFS checkout。
+
 | 工具 | 已实现的职责 | 不代表什么 |
 | --- | --- | --- |
 | `matrix.py` | 84 项/301 分支索引、逐例操作卡、冻结计划、证据完整性审计 | 不自动分配拓扑，不根据文件存在就判 PASS |

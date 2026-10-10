@@ -11,6 +11,7 @@ from unittest.mock import patch
 from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, cases, compile_plan, select
 from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection
 from scripts.validation_heal.fleet_node import paths
+from scripts.validation_heal.inspector import verify as verify_inspector
 
 
 class HealContractTest(unittest.TestCase):
@@ -79,6 +80,32 @@ class HealContractTest(unittest.TestCase):
 
 
 class HealHealthyOracleTest(unittest.TestCase):
+    def test_inspector_rejects_other_candidate_tampered_binary_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            header = bytearray(20)
+            header[:6] = b"\x7fELF\x02\x01"
+            header[18:20] = b"\x3e\x00"
+            (root / "heal-meta-inspect").write_bytes(header)
+            (root / "inspector-Cargo.lock").write_text("unit fixture lock")
+            helper = Path(__file__).parent / "scripts/validation_heal/tools/heal_meta_inspect.rs"
+            manifest = {"built": True, "candidateCommit": "a" * 40, "candidateLockSha256": "b" * 64,
+                        "role": "read-only decoder; not the RustFS service under test", "target": "x86_64-unknown-linux-gnu",
+                        "binarySha256": hashlib.sha256(header).hexdigest(),
+                        "helperSourceSha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+                        "inspectorLockSha256": hashlib.sha256((root / "inspector-Cargo.lock").read_bytes()).hexdigest()}
+            (root / "heal-meta-inspect.json").write_text(json.dumps(manifest))
+            self.assertEqual(verify_inspector(root, {"source_sha": "a" * 40}), manifest)
+            with self.assertRaisesRegex(ValueError, "candidate"):
+                verify_inspector(root, {"source_sha": "c" * 40})
+            (root / "heal-meta-inspect").write_bytes(header + b"different bytes")
+            with self.assertRaisesRegex(ValueError, "digest"):
+                verify_inspector(root, {"source_sha": "a" * 40})
+            (root / "heal-meta-inspect").unlink()
+            (root / "heal-meta-inspect").symlink_to(root / "inspector-Cargo.lock")
+            with self.assertRaisesRegex(ValueError, "artifact file"):
+                verify_inspector(root, {"source_sha": "a" * 40})
+
     def test_request_rejection_needs_the_exact_server_code(self):
         good = {"httpStatus": 400, "response": "<Error><Code>InvalidArgument</Code></Error>"}
         validate_rejection(good, "InvalidArgument")

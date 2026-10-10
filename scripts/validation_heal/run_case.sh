@@ -36,6 +36,10 @@ PACKAGE_URL="$(jq -er '.package_url' "${candidate}")"
 PACKAGE_SHA256="$(jq -er '.package_sha256' "${candidate}")"
 [[ "${PACKAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid candidate package SHA-256"
 export RUSTFS_NODES="${NODES[*]}" RUSTFS_SSH_USER="${SSH_USER}" RUSTFS_SSH_PORT="${SSH_PORT}"
+tool_args=()
+if [ -n "${VALIDATION_HEAL_TOOL_DIRECTORY:-}" ]; then
+  tool_args=(--tool-directory "${VALIDATION_HEAL_TOOL_DIRECTORY}")
+fi
 evidence="${artifacts}/evidence/${case_id}"
 mkdir -p "${artifacts}/cases" "${evidence}"
 python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
@@ -105,6 +109,7 @@ if [ "${bootstrap_rc}" -eq 0 ]; then
   done
   python3 -B "${ROOT}/scripts/validation_heal/healthy.py" --candidate "${candidate}" \
     --case-id "${case_id}" \
+    "${tool_args[@]}" \
     --testing-commit "${testing_commit}" --binary-sha "${binary_sha}" --rc-bin "$(command -v rc)" \
     --evidence "${evidence}" > "${evidence}/test.log" 2>&1 || case_rc=$?
   cat "${evidence}/test.log"

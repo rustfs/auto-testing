@@ -125,6 +125,9 @@ def reserve(request):
     owner = {"runId": run_id, "unit": unit(run_id), "hostname": observed["hostname"],
              "mounts": observed["mounts"], "binarySha256": binary_sha,
              "bucket": request["bucket"], "volumes": volumes}
+    if request.get("inspectorSha256"):
+        require(bool(re.fullmatch(r"[0-9a-f]{64}", request["inspectorSha256"])), "invalid inspector digest")
+        owner["inspectorSha256"] = request["inspectorSha256"]
     require(bool(re.fullmatch(r"rv-heal-[a-f0-9]{16}", owner["bucket"])), "invalid run bucket")
     state.mkdir(parents=True, mode=0o700)
     (state / "owner.json").write_text(json.dumps(owner))
@@ -174,6 +177,14 @@ def start(request):
     return {"unit": owner["unit"], "started": True}
 
 
+def install_inspector(request):
+    state, _, owner = owned(request["runId"])
+    tool = checked(state / "heal-meta-inspect", state)
+    require(digest(tool) == owner.get("inspectorSha256"), "uploaded inspector digest differs")
+    tool.chmod(0o500)
+    return {"inspectorSha256": owner["inspectorSha256"], "installed": True}
+
+
 def snapshot(request):
     state, roots, owner = owned(request["runId"])
     pid = int(command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"]).stdout.strip())
@@ -186,6 +197,9 @@ def snapshot(request):
     require(all(environment.get(key) == value for key, value in BACKGROUND_CONFIG.items()),
             "background repair isolation configuration differs")
     files, formats = [], []
+    tool = state / "heal-meta-inspect"
+    if owner.get("inspectorSha256"):
+        require(digest(checked(tool, state)) == owner["inspectorSha256"], "metadata inspector changed")
     for index, root in enumerate(roots):
         data = root / "data"
         folder = checked(data / owner["bucket"], data)
@@ -196,8 +210,16 @@ def snapshot(request):
                 for name in sorted(names):
                     path = Path(directory) / name
                     require(len(files) < 4096 and path.stat().st_size <= 64 * 1024**2, "fixture exceeds physical evidence budget")
-                    files.append({"disk": index, "path": str(path.relative_to(data)),
-                                  "size": path.stat().st_size, "sha256": digest(path)})
+                    entry = {"disk": index, "path": str(path.relative_to(data)),
+                             "size": path.stat().st_size, "sha256": digest(path)}
+                    if path.name == "xl.meta" and owner.get("inspectorSha256"):
+                        key = path.parent.relative_to(folder).as_posix()
+                        decoded = json.loads(command(str(tool), str(path), owner["bucket"], key).stdout)
+                        require(decoded.get("bucket") == owner["bucket"] and decoded.get("key") == key
+                                and decoded.get("physicalBitrotVerified") is False,
+                                "metadata decoder identity or verification role differs")
+                        entry["metadata"] = decoded
+                    files.append(entry)
         path = checked(data / ".rustfs.sys/format.json", data)
         require(path.stat().st_size < 65536, "disk format exceeds budget")
         formats.append({"disk": index, "sha256": digest(path), "value": json.loads(path.read_text())})
@@ -229,6 +251,6 @@ def cleanup(request):
 def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "snapshot": snapshot,
-               "logs": logs, "cleanup": cleanup}
+               "logs": logs, "cleanup": cleanup, "install-inspector": install_inspector}
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

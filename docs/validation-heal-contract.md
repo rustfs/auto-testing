@@ -6,7 +6,7 @@
 
 入口为 `scripts/validation_heal/matrix.py`、[逐例操作卡](validation-heal-cases.md) 和 [执行手册](validation-heal-operations.md)。运行环境是当前 auto-testing 的 Heal 节点；候选及 rc 使用当前 validation lane 的不可变包和实际二进制摘要。源仓库历史 pilot 结果不能计入本次通过数量。
 
-`heal.admin-healthy-noop` 已接入自动分发，覆盖 H1/H2 的 normal/deep；其余操作卡保留源 `operator-assisted` 方式。每项的实际执行状态见 [迁移映射](validation-migration-map.md)。方案、计划或完整文件归档均不能代替 live PASS。
+`heal.admin-healthy-noop` 和 `heal.admin-invalid-request` 已接入自动分发，分别覆盖 H1/H2 的 normal/deep 和六项非法请求分支；其余操作卡保留源 `operator-assisted` 方式。每项的实际执行状态见 [迁移映射](validation-migration-map.md)。方案、计划或完整文件归档均不能代替 live PASS。
 
 H07 的单 set 两个分支只属于 H3，双 set 两个分支只属于 H4；四个不匹配组合记为 `nonApplicableCombinations`。缺少机器属于资源阻塞。
 
