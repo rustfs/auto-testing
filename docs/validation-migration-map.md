@@ -29,12 +29,17 @@ cycle after upload plus a newer complete usage snapshot with exact object and
 logical-byte counts. The old STOR-134 threshold remains a separate regression
 test. This case also awaits a live candidate run.
 
+`kms.sse-kms-round-trip` has a dedicated executor using the existing local
+KMS single-disk deployment. It checks the same object's encryption key,
+metadata, and payload, then requires an invalid-key PUT to fail without
+exposing plaintext or key material. Its live candidate run is pending.
+
 The eight planned cases have these concrete reuse candidates:
 
 | Validation ID | Candidate IDs | Specific item to verify |
 | --- | --- | --- |
 | `scanner.usage-convergence` | STOR-134 | Dedicated executor added; live candidate evidence is pending. |
-| `kms.sse-kms-round-trip` | KMS-104, KMS-301, KMS-214 | Compare key/metadata semantics and failure redaction. |
+| `kms.sse-kms-round-trip` | KMS-104, KMS-301, KMS-214 | Dedicated executor added; live candidate evidence is pending. |
 | `tiering.transition-and-restore` | TIER-105, TIER-107 | Compare remote tier restore and object checksum. |
 | `events.delivery` | EVT-103, EVT-104 | Freeze and verify the exact delivery count contract. |
 | `audit.request-correlation` | AUD-102, AUD-104, AUD-106 | Verify request correlation and secret redaction in the same event trail. |

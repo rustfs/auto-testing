@@ -18,6 +18,7 @@
 #   ./rustfs-kms-test.sh --topology single-single --backends local -y
 #
 set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Per-run temp dir (shared runners may leave stale /tmp files owned by other users)
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-test.XXXXXX")"
@@ -125,6 +126,12 @@ ENDPOINT=""
 VOLUMES=""
 KMS_BACKEND="local"
 KMS_EXTRA_ENV="${KMS_EXTRA_ENV:-}"
+VALIDATION_CASE=""
+VALIDATION_ARTIFACTS_DIR=""
+VALIDATION_CANDIDATE_MANIFEST=""
+VALIDATION_TESTING_COMMIT=""
+VALIDATION_BINARY_SHA256=""
+VALIDATION_OBJECT_CLEANUP_STATUS=PASS
 
 # ==================== Helpers ====================
 
@@ -710,6 +717,36 @@ run_test() {
   fi
 }
 
+validation_write_evidence() {
+  local evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}" item
+  mkdir -p "${evidence_dir}"
+  cp "${TEST_TMP}/test.out" "${evidence_dir}/test.log"
+  for item in validation-put.json validation-head.json validation-get.json validation-failure.txt validation-missing.txt validation-fixture.json; do
+    if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
+  done
+}
+
+validation_write_result() {
+  local verdict="$1" reason="$2" cleanup_status="$3" item
+  local args=("${SCRIPT_DIR}/scripts/validation_result.py"
+    --case-id "${VALIDATION_CASE}" --profile single-1disk
+    --result-file "${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
+    --verdict "${verdict}" --cleanup-status "${cleanup_status}")
+  if [ -n "${reason}" ]; then args+=(--reason "${reason}"); fi
+  if [ "${verdict}" != RUNNING ]; then
+    args+=(--candidate-manifest "${VALIDATION_CANDIDATE_MANIFEST}"
+      --rc-bin "$(command -v rc)" --testing-commit "${VALIDATION_TESTING_COMMIT}"
+      --binary-sha256 "${VALIDATION_BINARY_SHA256}"
+      --evidence "evidence/${VALIDATION_CASE}/test.log")
+  fi
+  if [ "${verdict}" = PASS ]; then
+    for item in validation-put.json validation-head.json validation-get.json validation-failure.txt validation-missing.txt validation-fixture.json; do
+      args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
+    done
+  fi
+  python3 "${args[@]}"
+}
+
 rc_run() {
   RC_OUT="$(rc "$@" 2>&1)"; RC_CODE=$?
   return "${RC_CODE}"
@@ -1216,6 +1253,72 @@ test_kms301() {
     fi
   fi
   rm_bucket kms301-b1
+}
+
+test_validation_kms_sse_kms_round_trip() {
+  local bucket="val-kms-${RANDOM}-$$" key="encrypted" rejected="rejected"
+  local source="${TEST_TMP}/validation-kms-source" downloaded="${TEST_TMP}/validation-kms-downloaded"
+  local marker="validation-kms-plaintext-${RANDOM}-$$" kid="" expected_sha case_rc=0 cleanup_rc=0
+  VALIDATION_OBJECT_CLEANUP_STATUS=PASS
+  kms_create_key "val-kms-${RANDOM}-$$" "validation=roundtrip" || return 1
+  kid="${KMS_KEY_ID}"
+  printf '%s' "${marker}" > "${source}"
+  head -c 4096 /dev/urandom >> "${source}"
+  expected_sha="$(sha256sum "${source}" | awk '{print $1}')"
+  jq -n --arg bucket "${bucket}" --arg key "${key}" --arg key_id "${kid}" \
+    --arg sha256 "${expected_sha}" --argjson bytes "$(wc -c < "${source}")" \
+    '{bucket:$bucket,key:$key,key_id:$key_id,sha256:$sha256,bytes:$bytes,metadata:{validation:"kms-roundtrip"}}' \
+    > "${TEST_TMP}/validation-fixture.json"
+  new_bucket "${bucket}" || return 1
+  (
+    aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${source}" \
+      --server-side-encryption aws:kms --ssekms-key-id "${kid}" --metadata validation=kms-roundtrip
+    assert_aws_ok || exit 1
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-put.json"
+    printf '%s' "${AWS_OUT}" | jq -e --arg kid "${kid}" \
+      '.ServerSideEncryption == "aws:kms" and (.SSEKMSKeyId | strings | contains($kid))' >/dev/null \
+      || { echo "PUT lacks expected SSE-KMS key"; exit 1; }
+
+    aws_run s3api head-object --bucket "${bucket}" --key "${key}"
+    assert_aws_ok || exit 1
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-head.json"
+    jq -e --arg kid "${kid}" --argjson bytes "$(wc -c < "${source}")" \
+      '.ServerSideEncryption == "aws:kms" and (.SSEKMSKeyId | strings | contains($kid)) and .ContentLength == $bytes and .Metadata.validation == "kms-roundtrip"' \
+      "${TEST_TMP}/validation-head.json" >/dev/null || { echo "HEAD encryption or metadata mismatch"; exit 1; }
+
+    aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${downloaded}"
+    assert_aws_ok || exit 1
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-get.json"
+    [ "$(sha256sum "${downloaded}" | awk '{print $1}')" = "${expected_sha}" ] \
+      || { echo "SSE-KMS payload mismatch"; exit 1; }
+
+    aws_run s3api put-object --bucket "${bucket}" --key "${rejected}" --body "${source}" \
+      --server-side-encryption aws:kms --ssekms-key-id "missing-${RANDOM}-$$"
+    assert_aws_fails || { echo "invalid KMS key unexpectedly accepted"; exit 1; }
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-failure.txt"
+    for secret in "${marker}" "${KMS_LOCAL_MASTER_KEY}" "${KMS_BACKUP_KEK}" "${VAULT_TOKEN}"; do
+      [ -n "${secret}" ] || continue
+      if [[ "${AWS_OUT}" == *"${secret}"* ]]; then echo "expected failure leaked plaintext or key material"; exit 1; fi
+    done
+    aws_run s3api head-object --bucket "${bucket}" --key "${rejected}"
+    assert_aws_fails || { echo "failed encrypted PUT persisted an object"; exit 1; }
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-missing.txt"
+    if [[ "${AWS_OUT}" == *"${marker}"* ]] || [[ "${AWS_OUT}" == *"${KMS_LOCAL_MASTER_KEY}"* ]]; then
+      echo "missing-object failure leaked plaintext or key material"; exit 1
+    fi
+  ) || case_rc=$?
+
+  for key in "${key}" "${rejected}"; do
+    aws_run s3api delete-object --bucket "${bucket}" --key "${key}"
+    assert_aws_ok || cleanup_rc=1
+  done
+  aws_run s3api delete-bucket --bucket "${bucket}"
+  assert_aws_ok || cleanup_rc=1
+  if [ "${cleanup_rc}" -ne 0 ]; then
+    VALIDATION_OBJECT_CLEANUP_STATUS=FAIL
+    echo "validation bucket cleanup failed"
+  fi
+  [ "${case_rc}" -eq 0 ] && [ "${cleanup_rc}" -eq 0 ]
 }
 
 test_kms302() {
@@ -2139,6 +2242,10 @@ Usage:
   --ssh-user <user>         SSH user for the test nodes (default: azureuser)
   --log-file <path>         Tee output to a log file
   --dry-run                 Preview commands without executing them
+  --validation-case ID      Run only kms.sse-kms-round-trip (local, single-single)
+  --validation-artifacts-dir DIR  Write canonical result and evidence
+  --candidate-manifest FILE  Immutable candidate manifest
+  --testing-commit SHA      auto-testing commit used for validation results
   -y, --yes                 Skip confirmation prompts
   -h, --help                Show this help
 USAGE
@@ -2161,6 +2268,10 @@ main() {
       --ssh-user) SSH_USER="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
       --dry-run) DRY_RUN=1 ;;
+      --validation-case) VALIDATION_CASE="$1"; shift ;;
+      --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
+      --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
+      --testing-commit) VALIDATION_TESTING_COMMIT="$1"; shift ;;
       -y|--yes) ASSUME_YES=1 ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown option: ${opt} (see --help)" ;;
@@ -2177,6 +2288,28 @@ main() {
   if [ "${all}" -eq 1 ]; then
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}" "${TOPO_MULTI_MULTI}")
   fi
+  if [ -n "${VALIDATION_CASE}" ]; then
+    [ "${VALIDATION_CASE}" = "kms.sse-kms-round-trip" ] || die "unknown validation case: ${VALIDATION_CASE}"
+    [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
+    [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its own topology"
+    [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
+    SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}")
+    backends_arg=local
+    if [ "${DRY_RUN}" -eq 0 ]; then
+      [ -n "${VALIDATION_ARTIFACTS_DIR}" ] || die "--validation-case requires --validation-artifacts-dir"
+      [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "--validation-case requires --candidate-manifest"
+      [ -n "${VALIDATION_TESTING_COMMIT}" ] || die "--validation-case requires --testing-commit"
+      [ ! -e "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation artifacts directory already exists"
+      PACKAGE_URL="$(jq -er '.package_url' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate URL missing"
+      PACKAGE_SHA256="$(jq -er '.package_sha256' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate package SHA missing"
+      [[ "${PACKAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid candidate package SHA"
+      jq -e '.source_sha | test("^[0-9a-f]{40}$")' "${VALIDATION_CANDIDATE_MANIFEST}" >/dev/null \
+        || die "candidate source commit missing"
+      [ "${VALIDATION_TESTING_COMMIT}" = "$(git -C "${SCRIPT_DIR}" rev-parse HEAD)" ] \
+        || die "testing commit does not match this checkout"
+      mkdir -p "${VALIDATION_ARTIFACTS_DIR}"
+    fi
+  fi
   [ "${#SELECTED_TOPOLOGIES[@]}" -gt 0 ] || die "no topology selected (--all-topologies / --topology)"
   IFS=',' read -r -a BACKENDS <<<"${backends_arg}"
   [ "${#BACKENDS[@]}" -gt 0 ] || die "no backends selected (--backends local,vault-kv2)"
@@ -2192,6 +2325,7 @@ main() {
   need_cmd jq "JSON processor"
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4)"
+  if [ -n "${VALIDATION_CASE}" ]; then need_cmd python3 "validation result writer"; fi
   log "nodes: ${NODES[*]}  package: $(resolve_package_url)"
   log "backends: ${BACKENDS[*]}  topologies: ${SELECTED_TOPOLOGIES[*]}"
 
@@ -2205,17 +2339,41 @@ main() {
         vault_stop
         vault_start
       fi
+      if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+        validation_write_result RUNNING "validation case started" PENDING
+      fi
       env_setup "${topo}"
+      if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+        VALIDATION_BINARY_SHA256="$(printf 'sha256sum /usr/bin/rustfs\n' | run_remote "${NODES[0]}" | awk '{print $1}')"
+        [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
+      fi
       PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
       KMS_KEY_ID=""
-      run_all_tests
+      if [ -n "${VALIDATION_CASE}" ]; then
+        run_test "${VALIDATION_CASE}" "SseKmsRoundTrip" test_validation_kms_sse_kms_round_trip
+      else
+        run_all_tests
+      fi
       results_summary
       record_topology_result "${topo}/${KMS_BACKEND}"
+      local cleanup_status=PASS
       if [ "${KEEP_ENV}" -eq 0 ]; then
-        env_teardown "${topo}"
+        env_teardown "${topo}" || cleanup_status=FAIL
         if [ "${KMS_BACKEND}" = "vault-kv2" ]; then vault_stop; fi
       fi
+      if [ "${VALIDATION_OBJECT_CLEANUP_STATUS}" != PASS ]; then cleanup_status=FAIL; fi
+      if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+        validation_write_evidence
+        if [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
+          validation_write_result PASS "" PASS
+        elif [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ]; then
+          validation_write_result INFRA_ERROR "environment teardown failed" FAIL
+        else
+          validation_write_result FAIL "case failed or unsupported; inspect evidence" "${cleanup_status}"
+        fi
+      fi
       if [ "${FAIL}" -gt 0 ]; then overall_fail=1; fi
+      if [ "${UNSUPPORTED}" -gt 0 ] || [ "${cleanup_status}" != PASS ]; then overall_fail=1; fi
     done
   done
   final_summary
@@ -2223,4 +2381,6 @@ main() {
   log "all done"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
