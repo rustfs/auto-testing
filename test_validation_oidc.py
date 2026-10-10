@@ -43,6 +43,15 @@ class OidcBoundaryTest(unittest.TestCase):
                 self.assertNotIn("AWS_SESSION_TOKEN", environment)
                 self.assertNotIn("AWS_PROFILE", environment)
 
+    def test_invalid_request_only_proves_the_session_token_boundary(self):
+        rejected = subprocess.CompletedProcess([], 254, "", "An error occurred (InvalidRequest) when calling GetObject")
+        credentials = {"AWS_ACCESS_KEY_ID": "temporary-key", "AWS_SECRET_ACCESS_KEY": "temporary-secret"}
+        with patch("scripts.validation_oidc.subprocess.run", return_value=rejected):
+            with self.assertRaisesRegex(RuntimeError, "expected access boundary rejection"):
+                aws("http://fixture", credentials, "get-object", denied=True)
+            self.assertEqual(aws("http://fixture", credentials, "get-object", denied=True,
+                                 rejection_codes=frozenset({"InvalidRequest"})), "InvalidRequest")
+
 
 if __name__ == "__main__":
     unittest.main()

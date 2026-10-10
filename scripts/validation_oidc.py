@@ -138,7 +138,8 @@ def sts(endpoint: str, identity_token: str, subject: str, policy: dict | None = 
     return credentials, {"subject": subject, "expiration": values["Expiration"]}
 
 
-def aws(endpoint: str, credentials: dict, *arguments: str, denied: bool = False) -> str:
+def aws(endpoint: str, credentials: dict, *arguments: str, denied: bool = False,
+        rejection_codes: frozenset[str] = frozenset({"AccessDenied", "InvalidToken", "InvalidAccessKeyId"})) -> str:
     environment = os.environ.copy()
     for name in ("AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_PROFILE"):
         environment.pop(name, None)
@@ -150,7 +151,7 @@ def aws(endpoint: str, credentials: dict, *arguments: str, denied: bool = False)
     if denied:
         match = re.search(r"An error occurred \(([A-Za-z0-9]+)\)", result.stderr)
         code = match.group(1) if match else "missing"
-        if not result.returncode or code not in {"AccessDenied", "InvalidToken", "InvalidAccessKeyId"}:
+        if not result.returncode or code not in rejection_codes:
             raise RuntimeError(f"expected access boundary rejection, received {code} (exit {result.returncode})")
         return code
     if result.returncode:
@@ -203,10 +204,14 @@ def test(directory: Path, endpoint: str) -> None:
         if outside_code != "AccessDenied":
             raise RuntimeError("session policy boundary did not return AccessDenied")
         observations["checks"]["session_outside_denied"] = outside_code
+        # RustFS auth::check_session_token returns InvalidRequest for absent or
+        # mismatched temporary tokens. Authorization denials above must still
+        # return AccessDenied; a generic request error cannot prove that policy.
         for name, altered in (("missing_session_token", {key: value for key, value in session.items() if key != "AWS_SESSION_TOKEN"}),
                               ("invalid_session_token", {**session, "AWS_SESSION_TOKEN": "invalid-session-token"})):
             observations["checks"][name] = aws(endpoint, altered, "get-object", "--bucket", buckets[0], "--key", "object.bin",
-                                                str(directory / "oidc-invalid.bin"), denied=True)
+                                                str(directory / "oidc-invalid.bin"), denied=True,
+                                                rejection_codes=frozenset({"InvalidRequest"}))
         parts = encoded.split(".")
         parts[2] = ("A" if parts[2][0] != "A" else "B") + parts[2][1:]
         wrong_token, _ = token(state, "wrong-audience", "wrong_client_secret")
@@ -224,6 +229,7 @@ def test(directory: Path, endpoint: str) -> None:
         observations["checks"]["fixtures_preserved"] = True
     except Exception as exc:
         primary = exc
+        observations["failure"] = {"type": type(exc).__name__, "message": str(exc)}
     finally:
         cleanup_errors = []
         for bucket in created:
