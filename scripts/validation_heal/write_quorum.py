@@ -43,6 +43,11 @@ BRANCHES = ("read-present-write-absent", "lock-quorum-absent")
 REFUSALS = {"XMinioWriteQuorum", "XMinioLockTimeout", "InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout"}
 LOCAL_LOCK_REASON = ("H1 uses the candidate's in-process local manager, not a distributed client quorum. "
                      "Losing its only process also removes the read endpoint; distributed peer-loss is applicable on H2 only.")
+STORAGE_REFERENCE = {"candidateCommit": LOCK_REFERENCE["candidateCommit"],
+    "sourceFiles": {"crates/ecstore/src/config/storageclass.rs":
+        "e7c29544e2798c246e78d978f60f103bd6446eccd560c5c9b490316bca64bf9c"},
+    "H2LockFixture": "explicit EC:8 only for the fresh run-owned sixteen-drive lock-loss branch",
+    "WriteFixture": "all N readable authorities; independent read-only gates remove W even when R equals W"}
 
 
 def plan_for(snapshot, target, branch, contract):
@@ -57,7 +62,7 @@ def plan_for(snapshot, target, branch, contract):
             and len({(row["node"], row["disk"]) for row in cohort}) == total
             and all({row["disk"] for row in cohort if row["node"] == node} == set(range(4)) for node in hosts),
             "B08 requires actual full H1/H2 member identities")
-    require(read < write and total - 1 >= read, "layout cannot preserve R while removing W")
+    require(total - 1 >= read, "layout cannot retain R payload sources after the original missing part")
     lock = {"mode": "local" if len(hosts) == 1 else "distributed", "clients": len(hosts),
             "sharedQuorum": (len(hosts) + 1) // 2, "exclusiveQuorum": len(hosts) // 2 + 1}
     if branch == "lock-quorum-absent" and len(hosts) == 1:
@@ -165,7 +170,8 @@ def run_branch(args, topology, nodes, branch):
     directory = args.evidence / topology / branch
     directory.mkdir(parents=True)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory)
+    lock_fixture = topology == "H2" and branch == "lock-quorum-absent"
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile="lock-quorum" if lock_fixture else "manual")
     candidate = json.loads(args.candidate.read_text())
     require(candidate["source_sha"] == LOCK_REFERENCE["candidateCommit"], "B08 lock client policy is unreviewed")
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
@@ -179,6 +185,7 @@ def run_branch(args, topology, nodes, branch):
         "rcBinarySha256": hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(), "maxInventoryObjects": 256,
         "maxInventoryBytes": 512 * 1024**2}
     fleet.record("lock-policy-source-contract", LOCK_REFERENCE)
+    fleet.record("storage-boundary-source-contract", STORAGE_REFERENCE)
     contract = verify_quorum_contract(fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate)), candidate)
     fleet.record("binding", binding)
     probe, active = Probe(binding), []
@@ -186,6 +193,10 @@ def run_branch(args, topology, nodes, branch):
     put_observed, put_key, put_payload, original = None, None, None, None
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
+        if lock_fixture:
+            processes = fleet.snapshot("lock-fixture-actual-storage-configuration")
+            require(all(value["storageClassEnvironment"]["RUSTFS_STORAGE_CLASS_STANDARD"] == "EC:8"
+                        for value in processes.values()), "lock fixture did not load its actual sixteen-drive eight-parity configuration")
         expected = seed(Recorder(probe, directory / "fixture"), bucket, "DB", 128, SIZES)
         baseline = fleet.record("S3-baseline", probe.inventory(bucket, unversioned_current_tags=True))
         fleet.record("ACK-manifest", {"expected": expected, **verify_seed(expected, baseline)})

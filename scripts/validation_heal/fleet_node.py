@@ -33,7 +33,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "durable-mrf", "mrf-crash", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    if profile == "lock-quorum":
+        return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:8"}
     if profile == "scope-isolation":
         return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "8"}
     if profile in {"durable-mrf", "mrf-crash"}:
@@ -172,6 +174,7 @@ def reserve(request):
     require(isinstance(volumes, list) and len(volumes) in {4, 16}, "unsupported automatic Heal topology")
     local_paths = [str(root / "data") for root in paths(run_id)[1]]
     h1 = run_id.endswith("-h1")
+    require(profile != "lock-quorum" or not h1, "eight-parity lock boundary requires actual sixteen-drive H2")
     expected = local_paths if h1 else [f"http://rustfs-node{node}:9000{path}"
                                       for node in range(1, 5) for path in local_paths]
     if profile == "scope-isolation":

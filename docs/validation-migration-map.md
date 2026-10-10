@@ -1036,7 +1036,7 @@ four regression verdicts have their own archive and never increment a fleet or
 canonical-case PASS count. Existing tests assert captured lock events internally;
 the collector does not fabricate emitted barrier logs. Missing critical-point
 fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps.
-The current implementation has 285 focused Heal/catalog checks, including the
+The current implementation has 287 focused Heal/catalog checks, including the
 Linux-only D11, C09 and D08 ownership/mount/recovery checks. Native compilation and execution
 still require the separate hosted job; local parser checks are not native PASS.
 
@@ -1230,3 +1230,19 @@ source attribution, bounded configuration and mandatory three-mechanism scoring.
 F04 has no live PASS claim yet. The source-bound MRF log reader also accepts the
 reviewed Rust Option debug spelling without merging different version identities;
 existing E05 receipts and every original branch remain independently required.
+
+
+B08's read-only plan now measures writable drives independently of readable
+sources, including the candidate's actual default H2 R=12/W=12 geometry. Five
+owned read-only roots leave fifteen payload sources and all sixteen metadata
+authorities readable while only eleven roots remain writable. Numerical R<W
+is unnecessary for that distinct write-admission fault. The H2 distributed
+lock-loss branch now seeds a fresh explicitly configured EC:8 run, and attests
+that setting in every actual process before PUT. Its decoded eight-data/eight-
+parity authority must still preserve R=8 after two exact peer stops while losing
+W=9 and exclusive distributed lock quorum. No existing object's parity is
+rewritten, and ordinary profiles keep their own observed layout. The storage
+configuration source hash is archived. Two regression tests cover the default
+R=W read-only plan and fresh balanced lock fixture. H1's missing incarnation
+receipt remains a product/evidence FAIL; the identity oracle is not relaxed.
+A fresh full B08 run is required and no new live PASS is claimed.

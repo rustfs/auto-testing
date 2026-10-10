@@ -52,15 +52,37 @@ class WriteQuorumTests(unittest.TestCase):
 
     def test_layout_and_source_uncertainty_cannot_be_assumed_sufficient(self):
         snapshot, target, _ = self.scene(16)
-        for kind in ("duplicate-member", "other-node", "unrecognized", "different-policy", "no-read-write-gap"):
+        for kind in ("duplicate-member", "other-node", "unrecognized", "different-policy", "insufficient-read"):
             broken, contract = copy.deepcopy(target), dict(self.contract)
             if kind == "duplicate-member": broken["cohort"][-1] = copy.deepcopy(broken["cohort"][0])
             elif kind == "other-node": broken["cohort"][-1]["node"] = "foreign"
             elif kind == "unrecognized": contract["recognized"] = False
             elif kind == "different-policy": contract["writeQuorumRule"] = "assumed"
-            else: broken["logical"]["erasure"].update(data_blocks=10, parity_blocks=6)
+            else: broken["logical"]["erasure"].update(data_blocks=16, parity_blocks=0)
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 executor.plan_for(snapshot, broken, executor.BRANCHES[0], contract)
+
+    def test_read_only_boundary_can_preserve_reads_when_numerical_r_equals_w(self):
+        source = oracle.HealReadQuorumBoundaryTest()
+        snapshot, expected = source.scene(total=16, data=12)
+        target = shards.map_target(snapshot, source.bucket, expected[0]["key"], "data", 1)
+        plan = executor.plan_for(snapshot, target, executor.BRANCHES[0], self.contract)
+        self.assertEqual(plan["readQuorum"], plan["writeQuorum"])
+        self.assertEqual(plan["readableMetadataAuthorities"], 16)
+        self.assertEqual(plan["readablePayloadSources"], 15)
+        self.assertEqual(plan["writableDrives"], 11)
+        self.assertEqual(sum(map(len, plan["gates"].values())), 5)
+        target = {**target, **next(row for row in target["cohort"] if row["node"] == "node4")}
+        with self.assertRaisesRegex(ValueError, "preserve R"):
+            executor.plan_for(snapshot, target, executor.BRANCHES[1], self.contract)
+
+    def test_fresh_h2_lock_fixture_has_a_source_reviewed_balanced_layout(self):
+        from scripts.validation_heal.fleet_node import runtime_config, BACKGROUND_CONFIG
+        config = runtime_config("lock-quorum")
+        self.assertEqual(config.pop("RUSTFS_STORAGE_CLASS_STANDARD"), "EC:8")
+        self.assertEqual(config, BACKGROUND_CONFIG)
+        self.assertNotIn("RUSTFS_STORAGE_CLASS_STANDARD", runtime_config("manual"))
+        self.assertEqual(executor.STORAGE_REFERENCE["candidateCommit"], executor.LOCK_REFERENCE["candidateCommit"])
 
     def test_measured_read_and_write_refusals_must_match_every_root(self):
         _, _, plan = self.scene(4)

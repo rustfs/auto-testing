@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "offline-replay", "durable-mrf", "mrf-crash", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
