@@ -9,15 +9,21 @@ try:
     from .heal_workload import verify_seed
     from .healthy import validate_topology
     from .shards import files, map_target, run_task
+    from .fleet_node import PROCESS_FIELDS
+    from .scanner_repair import JournalWindow, SOURCE_TARGETS, event_time
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, require
     from heal_workload import verify_seed
     from healthy import validate_topology
     from shards import files, map_target, run_task
+    from fleet_node import PROCESS_FIELDS
+    from scanner_repair import JournalWindow, SOURCE_TARGETS, event_time
 
 
 BRANCHES = ("new-disk-data", "new-disk-versioned")
 AUTOMATIC_BRANCHES = ("replacement-unversioned", "replacement-versioned-marker")
+GRACEFUL_BRANCHES = ("target-partial-graceful", "versioned-target-partial")
+CRASH_BRANCHES = ("target-partial-sigkill", "target-partial-sigkill-versioned")
 FORMAT_SECONDS = 90
 REBUILD_SECONDS = 300
 STATUS_PATH = "/rustfs/admin/v4/heal/replacement-recovery"
@@ -58,8 +64,115 @@ def generation(records, endpoint, earliest, *, original=None, completed=False):
     return binding
 
 
-def automatic_completion(probe, fleet, endpoint, earliest):
+def target_progress(snapshot, proofs):
+    indexed, complete, external_complete, external_pending = files(snapshot), [], 0, 0
+    for target in proofs:
+        identity = target["node"], target["disk"], f"{target['bucket']}/{target['key']}/xl.meta"
+        metadata = indexed.get(identity, {}).get("metadata")
+        matched = None if not metadata else next((version for version in metadata["versions"]
+            if (version.get("versionId") or "null") == target["versionId"]), None)
+        valid = False
+        if matched is not None:
+            logical = {name: matched.get(name) for name in target["logical"] if name != "erasure"}
+            logical["erasure"] = {name: matched.get("erasure", {}).get(name) for name in target["logical"]["erasure"]}
+            require(logical == target["logical"] and matched.get("role") == target["role"]
+                    and matched.get("erasure", {}).get("index") == target["index"],
+                    "partial replacement changed the acknowledged version authority or original shard role")
+            if target.get("zeroProof"):
+                require(matched.get("size") == 0 and not matched.get("inline"), "replacement invented data for a zero-length ACK")
+                valid = True
+            elif target.get("inlineProof"):
+                inline = matched.get("inline") or {}
+                require(inline.get("length") == target["inlineValue"]["length"]
+                        and inline.get("sha256") == target["inlineValue"]["sha256"], "partial replacement committed incorrect inline bytes")
+                valid = True
+            else:
+                entry = indexed.get((target["node"], target["disk"], target["relativePath"]))
+                if entry:
+                    require(entry["sha256"] == target["sha256"] and entry["size"] == target["size"],
+                            "partial replacement committed incorrect original same-role shard bytes")
+                    valid = True
+        if valid: complete.append((target["key"], target["versionId"]))
+        if not target.get("zeroProof") and not target.get("inlineProof"):
+            if valid: external_complete += 1
+            else: external_pending += 1
+    return {"completeDataVersions": complete, "dataVersions": len(proofs),
+            "externalComplete": external_complete, "externalPending": external_pending,
+            "partial": 0 < len(complete) < len(proofs) and external_complete > 0 and external_pending > 0}
+
+
+def target_restart_identity(before, after, target):
+    require(set(before) == set(after) and target in before and len(before) == 4, "target restart omitted an actual H2 peer")
+    for node, old in before.items():
+        new = after[node]
+        ignored = {"pid", "startTicks", "mountNamespace"} if node == target else set()
+        require(all(new.get(name) == old.get(name) for name in PROCESS_FIELDS if name not in ignored),
+                "target restart changed candidate, boot, unit, settings or a non-target peer")
+        if node == target:
+            require(type(new.get("pid")) is int and new["pid"] > 1 and type(new.get("startTicks")) is int
+                    and isinstance(new.get("mountNamespace"), str) and new["mountNamespace"]
+                    and (new["pid"], new["startTicks"]) != (old["pid"], old["startTicks"]), "replacement target was not actually restarted")
+    return {"onlyOriginalTargetProcessRestarted": True, "sameBootCandidateUnitSettingsAndRoots": True,
+            "newPrivateMountNamespaceMustProveArchiveRefusal": True}
+
+
+def interrupt_target(fleet, node, proofs, mode, original_format):
+    before = fleet.record("replacement-processes-before-interruption", {peer: fleet.remote(peer, "process") for peer in fleet.nodes})
+    identity = before[node]
+    fleet.frozen_processes[node] = identity
+    fleet.record("replacement-target-freeze", fleet.remote(node, "process-signal", signal="SIGSTOP", expected=identity))
+    frozen = fleet.snapshot("replacement-target-frozen-physical")
+    progress = target_progress(frozen, proofs)
+    require(progress["partial"], "NOT_OBSERVED: replacement was not physically partial at its frozen interruption boundary")
+    require(all(frozen[peer]["formats"] == original_format[peer]["formats"] for peer in fleet.nodes),
+            "partial replacement changed its new target UUID or another disk identity")
+    exit_proof = fleet.record("replacement-target-actual-exit", fleet.remote(node,
+        "process-graceful" if mode == "graceful" else "process-crash", expected=identity))
+    if mode == "graceful":
+        require(exit_proof.get("actualExitCode") == 0 and exit_proof.get("signal") == "SIGTERM", "target has no real graceful exit")
+    else:
+        require(exit_proof.get("actualSignal") == 9 and exit_proof.get("graceful") is False
+                and exit_proof.get("platformEventIssued") is False, "target crash lacks an exact SIGKILL witness")
+    del fleet.frozen_processes[node]
+    fleet.record("replacement-target-release-unit", fleet.remote(node, "stop"))
+    stopped = fleet.record("replacement-target-after-exit-physical", {peer: fleet.remote(peer, "snapshot", quiescent=peer == node) for peer in fleet.nodes})
+    after_progress = target_progress(stopped, proofs)
+    require(after_progress["partial"] and set(progress["completeDataVersions"]) <= set(after_progress["completeDataVersions"]),
+            "target exit lost a committed shard or missed the partial interruption window")
+    require(all(stopped[peer]["formats"] == original_format[peer]["formats"] for peer in fleet.nodes),
+            "target exit changed the original replacement generation's physical identity")
+    fleet.record("replacement-original-target-start", fleet.remote(node, "start"))
+    fleet.wait_ready()
+    after = fleet.record("replacement-processes-after-interruption", {peer: fleet.remote(peer, "process") for peer in fleet.nodes})
+    continuity = target_restart_identity(before, after, node)
+    archive = fleet.record("replacement-backup-refusal-after-interruption", fleet.remote(node, "replacement-probe"))
+    require(archive.get("serviceReadDenied") is True and archive.get("sameOriginalServiceProcess") is True,
+            "restarted target can access its original backup")
+    return {"interruption": mode, "before": progress, "afterActualExit": after_progress,
+            "actualExit": exit_proof, "processContinuity": continuity, "sameNewDiskUUIDAndSetSlot": True}
+
+
+def coordinator(events, token, target):
+    owners = []
+    for node, rows in events.items():
+        admitted = [event for event in rows if event.get("target") == "rustfs::heal::manager"
+            and event.get("request_id") == token and event.get("source") == "auto_heal"
+            and event.get("result") == "accepted" and event.get("message") == "Heal queue request accepted"
+            and event_time(event) is not None]
+        started = [event for event in rows if event.get("target") == "rustfs::heal::task"
+            and event.get("task_id") == token and event.get("set_disk_id") == "pool_0_set_0"
+            and event.get("stage") == "start" and event.get("message") == "Heal erasure set started"
+            and event_time(event) is not None]
+        if any(event_time(start) >= event_time(admission) for start in started for admission in admitted):
+            owners.append(node)
+    require(len(owners) == 1 and owners[0] != target,
+            "NOT_OBSERVED: replacement has no uniquely witnessed coordinator distinct from the interrupted target")
+    return owners[0]
+
+
+def automatic_completion(probe, fleet, endpoint, earliest, *, interruption=None, proofs=(), original_format=None, journal=None):
     deadline, original, timeline = time.monotonic() + REBUILD_SECONDS, None, []
+    interrupted = None
     while True:
         observed = replacement_records(probe, fleet, "automatic-replacement-generation-window")
         ready = True
@@ -71,6 +184,17 @@ def automatic_completion(probe, fleet, endpoint, earliest):
             original = original or bound
             ready = ready and records[0]["state"] == "completed"
         timeline.append(observed)
+        if interruption is not None and interrupted is None:
+            require(not ready, "NOT_OBSERVED: replacement completed before its required target interruption")
+            if any(records and records[0]["state"] == "running" for records in observed.values()):
+                progress = target_progress(fleet.snapshot("replacement-running-physical-window"), proofs)
+                if progress["partial"]:
+                    owner = coordinator(journal.capture(), original["taskId"], proofs[0]["node"])
+                    fleet.record("replacement-distinct-coordinator-proof", {"node": owner,
+                        "target": proofs[0]["node"], "originalGeneration": original, "source": "fresh accepted auto_heal and exact erasure task start"})
+                    interrupted = interrupt_target(fleet, proofs[0]["node"], proofs, interruption, original_format)
+                    interrupted["coordinatorKeptRunning"] = owner
+                    continue
         if ready and original is not None:
             require(len({canonical(records[0]) for records in observed.values()}) == 1,
                     "completed replacement responsibility differs across peers")
@@ -81,9 +205,10 @@ def automatic_completion(probe, fleet, endpoint, earliest):
         repeated = replacement_records(probe, fleet, "automatic-replacement-completion-repeat")
         for records in repeated.values(): generation(records, endpoint, earliest, original=original, completed=True)
         require(canonical(repeated) == canonical(observed), "completed replacement generation changed after its terminal observation")
+    require(interruption is None or interrupted is not None, "NOT_OBSERVED: no actual partial target interruption occurred")
     return {"source": "automatic-replacement", "generation": original, "observations": len(timeline),
             "completionObservedOnEveryPeer": True, "budgetSeconds": REBUILD_SECONDS,
-            "adminHealMutations": 0, "targetS3ReadsBeforePhysicalProof": 0}
+            "adminHealMutations": 0, "targetS3ReadsBeforePhysicalProof": 0, "targetInterruption": interrupted}
 
 
 def wait_format(fleet, node, disk):
@@ -167,8 +292,8 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
         from .versions import map_inline_target, validate_version_receipts, verify_version_s3
     except ImportError:
         from versions import map_inline_target, validate_version_receipts, verify_version_s3
-    automatic = branch in AUTOMATIC_BRANCHES
-    require(branch in (*BRANCHES, *AUTOMATIC_BRANCHES), "unknown replacement branch")
+    automatic = branch in (*AUTOMATIC_BRANCHES, *GRACEFUL_BRANCHES, *CRASH_BRANCHES)
+    require(branch in (*BRANCHES, *AUTOMATIC_BRANCHES, *GRACEFUL_BRANCHES, *CRASH_BRANCHES), "unknown replacement branch")
     require(not automatic or fleet.runtime_profile == "replacement", "automatic replacement lacks its isolated source configuration")
     before = fleet.snapshot("replacement-original-" + branch, quiescent=True)
     if automatic:
@@ -192,6 +317,8 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
         shard = next(value for value in target["cohort"] if (value["node"], value["disk"]) == member)
         proofs.append({**target, **shard})
     earliest = int(time.time())
+    journal = JournalWindow(fleet, "replacement-interruption-source", event_targets=SOURCE_TARGETS) \
+        if branch in (*GRACEFUL_BRANCHES, *CRASH_BRANCHES) else None
     replaced = fleet.record("replacement-original-root-isolated", fleet.remote(node, "replace-drive", disk=disk,
         expectedFormatSha256=physical_format["sha256"]))
     require(replaced.get("oldRootMovedIntact") is True and replaced.get("newDataRootEmpty") is True
@@ -210,7 +337,9 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
             {key: value for key, value in indexed.items() if key[:2] != member}, "replacement initialization changed surviving objects")
     if automatic:
         endpoint = replaced["dataPath"] if len(fleet.nodes) == 1 else f"http://rustfs-node{fleet.nodes.index(node) + 1}:9000{replaced['dataPath']}"
-        receipts = automatic_completion(recorder.probe, fleet, endpoint, earliest)
+        receipts = automatic_completion(recorder.probe, fleet, endpoint, earliest,
+            interruption="graceful" if branch in GRACEFUL_BRANCHES else "sigkill" if branch in CRASH_BRANCHES else None,
+            proofs=proofs, original_format=initialized, journal=journal)
     else:
         status = run_task(recorder.probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
                           option_overrides={"recursive": True}, admissions=admissions)
@@ -220,12 +349,15 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
     after = fleet.snapshot("replacement-after-manual", quiescent=True)
     physical = fleet.record("replacement-full-physical-proof", physical_rebuild(before, after, member))
     fleet.record("replacement-original-archive-after-rebuild", fleet.remote(node, "replacement-state"))
-    streaming = []
+    streaming, external = [], []
     for target in proofs:
         if target.get("zeroProof"):
             streaming.append({"key": target["key"], "zeroLengthMetadataVerified": True, "noPartInvented": True})
             continue
         operation = "verify-inline" if target.get("inlineProof") else "verify-part"
+        if operation == "verify-part":
+            external.append(target)
+            continue
         params = {name: target[name] for name in ("disk", "relativePath", "versionId")}
         if operation == "verify-part": params["partNumber"] = target["partNumber"]
         proof = fleet.record("replacement-target-streaming-check", fleet.remote(node, operation, **params))
@@ -237,9 +369,20 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
             require(proof.get("sha256") == target["sha256"] and proof.get("physicalSize") == target["size"],
                     "new target external shard differs from the original same-role oracle")
         streaming.append({"key": target["key"], "versionId": target["versionId"], "proof": proof})
+    for offset in range(0, len(external), 128):
+        batch = external[offset:offset + 128]
+        observed = fleet.record("replacement-target-streaming-batch", fleet.remote(node, "verify-parts", parts=[
+            {name: target[name] for name in ("disk", "relativePath", "versionId", "partNumber")} for target in batch]))
+        require(observed.get("complete") is True and isinstance(observed.get("parts"), list)
+                and len(observed["parts"]) == len(batch), "replacement streaming batch omitted an exact target part")
+        for target, proof in zip(batch, observed["parts"], strict=True):
+            require(proof.get("physicalBitrotVerified") is True
+                    and all(proof.get(name) == target[name] for name in ("disk", "relativePath", "versionId", "partNumber", "sha256"))
+                    and proof.get("physicalSize") == target["size"], "replacement target streaming batch changed an acknowledged same-role part")
+            streaming.append({"key": target["key"], "versionId": target["versionId"], "proof": proof})
     fleet.start()
     fleet.record("replacement-backup-service-refusal-after", fleet.remote(node, "replacement-probe"))
-    fixture = "DB" if branch in {"new-disk-data", "replacement-unversioned"} else "DV"
+    fixture = "DB" if branch in {"new-disk-data", "replacement-unversioned", "target-partial-graceful", "target-partial-sigkill"} else "DV"
     s3 = verify_version_s3(recorder.probe, fleet, bucket, expected, baseline, "replacement-s3-after", fixture=fixture)
     peers = []
     for endpoint in recorder.probe.binding["endpoints"]:

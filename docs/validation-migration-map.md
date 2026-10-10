@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 115 currently dispatchable IDs include all 74 non-Heal cases and forty-one Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
+case evidence. The 117 currently dispatchable IDs include all 74 non-Heal cases and forty-three Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 43 Heal cases remain
+The other 41 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -811,3 +811,26 @@ E04 `38083897141` and C06 `38084060749` retained FAIL/cleanup PASS because the
 first paginated collector used journald's default JSON field-size limit, which
 can omit a long MESSAGE. The collector now requests `--all`, decodes complete
 UTF-8 byte-array messages and rejects missing fields; original failures remain.
+
+F02/F03 now execute both H2 source branches using automatic replacement. The
+unversioned observation fixture has 1,025 external objects; the versioned
+fixture has 64 keys, 192 data versions and their delete markers, with a 45-minute
+private-service lease. Only node1 enables automatic disk discovery; the other
+three nodes retain enabled Heal with discovery disabled. Before interrupting
+node4, fresh cursor-bounded logs must bind the original generation to accepted
+`auto_heal` admission and exact erasure-set task start on one distinct
+coordinator. Physical census must show both committed original same-role
+external shards and pending data versions. The target is paused through its
+exact MainPID/birth identity and the partial window is checked again. F02 then
+requires witnessed SIGTERM/normal exit zero; F03 requires pidfd-bound SIGKILL,
+signal 9 and a non-graceful systemd exit, with no platform power event. No other
+peer process may change. Restart uses the same unit, environment, roots and new
+disk UUID, reproves old-archive refusal and finishes the same automatic
+generation. Complete physical/streaming and all-peer S3 proof remain mandatory.
+A fast completed task, missing distinct coordinator, changed generation or
+missed physical window cannot PASS. External target verification uses bounded
+128-part batches to keep the DX run within its registered resource budget.
+
+B03 bounded run `38084312163` retained FAIL/cleanup PASS in all four instances:
+the candidate still did not initialize the replacement format within 90 seconds.
+That explicit acceptance failure is not relabeled as a completed reconstruction.

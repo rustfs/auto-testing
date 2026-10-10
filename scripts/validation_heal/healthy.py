@@ -136,6 +136,7 @@ class Fleet:
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
         self.runtime_profile = runtime_profile
+        self.node_runtime_profiles = {}
         self.resource_profile = resource_profile
         self.sequence = 0
         self.reserved = []
@@ -230,7 +231,7 @@ class Fleet:
                 if self.tool_directory else None
             value = self.remote(node, "reserve", hostname=checked[node]["hostname"], mounts=checked[node]["mounts"],
                                 binarySha256=binary_sha, bucket=bucket, volumes=volumes, access=access, secret=secret,
-                                inspectorSha256=inspector_sha, runtimeProfile=self.runtime_profile,
+                                inspectorSha256=inspector_sha, runtimeProfile=self.node_runtime_profiles.get(node, self.runtime_profile),
                                 resourceProfile=self.resource_profile)
             self.record("reserved", {"node": node, **value})
             if self.tool_directory:

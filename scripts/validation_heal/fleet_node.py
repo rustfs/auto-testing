@@ -32,9 +32,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement"}, "unsupported Heal runtime profile")
-    if profile == "replacement":
-        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "true", "RUSTFS_HEAL_INTERVAL_SECS": "10",
+    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target"}, "unsupported Heal runtime profile")
+    if profile in {"replacement", "replacement-target"}:
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "true" if profile == "replacement" else "false", "RUSTFS_HEAL_INTERVAL_SECS": "10",
                 "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
     if profile == "stale-rejoin":
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_DANGLING_DELETE_GRACE_SECS": "0", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
@@ -217,7 +217,7 @@ def start(request):
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
-            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") == "root-restart" else []),
+            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "replacement", "replacement-target"} else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)),
@@ -303,7 +303,7 @@ def process_signal(request):
 
 
 def process_graceful(request):
-    require(owned(request["runId"])[2].get("runtimeProfile") == "root-restart"
+    require(owned(request["runId"])[2].get("runtimeProfile") in {"root-restart", "replacement", "replacement-target"}
             and process(request).get("state") == "T", "graceful observation requires the paused run-owned root service")
     before = pidfd_signal(request, signal.SIGTERM)
     # A paused process must receive CONT to handle TERM. Use the same pidfd
@@ -324,6 +324,26 @@ def process_graceful(request):
             and service.get("Result") == "success", "process has no witnessed normal exit zero; signal/timeout exits are not graceful")
     return {"before": before, "after": after, "signal": "SIGTERM", "actualExitCode": 0,
             "pidfdBound": True, "platformEventIssued": False}
+
+
+def process_crash(request):
+    require(owned(request["runId"])[2].get("runtimeProfile") in {"replacement", "replacement-target"}
+            and process(request).get("state") == "T", "crash observation requires the paused owned replacement service")
+    before = pidfd_signal(request, signal.SIGKILL)
+    deadline = time.monotonic() + 30
+    while True:
+        after = process(request)
+        if after["pid"] == 0: break
+        require(all(after.get(name) == before[name] for name in PROCESS_FIELDS), "another process replaced the crash target")
+        require(time.monotonic() < deadline, "owned replacement process did not exit after SIGKILL")
+        time.sleep(0.1)
+    service = after["service"]
+    require(after["bootId"] == before["bootId"] and after["binarySha256"] == before["binarySha256"]
+            and after["environmentFileSha256"] == before["environmentFileSha256"]
+            and service.get("ExecMainCode") == "2" and service.get("ExecMainStatus") == "9"
+            and service.get("Result") == "signal", "process has no exact non-graceful SIGKILL exit witness")
+    return {"before": before, "after": after, "signal": "SIGKILL", "actualSignal": 9,
+            "pidfdBound": True, "graceful": False, "platformEventIssued": False}
 
 
 def fault_module():
@@ -723,6 +743,6 @@ def main(request):
                "drive-gate-release-live": drive_gate_release_live}
     actions["task-records"] = task_records
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
-    actions.update({"process": process, "process-signal": process_signal, "process-graceful": process_graceful})
+    actions.update({"process": process, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

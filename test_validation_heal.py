@@ -2896,6 +2896,96 @@ class HealDiskLossTest(unittest.TestCase):
 
 
 class HealWholeDriveReplacementTest(unittest.TestCase):
+    def test_partial_target_window_requires_actual_committed_shards_and_pending_versions(self):
+        scene, bucket, expected = versioned_scene(["first", "second"])
+        proofs = [map_target(scene, bucket, key, "data", 1, "v0", latest_required=False) for key in ("first", "second")]
+        partial = copy.deepcopy(scene)
+        missing = proofs[1]
+        partial[missing["node"]]["files"] = [item for item in partial[missing["node"]]["files"]
+            if not (item["disk"] == missing["disk"] and item["path"] == missing["relativePath"])]
+        progress = replacement.target_progress(partial, proofs)
+        self.assertTrue(progress["partial"])
+        self.assertEqual(progress["completeDataVersions"], [("first", "v0")])
+        self.assertFalse(replacement.target_progress(scene, proofs)["partial"])
+        for kind in ("bytes", "version-authority", "role"):
+            changed = copy.deepcopy(partial)
+            target = proofs[0]
+            if kind == "bytes":
+                next(item for item in changed[target["node"]]["files"] if item["disk"] == target["disk"]
+                     and item["path"] == target["relativePath"])["sha256"] = "wrong"
+            else:
+                version = next(item for item in changed[target["node"]]["files"] if item["disk"] == target["disk"]
+                    and item["path"] == f"{bucket}/first/xl.meta")["metadata"]["versions"][0]
+                if kind == "version-authority": version["dataDir"] = "foreign-generation"
+                else: version["role"] = "wrong"
+            with self.subTest(kind=kind), self.assertRaises(ValueError): replacement.target_progress(changed, proofs)
+
+    def test_target_restart_keeps_other_peers_and_rechecks_private_namespace(self):
+        before = {f"node{index}": HealRootRestartOracleTest().process(10 + index, 50 + index) for index in range(1, 5)}
+        after = copy.deepcopy(before)
+        after["node4"].update(pid=29, startTicks=99, mountNamespace="mnt:[new-private]")
+        self.assertTrue(replacement.target_restart_identity(before, after, "node4")["onlyOriginalTargetProcessRestarted"])
+        for node, field in (("node1", "pid"), ("node4", "binarySha256"), ("node4", "bootId"), ("node4", "settings")):
+            changed = copy.deepcopy(after); changed[node][field] = "changed"
+            with self.subTest(node=node, field=field), self.assertRaises(ValueError): replacement.target_restart_identity(before, changed, "node4")
+
+    def test_target_crash_requires_exact_signal_nine_and_original_birth_identity(self):
+        before = HealRootRestartOracleTest().process()
+        exited = {"pid": 0, "bootId": "boot", "binarySha256": "sha", "environmentFileSha256": "env",
+                  "service": {"ExecMainCode": "2", "ExecMainStatus": "9", "Result": "signal"}}
+        for kind in ("good", "graceful", "other-signal", "timeout", "boot", "candidate", "environment"):
+            current = copy.deepcopy(exited)
+            if kind == "graceful": current["service"]["ExecMainCode"] = "1"
+            elif kind == "other-signal": current["service"]["ExecMainStatus"] = "15"
+            elif kind == "timeout": current["service"]["Result"] = "timeout"
+            elif kind == "boot": current["bootId"] = "new-boot"
+            elif kind == "candidate": current["binarySha256"] = "new-build"
+            elif kind == "environment": current["environmentFileSha256"] = "new-env"
+            with self.subTest(kind=kind), patch.object(fleet_node, "owned", return_value=(None, None, {"runtimeProfile": "replacement"})), \
+                 patch.object(fleet_node, "process", side_effect=[before, current]), patch.object(fleet_node, "pidfd_signal", return_value=before) as send:
+                if kind == "good":
+                    proof = fleet_node.process_crash({"runId": "run", "expected": before})
+                    self.assertEqual(proof["actualSignal"], 9)
+                    self.assertFalse(proof["platformEventIssued"])
+                    self.assertEqual(send.call_args.args[1], fleet_node.signal.SIGKILL)
+                else:
+                    with self.assertRaises(ValueError): fleet_node.process_crash({"runId": "run", "expected": before})
+        with patch.object(fleet_node, "owned", return_value=(None, None, {"runtimeProfile": "manual"})), \
+             patch.object(fleet_node, "pidfd_signal") as send, self.assertRaises(ValueError):
+            fleet_node.process_crash({"runId": "run", "expected": before})
+        send.assert_not_called()
+
+    def test_fast_completed_replacement_cannot_certify_an_unobserved_interruption(self):
+        endpoint = "/private/new/data"
+        row = {"taskId": "12345678-1234-4234-8234-123456789abc", "generation": "12345678-1234-4234-8234-123456789abc",
+               "setDiskId": "pool_0_set_0", "targetSlots": [endpoint], "state": "completed", "reason": None, "verifiedAt": 101}
+        with patch("scripts.validation_heal.replacement.replacement_records", return_value={"node1": [row]}), \
+             patch("scripts.validation_heal.replacement.time.time", return_value=102), self.assertRaisesRegex(ValueError, "NOT_OBSERVED"):
+            replacement.automatic_completion(None, None, endpoint, 100, interruption="sigkill")
+        self.assertEqual(list(replacement.GRACEFUL_BRANCHES), select("F02")[0]["variants"])
+        self.assertEqual(list(replacement.CRASH_BRANCHES), select("F03")[0]["variants"])
+
+    def test_target_interruption_needs_fresh_source_and_a_distinct_actual_coordinator(self):
+        token = "12345678-1234-4234-8234-123456789abc"
+        rows = [{"timestamp": "2026-10-10T10:00:01Z", "target": "rustfs::heal::manager",
+                 "request_id": token, "source": "auto_heal", "result": "accepted", "message": "Heal queue request accepted"},
+                {"timestamp": "2026-10-10T10:00:02Z", "target": "rustfs::heal::task", "task_id": token,
+                 "set_disk_id": "pool_0_set_0", "stage": "start", "message": "Heal erasure set started"}]
+        self.assertEqual(replacement.coordinator({"node1": rows, "node4": []}, token, "node4"), "node1")
+        for kind in ("same-target", "duplicate", "source", "task", "order", "missing"):
+            events = {"node1": copy.deepcopy(rows), "node4": []}
+            if kind == "same-target": events = {"node4": rows}
+            elif kind == "duplicate": events["node2"] = rows
+            elif kind == "source": events["node1"][0]["source"] = "admin"
+            elif kind == "task": events["node1"][1]["task_id"] = "other-task"
+            elif kind == "order": events["node1"][1]["timestamp"] = "2026-10-10T10:00:00Z"
+            else: events["node1"].pop()
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "NOT_OBSERVED"):
+                replacement.coordinator(events, token, "node4")
+        config = runtime_config("replacement-target")
+        self.assertEqual(config["RUSTFS_HEAL_AUTO_HEAL_ENABLE"], "false")
+        self.assertEqual(config["RUSTFS_HEAL_ENABLED"], "true")
+
     def test_live_permission_rejoin_restores_same_inode_and_requires_same_process(self):
         for changed_process in (False, True):
             with self.subTest(changed_process=changed_process), tempfile.TemporaryDirectory() as folder:

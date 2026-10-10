@@ -34,7 +34,7 @@ try:
                           marker_plan, prepare_stale, verify_markers, reveal_current)
     from .stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
     from .disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch
-    from .replacement import BRANCHES as REPLACEMENT_BRANCHES, AUTOMATIC_BRANCHES as AUTO_REPLACEMENT_BRANCHES, run_branch as replacement_branch
+    from .replacement import BRANCHES as REPLACEMENT_BRANCHES, AUTOMATIC_BRANCHES as AUTO_REPLACEMENT_BRANCHES, GRACEFUL_BRANCHES, CRASH_BRANCHES, run_branch as replacement_branch
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -54,7 +54,7 @@ except ImportError:
                          marker_plan, prepare_stale, verify_markers, reveal_current)
     from stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
     from disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch
-    from replacement import BRANCHES as REPLACEMENT_BRANCHES, AUTOMATIC_BRANCHES as AUTO_REPLACEMENT_BRANCHES, run_branch as replacement_branch
+    from replacement import BRANCHES as REPLACEMENT_BRANCHES, AUTOMATIC_BRANCHES as AUTO_REPLACEMENT_BRANCHES, GRACEFUL_BRANCHES, CRASH_BRANCHES, run_branch as replacement_branch
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -80,6 +80,8 @@ BRANCHES = {
     "heal.disk-loss-and-repair": DISK_LOSS_BRANCHES,
     "heal.disk-replacement-formatted": REPLACEMENT_BRANCHES,
     "heal.replacement-auto-rebuild": AUTO_REPLACEMENT_BRANCHES,
+    "heal.target-graceful-restart": GRACEFUL_BRANCHES,
+    "heal.target-process-crash": CRASH_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -712,11 +714,14 @@ def run_topology(args, topology, nodes, fixture):
     directory = args.evidence / fixture / topology
     directory.mkdir(parents=True)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory,
+    target_restart = args.case_id in {"heal.target-graceful-restart", "heal.target-process-crash"}
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory, resource_profile="cursor" if target_restart else "standard",
                   runtime_profile="scanner" if args.case_id == "heal.scanner-cold-object-repair" else
                   "read-repair" if args.case_id == "heal.read-repair-attribution" else
-                  "replacement" if args.case_id == "heal.replacement-auto-rebuild" else
+                  "replacement" if args.case_id == "heal.replacement-auto-rebuild" or target_restart else
                   "stale-rejoin" if args.case_id == "heal.stale-version-rejoin" else "manual")
+    if target_restart:
+        fleet.node_runtime_profiles = {node: "replacement-target" for node in nodes[1:]}
     candidate = json.loads(args.candidate.read_text())
     tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id in {
@@ -727,12 +732,12 @@ def run_topology(args, topology, nodes, fixture):
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
     binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,
-        "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=45 if size_rule else 30)).isoformat(), "bucketPrefix": bucket,
+        "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=45 if size_rule or target_restart else 30)).isoformat(), "bucketPrefix": bucket,
         "endpoints": {f"node{index}": f"http://rustfs-node{index}:9000" for index in range(1, len(nodes) + 1)},
         "defaultEndpoint": "node1", "candidateCommit": candidate["source_sha"], "harnessCommit": args.testing_commit,
         "candidatePackageSha256": candidate["package_sha256"], "candidateBinarySha256": args.binary_sha,
         "rcBinarySha256": hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(),
-        "maxInventoryObjects": 512, "maxInventoryBytes": 512 * 1024**2}
+        "maxInventoryObjects": 2048 if target_restart else 512, "maxInventoryBytes": 2 * 1024**3 if target_restart else 512 * 1024**2}
     fleet.record("binding", binding)
     recipe = select(args.case_id)[0]
     require(list(BRANCHES[args.case_id]) == recipe["variants"], "executor omitted a source version branch")
@@ -747,6 +752,8 @@ def run_topology(args, topology, nodes, fixture):
         branches = [branch for branch in REPLACEMENT_BRANCHES if (branch == "new-disk-data") == (fixture == "DB")]
     if args.case_id == "heal.replacement-auto-rebuild":
         branches = [branch for branch in AUTO_REPLACEMENT_BRANCHES if (branch == "replacement-unversioned") == (fixture == "DB")]
+    if target_restart:
+        branches = [branch for index, branch in enumerate(BRANCHES[args.case_id]) if (index == 0) == (fixture == "DB")]
     result = {"topology": topology, "fixture": fixture, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, admissions = [], []
     probe = Probe(binding)
@@ -777,6 +784,9 @@ def run_topology(args, topology, nodes, fixture):
         elif args.case_id == "heal.delete-marker-semantics":
             expected = seed_markers(recorder, bucket, VERSION_SIZE)
             instances = list(MARKER_INSTANCES)
+        elif target_restart:
+            expected = seed(recorder, bucket, fixture, 1025 if fixture == "DB" else 64, [1024**2 + 73])
+            fleet.record("replacement-interruption-budget", {"dataObjects": 1025 if fixture == "DB" else 192, "objectBytes": 1024**2 + 73, "requiresActualPartialPhysicalProgress": True, "runtimeMinutes": 45})
         elif fixture == "DK":
             expected = seed_special_keys(recorder, bucket)
         elif fixture == "DS":
@@ -831,7 +841,7 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
                         key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-before-" + branch))
                 fleet.stop()
-                if args.case_id in {"heal.disk-replacement-formatted", "heal.replacement-auto-rebuild"}:
+                if args.case_id in {"heal.disk-replacement-formatted", "heal.replacement-auto-rebuild", "heal.target-graceful-restart", "heal.target-process-crash"}:
                     stale_marker_started = True
                     result["branches"][branch] = replacement_branch(recorder, fleet, bucket, branch, expected, baseline, active, admissions)
                     stale_marker_started = False
@@ -1026,7 +1036,7 @@ def run_topology(args, topology, nodes, fixture):
                 result["branches"][branch] = {"verdict": "FAIL", "failure": {"type": type(exc).__name__, "message": str(exc)}}
                 try:
                     fleet.stop()
-                    if args.case_id in {"heal.disk-replacement-formatted", "heal.replacement-auto-rebuild"}:
+                    if args.case_id in {"heal.disk-replacement-formatted", "heal.replacement-auto-rebuild", "heal.target-graceful-restart", "heal.target-process-crash"}:
                         for node in fleet.nodes:
                             fleet.record("replacement-failure-format-and-original", {"node": node,
                                 **fleet.remote(node, "replacement-state")})
@@ -1082,7 +1092,7 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes), "four current Heal nodes required")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
-    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss", "heal.read-repair-attribution", "heal.stale-version-rejoin", "heal.disk-replacement-formatted", "heal.replacement-auto-rebuild"} else ("DV",)
+    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss", "heal.read-repair-attribution", "heal.stale-version-rejoin", "heal.disk-replacement-formatted", "heal.replacement-auto-rebuild", "heal.target-graceful-restart", "heal.target-process-crash"} else ("DV",)
     if args.case_id == "heal.object-metadata-and-tags":
         fixtures = ("DS",)
     if args.case_id == "heal.special-keys-and-pagination":
@@ -1093,9 +1103,12 @@ def main():
         fixtures = ("DO",)
     if args.case_id in {"heal.disk-readonly-and-permission", "heal.scanner-cold-object-repair", "heal.disk-loss-and-repair"}:
         fixtures = ("DB",)
+    allowed_topologies = set(select(args.case_id)[0]["contract"]["probes"]["topology"].split(","))
+    require(allowed_topologies <= {"H1", "H2"}, "version executor lacks a required topology")
+    topologies = [(name, selected) for name, selected in (("H1", nodes[:1]), ("H2", nodes[:4])) if name in allowed_topologies]
     results = []
     try:
-        for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
+        for topology, selected in topologies:
             for fixture in fixtures:
                 results.append(run_topology(args, topology, selected, fixture))
                 if results[-1]["cleanup"] != "PASS":
@@ -1103,7 +1116,7 @@ def main():
             if results[-1]["cleanup"] != "PASS":
                 break
     finally:
-        complete = len(results) == 2 * len(fixtures) and all(
+        complete = len(results) == len(topologies) * len(fixtures) and all(
             item["verdict"] == "PASS" and item["cleanup"] == "PASS" for item in results)
         save(args.evidence / "healthy-summary.json", {"caseId": args.case_id, "results": results,
             "cleanup": "PASS" if results and all(item["cleanup"] == "PASS" for item in results) else "FAIL", "complete": complete})
