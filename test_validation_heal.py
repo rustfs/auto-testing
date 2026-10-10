@@ -16,7 +16,7 @@ from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
 from scripts.validation_heal.shards import validate_conditional_response
-from scripts.validation_heal.shards import run_task
+from scripts.validation_heal.shards import run_task, verify_ranges
 from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, validate_version_receipts,
     branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract)
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract
@@ -176,6 +176,24 @@ class HealHealthyOracleTest(unittest.TestCase):
 
 
 class HealShardOracleTest(unittest.TestCase):
+    def test_ranges_at_one_megabyte_boundary_stay_inside_the_real_payload(self):
+        for size in (1024**2 - 1, 1024**2, 1024**2 + 1):
+            body = b"x" * size
+            requested = []
+            def s3(operation, params):
+                start, end = map(int, params["Range"].removeprefix("bytes=").split("-"))
+                self.assertTrue(0 <= start <= end < size)
+                requested.append((start, end))
+                value = body[start:end + 1]
+                return {"acknowledged": True, "response": {"ResponseMetadata": {"HTTPStatusCode": 206},
+                    "ContentRange": f"bytes {start}-{end}/{size}"},
+                    "payload": {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}}
+            verify_ranges(types.SimpleNamespace(s3=s3), types.SimpleNamespace(record=lambda label, value: value),
+                          "fixture", "objects/0000.bin", expected_body=body)
+            self.assertEqual(requested[-1][1], size - 1)
+            if size > 1024**2:
+                self.assertTrue(any(start < 1024**2 <= end for start, end in requested))
+
     def test_bucket_and_literal_object_routes_keep_the_original_token_for_status(self):
         for key, expected_path in (("", "/rustfs/admin/v3/heal/fixture"),
                                    ("literal%2F/key", "/rustfs/admin/v3/heal/fixture/literal%252F/key")):

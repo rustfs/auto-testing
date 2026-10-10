@@ -231,3 +231,13 @@ both H1/H2, but its bucket-recursive branch used an extra trailing slash and
 received HTTP 501 before admission. Cleanup passed. The task URL now uses the
 registered exact bucket route; this harness failure remains retained and D03
 needs a fresh full run before a canonical PASS claim.
+
+J04 run `38058699913` retained FAIL with clean finalization. Its DB checks hit
+an executor Range bug on exact/near-1MiB controls; positive ranges now use
+actual bounded intervals and have boundary regression coverage. The DV H1
+branch passed first repair and both normal/deep repeats. DV H2 physically
+restored all original bytes, decoded version references and S3 manifests, but
+the candidate attributed the current delete marker as unknown while three data
+versions were repaired. That genuine receipt failure remains strict and visible.
+Tool build `38058949922` successfully produced the current decoder plus the
+recognized exact-candidate quorum/error contract for B07.

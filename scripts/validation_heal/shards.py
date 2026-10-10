@@ -349,7 +349,11 @@ def verify_ranges(probe, fleet, bucket, key, *, version_id="null", expected_body
             f"{bucket}/{key}/0", SIZES[int(key.rsplit("/", 1)[1].split(".")[0]) % len(SIZES)])
         boundaries = (1024**2, len(body) // 2)
     proofs = []
-    for start, end in [(point - 17, point + 29) for point in boundaries] + [(len(body) - 47, len(body) - 1)]:
+    require(len(body) > 0, "positive ranges require a nonempty fixture")
+    intervals = [(max(0, point - 17), min(len(body) - 1, point + 29))
+                 for point in boundaries if 0 < point < len(body)]
+    intervals.append((max(0, len(body) - 47), len(body) - 1))
+    for start, end in intervals:
         require(0 <= start <= end < len(body), "invalid fixture range")
         observed = fleet.record("s3-range", probe.s3("get_object", {"Bucket": bucket, "Key": key,
             "VersionId": version_id, "Range": f"bytes={start}-{end}"}))
