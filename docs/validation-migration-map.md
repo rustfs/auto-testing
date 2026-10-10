@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 122 currently dispatchable IDs include all 74 non-Heal cases and forty-eight Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
+case evidence. The 122 currently dispatchable IDs include all 74 non-Heal cases and forty-eight Heal cases. Forty-five have live PASS evidence; the other 113 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -1034,3 +1034,16 @@ fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps
 The current implementation has 239 focused Heal/catalog checks, including the
 Linux-only D11 ownership/mount/recovery checks. Native compilation and execution
 still require the separate hosted job; local parser checks are not native PASS.
+
+
+J03 corrected-budget run `38089238767` passed every within-window,
+past-retention-gap, cross-node and terminal-truncation branch on both H1 and
+H2. It retained complete DX responsibility, real running-status windows,
+physical/streaming integrity, all-peer S3 evidence, cleanup PASS and the
+independent canonical selected-case gate. This increases complete live PASS
+to 45/158; branch-only successes and native regressions remain outside that
+count. A06/F06/F01 and A02/E05/F05/J06/D11 queues continue serially on the
+current auto-testing fleet. The optional native build waits for those queues
+and uses the existing Functional Chain tools-only driver, because the reusable
+workflow is still in a draft PR and cannot be dispatched directly from the
+default branch.
