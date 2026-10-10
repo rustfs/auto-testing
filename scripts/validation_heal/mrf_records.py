@@ -20,7 +20,8 @@ REFERENCE = {"candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926", "sou
     "crates/heal/src/heal/mrf_queue/snapshot.rs": "ecfcb5ee63edef5c5d3d6713edc127e16f489522afc5fc02dc1044ccca241d14",
     "crates/heal/src/heal/mrf_queue/partial_write.rs": "20415e0e985daea8fc62c5e152ed438e75008c33a2a592275e1dd9d1d4fee771",
     "crates/common/src/mrf_channel.rs": "075bb84bcbbe7d76674f730c64c8b69fe37d0790ec75da46365ba2e0cab34e0f",
-    "crates/heal/src/heal/manager/scheduler.rs": "79ce1f9c278c664231b6a1eca7c521f8e98742fe6d17d8f852368da4e77cc33b"},
+    "crates/heal/src/heal/manager/scheduler.rs": "79ce1f9c278c664231b6a1eca7c521f8e98742fe6d17d8f852368da4e77cc33b",
+    "crates/heal/src/heal/task/heal_object.rs": "17bb72783b6fd58afdc0b81c24558c1f5aff867fa3fb6ee27bd7f264076d8f6e"},
     "journal": "complete CRC32/ISO-HDLC records; format 1, layouts 1/2/3",
     "commit": "RFMRFC01 version 1; owner, sequence, payload length and two SHA-256 digests",
     "lifecycle": "RFMFLC01 version 1; checksummed JSON, same committed owner and sequence",
@@ -48,7 +49,7 @@ def verify_reference(candidate):
 
 def read_records(state, roots, owner, checked):
     """Exact allowlist, no directory enumeration, no write descriptor."""
-    require(owner.get("runtimeProfile") == "durable-mrf", "MRF records require the dedicated run-owned runtime")
+    require(owner.get("runtimeProfile") in {"durable-mrf", "mrf-crash"}, "MRF records require the dedicated run-owned runtime")
     require(hashlib.sha256((state / "rustfs").read_bytes()).hexdigest() == owner["binarySha256"], "MRF candidate changed")
 
     def collect():

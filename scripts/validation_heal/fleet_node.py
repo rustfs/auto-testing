@@ -33,11 +33,13 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "durable-mrf", "mrf-crash", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
     if profile == "scope-isolation":
         return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "8"}
-    if profile == "durable-mrf":
-        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
+    if profile in {"durable-mrf", "mrf-crash"}:
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug",
+                **({"RUSTFS_HEAL_MAX_CONCURRENT_HEALS": "1", "RUSTFS_HEAL_MAX_CONCURRENT_PER_SET": "1",
+                    "RUSTFS_HEAL_MRF_REPLAY_BATCH": "1"} if profile == "mrf-crash" else {})}
     if profile in {"replacement", "replacement-target", "schema-refusal"}:
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "true" if profile == "replacement" else "false", "RUSTFS_HEAL_INTERVAL_SECS": "10",
                 "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
@@ -231,7 +233,7 @@ def start(request):
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
-            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "replacement", "replacement-target", "schema-refusal"} else []),
+            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "durable-mrf", "mrf-crash", "replacement", "replacement-target", "schema-refusal"} else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)),
@@ -379,15 +381,15 @@ def process_graceful(request):
 
 
 def process_crash(request):
-    require(owned(request["runId"])[2].get("runtimeProfile") in {"replacement", "replacement-target"}
-            and process(request).get("state") == "T", "crash observation requires the paused owned replacement service")
+    require(owned(request["runId"])[2].get("runtimeProfile") in {"replacement", "replacement-target", "root-restart", "durable-mrf", "mrf-crash"}
+            and process(request).get("state") == "T", "crash observation requires a paused owned recovery service")
     before = pidfd_signal(request, signal.SIGKILL)
     deadline = time.monotonic() + 30
     while True:
         after = process(request)
         if after["pid"] == 0: break
         require(all(after.get(name) == before[name] for name in PROCESS_FIELDS), "another process replaced the crash target")
-        require(time.monotonic() < deadline, "owned replacement process did not exit after SIGKILL")
+        require(time.monotonic() < deadline, "owned recovery process did not exit after SIGKILL")
         time.sleep(0.1)
     service = after["service"]
     require(after["bootId"] == before["bootId"] and after["binarySha256"] == before["binarySha256"]
@@ -918,6 +920,17 @@ def mrf_records(request):
     return module.read_records(state, roots, owner, checked)
 
 
+def replacement_records(request):
+    require(set(request) <= {"runId", "action", "taskId", "quiescent"},
+            "replacement journal accepts no paths or mutation options")
+    state, roots, owner = owned(request["runId"])
+    require(owner.get("runtimeProfile") in {"replacement", "replacement-target"}
+            and digest(state / "rustfs") == owner["binarySha256"], "replacement checkpoint candidate/runtime changed")
+    if request.get("quiescent") is True: stopped(owner)
+    else: require(process(request)["pid"] > 1, "replacement checkpoint has no live owned service")
+    return globals()["replacement_journal"].read_records(roots, request.get("taskId"), checked)
+
+
 def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
@@ -934,6 +947,7 @@ def main(request):
         actions[action] = quorum_gate_operation
     actions["format-schema-fault"] = format_schema_fault
     actions["encryption-configure"] = configure_encryption
+    actions["replacement-records"] = replacement_records
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
     actions.update({"process": process, "process-metrics": process_metrics, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})

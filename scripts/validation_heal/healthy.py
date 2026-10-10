@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "offline-replay", "durable-mrf", "mrf-crash", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -183,6 +183,9 @@ class Fleet:
         if action == "mrf-records":
             source += "\nimport types\nmrf = types.ModuleType('mrf_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("mrf_records.py").read_text()) + ", mrf.__dict__)\n"
+        if action == "replacement-records":
+            source += "\nimport types\nreplacement_journal = types.ModuleType('replacement_journal')\nexec(" + repr(
+                NODE_SOURCE.with_name("replacement_journal.py").read_text()) + ", replacement_journal.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
                       "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(

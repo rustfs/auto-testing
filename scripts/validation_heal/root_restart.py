@@ -176,8 +176,19 @@ def root_terminal(observed, token, owner, current, bucket, expected):
             "completedReportMatchesControlPlane": True, "retainedDiagnosticsAreFullManifest": False}
 
 
-def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, original):
-    fleet.record("root-restart-contract", REFERENCE)
+def crashed_owner(before, after):
+    require(canonical(before) == canonical(after),
+            "SIGKILL changed or moved the frozen original root intent without a graceful checkpoint")
+    return {"samePhysicalOwnerAndIntentBytes": True, "gracefulTimeoutCheckpointClaimed": False,
+            "recoveryBoundary": "replay the persisted admission; no cursor or elapsed-budget checkpoint claim"}
+
+
+def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, original, interruption="graceful"):
+    require(interruption in {"graceful", "sigkill"}, "unsupported root interruption")
+    require(interruption != "sigkill" or len(fleet.nodes) == 4, "F04 root coordinator crash requires actual H2")
+    fleet.record("root-restart-contract", {**REFERENCE, "interruption": interruption,
+        "processBoundary": REFERENCE["processBoundary"] if interruption == "graceful" else
+            "coordinator-only pidfd SIGKILL; persisted admission replay, without shutdown checkpoint"})
     started = fleet.record("root-admission", probe.admin(PATH, [], json.dumps(OPTIONS).encode()))
     require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict), "root admission failed")
     token = started["response"].get("clientToken")
@@ -189,6 +200,8 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     require(set(owners) == {"intent"}, "NOT_OBSERVED: original root owner finished before the interruption window")
     coordinator = owners["intent"]["node"]
     require(coordinator in fleet.nodes, "root coordinator is outside the actual bound fleet")
+    require(interruption != "sigkill" or all(target["node"] != coordinator for target in targets),
+            "NOT_OBSERVED: F04 root crash must keep every missing-shard target process alive")
     root_intent(admitted, token, coordinator)
     fleet.record("actual-root-coordinator", {"node": coordinator, "source": "unique physical admitted intent owner", "taskId": token})
     processes = fleet.record("processes-before-interruption", {node: fleet.remote(node, "process") for node in fleet.nodes})
@@ -200,11 +213,16 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     scene = fleet.snapshot("root-frozen-physical")
     pending, before_physical = partial_physical(original, scene, targets)
     before_record = root_intent(records(fleet, token, "root-intent-before-stop"), token, coordinator)
-    fleet.record("root-graceful-exit", fleet.remote(coordinator, "process-graceful", expected=identity))
+    exit_proof = fleet.record("root-actual-exit", fleet.remote(coordinator,
+        "process-graceful" if interruption == "graceful" else "process-crash", expected=identity))
+    if interruption == "sigkill":
+        require(exit_proof.get("actualSignal") == 9 and exit_proof.get("graceful") is False
+                and exit_proof.get("pidfdBound") is True and exit_proof.get("platformEventIssued") is False,
+                "root coordinator has no exact process-bound SIGKILL exit witness")
     del fleet.frozen_processes[coordinator]
     fleet.record("release-exited-unit", fleet.remote(coordinator, "stop"))
     after_record = root_intent(records(fleet, token, "root-intent-after-exit", stopped_node=coordinator), token, coordinator)
-    budget = same_owner(before_record, after_record)
+    budget = same_owner(before_record, after_record) if interruption == "graceful" else crashed_owner(before_record, after_record)
     exit_scenes = []
     for index in range(3):
         exit_scenes.append(fleet.record("root-physical-after-exit", {node: fleet.remote(node, "snapshot", quiescent=node == coordinator) for node in fleet.nodes}))
@@ -247,6 +265,13 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     root_terminal(journal_after, token, after_record, repeat, bucket, expected)
     require(canonical(journal_before) == canonical(journal_after), "repeat restart rewrote the completed root journal")
     require(physical_content(complete_scene) == physical_content(fleet.snapshot("root-repeat-live-scene")), "completed task revived and rewrote user files after repeat restart")
+    if interruption == "sigkill":
+        return {"root-coordinator-kill": {"verdict": "PASS", "originalTaskId": token,
+            "runningWindow": first["outcome"]["counters"], "beforeInterruptionPhysical": before_physical,
+            "afterActualExitPhysical": after_physical, "actualExit": exit_proof, "processContinuity": continuity,
+            "persistedAdmission": budget, "sameTaskRecovered": True, "newStartRequestIssued": False,
+            "completeResponsibility": terminal, "terminalJournal": journal, "repeatRestartIdle": repeat_idle,
+            "completedJournalBytesPreserved": True, "allPeerIdle": idle}}
     return {"root-partial-graceful": {"verdict": "PASS", "originalTaskId": token, "runningWindow": first["outcome"]["counters"],
                 "beforeInterruptionPhysical": before_physical, "afterActualExitPhysical": after_physical,
                 "sameTaskRecovered": True, "newStartRequestIssued": False, "processContinuity": continuity,

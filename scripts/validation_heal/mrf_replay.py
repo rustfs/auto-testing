@@ -29,7 +29,7 @@ try:
     from .node_outage import quorum_plan, put_ack, delete_ack, replica_census, validate_deleted_read
     from .scanner_repair import JournalWindow, event_time
     from .shards import files, map_target, verify_cohort
-    from .versions import verify_quorum_contract
+    from .versions import public_version_id, verify_quorum_contract
 except ImportError:
     from heal_probe import Probe, compare_inventories, payload, require, save
     from heal_workload import Recorder, seed, verify_seed
@@ -40,7 +40,7 @@ except ImportError:
     from node_outage import quorum_plan, put_ack, delete_ack, replica_census, validate_deleted_read
     from scanner_repair import JournalWindow, event_time
     from shards import files, map_target, verify_cohort
-    from versions import verify_quorum_contract
+    from versions import public_version_id, verify_quorum_contract
 
 
 CASE_ID = "heal.mrf-offline-write-replay"
@@ -54,16 +54,20 @@ def identity(item):
     return item["bucket"], item["key"], item["versionId"], item["poolIndex"], item["setIndex"], item["kind"]
 
 
-def acknowledge(recorder, bucket, branch, expected):
+def acknowledge(recorder, bucket, branch, expected, *, put_count=3, fixture="DV"):
+    require(type(put_count) is int and 3 <= put_count <= 64
+            and (branch == "offline-put" or put_count == 3), "unreviewed MRF workload size")
+    require(fixture == "DV" or fixture == "DB" and branch == "offline-put", "unsupported MRF ACK fixture")
     manifest, obligations, deleted = copy.deepcopy(expected), [], []
-    for index in range(3):
+    count = put_count if branch == "offline-put" else 3
+    for index in range(count):
         if branch == "offline-put":
             key = f"offline/new-{index:02d}.bin"
             body = payload(f"{bucket}/{key}/offline", SIZE + index)
             response = recorder.call("put_object", {"Bucket": bucket, "Key": key,
                 "Metadata": {"heal-fixture": "durable-MRF", "branch": branch}, "Tagging": "suite=heal&fixture=DV"}, body)
-            manifest = put_ack(manifest, key, body, response, "DV")
-            version = response["VersionId"]
+            manifest = put_ack(manifest, key, body, response, fixture)
+            version = public_version_id(response.get("VersionId"))
             absent = False
         elif branch == "offline-version-delete":
             entry = next(entry for entry in expected if entry["key"] == f"objects/{index + 1:04d}.bin"
@@ -82,7 +86,7 @@ def acknowledge(recorder, bucket, branch, expected):
         require(response.get("ResponseMetadata", {}).get("HTTPStatusCode") in {200, 204}, "MRF workload lacks an explicit commit ACK")
         obligations.append({"bucket": bucket, "key": key, "versionId": version, "poolIndex": 0,
                             "setIndex": 0, "kind": 3, "authoritativelyAbsentRequired": absent})
-    require(len({identity(item) for item in obligations}) == 3, "MRF workload reused an ACK identity")
+    require(len({identity(item) for item in obligations}) == count, "MRF workload reused an ACK identity")
     return manifest, obligations, deleted
 
 
@@ -129,6 +133,13 @@ def retirement(checkpoints, obligations, bindings):
             "operatorAcceptanceUsed": False, "responsibilityCount": len(obligations)}
 
 
+def source_version(value, wanted):
+    # heal_object.rs logs Option<&str> with Rust debug syntax. Preserve the
+    # exact version; only the reviewed null representations denote no version.
+    if wanted == "null": return value in {None, "", "None", "null", "00000000-0000-0000-0000-000000000000"}
+    return isinstance(value, str) and value in {wanted, f'Some("{wanted}")'}
+
+
 def source_tasks(events, obligation, owners, after):
     tasks = []
     for node in {owner["node"] for owner in owners}:
@@ -137,7 +148,8 @@ def source_tasks(events, obligation, owners, after):
             stamp, token = event_time(start), start.get("task_id")
             if not (start.get("target") == "rustfs::heal::task" and start.get("message") == "Heal object started"
                     and start.get("stage") == "start" and start.get("bucket") == obligation["bucket"]
-                    and start.get("object") == obligation["key"] and start.get("version_id") == obligation["versionId"]
+                    and start.get("object") == obligation["key"] and "version_id" in start
+                    and source_version(start["version_id"], obligation["versionId"])
                     and isinstance(token, str) and token and stamp is not None and stamp >= after):
                 continue
             admission = next((event for event in rows if event.get("target") == "rustfs::heal::manager"
@@ -163,7 +175,7 @@ def verified_receipt(status, obligation, owners):
     item = receipt.get("identity", {})
     incarnation = {owner["bucketIncarnationId"] for owner in owners}
     require(item.get("kind") == "object" and item.get("bucket") == obligation["bucket"]
-            and item.get("object") == obligation["key"] and item.get("versionId") == obligation["versionId"]
+            and item.get("object") == obligation["key"] and public_version_id(item.get("versionId")) == obligation["versionId"]
             and type(item.get("poolIndex")) is int and item["poolIndex"] == obligation["poolIndex"]
             and type(item.get("setIndex")) is int and item["setIndex"] == obligation["setIndex"]
             and item.get("bucketIncarnationId") in incarnation, "MRF proof belongs to another ACK, set or bucket generation")
@@ -230,11 +242,12 @@ def wait_replay(fleet, window, binding, nodes, bucket, expected, obligations, bi
             time.sleep(2)
 
 
-def run_branch(args, branch, nodes):
+def run_branch(args, branch, nodes, *, after_rejoin=None, put_count=3, fixture="DV"):
     directory = args.evidence / branch
     directory.mkdir()
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-h2"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile="durable-mrf")
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory,
+        runtime_profile="durable-mrf" if after_rejoin is None else "mrf-crash")
     candidate = json.loads(args.candidate.read_text())
     tool = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     contract = verify_quorum_contract(tool, candidate)
@@ -255,8 +268,8 @@ def run_branch(args, branch, nodes):
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         recorder = Recorder(probe, directory / "fixture")
-        expected = seed(recorder, bucket, "DV", 4, [SIZE])
-        baseline = fleet.record("s3-baseline", probe.inventory(bucket))
+        expected = seed(recorder, bucket, fixture, 4, [SIZE])
+        baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         before = fleet.snapshot("physical-baseline")
         fleet.record("topology-proof", validate_topology(before, "H2"))
@@ -276,9 +289,9 @@ def run_branch(args, branch, nodes):
             fleet.record("offline-refusal", {"node": offline_node, "connectionRefused": True})
         frozen = fleet.record("original-offline-scene", fleet.remote(offline_node, "snapshot", quiescent=True))
         earliest_ms = int(time.time() * 1000) - 5000
-        expected, obligations, deleted = acknowledge(recorder, bucket, branch, expected)
+        expected, obligations, deleted = acknowledge(recorder, bucket, branch, expected, put_count=put_count, fixture=fixture)
         fleet.record("offline-ACK-responsibility-manifest", {"expected": expected, "obligations": obligations, "deleted": deleted})
-        acknowledged = fleet.record("offline-S3-ACK-proof", probe.inventory(bucket))
+        acknowledged = fleet.record("offline-S3-ACK-proof", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("offline-S3-full-manifest", verify_seed(expected, acknowledged))
         deadline = time.monotonic() + PERSIST_SECONDS
         while True:
@@ -302,8 +315,17 @@ def run_branch(args, branch, nodes):
         fleet.record("registered-automatic-replay-budget", {"persistenceSeconds": PERSIST_SECONDS,
             "replaySeconds": REPLAY_SECONDS, "adminMutations": 0, "targetReadsBeforePhysicalProof": 0,
             "source": "MRF", "originalNodeAndDiskIdentitiesRequired": True})
+        interruption = None if after_rejoin is None else after_rejoin(probe, fleet, window, binding, bucket,
+            expected, obligations, bindings, rejoin_time, before, authorities, offline_node)
         proofs, retired = wait_replay(fleet, window, binding, nodes, bucket, expected, obligations, bindings,
                                      rejoin_time, before, authorities, deleted_targets)
+        if interruption is not None:
+            interrupted_identity = tuple(interruption["ackIdentity"])
+            require(interrupted_identity in proofs and
+                    proofs[interrupted_identity]["source"]["taskId"] != interruption["volatileOriginalTaskId"],
+                    "MRF automatic rescan was mistaken for completion of the lost volatile task")
+            interruption["newAutomaticTaskId"] = proofs[interrupted_identity]["source"]["taskId"]
+            result["coordinatorInterruption"] = interruption
         fleet.record("MRF-verified-responsibility-retirement", {"retirement": retired,
             "proofs": [{"identity": list(key), **value} for key, value in proofs.items()]})
         retirement(read_checkpoints(fleet, nodes, "MRF-repeat-retirement"), obligations, bindings)
@@ -316,7 +338,8 @@ def run_branch(args, branch, nodes):
         fleet.start()
         for endpoint in binding["endpoints"]:
             peer = Probe(binding, endpoint)
-            inventory = fleet.record("MRF-all-peer-S3", {"endpoint": endpoint, **peer.inventory(bucket)})
+            inventory = fleet.record("MRF-all-peer-S3", {"endpoint": endpoint,
+                **peer.inventory(bucket, unversioned_current_tags=fixture == "DB")})
             fleet.record("MRF-all-peer-manifest", {**verify_seed(expected, inventory), **compare_inventories(acknowledged, inventory)})
             for entry in deleted:
                 validate_deleted_read(fleet.record("MRF-deleted-version-refusal", peer.s3("get_object",

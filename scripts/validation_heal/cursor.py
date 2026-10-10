@@ -298,7 +298,8 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
 
 def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANCHES,
                  count=OBJECTS, fixture_builder=None, missing_indices=None,
-                 source_branches=None, runtime_profile="manual", policy_reference=LIMIT_REFERENCE):
+                 source_branches=None, runtime_profile="manual", policy_reference=LIMIT_REFERENCE,
+                 target_nodes=None):
     directory = args.evidence / topology
     directory.mkdir()
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
@@ -343,6 +344,18 @@ def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANC
         cohorts = map_cohorts(original, bucket, expected, count=count)
         fleet.record("all-external-baseline", verify_all_parts(fleet, cohorts, "baseline-part-batch", count=count))
         targets = [cohorts[index] for index in missing_indices]
+        if target_nodes is not None:
+            require(target_nodes and len(set(target_nodes)) == len(target_nodes) and set(target_nodes) <= set(nodes),
+                    "DX fault placement escaped its actual bound fleet")
+            selected = []
+            for target in targets:
+                shard = next((entry for entry in target["cohort"] if entry["node"] in target_nodes
+                    and entry["role"] == target["role"]), None)
+                require(shard is not None, "DX fault has no requested role outside the coordinator")
+                selected.append({**target, **shard})
+            targets = selected
+            fleet.record("explicit-fault-placement", {"nodes": target_nodes,
+                "targets": [{name: target[name] for name in ("node", "disk", "key", "role", "index")} for target in targets]})
         receipts = []
         for index, target in enumerate(targets):
             params = {"disk": target["disk"], "relativePath": target["relativePath"], "kind": "missing",

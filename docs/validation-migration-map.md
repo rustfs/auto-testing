@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 125 currently dispatchable IDs include all 74 non-Heal cases and fifty-one Heal cases. Forty-five have live PASS evidence; the other 113 have no live PASS claim.
+case evidence. The 126 currently dispatchable IDs include all 74 non-Heal cases and fifty-two Heal cases. Forty-six have live PASS evidence; the other 112 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 33 Heal cases remain
+The other 32 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -1036,7 +1036,7 @@ four regression verdicts have their own archive and never increment a fleet or
 canonical-case PASS count. Existing tests assert captured lock events internally;
 the collector does not fabricate emitted barrier logs. Missing critical-point
 fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps.
-The current implementation has 274 focused Heal/catalog checks, including the
+The current implementation has 285 focused Heal/catalog checks, including the
 Linux-only D11, C09 and D08 ownership/mount/recovery checks. Native compilation and execution
 still require the separate hosted job; local parser checks are not native PASS.
 
@@ -1175,3 +1175,58 @@ SSE-S3 records that its service-managed key has no caller decryption-key
 argument. Failed IAM cleanup retains a DIRTY stopped namespace. Nine targeted
 geometry, authority, version, redaction and Linux file-ownership tests pass;
 D08 still requires fresh complete live evidence and has no live PASS claim.
+
+
+A02 `38094094085` passed every applicable H1/H2 root, bucket, object, prefix,
+recursive and actual two-set selector branch. H1 keeps the source's selector
+inapplicability explicit; H2 tests the actual independent sets. Its complete
+physical/streaming and all-peer ACK manifests, cleanup PASS and independent
+canonical gate increase the complete live total to 46/158. F06 `38093199055`
+retained FAIL/cleanup PASS on the already queued old harness; its durable-stop
+query assertion is fixed at `62d0ca9` and remains queued for a fresh run.
+B08 `38093907057` retained FAIL/cleanup PASS: H1 lacks the exact incarnation
+receipt, while H2's actual default layout cannot preserve R with the selected
+write/lock-loss plan. No layout or missing identity is assumed sufficient.
+
+F04 `heal.coordinator-process-crash` now dispatches its three separate source
+mechanisms on actual H2. It records a candidate-bound persistence support table
+and only sends SIGKILL through Linux pidfd after freezing the unique original
+coordinator at nonzero and unfinished physical progress. Target and other peer
+process birth identities must remain unchanged throughout recovery. No host or
+platform restart is issued, and an unobserved window cannot pass.
+
+The root branch ACKs the full DX fixture, places missing original data shards
+outside the coordinator, freezes the exact durable admission owner and requires
+the original token to replay with complete responsibility. SIGKILL must leave
+the original intent bytes unchanged; it makes no graceful elapsed-time or cursor
+checkpoint claim. Repeated terminal restart, original record disk, full physical
+hashes/streaming and all-peer S3 inventories remain mandatory.
+
+The MRF branch ACKs sixty-four independent never-versioned DB writes while one
+original node is offline. Its isolated profile enables only MRF, with one worker,
+one task per set and a replay batch of one. Actual process settings and the
+configuration source digest are retained. Fresh accepted MRF task/start logs,
+exact version/null representation and a partial target census bind the paused
+coordinator to a still-committed original ACK responsibility. The complete
+CRC/commit/lifecycle checkpoint remains byte-identical across the crash.
+The lost volatile token must return its explicit unknown-token error; a separate
+new automatic task must prove the interrupted ACK, while every ACK's original
+responsibility retires with a verified receipt. Automatic rescan success is never
+reported as original-token recovery. The final census, all surviving original
+shards, streaming checks and S3 inventories gate the branch.
+
+The replacement branch independently ACKs 1025 external objects and preserves
+an inaccessible original drive archive. Its coordinator is distinct from the
+live target. An exact-name read-only journal captures the schema-seven sealed
+intent for the original generation, endpoint, physical device and filesystem
+identity before and after SIGKILL. The original generation must finish on every
+peer after the same coordinator unit restarts, with the original replacement
+UUID/set slot, full same-role shard hashes, streaming and ACK inventories.
+No manual replacement compensation or backup rescue earns repair credit.
+
+Eleven focused F04 tests cover process continuity/exit, exact root intent,
+replacement seals/name/identity and filesystem guards, partial MRF authority,
+source attribution, bounded configuration and mandatory three-mechanism scoring.
+F04 has no live PASS claim yet. The source-bound MRF log reader also accepts the
+reviewed Rust Option debug spelling without merging different version identities;
+existing E05 receipts and every original branch remain independently required.

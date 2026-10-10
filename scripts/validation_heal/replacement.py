@@ -24,6 +24,7 @@ BRANCHES = ("new-disk-data", "new-disk-versioned")
 AUTOMATIC_BRANCHES = ("replacement-unversioned", "replacement-versioned-marker")
 GRACEFUL_BRANCHES = ("target-partial-graceful", "versioned-target-partial")
 CRASH_BRANCHES = ("target-partial-sigkill", "target-partial-sigkill-versioned")
+COORDINATOR_BRANCHES = ("replacement-coordinator-kill",)
 FORMAT_SECONDS = 90
 REBUILD_SECONDS = 300
 STATUS_PATH = "/rustfs/admin/v4/heal/replacement-recovery"
@@ -170,7 +171,8 @@ def coordinator(events, token, target):
     return owners[0]
 
 
-def automatic_completion(probe, fleet, endpoint, earliest, *, interruption=None, proofs=(), original_format=None, journal=None):
+def automatic_completion(probe, fleet, endpoint, earliest, *, interruption=None, proofs=(), original_format=None,
+                         journal=None, coordinator_interruptor=None):
     deadline, original, timeline = time.monotonic() + REBUILD_SECONDS, None, []
     interrupted = None
     while True:
@@ -192,8 +194,12 @@ def automatic_completion(probe, fleet, endpoint, earliest, *, interruption=None,
                     owner = coordinator(journal.capture(), original["taskId"], proofs[0]["node"])
                     fleet.record("replacement-distinct-coordinator-proof", {"node": owner,
                         "target": proofs[0]["node"], "originalGeneration": original, "source": "fresh accepted auto_heal and exact erasure task start"})
-                    interrupted = interrupt_target(fleet, proofs[0]["node"], proofs, interruption, original_format)
-                    interrupted["coordinatorKeptRunning"] = owner
+                    if interruption == "coordinator-sigkill":
+                        require(coordinator_interruptor is not None, "replacement coordinator observer missing")
+                        interrupted = coordinator_interruptor(fleet, owner, proofs, original_format, original)
+                    else:
+                        interrupted = interrupt_target(fleet, proofs[0]["node"], proofs, interruption, original_format)
+                        interrupted["coordinatorKeptRunning"] = owner
                     continue
         if ready and original is not None:
             require(len({canonical(records[0]) for records in observed.values()}) == 1,
@@ -208,7 +214,8 @@ def automatic_completion(probe, fleet, endpoint, earliest, *, interruption=None,
     require(interruption is None or interrupted is not None, "NOT_OBSERVED: no actual partial target interruption occurred")
     return {"source": "automatic-replacement", "generation": original, "observations": len(timeline),
             "completionObservedOnEveryPeer": True, "budgetSeconds": REBUILD_SECONDS,
-            "adminHealMutations": 0, "targetS3ReadsBeforePhysicalProof": 0, "targetInterruption": interrupted}
+            "adminHealMutations": 0, "targetS3ReadsBeforePhysicalProof": 0,
+            "coordinatorInterruption" if interruption == "coordinator-sigkill" else "targetInterruption": interrupted}
 
 
 def wait_format(fleet, node, disk):
@@ -287,13 +294,15 @@ def physical_rebuild(before, after, member):
             "backupRestorationUsed": False}
 
 
-def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admissions):
+def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admissions, *, coordinator_interruptor=None):
     try:
         from .versions import map_inline_target, validate_version_receipts, verify_version_s3
     except ImportError:
         from versions import map_inline_target, validate_version_receipts, verify_version_s3
-    automatic = branch in (*AUTOMATIC_BRANCHES, *GRACEFUL_BRANCHES, *CRASH_BRANCHES)
-    require(branch in (*BRANCHES, *AUTOMATIC_BRANCHES, *GRACEFUL_BRANCHES, *CRASH_BRANCHES), "unknown replacement branch")
+    automatic = branch in (*AUTOMATIC_BRANCHES, *GRACEFUL_BRANCHES, *CRASH_BRANCHES, *COORDINATOR_BRANCHES)
+    require(branch in (*BRANCHES, *AUTOMATIC_BRANCHES, *GRACEFUL_BRANCHES, *CRASH_BRANCHES, *COORDINATOR_BRANCHES), "unknown replacement branch")
+    require(branch not in COORDINATOR_BRANCHES or len(fleet.nodes) == 4 and coordinator_interruptor is not None,
+            "replacement coordinator crash requires actual H2 and its independent observer")
     require(not automatic or fleet.runtime_profile == "replacement", "automatic replacement lacks its isolated source configuration")
     before = fleet.snapshot("replacement-original-" + branch, quiescent=True)
     if automatic:
@@ -318,7 +327,7 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
         proofs.append({**target, **shard})
     earliest = int(time.time())
     journal = JournalWindow(fleet, "replacement-interruption-source", event_targets=SOURCE_TARGETS) \
-        if branch in (*GRACEFUL_BRANCHES, *CRASH_BRANCHES) else None
+        if branch in (*GRACEFUL_BRANCHES, *CRASH_BRANCHES, *COORDINATOR_BRANCHES) else None
     replaced = fleet.record("replacement-original-root-isolated", fleet.remote(node, "replace-drive", disk=disk,
         expectedFormatSha256=physical_format["sha256"]))
     require(replaced.get("oldRootMovedIntact") is True and replaced.get("newDataRootEmpty") is True
@@ -338,8 +347,9 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
     if automatic:
         endpoint = replaced["dataPath"] if len(fleet.nodes) == 1 else f"http://rustfs-node{fleet.nodes.index(node) + 1}:9000{replaced['dataPath']}"
         receipts = automatic_completion(recorder.probe, fleet, endpoint, earliest,
-            interruption="graceful" if branch in GRACEFUL_BRANCHES else "sigkill" if branch in CRASH_BRANCHES else None,
-            proofs=proofs, original_format=initialized, journal=journal)
+            interruption="graceful" if branch in GRACEFUL_BRANCHES else "sigkill" if branch in CRASH_BRANCHES else
+                "coordinator-sigkill" if branch in COORDINATOR_BRANCHES else None,
+            proofs=proofs, original_format=initialized, journal=journal, coordinator_interruptor=coordinator_interruptor)
     else:
         status = run_task(recorder.probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
                           option_overrides={"recursive": True}, admissions=admissions)
@@ -382,7 +392,7 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
             streaming.append({"key": target["key"], "versionId": target["versionId"], "proof": proof})
     fleet.start()
     fleet.record("replacement-backup-service-refusal-after", fleet.remote(node, "replacement-probe"))
-    fixture = "DB" if branch in {"new-disk-data", "replacement-unversioned", "target-partial-graceful", "target-partial-sigkill"} else "DV"
+    fixture = "DB" if branch in {"new-disk-data", "replacement-unversioned", "target-partial-graceful", "target-partial-sigkill", *COORDINATOR_BRANCHES} else "DV"
     s3 = verify_version_s3(recorder.probe, fleet, bucket, expected, baseline, "replacement-s3-after", fixture=fixture)
     peers = []
     for endpoint in recorder.probe.binding["endpoints"]:
