@@ -138,6 +138,7 @@ class Fleet:
         self.sequence = 0
         self.reserved = []
         self.faults = []
+        self.drive_gates = set()
         self.secret_values = set()
 
     def record(self, label, value):
@@ -166,6 +167,9 @@ class Fleet:
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-inline"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
+        if action in {"start", "cleanup", "audit-finalize", "drive-gate", "drive-gate-probe"}:
+            source += "\nimport types\ngate = types.ModuleType('drive_gate')\nexec(" + repr(
+                NODE_SOURCE.with_name("drive_gate.py").read_text()) + ", gate.__dict__)\n"
         source += "\nmain(" + repr(value) + ")\n"
         result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
                                 input=source, capture_output=True, text=True, timeout=180)
@@ -240,12 +244,20 @@ class Fleet:
 
     def cleanup(self):
         failures = []
+        if self.drive_gates:
+            try:
+                self.stop()
+                for node in tuple(self.drive_gates):
+                    self.record("gate-recovery", {"node": node, **self.remote(node, "drive-gate", mode="clear")})
+                    self.drive_gates.remove(node)
+            except Exception as exc:
+                failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
         for node in self.reserved:
             try:
                 self.record("logs", {"node": node, **self.remote(node, "logs")})
             except Exception as exc:
                 self.record("logs-error", {"node": node, "error": str(exc)})
-        if self.faults:
+        if self.faults and not failures:
             try:
                 self.stop()
                 for node, params in self.faults:

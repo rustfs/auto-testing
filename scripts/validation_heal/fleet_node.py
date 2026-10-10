@@ -178,7 +178,7 @@ def owned(run_id):
 
 
 def start(request):
-    state, _, owner = owned(request["runId"])
+    state, roots, owner = owned(request["runId"])
     stopped(owner)
     command("systemctl", "reset-failed", owner["unit"], check=False)
     require(digest(state / "rustfs") == owner["binarySha256"], "candidate changed before start")
@@ -186,7 +186,8 @@ def start(request):
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=RuntimeMaxSec=1800", "--property=MemoryMax=4G",
             "--property=WorkingDirectory=" + str(state),
-            "--property=EnvironmentFile=" + str(state / "service.env"), str(state / "rustfs"), *owner["volumes"])
+            "--property=EnvironmentFile=" + str(state / "service.env"),
+            *gate_module().start_properties(gate_module().checked_gate(state, roots)), str(state / "rustfs"), *owner["volumes"])
     return {"unit": owner["unit"], "started": True}
 
 
@@ -219,6 +220,27 @@ def fault_module():
         return globals()["fault"]
     from . import heal_fault
     return heal_fault
+
+
+def gate_module():
+    if "gate" in globals(): return globals()["gate"]
+    from . import drive_gate
+    return drive_gate
+
+
+def drive_gate(request):
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    if request.get("mode") == "clear": return gate_module().release_gate(state, roots)
+    return gate_module().apply_gate(state, roots, request.get("disk"), request.get("mode"))
+
+
+def drive_gate_probe(request):
+    state, roots, owner = owned(request["runId"])
+    pid = int(command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"]).stdout.strip())
+    require(Path(f"/proc/{pid}/exe").resolve(strict=True) == state / "rustfs", "gate probe candidate process differs")
+    require(digest(state / "rustfs") == owner["binarySha256"], "gate probe candidate digest differs")
+    return gate_module().probe_gate(state, roots, pid)
 
 
 def fault_root(request):
@@ -371,6 +393,7 @@ def cleanup(request):
     command("systemctl", "stop", owner["unit"], check=False)
     pid = command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"], check=False).stdout.strip()
     require(pid in {"", "0"}, "run-owned service remains active")
+    gate_module().release_gate(state, roots)
     command("systemctl", "reset-failed", owner["unit"], check=False)
     for root in (*roots, state):
         for directory, children, names in os.walk(root, followlinks=False):
@@ -408,6 +431,6 @@ def main(request):
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
                "logs": logs, "cleanup": cleanup, "audit-finalize": audit_finalize, "install-inspector": install_inspector,
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part,
-               "verify-inline": verify_inline}
+               "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe}
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

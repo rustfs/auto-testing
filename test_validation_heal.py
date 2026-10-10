@@ -34,6 +34,9 @@ from scripts.validation_heal.object_lock import (validate_protection, validate_p
 from scripts.validation_heal.versions import mismatch_plan, seed_mismatch
 from scripts.validation_heal import heal_fault
 from scripts.validation_heal.read_repair import source_tasks, validate_read, tracked_read_task, ADMISSION_MESSAGE, ADMISSION_TARGET
+from scripts.validation_heal.drive_gate import apply_gate, release_gate, checked_gate, start_properties, validate_probe, validate_unwritable
+import errno
+import stat
 
 
 def versioned_scene(keys, sizes=(100, 100, 61)):
@@ -282,9 +285,9 @@ class HealShardOracleTest(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout='{"checked":true}', stderr="")
         with tempfile.TemporaryDirectory() as directory, patch("scripts.validation_heal.healthy.subprocess.run", side_effect=invoke):
             fleet = Fleet(["node1"], Path(directory), "gh-12345-1-h1")
-            for action in ("preflight", "verify-part", "verify-inline", "apply-fault", "recover-fault"):
+            for action in ("preflight", "verify-part", "verify-inline", "apply-fault", "recover-fault", "start", "cleanup", "drive-gate", "drive-gate-probe"):
                 self.assertTrue(fleet.remote("node1", action, disk=1, relativePath="literal$()'part.1")["checked"])
-        self.assertEqual(len(observed), 5)
+        self.assertEqual(len(observed), 9)
 
     def snapshot(self):
         bucket, key, data_dir = "rv-heal-0123456789abcdef", "objects/0008.bin", "12345678-1234-1234-1234-123456789abc"
@@ -985,6 +988,92 @@ class HealNodeOutageTest(unittest.TestCase):
             for changed in ({**good, "acknowledged": True}, {**good, "resultUnknown": True}, {**good, "payload": {}},
                             {**good, "response": {"ResponseMetadata": {"HTTPStatusCode": 403}, "Error": {"Code": "AccessDenied"}}}):
                 with self.subTest(version=version), self.assertRaises(ValueError): validate_deleted_read(changed, version)
+
+
+class HealDriveGateTest(unittest.TestCase):
+    def test_gate_only_changes_owned_permissions_and_restores_partial_intent(self):
+        for mode in ("read-only", "permission-denied"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory) / "state"
+                root = Path(directory) / "root"
+                state.mkdir()
+                (root / "data").mkdir(parents=True, mode=0o700)
+                other = root / "quarantine"
+                other.mkdir(mode=0o700)
+                (root / "data" / "original").write_bytes(b"owned-data")
+                original_lstat = Path.lstat
+                def root_owned(path):
+                    observed = original_lstat(path)
+                    return types.SimpleNamespace(st_mode=observed.st_mode, st_uid=0, st_nlink=observed.st_nlink,
+                        st_size=observed.st_size, st_dev=observed.st_dev, st_ino=observed.st_ino)
+                with patch.object(Path, "lstat", root_owned):
+                    gate = apply_gate(state, (root,), 0, mode)
+                    self.assertEqual(checked_gate(state, (root,))["mode"], mode)
+                    self.assertFalse(gate["hostMountRemounted"])
+                    self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0 if mode == "permission-denied" else 0o700)
+                    self.assertEqual(stat.S_IMODE(other.stat().st_mode), 0o700)
+                    with self.assertRaisesRegex(ValueError, "already active"):
+                        apply_gate(state, (root,), 0, mode)
+                    props = start_properties(gate)
+                    self.assertIn("--property=PrivateMounts=true", props)
+                    self.assertIn("--property=ReadOnlyPaths=" + str(root / "data") if mode == "read-only" else
+                                  "--property=CapabilityBoundingSet=~CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH", props)
+                    self.assertTrue(release_gate(state, (root,))["originalPermissionsRestored"])
+                    self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0o700)
+                    self.assertEqual((root / "data" / "original").read_bytes(), b"owned-data")
+                    self.assertFalse((state / "drive-gate.json").exists())
+                    self.assertTrue(release_gate(state, (root,))["gateWasAbsent"])
+
+    def test_gate_refusal_proof_requires_same_uid_gid_errno_and_no_root_bypass(self):
+        identity = {"uid": 0, "gid": 0, "capEff": 0}
+        for mode, error in (("read-only", errno.EROFS), ("permission-denied", errno.EACCES)):
+            good = {"uid": 0, "gid": 0, "errno": error}
+            self.assertTrue(validate_probe(good, mode, identity)["sameServiceIdentity"])
+            for changed in ({**good, "errno": 0}, {**good, "errno": errno.ENOSPC}, {**good, "uid": 1000}, {**good, "gid": 1000}):
+                with self.assertRaises(ValueError): validate_probe(changed, mode, identity)
+        with self.assertRaisesRegex(ValueError, "bypasses"):
+            validate_probe({"uid": 0, "gid": 0, "errno": errno.EACCES}, "permission-denied", {**identity, "capEff": 1 << 1})
+
+    def test_unwritable_receipt_never_accepts_repaired_or_hidden_failures(self):
+        status = HealHealthyOracleTest().receipt("failed")
+        bucket, entry = "rv-heal-drive-unit", {"key": "target.bin", "versionId": "null"}
+        receipt = status["outcome"]["objects"][0]
+        receipt["identity"].update(bucket=bucket, object=entry["key"], versionId=None)
+        receipt["disposition"]["details"] = "permanent"
+        status["outcome"]["execution"]["state"] = "completed_with_errors"
+        status["outcome"]["counters"].update(healed=0, unchanged=0, failed=1, attemptFailures=1)
+        self.assertFalse(validate_unwritable(status, bucket, entry)["repairClaimedWhileUnwritable"])
+        for invalid in ("repaired", "metadata_healthy", "unknown", "wrong-version", "healed-count", "hidden-failure", "incarnation"):
+            changed = copy.deepcopy(status)
+            if invalid in {"repaired", "metadata_healthy", "unknown"}: changed["outcome"]["objects"][0]["disposition"]["state"] = invalid
+            elif invalid == "wrong-version": changed["outcome"]["objects"][0]["identity"]["versionId"] = "foreign"
+            elif invalid == "healed-count": changed["outcome"]["counters"]["healed"] = 1
+            elif invalid == "hidden-failure": changed["outcome"]["execution"]["state"] = "completed"
+            else: changed["outcome"]["objects"][0]["identity"].pop("bucketIncarnationId")
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError): validate_unwritable(changed, bucket, entry)
+        deferred = copy.deepcopy(status)
+        deferred["outcome"]["execution"]["state"] = "completed"
+        deferred["outcome"]["counters"].update(failed=0, skipped=1)
+        deferred["outcome"]["objects"][0]["disposition"] = {"state": "deferred", "details": {"reason": "deadline"}}
+        validate_unwritable(deferred, bucket, entry)
+        deferred["outcome"]["objects"][0]["disposition"]["details"]["reason"] = "dangling_delete_grace"
+        with self.assertRaises(ValueError): validate_unwritable(deferred, bucket, entry)
+
+    def test_gate_cleanup_precedes_fault_rescue_and_preserves_namespace_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fleet = Fleet(["node1"], Path(directory), "gh-12345-1-h1")
+            fleet.reserved.append("node1")
+            fleet.drive_gates.add("node1")
+            fleet.faults.append(("node1", {"disk": 1, "faultId": "B02-test"}))
+            calls = []
+            def remote(node, action, **params):
+                calls.append(action)
+                if action == "drive-gate": raise ValueError("gate root drifted")
+                return {}
+            with patch.object(fleet, "remote", side_effect=remote): self.assertFalse(fleet.cleanup())
+            self.assertNotIn("recover-fault", calls)
+            self.assertNotIn("cleanup", calls)
+            self.assertTrue(fleet.drive_gates)
 
 
 class HealReadRepairTest(unittest.TestCase):

@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 100 currently dispatchable IDs include all 74 non-Heal cases and twenty-six Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 101 currently dispatchable IDs include all 74 non-Heal cases and twenty-seven Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 58 Heal cases remain
+The other 57 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -456,3 +456,19 @@ downloaded and independently checked by the canonical report gate. It covers
 zero/one/4KiB, actual inline and EC-block boundaries, multi-block payloads,
 both roles, missing/bitflip faults and exact Range outcomes. The three prior
 D01 failures and independent recovery record remain unchanged.
+
+B02 `heal.disk-readonly-and-permission` dispatches both H1/H2 branches. The
+read-only gate uses systemd PrivateMounts/ReadOnlyPaths for the selected
+run-owned data root; host mounts are never remounted. The permission gate
+records/restores that root's original 0700 mode and drops both DAC override
+capabilities from the root service, so chmod cannot be bypassed. A write probe
+enters the actual service mount namespace with the same effective UID/GID and
+DAC boundary and requires exact EROFS/EACCES. Original shard isolation precedes
+the gate. Failed/deferred exact-version responsibility must show zero repaired
+counters and the complete physical fault scene must remain unchanged. After
+service exit and gate release, a distinct task must actually repair the
+original target; full physical, streaming and public checks follow. Gate intent
+precedes chmod/start and is recovered before any fault rescue or physical
+cleanup. Root drift or release failure retains the namespace. Focused tests
+exercise permission restoration, write refusal identity/errno, no root bypass,
+truthful unresolved receipts and cleanup retention. Live proof is pending.

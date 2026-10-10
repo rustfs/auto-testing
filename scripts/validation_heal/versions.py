@@ -28,6 +28,7 @@ try:
                              seed_boundaries, verify_boundary_ranges)
     from .object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
     from .read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
+    from .drive_gate import validate_unwritable
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -41,6 +42,7 @@ except ImportError:
                             seed_boundaries, verify_boundary_ranges)
     from object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
     from read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
+    from drive_gate import validate_unwritable
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -59,6 +61,7 @@ BRANCHES = {
     "heal.object-lock-retention": LOCK_BRANCHES,
     "heal.metadata-payload-mismatch": ("length-mismatch", "payload-mismatch", "insufficient-authority"),
     "heal.read-repair-attribution": READ_BRANCHES,
+    "heal.disk-readonly-and-permission": ("read-only", "permission-denied"),
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -502,6 +505,14 @@ def reenable_and_verify(recorder, fleet, bucket, baseline):
 
 def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
     """Plans are derived from ACK order and decoded physical roles, never disk numbers."""
+    if case_id == "heal.disk-readonly-and-permission":
+        key = f"objects/{8 + 9 * BRANCHES[case_id].index(branch):04d}.bin"
+        selected = [entry for entry in expected if entry["key"] == key]
+        require(len(selected) == 1 and selected[0]["versionId"] == "null", "unwritable fixture lacks a unique unversioned target")
+        target = choose_target(snapshot, bucket, selected[0], "data")
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": False, "expected": selected,
+                "faults": [target], "proofs": [target], "requiredRepairs": {version_identity(target)},
+                "metadataRepairs": set(), "driveGate": branch}
     if case_id == "heal.read-repair-attribution":
         key = "objects/0001.bin" if fixture == "DV" else f"objects/{8 + 9 * READ_BRANCHES.index(branch):04d}.bin"
         data = [entry for entry in expected if entry["key"] == key and not entry["deleteMarker"]]
@@ -751,6 +762,7 @@ def run_topology(args, topology, nodes, fixture):
         for branch in branches:
             registrations = []
             metadata_faults = {}
+            gate_node, gated_proof = None, None
             try:
                 if lock_context is not None:
                     fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
@@ -790,7 +802,14 @@ def run_topology(args, topology, nodes, fixture):
                     witnessed = fleet.snapshot("physical-fault-" + branch, quiescent=True, metadata_faults=metadata_faults)
                     validate_fault(prior, witnessed, target, receipt)
                     prior = witnessed
+                if plan.get("driveGate"):
+                    gate_node = plan["proofs"][0]["node"]
+                    fleet.drive_gates.add(gate_node)
+                    fleet.record("drive-gate-armed", fleet.remote(gate_node, "drive-gate",
+                        disk=plan["proofs"][0]["disk"], mode=plan["driveGate"]))
                 fleet.start()
+                if gate_node is not None:
+                    fleet.record("service-write-denial", fleet.remote(gate_node, "drive-gate-probe"))
                 witness = fleet.snapshot("physical-before-trigger-" + branch, metadata_faults=metadata_faults)
                 require(physical_content(prior) == physical_content(witness),
                         "ATTRIBUTION_NOT_OBSERVED: version fault changed before the manual token")
@@ -810,6 +829,22 @@ def run_topology(args, topology, nodes, fixture):
                                       option_overrides={"recursive": plan["recursive"]}, admissions=admissions)
                 fleet.stop()
                 repaired = fleet.snapshot("physical-after-" + branch, quiescent=True, metadata_faults=metadata_faults)
+                if gate_node is not None:
+                    require(physical_content(prior) == physical_content(repaired),
+                            "unwritable window changed object files or wrote outside the target")
+                    gated_proof = validate_unwritable(status, bucket, plan["expected"][0])
+                    fleet.record("unwritable-responsibility", gated_proof)
+                    fleet.record("drive-gate-released", fleet.remote(gate_node, "drive-gate", mode="clear"))
+                    fleet.drive_gates.remove(gate_node)
+                    gate_node = None
+                    fleet.start()
+                    restored_status = run_task(probe, fleet, plan["scope"], 2, active,
+                        option_overrides={"recursive": False}, admissions=admissions)
+                    require(len(admissions) >= 2 and admissions[-1]["clientToken"] != admissions[-2]["clientToken"],
+                            "restored writable repair reused the failed task identity")
+                    status = restored_status
+                    fleet.stop()
+                    repaired = fleet.snapshot("physical-writable-repair", quiescent=True)
                 negative_proof = None
                 if plan.get("negative"):
                     require(physical_content(prior) == physical_content(repaired),
@@ -891,10 +926,15 @@ def run_topology(args, topology, nodes, fixture):
                     result["branches"][branch]["negative"] = negative_proof
                     result["branches"][branch]["physical"]["backupUsedAfterFailureProof"] = True
                     result["branches"][branch]["physical"]["productRepairClaimed"] = False
+                if gated_proof is not None:
+                    result["branches"][branch]["unwritableWindow"] = gated_proof
             except (Exception, KeyboardInterrupt) as exc:
                 result["branches"][branch] = {"verdict": "FAIL", "failure": {"type": type(exc).__name__, "message": str(exc)}}
                 try:
                     fleet.stop()
+                    if gate_node is not None:
+                        fleet.record("gate-error-rescue", fleet.remote(gate_node, "drive-gate", mode="clear"))
+                        fleet.drive_gates.remove(gate_node)
                     fleet.snapshot("physical-failure-" + branch, quiescent=True, metadata_faults=metadata_faults)
                     for registration in reversed(registrations):
                         node, params = registration
@@ -950,6 +990,8 @@ def main():
         fixtures = ("DB",)
     if args.case_id == "heal.object-lock-retention":
         fixtures = ("DO",)
+    if args.case_id == "heal.disk-readonly-and-permission":
+        fixtures = ("DB",)
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
