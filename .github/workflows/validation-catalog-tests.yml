@@ -13,6 +13,9 @@ on:
       - test_validation_pool.py
       - scripts/validation_pool/**
       - rustfs_pool_expand.sh
+      - test_validation_replication.py
+      - scripts/validation_replication/**
+      - rustfs-replication-test.sh
       - rustfs-storage-test.sh
       - test_validation_scanner_usage.sh
       - .github/workflows/validation-catalog-tests.yml
@@ -29,6 +32,9 @@ on:
       - test_validation_pool.py
       - scripts/validation_pool/**
       - rustfs_pool_expand.sh
+      - test_validation_replication.py
+      - scripts/validation_replication/**
+      - rustfs-replication-test.sh
       - rustfs-storage-test.sh
       - test_validation_scanner_usage.sh
       - .github/workflows/validation-catalog-tests.yml
@@ -48,5 +54,6 @@ jobs:
       - run: python3 -B -m unittest -v test_validation_migration.py
       - run: python3 -B -m unittest -v test_validation_ilm.py
       - run: python3 -B -m unittest -v test_validation_pool.py
-      - run: bash -n rustfs-storage-test.sh rustfs_pool_expand.sh scripts/validation_pool/run_case.sh test_validation_scanner_usage.sh
+      - run: python3 -B -m unittest -v test_validation_replication.py
+      - run: bash -n rustfs-storage-test.sh rustfs_pool_expand.sh rustfs-replication-test.sh scripts/validation_pool/run_case.sh scripts/validation_replication/run_case.sh test_validation_scanner_usage.sh
       - run: bash test_validation_scanner_usage.sh

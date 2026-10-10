@@ -684,6 +684,10 @@ wait_service_active() {
 
 rustfs_config_body() {
   local volumes="$1"
+  local mqtt_enabled=true
+  if [ "${VALIDATION_CASE}" = events.delivery ] || [ "${VALIDATION_CASE}" = audit.request-correlation ]; then
+    mqtt_enabled=false
+  fi
   cat <<EOF
 RUSTFS_ACCESS_KEY=${ACCESS_KEY}
 RUSTFS_SECRET_KEY=${SECRET_KEY}
@@ -692,7 +696,7 @@ RUSTFS_NOTIFY_WEBHOOK_ENABLE_PRIMARY=true
 RUSTFS_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY=${NOTIFY_ENDPOINT}
 RUSTFS_NOTIFY_WEBHOOK_AUTH_TOKEN_PRIMARY=${NOTIFY_TOKEN}
 RUSTFS_NOTIFY_WEBHOOK_QUEUE_DIR_PRIMARY=/var/lib/rustfs/notify-webhook
-RUSTFS_NOTIFY_MQTT_ENABLE_PRIMARY=true
+RUSTFS_NOTIFY_MQTT_ENABLE_PRIMARY=${mqtt_enabled}
 RUSTFS_NOTIFY_MQTT_BROKER_PRIMARY=${MQTT_BROKER}
 RUSTFS_NOTIFY_MQTT_TOPIC_PRIMARY=${MQTT_TOPIC}
 RUSTFS_NOTIFY_MQTT_QOS_PRIMARY=1
@@ -1127,12 +1131,17 @@ EOF
       || die "failed to create unique warm-tier bucket ${TIER_BUCKET}: ${AWS_OUT}"
     if [ "${VALIDATION_CASE}" != tiering.transition-and-restore ]; then
       receiver_start
-      mqtt_start
+      if [ "${VALIDATION_CASE}" != events.delivery ] && [ "${VALIDATION_CASE}" != audit.request-correlation ]; then
+        mqtt_start
+      fi
       # EVT and AUD use the API-managed module switches.
       local mbody mcode
-      mbody="$(admin_api PUT /rustfs/admin/v3/module-switches "" '{"notify_enabled":true,"audit_enabled":true}')"; mcode="$(admin_api_code)"
+      local switches='{"notify_enabled":true,"audit_enabled":true}'
+      [ "${VALIDATION_CASE}" = events.delivery ] && switches='{"notify_enabled":true,"audit_enabled":false}'
+      [ "${VALIDATION_CASE}" = audit.request-correlation ] && switches='{"notify_enabled":false,"audit_enabled":true}'
+      mbody="$(admin_api PUT /rustfs/admin/v3/module-switches "" "${switches}")"; mcode="$(admin_api_code)"
       [ "${mcode}" = "200" ] || { echo "enable modules -> HTTP ${mcode}: ${mbody}"; die "failed to enable notify/audit modules"; }
-      wait_targets_ready
+      [ "${VALIDATION_CASE}" = audit.request-correlation ] || wait_targets_ready
     fi
     log "rc aliases local/target; warm bucket ${TIER_BUCKET} ready"
   fi

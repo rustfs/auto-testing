@@ -42,8 +42,26 @@ source's accelerated scanner/ILM timing, and supplies a cluster restart hook
 for `ilm.restart-persistence`. `ilm.transition-and-restore` uses the third
 auto-testing node as an independent warm-tier target. Each selected case must
 pass its own harness result, evidence, and bucket-cleanup verification before
-the canonical result can become PASS. These executors have local contract and
-dry-run checks, but no live PASS evidence yet.
+the canonical result can become PASS. `ilm.configuration-roundtrip`,
+`ilm.invalid-configuration`, `ilm.current-expiration`,
+`ilm.tag-filter-expiration`, `ilm.disabled-rule`, and `ilm.rule-removal` have
+live PASS evidence in RustFS Actions runs `38044956285`, `38045047518`,
+`38045154019`, `38045412209`, `38045496042`, and `38045714246` respectively.
+The other eight ILM executors have local contract and dry-run checks but no
+live PASS evidence yet.
+
+All 13 Pool lifecycle IDs now dispatch to the source black-box pool checks.
+The driver reuses the existing auto-testing Pool suite's two-node seed and
+expansion operations, supplies marker-guarded reset/topology/restart/physical
+census hooks, and requires source case evidence plus physical cleanup before
+canonical PASS. These cases have not yet completed live validation.
+
+The 18 bucket-replication and 20 site-replication IDs now dispatch to the
+source black-box checks. The driver uses the existing auto-testing four-node
+main cluster and second RustFS instance on port 19000, including the source's
+site-group fixture and site outage hooks. Logical bucket isolation and
+physical teardown are required for PASS. These cases have not yet completed
+live validation.
 
 `kms.sse-kms-round-trip` has a dedicated executor using the existing local
 KMS single-disk deployment. It checks the same object's encryption key,
@@ -61,8 +79,12 @@ Actions run `38042759074`.
 `events.delivery` and `audit.request-correlation` now have dedicated executors
 on the Tier suite's `single-single` topology. Event delivery is counted for a
 unique object after a quiet window; audit checks matching PUT/GET records,
-distinct request IDs, successful status, and absence of known secrets. Both
-still require live candidate evidence before being counted as verified.
+distinct request IDs, successful status, and absence of known secrets. The
+first two event attempts stopped before case execution because the candidate
+could not converge local notification runtime while both notification and
+audit modules were enabled. The validation setup now enables only the required
+webhook channel and retains its full setup log. Both cases still require live
+candidate evidence before being counted as verified.
 
 `iam.policy-enforcement` has a dedicated executor on the Security suite's
 `single-single` deployment. It uses one principal with a policy that allows
@@ -90,9 +112,10 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 22 currently dispatchable IDs are the S3, two scanner,
-KMS, tiering, events, audit, IAM, and 14 additional ILM cases above. Six have
-live PASS evidence; the other 152 IDs remain unverified.
+case evidence. The 73 currently dispatchable IDs are the S3, two scanner,
+KMS, tiering, events, audit, IAM, 14 additional ILM, 13 Pool, and 38
+replication cases above. Twelve have live PASS evidence; the other 146 IDs
+remain unverified.
 
 The eight planned cases have these concrete reuse candidates:
 
