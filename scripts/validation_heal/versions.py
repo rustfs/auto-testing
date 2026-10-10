@@ -32,6 +32,7 @@ try:
     from .scanner_repair import BRANCHES as SCANNER_BRANCHES, JournalWindow, observe_task as scanner_task
     from .markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
                           marker_plan, prepare_stale, verify_markers, reveal_current)
+    from .stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -49,6 +50,7 @@ except ImportError:
     from scanner_repair import BRANCHES as SCANNER_BRANCHES, JournalWindow, observe_task as scanner_task
     from markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
                          marker_plan, prepare_stale, verify_markers, reveal_current)
+    from stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -70,6 +72,7 @@ BRANCHES = {
     "heal.disk-readonly-and-permission": ("read-only", "permission-denied"),
     "heal.scanner-cold-object-repair": SCANNER_BRANCHES,
     "heal.delete-marker-semantics": MARKER_BRANCHES,
+    "heal.stale-version-rejoin": STALE_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -689,6 +692,7 @@ def verify_version_s3(probe, fleet, bucket, expected, baseline, label, *, fixtur
         nonce = next(index for index, item in enumerate(
             item for item in expected if item["key"] == entry["key"] and not item["deleteMarker"])
             if item["versionId"] == entry["versionId"])
+        nonce = entry.get("payloadNonce", nonce)
         body = semantic_body(bucket, entry["key"], nonce) if fixture == "DS" else payload(
             f"{bucket}/{entry['key']}/{nonce}", entry["payload"]["size"])
         ranges.append({"key": entry["key"], "versionId": entry["versionId"], "proof": verify_ranges(
@@ -703,11 +707,12 @@ def run_topology(args, topology, nodes, fixture):
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory,
                   runtime_profile="scanner" if args.case_id == "heal.scanner-cold-object-repair" else
-                  "read-repair" if args.case_id == "heal.read-repair-attribution" else "manual")
+                  "read-repair" if args.case_id == "heal.read-repair-attribution" else
+                  "stale-rejoin" if args.case_id == "heal.stale-version-rejoin" else "manual")
     candidate = json.loads(args.candidate.read_text())
     tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id in {
-        "heal.below-read-quorum", "heal.metadata-payload-mismatch"} else None
+        "heal.below-read-quorum", "heal.metadata-payload-mismatch", "heal.stale-version-rejoin"} else None
     size_rule = verify_size_contract(tool_manifest, candidate) if args.case_id == "heal.object-size-boundaries" else None
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
@@ -727,6 +732,8 @@ def run_topology(args, topology, nodes, fixture):
                 and (args.case_id != "heal.below-read-quorum" or (branch == "r-minus-1-historical") == (fixture == "DV"))
                 and (args.case_id != "heal.read-repair-attribution" or (branch == "historical-version-read") == (fixture == "DV"))
                 and (args.case_id != "heal.missing-or-corrupt-xlmeta" or (branch == "versioned-xlmeta") == (fixture == "DV"))]
+    if args.case_id == "heal.stale-version-rejoin":
+        branches = [branch for branch in STALE_BRANCHES if (branch == "unversioned-overwrite") == (fixture == "DB")]
     result = {"topology": topology, "fixture": fixture, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, admissions = [], []
     probe = Probe(binding)
@@ -764,10 +771,14 @@ def run_topology(args, topology, nodes, fixture):
             expected, public = seed_semantics(recorder, bucket)
         else:
             expected = seed(recorder, bucket, fixture,
-                            16 if args.case_id == "heal.multiple-shard-loss" else 4 if fixture == "DV" else 128,
-                            [VERSION_SIZE] if args.case_id == "heal.multiple-shard-loss" or fixture == "DV" else SIZES)
+                            16 if args.case_id == "heal.multiple-shard-loss" else 4 if fixture == "DV" or args.case_id == "heal.stale-version-rejoin" else 128,
+                            [VERSION_SIZE] if args.case_id in {"heal.multiple-shard-loss", "heal.stale-version-rejoin"} or fixture == "DV" else SIZES)
         if args.case_id == "heal.versioning-suspended-null":
             expected = suspend_fixture(recorder, bucket, expected)
+        if args.case_id == "heal.stale-version-rejoin":
+            for key in {entry["key"] for entry in expected}:
+                for nonce, entry in enumerate(entry for entry in expected if entry["key"] == key and not entry["deleteMarker"]):
+                    entry["payloadNonce"] = nonce
         baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture in {"DB", "DK"},
                                                               page_size=17 if fixture == "DK" else None))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
@@ -807,6 +818,12 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
                         key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-before-" + branch))
                 fleet.stop()
+                if args.case_id == "heal.stale-version-rejoin":
+                    stale_marker_started = True
+                    expected, baseline, proof = stale_branch(recorder, fleet, bucket, branch, expected, active, admissions, contract)
+                    result["branches"][branch] = proof
+                    stale_marker_started = False
+                    continue
                 before = fleet.snapshot("physical-before-" + branch, quiescent=True)
                 scanner_window = JournalWindow(fleet, "scanner-fault-" + branch) if scanner else None
                 if size_rule:
@@ -1037,7 +1054,7 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes), "four current Heal nodes required")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
-    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss", "heal.read-repair-attribution"} else ("DV",)
+    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss", "heal.read-repair-attribution", "heal.stale-version-rejoin"} else ("DV",)
     if args.case_id == "heal.object-metadata-and-tags":
         fixtures = ("DS",)
     if args.case_id == "heal.special-keys-and-pagination":

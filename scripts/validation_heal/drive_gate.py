@@ -47,6 +47,7 @@ def checked_gate(state, roots):
             and info.st_size < 4096 and info.st_mode & 0o077 == 0, "invalid drive gate ownership")
     value = json.loads(path.read_text())
     require(value.get("schemaVersion") == 1 and value.get("mode") in {"read-only", "permission-denied"}
+            and value.get("phase", "active") in {"armed", "active"}
             and type(value.get("disk")) is int and 0 <= value["disk"] < len(roots)
             and value.get("dataPath") == str(roots[value["disk"]] / "data")
             and type(value.get("originalMode")) is int and value["originalMode"] == 0o700,
@@ -62,15 +63,39 @@ def apply_gate(state, roots, disk, mode):
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700,
             "expected private run-owned root with original mode 0700")
     value = {"schemaVersion": 1, "disk": disk, "mode": mode, "dataPath": str(folder),
-             "originalMode": 0o700, "device": info.st_dev, "inode": info.st_ino}
+             "originalMode": 0o700, "device": info.st_dev, "inode": info.st_ino,
+             "phase": "armed" if mode == "permission-denied" else "active"}
     # Intent precedes chmod/start. Cleanup can restore a partially applied gate.
     fd = os.open(state / "drive-gate.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as stream:
         json.dump(value, stream)
         stream.flush()
         os.fsync(stream.fileno())
-    if mode == "permission-denied": folder.chmod(0)
     return {**value, "state": "ARMED", "hostMountRemounted": False, "sharedPermissionsChanged": False}
+
+
+def activate_gate(state, roots):
+    value = checked_gate(state, roots)
+    require(value and value["mode"] == "permission-denied" and value.get("phase") == "armed",
+            "permission activation requires a newly armed run-owned gate")
+    folder = Path(value["dataPath"])
+    info = folder.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_dev == value["device"]
+            and info.st_ino == value["inode"] and stat.S_IMODE(info.st_mode) == 0o700,
+            "armed permission root changed before live injection")
+    # Keep the recovery intent before chmod. A partially activated gate remains
+    # recoverable from the armed marker and original inode/mode.
+    folder.chmod(0)
+    temporary = state / "drive-gate-active.json"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    value["phase"] = "active"
+    with os.fdopen(fd, "w") as stream:
+        json.dump(value, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, state / "drive-gate.json")
+    return {**value, "state": "ACTIVE", "injectedAfterActualServiceStart": True,
+            "hostMountRemounted": False, "sharedPermissionsChanged": False}
 
 
 def release_gate(state, roots):
@@ -117,6 +142,7 @@ def validate_probe(observed, mode, identity):
 def probe_gate(state, roots, pid):
     value = checked_gate(state, roots)
     require(value is not None and type(pid) is int and pid > 0, "active gated service required")
+    require(value.get("phase", "active") == "active", "permission gate is still armed; no refusal claim")
     identity = process_identity(pid)
     require(Path(f"/proc/{pid}/ns/mnt").readlink() != Path("/proc/self/ns/mnt").readlink(),
             "gate requires an independent service mount namespace")
@@ -144,7 +170,9 @@ def probe_gate(state, roots, pid):
 def validate_unwritable(status, bucket, entry):
     outcome = status.get("outcome") or {}
     objects = outcome.get("objects", [])
-    require(status.get("summary") == "finished" and status.get("truncated", False) is False
+    terminal = status.get("summary") == "finished" or status.get("summary") == "stopped" \
+        and outcome.get("execution", {}).get("state") == "completed_with_errors"
+    require(terminal and status.get("truncated", False) is False
             and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False
             and len(objects) == 1, "unwritable task did not preserve complete exact responsibility")
     receipt = objects[0]

@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 110 currently dispatchable IDs include all 74 non-Heal cases and thirty-six Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
+case evidence. The 111 currently dispatchable IDs include all 74 non-Heal cases and thirty-seven Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -650,5 +650,36 @@ A08 `heal.admin-authorization` passed live in RustFS Actions run
 `38069648003`, harness `0789743d439fd91b967c2d6fba85c06e29f844c5`. All five
 source branches passed independently on H1 and H2; the canonical gate,
 complete summary, cleanup and workflow all passed with the fixed candidate.
-The prior A08 failures remain recorded. Forty-eight Heal executors remain
+The prior A08 failures remain recorded. Forty-seven Heal executors remain
 to be migrated; automatic dispatch and local tests do not claim live PASS.
+
+
+C06 `heal.stale-version-rejoin` now dispatches all three source branches on
+H1/H2, with never-versioned overwrite and independent versioned historical
+delete/marker fixtures. A private permission gate removes both DAC bypass
+capabilities and activates only after the original candidate has started.
+Same-process read/write EACCES proves that the unchanged member cannot
+participate in the subsequent ACK transition. Every online metadata replica
+must agree on the complete acknowledged namespace, the isolated member's
+entire physical disk remains exact, and controls retain their original bytes.
+The same disk UUID and set slot must rejoin without harness metadata writes
+or restoring old-generation backups. An independent deep token must correct
+the stale namespace; exact outcome counters, retained same-drive shards,
+streaming checksums, deleted-version absence, current marker headers and
+all-peer S3 manifests are required. Original payload nonces remain attached
+to ACK versions after deletion so Range checks cannot silently renumber
+history. The candidate's dangling grace is explicitly zero for this rejoin
+profile; C10 retains the independent grace-policy requirements. Complete
+cursor-bounded generation-selection logs are archived. Live evidence is pending.
+
+B02 run `38079787495` retained FAIL and cleanup PASS on both H1/H2. The
+readonly window produced `completed_with_errors` with one failed receipt,
+zero repaired targets and `summary=stopped`, but omitted bucket incarnation.
+The stopped summary is now interpreted only with explicit failed execution,
+complete coverage and exact counters; missing incarnation still fails. The
+permission setup previously chmod'ed the data root before service startup,
+causing the candidate to exit with EACCES before injection could be witnessed.
+Permission gates now retain an armed recovery marker during initial startup
+and inject chmod only into the same live candidate with DAC bypass already
+removed. This fixes the injection window without certifying the old run or
+relaxing physical/refusal/responsibility assertions. A fresh run is required.

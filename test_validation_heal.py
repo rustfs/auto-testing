@@ -34,7 +34,7 @@ from scripts.validation_heal.object_lock import (validate_protection, validate_p
 from scripts.validation_heal.versions import mismatch_plan, seed_mismatch
 from scripts.validation_heal import heal_fault
 from scripts.validation_heal.read_repair import source_tasks, validate_read, tracked_read_task, ADMISSION_MESSAGE, ADMISSION_TARGET
-from scripts.validation_heal.drive_gate import apply_gate, release_gate, checked_gate, start_properties, validate_probe, validate_unwritable
+from scripts.validation_heal.drive_gate import apply_gate, activate_gate, release_gate, checked_gate, start_properties, validate_probe, validate_unwritable
 from scripts.validation_heal.scanner_repair import (source_tasks as scanner_sources, cycle_pairs,
     observe_task as observe_scanner, JournalWindow)
 from scripts.validation_heal.fleet_node import logs as node_logs
@@ -53,6 +53,7 @@ from scripts.validation_heal.fleet_node import task_records as node_task_records
 from scripts.validation_heal import overlap
 from scripts.validation_heal import root_restart, fleet_node
 from scripts.validation_heal import quorum_boundary
+from scripts.validation_heal import stale_rejoin
 import errno
 import stat
 
@@ -1013,6 +1014,43 @@ class HealNodeOutageTest(unittest.TestCase):
 
 
 class HealDriveGateTest(unittest.TestCase):
+    def test_live_permission_activation_follows_actual_start_and_initial_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fleet = Fleet(["node1"], Path(directory), "gh-12345-1-h1")
+            fleet.drive_gates.add("node1")
+            calls = []
+            def remote(node, action, **kwargs):
+                calls.append(action)
+                return {"mode": "permission-denied", "phase": "armed"} if action == "gate-state" else {}
+            with patch.object(fleet, "remote", side_effect=remote), \
+                 patch.object(fleet, "wait_ready", side_effect=lambda: calls.append("ready")):
+                fleet.start()
+            self.assertEqual(calls, ["start", "ready", "gate-state", "drive-gate-activate"])
+            calls.clear()
+            with patch.object(fleet, "remote", side_effect=remote), \
+                 patch.object(fleet, "wait_ready", side_effect=ValueError("startup failed")), self.assertRaises(ValueError):
+                fleet.start()
+            self.assertNotIn("drive-gate-activate", calls)
+
+    def test_partial_live_activation_restores_from_original_armed_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, root = Path(directory) / "state", Path(directory) / "root"
+            state.mkdir()
+            (root / "data").mkdir(parents=True, mode=0o700)
+            original = Path.lstat
+            def root_owned(path):
+                info = original(path)
+                return types.SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_nlink=info.st_nlink,
+                    st_size=info.st_size, st_dev=info.st_dev, st_ino=info.st_ino)
+            with patch.object(Path, "lstat", root_owned):
+                apply_gate(state, (root,), 0, "permission-denied")
+                with patch("scripts.validation_heal.drive_gate.os.replace", side_effect=OSError("interrupted")), self.assertRaises(OSError):
+                    activate_gate(state, (root,))
+                self.assertEqual(checked_gate(state, (root,))["phase"], "armed")
+                self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0)
+                self.assertTrue(release_gate(state, (root,))["originalPermissionsRestored"])
+                self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0o700)
+
     def test_gate_only_changes_owned_permissions_and_restores_partial_intent(self):
         for mode in ("read-only", "permission-denied"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
@@ -1032,7 +1070,14 @@ class HealDriveGateTest(unittest.TestCase):
                     gate = apply_gate(state, (root,), 0, mode)
                     self.assertEqual(checked_gate(state, (root,))["mode"], mode)
                     self.assertFalse(gate["hostMountRemounted"])
-                    self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0 if mode == "permission-denied" else 0o700)
+                    self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0o700)
+                    if mode == "permission-denied":
+                        self.assertEqual(gate["phase"], "armed")
+                        activated = activate_gate(state, (root,))
+                        self.assertTrue(activated["injectedAfterActualServiceStart"])
+                        self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0)
+                        self.assertEqual(checked_gate(state, (root,))["phase"], "active")
+                        with self.assertRaises(ValueError): activate_gate(state, (root,))
                     self.assertEqual(stat.S_IMODE(other.stat().st_mode), 0o700)
                     with self.assertRaisesRegex(ValueError, "already active"):
                         apply_gate(state, (root,), 0, mode)
@@ -1065,6 +1110,10 @@ class HealDriveGateTest(unittest.TestCase):
         status["outcome"]["execution"]["state"] = "completed_with_errors"
         status["outcome"]["counters"].update(healed=0, unchanged=0, failed=1, attemptFailures=1)
         self.assertFalse(validate_unwritable(status, bucket, entry)["repairClaimedWhileUnwritable"])
+        stopped = {**copy.deepcopy(status), "summary": "stopped"}
+        validate_unwritable(stopped, bucket, entry)
+        stopped["outcome"]["execution"]["state"] = "aborted"
+        with self.assertRaises(ValueError): validate_unwritable(stopped, bucket, entry)
         for invalid in ("repaired", "metadata_healthy", "unknown", "wrong-version", "healed-count", "hidden-failure", "incarnation"):
             changed = copy.deepcopy(status)
             if invalid in {"repaired", "metadata_healthy", "unknown"}: changed["outcome"]["objects"][0]["disposition"]["state"] = invalid
@@ -2534,6 +2583,152 @@ class HealReadQuorumBoundaryTest(unittest.TestCase):
         for contract in ({}, {"recognized": True, "writeQuorumRule": "unknown"}):
             with self.assertRaises(ValueError): quorum_boundary.boundary_plan("exact-r-read", snapshot, self.bucket, expected, contract)
         with self.assertRaises(ValueError): quorum_boundary.boundary_plan("exact-r-read", snapshot, self.bucket, expected * 2, self.contract)
+
+
+class HealStaleRejoinTest(unittest.TestCase):
+    def scene(self):
+        before, bucket, expected = versioned_scene(["objects/0001.bin", "control/object.bin"])
+        for key in {entry["key"] for entry in expected}:
+            for nonce, entry in enumerate(entry for entry in expected if entry["key"] == key): entry["payloadNonce"] = nonce
+        target = map_target(before, bucket, "objects/0001.bin", "data", 1, "v0", latest_required=False)
+        manifest = [entry for entry in expected if (entry["key"], entry["versionId"]) != (target["key"], "v0")]
+        authority = copy.deepcopy(before)
+        member = target["node"], target["disk"]
+        for node, value in authority.items():
+            for entry in value["files"]:
+                if (node, entry["disk"]) == member: continue
+                metadata = entry.get("metadata")
+                if metadata and metadata["key"] == target["key"]:
+                    metadata["versions"] = [version for version in metadata["versions"] if version["versionId"] != "v0"]
+                    entry["sha256"] += "-deleted-v0"
+            value["files"] = [entry for entry in value["files"] if (node, entry["disk"]) == member
+                or not entry["path"].startswith(f"{bucket}/{target['key']}/12345678-1234-1234-1234-000000000000/")]
+        witness = stale_rejoin.authority_witness(before, authority, bucket, target["key"], manifest, target)
+        after = copy.deepcopy(authority)
+        for entry in after[member[0]]["files"]:
+            if entry["disk"] == member[1] and entry.get("metadata", {}).get("key") == target["key"]:
+                entry["metadata"]["versions"] = [version for version in entry["metadata"]["versions"] if version["versionId"] != "v0"]
+                entry["sha256"] += "-deleted-v0"
+        return before, authority, after, bucket, manifest, target, witness
+
+    def test_same_disk_stale_generation_requires_full_online_ack_authority(self):
+        before, authority, after, bucket, expected, target, witness = self.scene()
+        self.assertEqual((witness["readQuorum"], witness["writeQuorum"], witness["onlineAuthorities"]), (2, 3, 3))
+        cohorts, proof = stale_rejoin.physical_rejoin(authority, after, bucket, target["key"], expected, target, witness)
+        self.assertEqual({cohort["versionId"] for cohort in cohorts}, {"v1", "v2"})
+        self.assertFalse(proof["backupRestoreUsed"])
+        for kind in ("offline-write", "lost-online-version", "no-stale-generation", "control", "format"):
+            changed = copy.deepcopy(authority)
+            if kind == "offline-write": next(entry for entry in changed[target["node"]]["files"] if entry["disk"] == target["disk"])["sha256"] = "changed"
+            elif kind == "lost-online-version":
+                next(entry for entry in changed["node1"]["files"] if entry["disk"] != target["disk"]
+                     and entry.get("metadata", {}).get("key") == target["key"])["metadata"]["versions"].pop()
+            elif kind == "no-stale-generation": changed = copy.deepcopy(after)
+            elif kind == "control": next(entry for entry in changed["node1"]["files"] if "/control/" in entry["path"])["sha256"] = "changed"
+            else: changed["node1"]["formats"][0]["value"]["id"] = "foreign"
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                stale_rejoin.authority_witness(before, changed, bucket, target["key"], expected, target)
+
+    def test_physical_convergence_cannot_change_retained_shards_or_quorum_controls(self):
+        _, authority, after, bucket, expected, target, witness = self.scene()
+        for kind in ("retained-target-shard", "quorum-shard", "control", "resurrected-metadata", "extra-file"):
+            changed = copy.deepcopy(after)
+            if kind in {"retained-target-shard", "quorum-shard"}:
+                entry = next(entry for entry in changed["node1"]["files"] if entry["path"].endswith("/part.1")
+                    and target["key"] in entry["path"] and "000000000001" in entry["path"]
+                    and (entry["disk"] == target["disk"]) == (kind == "retained-target-shard"))
+                entry["sha256"] = "corrupt"
+            elif kind == "control": next(entry for entry in changed["node1"]["files"] if "/control/" in entry["path"])["sha256"] = "changed"
+            elif kind == "resurrected-metadata":
+                entry = next(entry for entry in changed["node1"]["files"] if entry["disk"] == target["disk"] and entry.get("metadata", {}).get("key") == target["key"])
+                entry["metadata"] = copy.deepcopy(next(entry for entry in authority["node1"]["files"] if entry["disk"] == target["disk"] and entry.get("metadata", {}).get("key") == target["key"])["metadata"])
+            else: changed["node1"]["files"].append({"disk": 0, "path": f"{bucket}/unrelated/new.bin", "size": 1, "sha256": "extra"})
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                stale_rejoin.physical_rejoin(authority, changed, bucket, target["key"], expected, target, witness)
+
+    def test_historical_delete_keeps_original_payload_nonce_and_exact_ack(self):
+        _, _, _, bucket, expected_after, target, _ = self.scene()
+        _, _, expected = versioned_scene([target["key"]])
+        for nonce, entry in enumerate(expected): entry["payloadNonce"] = nonce
+        recorder = Mock()
+        recorder.call.return_value = {"VersionId": "v0", "ResponseMetadata": {"HTTPStatusCode": 204}}
+        manifest, ack = stale_rejoin.transition(recorder, bucket, "delete-historical-version", target["key"], expected)
+        self.assertEqual([(entry["versionId"], entry["payloadNonce"]) for entry in manifest], [("v1", 1), ("v2", 2)])
+        self.assertEqual(ack["deletedVersionId"], "v0")
+        self.assertFalse(ack["backupRestorationAllowed"])
+        for changed in ({"VersionId": "v1", "ResponseMetadata": {"HTTPStatusCode": 204}},
+                        {"VersionId": "v0", "DeleteMarker": True, "ResponseMetadata": {"HTTPStatusCode": 204}}):
+            recorder.call.return_value = changed
+            with self.assertRaises(ValueError): stale_rejoin.transition(recorder, bucket, "delete-historical-version", target["key"], expected)
+
+    def test_overwrite_uses_new_nonce_and_marker_preserves_all_acknowledged_versions(self):
+        key, bucket = "objects/0001.bin", "rv-heal-0123456789abcdef"
+        old = [{"key": key, "versionId": "null", "deleteMarker": False, "isLatest": True,
+                "payload": {"size": 100, "sha256": "old"}, "payloadNonce": 0}]
+        recorder = Mock()
+        recorder.call.return_value = {"ResponseMetadata": {"HTTPStatusCode": 200}}
+        manifest, ack = stale_rejoin.transition(recorder, bucket, "unversioned-overwrite", key, old)
+        self.assertEqual(manifest[0]["payloadNonce"], 1)
+        self.assertEqual(manifest[0]["payload"]["sha256"], hashlib.sha256(stale_rejoin.payload(f"{bucket}/{key}/1", 100)).hexdigest())
+        self.assertEqual(old[0]["payload"]["sha256"], "old")
+        before, _, expected = versioned_scene([key])
+        recorder.call.return_value = {"VersionId": "new-marker", "DeleteMarker": True, "ResponseMetadata": {"HTTPStatusCode": 204}}
+        manifest, ack = stale_rejoin.transition(recorder, bucket, "delete-marker", key, expected)
+        self.assertEqual(len(manifest), 4)
+        self.assertTrue(manifest[-1]["isLatest"] and manifest[-1]["deleteMarker"])
+        self.assertTrue(all(not entry["isLatest"] for entry in manifest[:-1]))
+
+    def test_stale_receipts_reject_unknown_resurrection_and_false_convergence(self):
+        _, _, _, bucket, expected, target, _ = self.scene()
+        selected = [entry for entry in expected if entry["key"] == target["key"]]
+        state = HealHealthyOracleTest().receipt("repaired")
+        template = state["outcome"]["objects"][0]
+        receipts = []
+        for entry in selected:
+            receipt = copy.deepcopy(template)
+            receipt["identity"].update(bucket=bucket, object=target["key"], versionId=entry["versionId"])
+            receipt["disposition"] = {"state": "repaired" if entry["versionId"] == "v1" else "verified_healthy"}
+            receipts.append(receipt)
+        absent = copy.deepcopy(template)
+        absent["identity"].update(bucket=bucket, object=target["key"], versionId="v0")
+        absent["disposition"] = {"state": "authoritatively_absent"}
+        state["outcome"]["objects"] = [*receipts, absent]
+        state["outcome"]["counters"].update(processed=3, healed=1, unchanged=2)
+        self.assertTrue(stale_rejoin.responsibility(state, bucket, target["key"], expected, deleted="v0")["completeRetainedAndOptionalDeletedVersionReceipts"])
+        for kind in ("unknown", "live-deleted", "no-repair", "missing-retained", "incarnation", "wrong-count"):
+            changed = copy.deepcopy(state)
+            if kind == "unknown": changed["outcome"]["objects"][0]["disposition"]["state"] = "unknown"
+            elif kind == "live-deleted": changed["outcome"]["objects"][-1]["disposition"]["state"] = "verified_healthy"
+            elif kind == "no-repair": changed["outcome"]["objects"][0]["disposition"]["state"] = "verified_healthy"
+            elif kind == "missing-retained": changed["outcome"]["objects"].pop(1)
+            elif kind == "incarnation": changed["outcome"]["objects"][1]["identity"]["bucketIncarnationId"] = "foreign"
+            else: changed["outcome"]["counters"]["healed"] += 1
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                stale_rejoin.responsibility(changed, bucket, target["key"], expected, deleted="v0")
+
+    def test_stale_runtime_and_source_branches_are_explicit(self):
+        self.assertEqual(list(stale_rejoin.BRANCHES), select("C06")[0]["variants"])
+        config = runtime_config("stale-rejoin")
+        self.assertEqual(config["RUSTFS_HEAL_DANGLING_DELETE_GRACE_SECS"], "0")
+        self.assertEqual(config["RUSTFS_HEAL_MRF_ENABLE"], "false")
+
+    def test_range_oracle_uses_ack_nonce_after_historical_deletion(self):
+        from scripts.validation_heal.versions import verify_version_s3
+        bucket, key = "rv-heal-0123456789abcdef", "objects/0001.bin"
+        expected = [{"key": key, "versionId": f"v{nonce}", "deleteMarker": False, "isLatest": nonce == 2,
+                     "payload": {"size": 1024**2 + 47}, "payloadNonce": nonce} for nonce in (1, 2)]
+        baseline = {"entries": [{**entry, "properties": {}} for entry in expected]}
+        probe, fleet = Mock(), Mock()
+        probe.inventory.return_value = baseline
+        probe.s3.return_value = {"acknowledged": True, "response": {}}
+        fleet.record.side_effect = lambda label, value: value
+        with patch("scripts.validation_heal.versions.compare_inventories", return_value={}), \
+             patch("scripts.validation_heal.versions.payload", side_effect=lambda label, size: label.encode()) as generator, \
+             patch("scripts.validation_heal.versions.verify_ranges", return_value=[]) as ranges:
+            verify_version_s3(probe, fleet, bucket, expected, baseline, "after-deletion")
+        self.assertEqual([call.args[0] for call in generator.call_args_list], [f"{bucket}/{key}/1", f"{bucket}/{key}/2"])
+        self.assertEqual([call.kwargs["expected_body"] for call in ranges.call_args_list],
+                         [f"{bucket}/{key}/1".encode(), f"{bucket}/{key}/2".encode()])
 
 
 if __name__ == "__main__":

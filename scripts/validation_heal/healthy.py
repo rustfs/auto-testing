@@ -131,7 +131,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -170,7 +170,7 @@ class Fleet:
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
-        if action in {"start", "cleanup", "audit-finalize", "drive-gate", "drive-gate-probe"}:
+        if action in {"start", "cleanup", "audit-finalize", "drive-gate", "drive-gate-probe", "drive-gate-activate", "gate-state"}:
             source += "\nimport types\ngate = types.ModuleType('drive_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("drive_gate.py").read_text()) + ", gate.__dict__)\n"
         source += "\nmain(" + repr(value) + ")\n"
@@ -194,6 +194,10 @@ class Fleet:
             results = list(executor.map(lambda node: self.remote(node, "start"), self.nodes))
         self.record("started", dict(zip(self.nodes, results, strict=True)))
         self.wait_ready()
+        for node in sorted(self.drive_gates):
+            gate = self.remote(node, "gate-state")
+            if gate.get("mode") == "permission-denied" and gate.get("phase") == "armed":
+                self.record("live-permission-injection", {"node": node, **self.remote(node, "drive-gate-activate")})
 
     def deploy(self, binary_sha, bucket, access, secret, *, before_start=None):
         self.secret_values.update({access, secret})

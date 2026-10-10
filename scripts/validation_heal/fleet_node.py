@@ -32,7 +32,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin"}, "unsupported Heal runtime profile")
+    if profile == "stale-rejoin":
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_DANGLING_DELETE_GRACE_SECS": "0", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
     if profile == "root-restart":
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false"}
     if profile == "overlap":
@@ -350,6 +352,22 @@ def drive_gate_probe(request):
     return gate_module().probe_gate(state, roots, pid)
 
 
+def drive_gate_activate(request):
+    state, roots, _ = owned(request["runId"])
+    before = process(request)
+    require(before["pid"] > 1, "permission fault requires the running owned candidate")
+    receipt = gate_module().activate_gate(state, roots)
+    after = process(request)
+    require(all(before.get(name) == after.get(name) for name in PROCESS_FIELDS),
+            "permission injection crossed the original process identity")
+    return {**receipt, "processBefore": before, "processAfter": after, "sameOriginalProcess": True}
+
+
+def drive_gate_state(request):
+    state, roots, _ = owned(request["runId"])
+    return gate_module().checked_gate(state, roots) or {"state": "CLEAR"}
+
+
 def fault_root(request):
     _, roots, owner = owned(request["runId"])
     stopped(owner)
@@ -619,7 +637,8 @@ def main(request):
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
                "logs": logs, "cleanup": cleanup, "audit-finalize": audit_finalize, "install-inspector": install_inspector,
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part, "verify-parts": verify_parts,
-               "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe}
+               "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe,
+               "drive-gate-activate": drive_gate_activate, "gate-state": drive_gate_state}
     actions["task-records"] = task_records
     actions.update({"process": process, "process-signal": process_signal, "process-graceful": process_graceful})
     require(request.get("action") in actions, "unsupported node operation")
