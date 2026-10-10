@@ -22,6 +22,17 @@ else:
     result["errno"] = 0
 print(json.dumps(result))
 '''
+READ_PROBE_SOURCE = '''import json,os
+result = {"uid": os.geteuid(), "gid": os.getegid()}
+try:
+    fd = os.open(__import__('sys').argv[1], os.O_RDONLY | os.O_NOFOLLOW)
+except OSError as exc:
+    result["errno"] = exc.errno
+else:
+    os.close(fd)
+    result["errno"] = 0
+print(json.dumps(result))
+'''
 
 
 def require(value, message):
@@ -116,7 +127,17 @@ def probe_gate(state, roots, pid):
     result = subprocess.run(args, capture_output=True, text=True, timeout=15)
     require(result.returncode == 0, "service-namespace write probe did not complete")
     observed = json.loads(result.stdout)
-    return {**validate_probe(observed, value["mode"], identity), "disk": value["disk"],
+    read = None
+    if value["mode"] == "permission-denied":
+        # A denied write alone cannot prove a stale member cannot read. Use
+        # the same namespace/identity/capability boundary to open its format.
+        read_args = [*args[:-4], "python3", "-c", READ_PROBE_SOURCE,
+                     value["dataPath"] + "/.rustfs.sys/format.json"]
+        result = subprocess.run(read_args, capture_output=True, text=True, timeout=15)
+        require(result.returncode == 0, "service-namespace read probe did not complete")
+        read = json.loads(result.stdout)
+        validate_probe(read, value["mode"], identity)
+    return {**validate_probe(observed, value["mode"], identity), "disk": value["disk"], "readProbe": read,
             "privateMountNamespace": True, "hostMountRemounted": False, "observed": observed}
 
 

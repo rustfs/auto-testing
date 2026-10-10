@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 102 currently dispatchable IDs include all 74 non-Heal cases and twenty-eight Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 103 currently dispatchable IDs include all 74 non-Heal cases and twenty-nine Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 56 Heal cases remain
+The other 55 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -488,3 +488,21 @@ responsibility, original physical shard bytes, streaming checksum and complete
 S3 inventories still gate PASS. Truncated logs, another source, a later healthy
 receipt or cycle counters alone cannot certify repair. The executor passed its
 local source/timing/cursor negatives; full live evidence remains pending.
+
+D04 `heal.delete-marker-semantics` now dispatches its four H1/H2 source
+branches as six real instances. Each key has three separately acknowledged
+data versions and, where applicable, a current or historical marker. Missing
+replicas cover both physical roles. Stale creation and deletion isolate one
+original drive with a service-identity read/write EACCES gate, perform one
+exact marker mutation, and prove the gated replica stayed unchanged while all
+other members carry the ACK authority. The expected metadata is derived only
+for comparison from that authority and the original target-drive data
+references; the harness never writes synthesized metadata. Formats, data
+shards, controls, exact version receipts and streaming checksums must agree.
+Every peer checks current-marker 404 and explicit-marker 405 with exact marker
+identity headers. Explicit current-marker deletion must reveal the precise
+previous data version, remove the marker identity and preserve the full
+remaining version/public-property manifest. A failed or ambiguous stale ACK
+stops the topology and retains its result; gate cleanup precedes physical
+finalization. Local ACK/order/authority/header/gate negatives passed; full live
+evidence remains pending.

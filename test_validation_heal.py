@@ -15,7 +15,7 @@ from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, c
 from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection, Fleet
 from scripts.validation_heal.fleet_node import paths, stopped, inspect_metadata
 from scripts.validation_heal.inspector import verify as verify_inspector
-from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
+from scripts.validation_heal.shards import BRANCHES, files, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
 from scripts.validation_heal.shards import validate_conditional_response
 from scripts.validation_heal.shards import run_task, verify_ranges
@@ -38,6 +38,9 @@ from scripts.validation_heal.drive_gate import apply_gate, release_gate, checked
 from scripts.validation_heal.scanner_repair import (source_tasks as scanner_sources, cycle_pairs,
     observe_task as observe_scanner, JournalWindow)
 from scripts.validation_heal.fleet_node import logs as node_logs
+from scripts.validation_heal.markers import (INSTANCES as MARKER_INSTANCES, seed_markers, marker_plan,
+    stale_expected_scene, add_marker, remove_marker, validate_marker_error)
+from scripts.validation_heal.drive_gate import probe_gate
 import errno
 import stat
 
@@ -1291,6 +1294,120 @@ class HealScannerSourceTest(unittest.TestCase):
         self.assertEqual(config["RUSTFS_SCANNER_BITROT_CYCLE_SECS"], "0")
         self.assertEqual(config["RUSTFS_SCANNER_DEEP_VERIFY_COOLDOWN_SECS"], "0")
         self.assertEqual(config["RUSTFS_HEAL_OBJECT_SELECT_PROB"], "1")
+
+
+class HealMarkerSemanticsTest(unittest.TestCase):
+    def response(self, version, **changes):
+        return {"VersionId": version, "DeleteMarker": True, "ResponseMetadata": {"HTTPStatusCode": 204}, **changes}
+
+    def test_ack_manifest_retains_three_data_versions_and_exact_marker_order(self):
+        expected = [{"key": "key", "versionId": f"v{nonce}", "deleteMarker": False, "isLatest": nonce == 2}
+                    for nonce in range(3)]
+        current = add_marker(expected, "key", self.response("marker"))
+        self.assertEqual(current[-1], {"key": "key", "versionId": "marker", "deleteMarker": True, "isLatest": True})
+        self.assertTrue(all(not entry["isLatest"] for entry in current[:-1]))
+        self.assertEqual(remove_marker(current, "key", self.response("marker")), expected)
+        for response in (self.response("marker", DeleteMarker=False), self.response("v1"), self.response("null"),
+                         self.response("marker", ResponseMetadata={"HTTPStatusCode": 200})):
+            with self.subTest(response=response), self.assertRaises(ValueError): add_marker(expected, "key", response)
+        with self.assertRaises(ValueError): remove_marker(current, "key", self.response("another"))
+
+    def test_seed_has_real_historical_and_current_marker_ack_positions(self):
+        sequence = 0
+        calls = []
+        def call(operation, params, body=None):
+            nonlocal sequence
+            sequence += 1
+            calls.append((operation, params))
+            if operation == "put_object": return {"VersionId": f"data-{sequence}"}
+            if operation == "delete_object": return self.response(f"marker-{sequence}")
+            return {}
+        recorder = types.SimpleNamespace(call=call)
+        expected = seed_markers(recorder, "rv-heal-markers", 100)
+        self.assertEqual(len([entry for entry in expected if not entry["deleteMarker"]]), 18)
+        for instance in MARKER_INSTANCES:
+            key = "markers/" + instance["name"] + ".bin"
+            entries = [entry for entry in expected if entry["key"] == key]
+            markers = [entry for entry in entries if entry["deleteMarker"]]
+            self.assertEqual(len(markers), int(instance["mode"] != "create"))
+            if markers:
+                self.assertEqual(markers[0]["isLatest"], instance["mode"] != "historical")
+                selected = [operation for operation, params in calls if params.get("Key") == key]
+                self.assertEqual(selected, ["put_object", "put_object", "delete_object", "put_object"]
+                                 if instance["mode"] == "historical" else ["put_object"] * 3 + ["delete_object"])
+
+    def scene(self):
+        instance = next(item for item in MARKER_INSTANCES if item["mode"] == "create")
+        key = "markers/" + instance["name"] + ".bin"
+        before, bucket, expected = versioned_scene([key])
+        plan = marker_plan(instance, before, bucket, expected)
+        target = plan["proofs"][0]
+        marker = {"versionId": "new-marker", "deleted": True, "isLatest": True,
+                  "dataDir": None, "inline": None, "parts": [], "erasure": {}, "size": 0}
+        authorities = copy.deepcopy(before)
+        for entry in authorities[target["node"]]["files"]:
+            if "metadata" not in entry or entry["disk"] == target["disk"]: continue
+            for version in entry["metadata"]["versions"]: version["isLatest"] = False
+            entry["metadata"]["versions"].insert(0, copy.deepcopy(marker))
+            entry["sha256"] += "marker-ack"
+        manifest = add_marker(expected, key, self.response("new-marker"))
+        return before, authorities, bucket, key, manifest, target
+
+    def test_stale_oracle_uses_online_ack_authority_and_original_target_data_roles(self):
+        before, authorities, bucket, key, manifest, target = self.scene()
+        oracle = stale_expected_scene(before, authorities, bucket, key, manifest, target)
+        identity = (target["node"], target["disk"], f"{bucket}/{key}/xl.meta")
+        original = files(before)[identity]["metadata"]["versions"]
+        wanted = files(oracle)[identity]["metadata"]["versions"]
+        self.assertEqual(wanted[0]["versionId"], "new-marker")
+        for old, new in zip(original, wanted[1:], strict=True):
+            self.assertEqual({**old, "isLatest": False}, new)
+        self.assertEqual(files(before)[identity]["sha256"], files(oracle)[identity]["sha256"])
+        self.assertEqual(files(authorities)[identity]["metadata"]["versions"], original)
+
+    def test_stale_oracle_rejects_target_writes_wrong_quorum_and_control_changes(self):
+        before, authorities, bucket, key, manifest, target = self.scene()
+        for mutation in ("target", "authority", "data", "format"):
+            changed = copy.deepcopy(authorities)
+            entries = changed[target["node"]]["files"]
+            if mutation == "target":
+                next(entry for entry in entries if entry["disk"] == target["disk"])["sha256"] += "unexpected"
+            elif mutation == "authority":
+                next(entry for entry in entries if entry.get("metadata") and entry["disk"] != target["disk"])["metadata"]["versions"][0]["versionId"] = "foreign"
+            elif mutation == "data": next(entry for entry in entries if not entry.get("metadata"))["sha256"] += "changed"
+            else: changed[target["node"]]["formats"][0]["value"]["id"] += "changed"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                stale_expected_scene(before, changed, bucket, key, manifest, target)
+
+    def test_marker_negative_requires_http_headers_and_no_payload_or_unknown(self):
+        good = {"acknowledged": False, "resultUnknown": False, "response": {"ResponseMetadata": {
+            "HTTPStatusCode": 405, "HTTPHeaders": {"x-amz-version-id": "marker", "x-amz-delete-marker": "true"}}}}
+        validate_marker_error(good, 405, "marker")
+        for kind in ("status", "version", "marker", "payload", "transport", "ack"):
+            changed = copy.deepcopy(good)
+            if kind == "status": changed["response"]["ResponseMetadata"]["HTTPStatusCode"] = 404
+            elif kind in {"version", "marker"}: changed["response"]["ResponseMetadata"]["HTTPHeaders"]["x-amz-" + ("version-id" if kind == "version" else "delete-marker")] = "wrong"
+            elif kind == "payload": changed["payload"] = {"size": 0}
+            elif kind == "transport": changed["resultUnknown"] = True
+            else: changed["acknowledged"] = True
+            with self.subTest(kind=kind), self.assertRaises(ValueError): validate_marker_error(changed, 405, "marker")
+
+    def test_permission_probe_checks_read_and_write_with_same_namespace_and_dac_limit(self):
+        value = {"mode": "permission-denied", "dataPath": "/private/data", "disk": 1}
+        output = types.SimpleNamespace(returncode=0, stdout=json.dumps({"uid": 0, "gid": 0, "errno": errno.EACCES}))
+        with patch("scripts.validation_heal.drive_gate.checked_gate", return_value=value), \
+             patch("scripts.validation_heal.drive_gate.process_identity", return_value={"uid": 0, "gid": 0, "capEff": 0}), \
+             patch("pathlib.Path.readlink", side_effect=[Path("mnt:[private]"), Path("mnt:[host]")]), \
+             patch("scripts.validation_heal.drive_gate.subprocess.run", return_value=output) as invoke:
+            result = probe_gate(None, None, 123)
+        self.assertEqual(result["readProbe"]["errno"], errno.EACCES)
+        self.assertEqual(invoke.call_count, 2)
+        for args in invoke.call_args_list:
+            command = args.args[0]
+            self.assertEqual(command.count("python3"), 1)
+            self.assertIn("--mount=/proc/123/ns/mnt", command)
+            self.assertIn("--bounding-set=-dac_override,-dac_read_search", command)
+        self.assertEqual(invoke.call_args.args[0][-1], "/private/data/.rustfs.sys/format.json")
 
 
 class HealPayloadMismatchTest(unittest.TestCase):

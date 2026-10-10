@@ -30,6 +30,8 @@ try:
     from .read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
     from .drive_gate import validate_unwritable
     from .scanner_repair import BRANCHES as SCANNER_BRANCHES, JournalWindow, observe_task as scanner_task
+    from .markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
+                          marker_plan, prepare_stale, verify_markers, reveal_current)
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -45,6 +47,8 @@ except ImportError:
     from read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
     from drive_gate import validate_unwritable
     from scanner_repair import BRANCHES as SCANNER_BRANCHES, JournalWindow, observe_task as scanner_task
+    from markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
+                         marker_plan, prepare_stale, verify_markers, reveal_current)
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -65,6 +69,7 @@ BRANCHES = {
     "heal.read-repair-attribution": READ_BRANCHES,
     "heal.disk-readonly-and-permission": ("read-only", "permission-denied"),
     "heal.scanner-cold-object-repair": SCANNER_BRANCHES,
+    "heal.delete-marker-semantics": MARKER_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -750,6 +755,9 @@ def run_topology(args, topology, nodes, fixture):
             expected = seed_locked(recorder, fleet, bucket, lock_context)
         elif args.case_id == "heal.metadata-payload-mismatch":
             expected = seed_mismatch(recorder, bucket)
+        elif args.case_id == "heal.delete-marker-semantics":
+            expected = seed_markers(recorder, bucket, VERSION_SIZE)
+            instances = list(MARKER_INSTANCES)
         elif fixture == "DK":
             expected = seed_special_keys(recorder, bucket)
         elif fixture == "DS":
@@ -786,10 +794,14 @@ def run_topology(args, topology, nodes, fixture):
         if size_rule:
             branches = [entry["name"] for entry in instances]
             fleet.record("boundary-parameter-matrix", {"instances": instances, "sourceBranches": list(SIZE_BRANCHES)})
+        if args.case_id == "heal.delete-marker-semantics":
+            branches = [entry["name"] for entry in instances]
+            fleet.record("marker-parameter-matrix", {"instances": instances, "sourceBranches": list(MARKER_BRANCHES)})
         for branch in branches:
             registrations = []
             metadata_faults = {}
             gate_node, gated_proof = None, None
+            stale_marker_started = False
             try:
                 if lock_context is not None:
                     fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
@@ -799,6 +811,8 @@ def run_topology(args, topology, nodes, fixture):
                 scanner_window = JournalWindow(fleet, "scanner-fault-" + branch) if scanner else None
                 if size_rule:
                     plan = boundary_plan(next(entry for entry in instances if entry["name"] == branch), before, bucket, expected)
+                elif args.case_id == "heal.delete-marker-semantics":
+                    plan = marker_plan(next(entry for entry in instances if entry["name"] == branch), before, bucket, expected)
                 elif instances:
                     plan = multi_loss_plan(next(entry for entry in instances if entry["name"] == branch), before, bucket, expected, fixture)
                 else:
@@ -810,6 +824,9 @@ def run_topology(args, topology, nodes, fixture):
                 if plan.get("donorProof"):
                     verify_proof(fleet, plan["donorProof"], "baseline-donor-bitrot-" + branch)
                 prior = before
+                if plan.get("staleMarker"):
+                    stale_marker_started = True
+                    before, prior, expected, baseline = prepare_stale(recorder, fleet, bucket, plan, before, expected)
                 for index, target in enumerate(plan["faults"]):
                     params = {"disk": target["disk"], "faultId": bounded_fault_id(recipe["code"], branch, index)}
                     registration = target["node"], params
@@ -901,6 +918,8 @@ def run_topology(args, topology, nodes, fixture):
                 if lock_context is not None:
                     s3["protection"] = prove_locked(probe, fleet, bucket, lock_context,
                         key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-after-" + branch)
+                if args.case_id == "heal.delete-marker-semantics":
+                    s3["markerSemantics"] = verify_markers(probe, fleet, bucket, plan["scope"]["key"], expected)
                 if size_rule:
                     s3["actualBoundaryRanges"] = verify_boundary_ranges(probe, fleet, bucket, expected, sizes["actualECBlockSize"])
                 # These faults have now been independently repaired and fully
@@ -914,6 +933,9 @@ def run_topology(args, topology, nodes, fixture):
                     "canonicalVerdict": "still requires the exact responsibility oracle"})
                 responsibility = validate_version_receipts(status, bucket, plan["expected"], 2,
                     required_repairs=plan["requiredRepairs"], metadata_repairs=plan["metadataRepairs"])
+                if args.case_id == "heal.delete-marker-semantics":
+                    expected, baseline, s3["markerRemoval"] = reveal_current(
+                        recorder, fleet, bucket, plan["scope"]["key"], expected, baseline)
                 repeats = []
                 if args.case_id == "heal.repeat-idempotency":
                     fleet.stop()
@@ -967,6 +989,9 @@ def run_topology(args, topology, nodes, fixture):
                         fleet.record("gate-error-rescue", fleet.remote(gate_node, "drive-gate", mode="clear"))
                         fleet.drive_gates.remove(gate_node)
                     fleet.snapshot("physical-failure-" + branch, quiescent=True, metadata_faults=metadata_faults)
+                    for node in tuple(fleet.drive_gates):
+                        fleet.record("marker-gate-error-rescue", fleet.remote(node, "drive-gate", mode="clear"))
+                        fleet.drive_gates.remove(node)
                     for registration in reversed(registrations):
                         node, params = registration
                         fleet.record("rescue-" + branch, fleet.remote(node, "recover-fault", **params))
@@ -974,7 +999,7 @@ def run_topology(args, topology, nodes, fixture):
                 except Exception as recovery_error:
                     result["branches"][branch]["recoveryError"] = str(recovery_error)
                     raise
-                if isinstance(exc, KeyboardInterrupt) or active:
+                if isinstance(exc, KeyboardInterrupt) or active or stale_marker_started:
                     raise
         result["verdict"] = "PASS" if len(result["branches"]) == len(branches) and all(
             item["verdict"] == "PASS" for item in result["branches"].values()) else "FAIL"
