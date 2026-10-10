@@ -2061,7 +2061,7 @@ class HealCancelledRestartOracleTest(unittest.TestCase):
         observed, status = self.journal()
         expected = HealCursorOracleTest().expected()
         self.assertTrue(validate_journal(observed, self.token, HealCursorOracleTest.bucket, status, expected)["runnableIntentAbsentOnEveryDrive"])
-        for kind in ("intent", "duplicate", "scope", "status", "schema", "identity", "outcome", "cursor", "owner", "missing", "item-key", "item-version", "item-size"):
+        for kind in ("intent", "duplicate", "scope", "status", "schema", "identity", "outcome", "cursor", "owner", "missing", "item-key", "item-version", "item-size", "item-duplicate", "item-empty"):
             changed = copy.deepcopy(observed)
             records = changed["node1"]["records"]
             terminal, report = records[1]["value"], records[2]["value"]
@@ -2078,6 +2078,10 @@ class HealCancelledRestartOracleTest(unittest.TestCase):
             if kind == "item-key": report["seqed_items"][0][1]["object"] = "objects/unregistered.bin"
             if kind == "item-version": report["seqed_items"][0][1]["versionId"] = "another-version"
             if kind == "item-size": report["seqed_items"][0][1]["objectSize"] += 1
+            if kind == "item-duplicate":
+                report["next_seq"] = 3
+                report["seqed_items"].append([2, copy.deepcopy(report["seqed_items"][0][1])])
+            if kind == "item-empty": report["seqed_items"] = []
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 validate_journal(changed, self.token, HealCursorOracleTest.bucket, status, expected)
 

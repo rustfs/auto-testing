@@ -60,8 +60,8 @@ def validate_journal(observed, token, bucket, cancelled, expected):
             "durable report differs from the settled cancelled responsibility")
     require(type(report.get("next_seq")) is int and type(report.get("min_seq")) is int
             and 1 <= report["min_seq"] <= report["next_seq"] and isinstance(report.get("seqed_items"), list)
-            and len(report["seqed_items"]) <= 1024, "durable cancelled report has invalid sequence bounds")
-    previous = 0
+            and 0 < len(report["seqed_items"]) <= 1024, "durable cancelled report has invalid sequence bounds")
+    previous, seen_items = 0, set()
     for item in report["seqed_items"]:
         require(isinstance(item, list) and len(item) == 2 and type(item[0]) is int
                 and max(previous + 1, report["min_seq"]) <= item[0] < report["next_seq"]
@@ -69,6 +69,9 @@ def validate_journal(observed, token, bucket, cancelled, expected):
                 and (item[1].get("object"), public_version_id(item[1].get("versionId"))) in wanted
                 and item[1].get("objectSize") == wanted[item[1]["object"], public_version_id(item[1].get("versionId"))]["payload"]["size"],
                 "durable report cursor/item crossed the old task responsibility")
+        pair = item[1]["object"], public_version_id(item[1].get("versionId"))
+        require(pair not in seen_items, "durable cancelled report duplicated an ACK identity")
+        seen_items.add(pair)
         previous = item[0]
     return {"ownerNode": terminal_node, "ownerDisk": terminal_entry["disk"], "cancelledTaskId": token,
             "runnableIntentAbsentOnEveryDrive": True, "terminalAndReportExactlyMatch": True,
