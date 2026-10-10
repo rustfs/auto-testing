@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 119 currently dispatchable IDs include all 74 non-Heal cases and forty-five Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
+case evidence. The 120 currently dispatchable IDs include all 74 non-Heal cases and forty-six Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 39 Heal cases remain
+The other 38 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -650,7 +650,7 @@ A08 `heal.admin-authorization` passed live in RustFS Actions run
 `38069648003`, harness `0789743d439fd91b967c2d6fba85c06e29f844c5`. All five
 source branches passed independently on H1 and H2; the canonical gate,
 complete summary, cleanup and workflow all passed with the fixed candidate.
-The prior A08 failures remain recorded. Forty-five Heal executors remain
+The prior A08 failures remain recorded. Thirty-eight Heal executors remain
 to be migrated; automatic dispatch and local tests do not claim live PASS.
 
 
@@ -899,3 +899,43 @@ Three instances generated a format without a distinct replacement UUID; the
 H2 unversioned instance instead exposed partial/unknown/incompatible cluster
 replacement status. Neither directory-root fallback nor a format file alone
 certifies actual replacement readiness or responsibility.
+
+
+The cursor resource budget now includes the candidate's `part.N.integrity.*`
+sidecars: 1,025 external objects on four roots already require at least 12,300
+files. The explicit limit is 16,384 and the registered DX budget reads the same
+configuration. F02 `38086220066` and F03 `38086565751` retain FAIL/cleanup PASS:
+their DB branches exceeded the old 12,288-file allowance; the DV branches
+failed to expose a distinct replacement UUID. Budget correction permits fresh
+verification and does not change these original results.
+
+E05 `38086919036` retained FAIL/cleanup PASS on all three branches. PUT/marker
+reached durable ACK binding but the replay caller passed an unsupported label
+to `JournalWindow.capture`; the actual shared interface and replay observer
+are now covered together by a regression test. Exact historical deletion
+failed to expose committed durable responsibility within the registered
+30-second persistence deadline. That failure remains; no substitute manual
+mutation or inferred queue record is accepted.
+
+J06 `heal.performance-abba` now dispatches three complete H2 ABBA groups on
+the same candidate, rc, four nodes, original roots and disk UUIDs. A frozen
+protocol sets 30-second phases, two workers, four requests per second, a 1:1
+GET/PUT ratio and the same 16 logical 64KiB load objects. Every scheduled request
+has durable intent/receipt evidence; unknowns, failed samples and missed
+admission deadlines remain in both error and latency denominators. Each phase
+restarts the same services and uses the same fixed warmup without changing host
+caches. Every A phase proves idle throughout and unchanged repair files. Each
+B phase injects the same 17 missing data/parity shards in an independent
+1,025-object repair bucket and binds one actual task's partial running progress
+to both foreground operations. No observed overlap means NOT_OBSERVED and a
+complete-case failure.
+
+Exact owned-process birth, boot and settings bind read-only CPU, logical/storage
+IO, RSS and FD samples. Candidate completion, actual reconstructed shard bytes,
+streaming verification and full peer S3 manifests must agree. Repair throughput
+uses physical target bytes, separately from logical S3 throughput. Frozen gates
+require zero errors, GET/PUT P95 <= 5s and P99 <= 10s, paired B/A ratios <= 3,
+positive verified repair throughput and bounded resources. All twelve phases
+and every paired difference are reported; no phase may be omitted or reordered
+and functional success cannot substitute for performance acceptance. J06 has
+no live PASS claim yet.

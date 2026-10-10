@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import struct
 import tempfile
+import types
 import unittest
 import uuid
 from unittest.mock import patch
@@ -191,6 +192,39 @@ class DurableMrfTests(unittest.TestCase):
         self.assertEqual(config["RUSTFS_HEAL_AUTO_HEAL_ENABLE"], "false")
         self.assertEqual(select("E05")[0]["variants"], list(replay.BRANCHES))
         self.assertIn(replay.CASE_ID, AUTOMATIC_CASES)
+
+    def test_replay_observer_uses_real_journal_interface_and_requires_exact_task_before_retirement(self):
+        obligation = self.obligation()
+        bindings = replay.pending_bindings({"node1": records.checkpoint(self.observed())}, [obligation], 1)
+        scene = {"node1": {"formats": ["original-format"], "files": []}}
+        queries = []
+        def remote(node, action, **params):
+            self.assertEqual(action, "logs")
+            cursor = params.get("afterCursor", "baseline")
+            return {"complete": True, "beforeCursor": params.get("afterCursor"), "afterCursor": cursor,
+                    "journal": "", "hasMore": False}
+        fleet = types.SimpleNamespace(nodes=["node1"], record=lambda label, value: value, remote=remote,
+                                      snapshot=lambda label: scene)
+        window = replay.JournalWindow(fleet, "MRF-rejoin")
+        def admin(path, query, body):
+            queries.append((path, query, body))
+            self.assertEqual(query, [("clientToken", self.responsibility)])
+            self.assertEqual(body, b"")
+            return {"httpStatus": 200, "response": self.receipt()}
+        task = {"node": "node1", "taskId": self.responsibility}
+        absent = {"node1": {"present": False, "intents": [], "allAllowlistedFilesAbsent": True}}
+        with patch.object(replay, "source_tasks", return_value=[task]), \
+                patch.object(replay, "Probe", return_value=types.SimpleNamespace(admin=admin)), \
+                patch.object(replay, "replica_census", return_value=[]), patch.object(replay, "read_checkpoints", return_value=absent):
+            proofs, retired = replay.wait_replay(fleet, window, {}, ["node1"], obligation["bucket"], [], [obligation],
+                                                bindings, None, scene, {}, [])
+        self.assertEqual(len(proofs), 1)
+        self.assertFalse(retired["queueDepthUsedAsProof"])
+        self.assertEqual(len(queries), 1)
+        with patch.object(replay, "source_tasks", return_value=[]), patch.object(replay, "replica_census", return_value=[]), \
+                patch.object(replay, "REPLAY_SECONDS", 0), patch.object(replay, "read_checkpoints", side_effect=AssertionError("no source proof")):
+            with self.assertRaisesRegex(ValueError, "lacks an exact verified source task"):
+                replay.wait_replay(fleet, window, {}, ["node1"], obligation["bucket"], [], [obligation], bindings, None, scene, {}, [])
 
 
 if __name__ == "__main__": unittest.main()

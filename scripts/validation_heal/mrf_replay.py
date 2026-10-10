@@ -194,6 +194,42 @@ def deleted_parts_absent(snapshot, targets):
                     "MRF retired an explicit deletion with its original data shard still present")
 
 
+def wait_replay(fleet, window, binding, nodes, bucket, expected, obligations, bindings, rejoin_time,
+                before, authorities, deleted_targets):
+    deadline, proofs = time.monotonic() + REPLAY_SECONDS, {}
+    while True:
+        events = window.capture()
+        for obligation in obligations:
+            key = identity(obligation)
+            if key in proofs: continue
+            for task in source_tasks(events, obligation, bindings[key], rejoin_time):
+                endpoint = "node" + str(nodes.index(task["node"]) + 1)
+                path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/" + quote(obligation["key"], safe="/")
+                observed = fleet.record("MRF-exact-task-status", {"source": task,
+                    **Probe(binding, endpoint).admin(path, [("clientToken", task["taskId"])], b"")})
+                require(observed.get("httpStatus") == 200, "MRF source task status is unavailable")
+                try:
+                    proof = verified_receipt(observed.get("response", {}), obligation, bindings[key])
+                except ValueError as exc:
+                    fleet.record("MRF-undischarged-task-result", {"task": task, "error": str(exc)})
+                    continue
+                proofs[key] = {"source": task, "proof": proof}
+                break
+        scene = fleet.snapshot("MRF-replay-physical-progress")
+        try:
+            require({node: value["formats"] for node, value in scene.items()} == {node: value["formats"] for node, value in before.items()},
+                    "MRF rejoin changed an original disk UUID or slot")
+            replica_census(scene, bucket, expected, authorities)
+            deleted_parts_absent(scene, deleted_targets)
+            require(set(proofs) == set(bindings), "NOT_OBSERVED: MRF replay lacks an exact verified source task for every ACK")
+            retired = retirement(read_checkpoints(fleet, nodes, "MRF-retirement"), obligations, bindings)
+            return proofs, retired
+        except ValueError as exc:
+            fleet.record("MRF-replay-incomplete", {"error": str(exc), "verifiedACKs": len(proofs)})
+            require(time.monotonic() < deadline, "MRF automatic replay deadline exceeded: " + str(exc))
+            time.sleep(2)
+
+
 def run_branch(args, branch, nodes):
     directory = args.evidence / branch
     directory.mkdir()
@@ -266,38 +302,8 @@ def run_branch(args, branch, nodes):
         fleet.record("registered-automatic-replay-budget", {"persistenceSeconds": PERSIST_SECONDS,
             "replaySeconds": REPLAY_SECONDS, "adminMutations": 0, "targetReadsBeforePhysicalProof": 0,
             "source": "MRF", "originalNodeAndDiskIdentitiesRequired": True})
-        deadline, proofs = time.monotonic() + REPLAY_SECONDS, {}
-        while True:
-            events = window.capture("MRF-replay-source")
-            for obligation in obligations:
-                key = identity(obligation)
-                if key in proofs: continue
-                for task in source_tasks(events, obligation, bindings[key], rejoin_time):
-                    endpoint = "node" + str(nodes.index(task["node"]) + 1)
-                    path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/" + quote(obligation["key"], safe="/")
-                    observed = fleet.record("MRF-exact-task-status", {"source": task,
-                        **Probe(binding, endpoint).admin(path, [("clientToken", task["taskId"])], b"")})
-                    require(observed.get("httpStatus") == 200, "MRF source task status is unavailable")
-                    try:
-                        proof = verified_receipt(observed.get("response", {}), obligation, bindings[key])
-                    except ValueError as exc:
-                        fleet.record("MRF-undischarged-task-result", {"task": task, "error": str(exc)})
-                        continue
-                    proofs[key] = {"source": task, "proof": proof}
-                    break
-            scene = fleet.snapshot("MRF-replay-physical-progress")
-            try:
-                require({node: value["formats"] for node, value in scene.items()} == {node: value["formats"] for node, value in before.items()},
-                        "MRF rejoin changed an original disk UUID or slot")
-                targets = replica_census(scene, bucket, expected, authorities)
-                deleted_parts_absent(scene, deleted_targets)
-                require(set(proofs) == set(bindings), "NOT_OBSERVED: MRF replay lacks an exact verified source task for every ACK")
-                retired = retirement(read_checkpoints(fleet, nodes, "MRF-retirement"), obligations, bindings)
-                break
-            except ValueError as exc:
-                fleet.record("MRF-replay-incomplete", {"error": str(exc), "verifiedACKs": len(proofs)})
-                require(time.monotonic() < deadline, "MRF automatic replay deadline exceeded: " + str(exc))
-                time.sleep(2)
+        proofs, retired = wait_replay(fleet, window, binding, nodes, bucket, expected, obligations, bindings,
+                                     rejoin_time, before, authorities, deleted_targets)
         fleet.record("MRF-verified-responsibility-retirement", {"retirement": retired,
             "proofs": [{"identity": list(key), **value} for key, value in proofs.items()]})
         retirement(read_checkpoints(fleet, nodes, "MRF-repeat-retirement"), obligations, bindings)

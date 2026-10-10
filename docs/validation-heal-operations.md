@@ -2,7 +2,7 @@
 
 此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 301 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
 
-公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 39 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
+公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 46 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
 
 ## 1. 使用入口与交付物
 
@@ -637,3 +637,6 @@ audit检查完整性/路径/摘要，输出`EVIDENCE_COMPLETE_REVIEW_REQUIRED`�
 
 
 自动正向夹具固定使用独立分片承诺配置；`integrity-fleet-attestation` 记录本例 endpoint/节点/候选摘要，启动前逐节点 reserve 校验候选，启动后实际进程环境读回两项开关。此配置只作用于 run-owned 服务。默认 legacy 配置的失败批次独立保留；保护模式不代表旧版本混部或默认环境能力。D07 的条件请求以服务器 HEAD 的 LastModified 和基线 ETag 冻结预期，不改主机时间；304/412/416 不能包含成功 payload 或未知传输结果。
+
+
+J06 的自动入口为 `heal.performance-abba`。执行器在部署前冻结三组 ABBA、每阶段 30 秒、2 并发、4 请求/秒、GET/PUT 各半与完整阈值；每阶段重启同一服务并按固定次数预热。每个 B 阶段的真实部分修复窗口必须包围 GET 和 PUT，否则整例不能 PASS。A 阶段持续检查完整 idle 与物理不变。所有排定请求（包括失败、未知和错过 admission 的请求）均计入分母；GET/PUT 独立报告 P95/P99，三组配对差异、实际修复分片吞吐与服务 CPU/IO/RSS/FD 分别留证。阈值保存在 `scripts/validation_heal/performance.py` 的 `PROTOCOL`，修改阈值必须产生新的 harness commit 和新验证记录；此入口不缩短 J05 的 24h/72h 要求。

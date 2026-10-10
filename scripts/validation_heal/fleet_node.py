@@ -304,6 +304,28 @@ def pidfd_signal(request, signum):
     return current
 
 
+def process_metrics(request):
+    """Read only the owned service's resource counters, with process birth binding."""
+    require(set(request) == {"runId", "action"}, "process metrics accept no arbitrary PID or path")
+    before = process(request)
+    require(before["pid"] > 1, "resource sample requires the original live service")
+    root = Path(f"/proc/{before['pid']}")
+    fields = (root / "stat").read_text().rpartition(") ")[2].split()
+    require(len(fields) >= 22 and int(fields[19]) == before["startTicks"], "resource sample crossed process birth")
+    io = {name: int(value.strip()) for name, value in (line.split(":", 1) for line in (root / "io").read_text().splitlines())}
+    required_io = {"rchar", "wchar", "syscr", "syscw", "read_bytes", "write_bytes", "cancelled_write_bytes"}
+    require(required_io <= set(io) and all(value >= 0 for value in io.values()), "owned process IO counters are incomplete")
+    result = {"identity": before, "clockDomain": before["bootId"], "monotonicNs": time.monotonic_ns(),
+              "cpuTicks": int(fields[11]) + int(fields[12]), "clockTicksPerSecond": os.sysconf("SC_CLK_TCK"),
+              "rssBytes": int(fields[21]) * os.sysconf("SC_PAGE_SIZE"), "virtualBytes": int(fields[20]),
+              "threads": int(fields[17]), "fileDescriptors": sum(1 for _ in (root / "fd").iterdir()),
+              "io": {name: io[name] for name in sorted(required_io)}, "readOnly": True,
+              "ioScope": "owned process counters; cached logical IO and storage IO reported separately"}
+    after = process(request)
+    require(all(after.get(name) == before[name] for name in PROCESS_FIELDS), "resource sample crossed a service identity change")
+    return result
+
+
 def process_signal(request):
     name = request.get("signal")
     require(name in {"SIGSTOP", "SIGCONT"}, "only owned-process pause/resume signals are allowed")
@@ -804,6 +826,6 @@ def main(request):
     actions["task-records"] = task_records
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
-    actions.update({"process": process, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})
+    actions.update({"process": process, "process-metrics": process_metrics, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))
