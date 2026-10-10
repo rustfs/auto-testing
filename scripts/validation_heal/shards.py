@@ -208,7 +208,9 @@ def validate_repaired_physical(before, after, target, *, repair_targets=None):
         else:
             def semantics(metadata):
                 return {"bucket": metadata["bucket"], "key": metadata["key"], "versions": [
-                    {**version, "erasure": {name: value for name, value in version["erasure"].items() if name != "checksums"}}
+                    {**version, "inline": {name: version["inline"].get(name) for name in ("length", "sha256")}
+                        if version.get("inline") else None,
+                     "erasure": {name: value for name, value in version["erasure"].items() if name != "checksums"}}
                     for version in metadata["versions"]]}
             require(actual.get("metadata") and semantics(actual["metadata"]) == semantics(entry["metadata"]),
                     "repair changed decoded version/part identity")

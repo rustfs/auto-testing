@@ -265,12 +265,43 @@ def verify_part(request):
     return {**result, "sha256": digest(part), "relativePath": relative, "disk": request["disk"]}
 
 
+def verify_inline(request):
+    state, _, owner = owned(request["runId"])
+    root, _ = fault_root(request)
+    module = fault_module()
+    parts = module.target_parts(request["relativePath"], owner["bucket"])
+    require(parts[-1] == "xl.meta", "inline verification requires the exact object metadata")
+    path = checked(root / "data" / request["relativePath"], root / "data")
+    key = "/".join(parts[1:-1])
+    tool = checked(state / "heal-meta-inspect", state)
+    require(digest(tool) == owner.get("inspectorSha256"), "inline verifier changed")
+    result = json.loads(command(str(tool), "--verify-inline", str(path), owner["bucket"], key, request["versionId"]).stdout)
+    require(result.get("physicalBitrotVerified") is True and result.get("key") == key
+            and result.get("versionId") == request["versionId"], "inline proof identity differs")
+    return {**result, "relativePath": request["relativePath"], "disk": request["disk"]}
+
+
 def install_inspector(request):
     state, _, owner = owned(request["runId"])
     tool = checked(state / "heal-meta-inspect", state)
     require(digest(tool) == owner.get("inspectorSha256"), "uploaded inspector digest differs")
     tool.chmod(0o500)
     return {"inspectorSha256": owner["inspectorSha256"], "installed": True}
+
+
+def inspect_metadata(tool, path, bucket, key, entry, metadata_faults):
+    observed = command(str(tool), str(path), bucket, key, check=False)
+    if observed.returncode:
+        expected_fault = metadata_faults.get(entry["path"])
+        require(expected_fault == {name: entry[name] for name in ("sha256", "size")},
+                "metadata decoder failed outside an exact witnessed file fault")
+        return {"metadataError": {"code": observed.returncode, "message": observed.stderr[-500:],
+                                  "exactWitnessedFault": True, "validMetadataClaimed": False}}
+    decoded = json.loads(observed.stdout)
+    require(decoded.get("bucket") == bucket and decoded.get("key") == key
+            and decoded.get("physicalBitrotVerified") is False,
+            "metadata decoder identity or verification role differs")
+    return {"metadata": decoded}
 
 
 def snapshot(request):
@@ -306,11 +337,7 @@ def snapshot(request):
                              "size": path.stat().st_size, "sha256": digest(path)}
                     if path.name == "xl.meta" and owner.get("inspectorSha256"):
                         key = path.parent.relative_to(folder).as_posix()
-                        decoded = json.loads(command(str(tool), str(path), owner["bucket"], key).stdout)
-                        require(decoded.get("bucket") == owner["bucket"] and decoded.get("key") == key
-                                and decoded.get("physicalBitrotVerified") is False,
-                                "metadata decoder identity or verification role differs")
-                        entry["metadata"] = decoded
+                        entry.update(inspect_metadata(tool, path, owner["bucket"], key, entry, request.get("metadataFaults", {})))
                     files.append(entry)
         path = checked(data / ".rustfs.sys/format.json", data)
         require(path.stat().st_size < 65536, "disk format exceeds budget")
@@ -345,6 +372,7 @@ def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
                "logs": logs, "cleanup": cleanup, "install-inspector": install_inspector,
-               "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part}
+               "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part,
+               "verify-inline": verify_inline}
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

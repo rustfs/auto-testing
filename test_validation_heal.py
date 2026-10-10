@@ -11,14 +11,15 @@ from unittest.mock import patch
 
 from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, cases, compile_plan, select
 from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection, Fleet
-from scripts.validation_heal.fleet_node import paths, stopped
+from scripts.validation_heal.fleet_node import paths, stopped, inspect_metadata
 from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
 from scripts.validation_heal.shards import validate_conditional_response
 from scripts.validation_heal.shards import run_task, verify_ranges
 from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, validate_version_receipts,
-    branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract)
+    branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract,
+    map_inline_target, verify_proof)
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract
 
 
@@ -235,9 +236,9 @@ class HealShardOracleTest(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout='{"checked":true}', stderr="")
         with tempfile.TemporaryDirectory() as directory, patch("scripts.validation_heal.healthy.subprocess.run", side_effect=invoke):
             fleet = Fleet(["node1"], Path(directory), "gh-12345-1-h1")
-            for action in ("preflight", "verify-part", "apply-fault", "recover-fault"):
+            for action in ("preflight", "verify-part", "verify-inline", "apply-fault", "recover-fault"):
                 self.assertTrue(fleet.remote("node1", action, disk=1, relativePath="literal$()'part.1")["checked"])
-        self.assertEqual(len(observed), 4)
+        self.assertEqual(len(observed), 5)
 
     def snapshot(self):
         bucket, key, data_dir = "rv-heal-0123456789abcdef", "objects/0008.bin", "12345678-1234-1234-1234-123456789abc"
@@ -385,6 +386,48 @@ class HealShardOracleTest(unittest.TestCase):
 
 
 class HealVersionOracleTest(unittest.TestCase):
+    def test_decoder_failure_is_evidence_only_for_the_exact_witnessed_corruption(self):
+        entry = {"path": "fixture/key/xl.meta", "sha256": "changed-sha", "size": 9}
+        fault = {entry["path"]: {"sha256": "changed-sha", "size": 9}}
+        rejected = types.SimpleNamespace(returncode=1, stderr="invalid captured metadata", stdout="")
+        with patch("scripts.validation_heal.fleet_node.command", return_value=rejected):
+            observed = inspect_metadata("tool", "path", "fixture", "key", entry, fault)
+            self.assertFalse(observed["metadataError"]["validMetadataClaimed"])
+            self.assertNotIn("metadata", observed)
+            for incorrect in ({}, {entry["path"]: {"sha256": "different", "size": 9}},
+                              {entry["path"]: {"sha256": "changed-sha", "size": 10}}):
+                with self.assertRaises(ValueError): inspect_metadata("tool", "path", "fixture", "key", entry, incorrect)
+        decoded = {"bucket": "fixture", "key": "another", "physicalBitrotVerified": False}
+        with patch("scripts.validation_heal.fleet_node.command", return_value=types.SimpleNamespace(
+                returncode=0, stdout=json.dumps(decoded))):
+            with self.assertRaises(ValueError): inspect_metadata("tool", "path", "fixture", "key", entry, fault)
+
+    def test_inline_fault_uses_unique_candidate_decoded_slice_and_frozen_role_digest(self):
+        original = HealShardOracleTest().snapshot()
+        bucket, key = "rv-heal-0123456789abcdef", "objects/0008.bin"
+        for entry in original["node1"]["files"]:
+            if "metadata" in entry:
+                entry["metadata"]["versions"][0]["inline"] = {"length": 82, "rawOffset": 200,
+                    "rawOccurrenceCount": 1, "sha256": str(entry["disk"]) * 64}
+        expected = {"key": key, "versionId": "null", "payload": {"size": 100}}
+        target = map_inline_target(original, bucket, expected)
+        self.assertEqual(target["disk"], 1)
+        def remote(node, action, **params):
+            entry = next(entry for entry in target["cohort"] if entry["disk"] == params["disk"])
+            return {"physicalBitrotVerified": True, "inlineLength": entry["inlineValue"]["length"], "inlineSha256": entry["inlineValue"]["sha256"]}
+        fleet = types.SimpleNamespace(record=lambda label, value: value, remote=remote)
+        self.assertTrue(verify_proof(fleet, target, "inline")['originalInlineSha256Restored'])
+        with patch.object(fleet, "remote", return_value={"inlineLength": 82, "inlineSha256": "wrong"}):
+            with self.assertRaises(ValueError): verify_proof(fleet, target, "inline")
+        for kind in ("ambiguous", "outside", "wrong-role", "wrong-digest"):
+            bad = copy.deepcopy(original)
+            value = next(entry["metadata"]["versions"][0] for entry in bad["node1"]["files"] if "metadata" in entry)
+            if kind == "ambiguous": value["inline"]["rawOccurrenceCount"] = 2
+            elif kind == "outside": value["inline"]["rawOffset"] = 590
+            elif kind == "wrong-role": value["role"] = "data"
+            else: value["inline"]["sha256"] = "invalid"
+            with self.subTest(kind=kind), self.assertRaises(ValueError): map_inline_target(bad, bucket, expected)
+
     def test_below_quorum_needs_exact_failure_and_never_accepts_transport_or_false_repair(self):
         status, expected = self.fixture()
         outcome = status["outcome"]

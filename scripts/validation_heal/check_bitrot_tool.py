@@ -48,7 +48,35 @@ def check(binary: Path, source: Path):
                     rejected += 1
     if verified != 24 or rejected != 12:
         raise ValueError("external bitrot corpus coverage is incomplete")
+    captured = bytes.fromhex((source / "crates/filemeta/tests/fixtures/issue_2288_legacy_xlmeta.hex").read_text())
+    if hashlib.sha256(captured).hexdigest() != "5997675004972399e2d279a83b725c360a12f117edbf9dffc8c02d76c8753452":
+        raise ValueError("captured inline fixture differs from its frozen released-process bytes")
+    with tempfile.TemporaryDirectory(prefix="heal-inline-oracle-") as directory:
+        metadata = Path(directory) / "xl.meta"
+        metadata.write_bytes(captured)
+        decoded = json.loads(subprocess.check_output([str(binary), str(metadata), "fixture", "object"], text=True))
+        inline_versions = [version for version in decoded["versions"] if version.get("inline")]
+        if len(inline_versions) != 1 or inline_versions[0]["inline"]["rawOccurrenceCount"] != 1:
+            raise ValueError("captured inline identity is ambiguous")
+        version = inline_versions[0]
+        inline = version["inline"]
+        value = captured[inline["rawOffset"]:inline["rawOffset"] + inline["length"]]
+        if hashlib.sha256(value).hexdigest() != inline["sha256"]:
+            raise ValueError("decoded inline value is not its exact physical slice")
+        args = [str(binary), "--verify-inline", str(metadata), "fixture", "object", version["versionId"] or "null"]
+        good = json.loads(subprocess.check_output(args, text=True))
+        if good.get("physicalBitrotVerified") is not True or good["inlineSha256"] != inline["sha256"]:
+            raise ValueError("captured inline framing did not verify")
+        inline_rejected = 0
+        for position in (0, inline["length"] // 2, inline["length"] - 1):
+            offset = inline["rawOffset"] + position
+            metadata.write_bytes(captured[:offset] + bytes([captured[offset] ^ 1]) + captured[offset + 1:])
+            bad = subprocess.run(args, capture_output=True, text=True)
+            if bad.returncode == 0 or "hash mismatch" not in bad.stderr:
+                raise ValueError("inline corruption was not rejected by the independent framing checker")
+            inline_rejected += 1
     return {"externalHealthyShardsVerified": verified, "corruptedShardsRejected": rejected,
+            "releasedInlineVerified": 1, "corruptedInlineValuesRejected": inline_rejected,
             "corpora": ["MinIO released GF8", "RustFS released legacy GF16"], "liveCasePassClaimed": False}
 
 

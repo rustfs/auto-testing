@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 90 currently dispatchable IDs include all 74 non-Heal cases and sixteen Heal cases. Thirty-eight have live PASS evidence; the other 120 have no live PASS claim.
+case evidence. The 91 currently dispatchable IDs include all 74 non-Heal cases and seventeen Heal cases. Thirty-eight have live PASS evidence; the other 120 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -177,7 +177,19 @@ metadata must remain unchanged. Only after that failure proof may backups be
 restored and a new token verify recovered integrity; recovery never proves
 product repair during the negative window. This executor still requires live
 evidence and a fresh tool build containing the quorum contract.
-The other 68 Heal cases remain
+C05 `heal.missing-or-corrupt-xlmeta` also has all five automatic branches on
+H1/H2: missing/truncated/header-corrupt xl.meta, a flip inside the unique decoded
+inline value, and whole metadata loss with three historical data versions and a
+marker. The tool now freezes each inline value's physical offset/length/SHA-256
+and verifies its streaming HighwayHash framing. Complete original inline shard
+digests, version/dataDir/part/role references and all S3 versions must be restored.
+A decoder error can be captured only when its file length/hash exactly matches
+an injected fault receipt; it never becomes valid metadata or a repair proof.
+Legal metadata re-encoding may move an inline value while its exact length/hash
+stay fixed. The extended helper passed the 24/12 external shard oracle and one
+frozen released-process inline fixture with three corruption negatives locally;
+this executor still needs a new candidate-bound tool build and live evidence.
+The other 67 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -241,3 +253,9 @@ the candidate attributed the current delete marker as unknown while three data
 versions were repaired. That genuine receipt failure remains strict and visible.
 Tool build `38058949922` successfully produced the current decoder plus the
 recognized exact-candidate quorum/error contract for B07.
+
+The corrected D03 run `38059278988` admitted every source branch, passed H1
+completely and passed H2 historical/current/recursive branches. H2's simultaneous
+multiple-version fault left one original current-version parity part missing.
+The exact physical oracle retained FAIL and clean backup-assisted finalization;
+that restoration does not count as product repair.

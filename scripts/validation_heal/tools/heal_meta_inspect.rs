@@ -12,6 +12,113 @@ fn bounded_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Ok(std::fs::read(path)?)
 }
 
+fn sha256(bytes: &[u8]) -> String {
+    HashAlgorithm::SHA256
+        .hash_encode(bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn verify_framing(
+    bytes: &[u8],
+    logical_size: usize,
+    block_size: usize,
+    data_blocks: usize,
+    legacy: bool,
+    algorithm: &HashAlgorithm,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if logical_size == 0 || block_size == 0 || data_blocks == 0 {
+        return Err("positive bitrot verification requires supported nonempty geometry".into());
+    }
+    if !matches!(
+        algorithm,
+        HashAlgorithm::HighwayHash256S | HashAlgorithm::HighwayHash256SLegacy
+    ) {
+        return Err("unsupported bitrot framing; no integrity claim".into());
+    }
+    let mut remaining = logical_size;
+    let mut offset: usize = 0;
+    let mut blocks: usize = 0;
+    while remaining > 0 {
+        let logical = remaining.min(block_size);
+        let length = logical.div_ceil(data_blocks);
+        let length = if legacy { (length + 1) & !1 } else { length };
+        let end = offset
+            .checked_add(32 + length)
+            .ok_or("part size overflow")?;
+        let block = bytes.get(offset..end).ok_or("short shard read")?;
+        if algorithm.hash_encode(&block[32..]).as_ref() != &block[..32] {
+            return Err(format!("bitrot hash mismatch in block {blocks}").into());
+        }
+        offset = end;
+        remaining -= logical;
+        blocks += 1;
+    }
+    if offset != bytes.len() {
+        return Err("unexpected trailing shard bytes".into());
+    }
+    Ok(blocks)
+}
+
+fn verify_inline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.len() != 6 {
+        return Err("usage: --verify-inline XL_META BUCKET KEY VERSION_ID".into());
+    }
+    let bytes = bounded_file(&args[2])?;
+    let meta = FileMeta::load(&bytes)?;
+    meta.data.validate()?;
+    let decoded = meta.into_file_info_versions(&args[3], &args[4], true)?;
+    let matches: Vec<_> = decoded
+        .versions
+        .iter()
+        .filter(|info| {
+            info.version_id
+                .filter(|id| !id.is_nil())
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "null".to_owned())
+                == args[5]
+        })
+        .collect();
+    if matches.len() != 1 {
+        return Err("inline verification requires one exact metadata version".into());
+    }
+    let info = matches[0];
+    if info.deleted
+        || !info.inline_data()
+        || info.parts.len() != 1
+        || info.parts[0].size == 0
+        || usize::try_from(info.parts[0].actual_size).ok() != Some(info.parts[0].size)
+        || usize::try_from(info.size).ok() != Some(info.parts[0].size)
+    {
+        return Err("unsupported inline version or part identity".into());
+    }
+    let data = meta.data.find(&args[5])?.ok_or("inline value is missing")?;
+    let algorithm = if info.uses_legacy_checksum {
+        HashAlgorithm::HighwayHash256SLegacy
+    } else {
+        info.erasure
+            .get_checksum_info(info.parts[0].number)
+            .algorithm
+    };
+    let blocks = verify_framing(
+        &data,
+        usize::try_from(info.parts[0].size)?,
+        info.erasure.block_size,
+        info.erasure.data_blocks,
+        info.uses_legacy_checksum,
+        &algorithm,
+    )?;
+    println!(
+        "{}",
+        json!({"schemaVersion": 1, "bucket": args[3], "key": args[4],
+        "versionId": args[5], "physicalBitrotVerified": true, "ecReconstructionVerified": false,
+        "algorithm": algorithm, "blocksVerified": blocks, "inlineLength": data.len(), "inlineSha256": sha256(&data)})
+    );
+    Ok(())
+}
+
 // This path checks stored framing without invoking the service or repairing
 // anything. EC reconstruction is checked separately against the frozen shard.
 fn verify_part(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,38 +175,15 @@ fn verify_part(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         info.erasure.get_checksum_info(number).algorithm
     };
-    if !matches!(
-        algorithm,
-        HashAlgorithm::HighwayHash256S | HashAlgorithm::HighwayHash256SLegacy
-    ) {
-        return Err("unsupported bitrot framing; no integrity claim".into());
-    }
     let bytes = bounded_file(&args[5])?;
-    let mut remaining = usize::try_from(part.size)?;
-    let mut offset: usize = 0;
-    let mut blocks: usize = 0;
-    while remaining > 0 {
-        let logical = remaining.min(info.erasure.block_size);
-        let length = logical.div_ceil(info.erasure.data_blocks);
-        let length = if info.uses_legacy_checksum {
-            (length + 1) & !1
-        } else {
-            length
-        };
-        let end = offset
-            .checked_add(32 + length)
-            .ok_or("part size overflow")?;
-        let block = bytes.get(offset..end).ok_or("short shard read")?;
-        if algorithm.hash_encode(&block[32..]).as_ref() != &block[..32] {
-            return Err(format!("bitrot hash mismatch in block {blocks}").into());
-        }
-        offset = end;
-        remaining -= logical;
-        blocks += 1;
-    }
-    if offset != bytes.len() {
-        return Err("unexpected trailing shard bytes".into());
-    }
+    let blocks = verify_framing(
+        &bytes,
+        usize::try_from(part.size)?,
+        info.erasure.block_size,
+        info.erasure.data_blocks,
+        info.uses_legacy_checksum,
+        &algorithm,
+    )?;
     println!(
         "{}",
         json!({"schemaVersion": 1, "bucket": args[3], "key": args[4],
@@ -114,6 +198,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|value| value == "--verify-part") {
         return verify_part(&args);
+    }
+    if args.get(1).is_some_and(|value| value == "--verify-inline") {
+        return verify_inline(&args);
     }
     if args.len() != 4 {
         return Err("usage: heal-meta-inspect XL_META_FILE BUCKET KEY".into());
@@ -167,6 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .collect();
                     json!({
                         "length": data.len(),
+                        "sha256": sha256(data),
                         "rawOccurrenceCount": offsets.len(),
                         "rawOffset": (offsets.len() == 1).then_some(offsets[0])
                     })

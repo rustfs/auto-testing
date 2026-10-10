@@ -39,6 +39,7 @@ BRANCHES = {
     "heal.repeat-idempotency": ("normal-repeat", "deep-repeat", "repeat-after-restart", "versioned-repeat"),
     "heal.versioning-suspended-null": ("enabled-to-suspended", "null-overwrite", "null-delete-marker"),
     "heal.below-read-quorum": ("r-minus-1-unversioned", "r-minus-1-historical"),
+    "heal.missing-or-corrupt-xlmeta": ("missing-xlmeta", "truncated-xlmeta", "corrupt-xlmeta", "inline-payload", "versioned-xlmeta"),
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 
@@ -171,6 +172,59 @@ def metadata_target(snapshot, part_target):
     return {**part_target, "relativePath": relative, "sha256": entry["sha256"], "size": entry["size"]}
 
 
+def map_inline_target(snapshot, bucket, entry):
+    validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2")
+    indexed, cohort, authority = files(snapshot), [], None
+    path = f"{bucket}/{entry['key']}/xl.meta"
+    for node, observation in snapshot.items():
+        for physical in observation["formats"]:
+            file = indexed.get((node, physical["disk"], path), {})
+            metadata = file.get("metadata", {})
+            versions = [version for version in metadata.get("versions", [])
+                        if (version.get("versionId") or "null") == entry["versionId"]]
+            require(metadata.get("bucket") == bucket and metadata.get("key") == entry["key"] and len(versions) == 1,
+                    "inline baseline lacks an exact full-set metadata authority")
+            version = versions[0]
+            inline, erasure = version.get("inline") or {}, version["erasure"]
+            layout = physical["value"]["xl"]
+            slot = layout["sets"][0].index(layout["this"])
+            require(version.get("deleted") is False and version.get("size") == entry["payload"]["size"] > 0
+                    and inline.get("rawOccurrenceCount") == 1 and type(inline.get("rawOffset")) is int
+                    and type(inline.get("length")) is int and inline["length"] > 32
+                    and 0 <= inline["rawOffset"] < inline["rawOffset"] + inline["length"] <= file["size"]
+                    and re.fullmatch(r"[0-9a-f]{64}", inline.get("sha256", ""))
+                    and erasure["index"] == erasure["distribution"][slot], "inline location, digest or physical role is unsupported")
+            role = "data" if erasure["index"] <= erasure["data_blocks"] else "parity"
+            require(version.get("role") == role, "inline erasure index and role differ")
+            logical = {name: version.get(name) for name in ("versionId", "isLatest", "deleted", "dataDir", "size", "parts", "usesLegacyChecksum")}
+            logical["erasure"] = {name: erasure[name] for name in ("data_blocks", "parity_blocks", "block_size", "distribution", "algorithm")}
+            require(authority is None or logical == authority, "inline version or part geometry lacks full-set authority")
+            authority = logical
+            cohort.append({"node": node, "disk": physical["disk"], "relativePath": path,
+                "versionId": entry["versionId"], "partNumber": 1, "dataDir": version.get("dataDir"),
+                "diskUUID": layout["this"], "setSlot": slot, "role": role, "index": erasure["index"],
+                "sha256": file["sha256"], "size": file["size"], "inlineValue": inline})
+    require(len(cohort) == authority["erasure"]["data_blocks"] + authority["erasure"]["parity_blocks"]
+            and len({item["index"] for item in cohort}) == len(cohort), "inline set is incomplete or duplicated")
+    target = next(item for item in cohort if item["role"] == "data")
+    return {**target, "bucket": bucket, "key": entry["key"], "poolIndex": 0, "setIndex": 0,
+            "inlineProof": True, "cohort": cohort, "logical": authority}
+
+
+def verify_proof(fleet, target, label):
+    if not target.get("inlineProof"):
+        return verify_cohort(fleet, target, label)
+    proofs = []
+    for entry in target["cohort"]:
+        proof = fleet.record(label, {"node": entry["node"], **fleet.remote(entry["node"], "verify-inline",
+            disk=entry["disk"], relativePath=entry["relativePath"], versionId=entry["versionId"])})
+        require(proof.get("physicalBitrotVerified") is True and proof.get("inlineLength") == entry["inlineValue"]["length"]
+                and proof.get("inlineSha256") == entry["inlineValue"]["sha256"],
+                "recovered inline shard differs from frozen same-role bytes")
+        proofs.append(proof)
+    return {"allInlineShardsBitrotVerified": True, "originalInlineSha256Restored": True, "shards": proofs}
+
+
 def suspend_fixture(recorder, bucket, historical):
     expected = copy.deepcopy(historical)
     recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Suspended"}})
@@ -236,8 +290,25 @@ def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
     key = f"objects/{branch_index:04d}.bin" if fixture == "DV" else f"objects/{8 + 9 * branch_index:04d}.bin"
     if branch == "versioned-repeat":
         key = "objects/0000.bin"
+    if case_id == "heal.missing-or-corrupt-xlmeta":
+        key = "objects/0000.bin" if fixture == "DV" else f"objects/{branch_index + 1:04d}.bin"
     selected = [entry for entry in expected if entry["key"] == key]
     data = [entry for entry in selected if not entry["deleteMarker"]]
+    if case_id == "heal.missing-or-corrupt-xlmeta":
+        if fixture == "DB":
+            target = map_inline_target(snapshot, bucket, data[0])
+            faults, proofs = [target], [target]
+        else:
+            target = choose_target(snapshot, bucket, data[0], "data")
+            faults = [metadata_target(snapshot, target)]
+            proofs = [choose_target(snapshot, bucket, entry, "data") for entry in data]
+            proofs = [{**item, **next(shard for shard in item["cohort"]
+                       if (shard["node"], shard["disk"]) == (target["node"], target["disk"]))} for item in proofs]
+        kind = {"truncated-xlmeta": "truncate", "corrupt-xlmeta": "header", "inline-payload": "bitflip"}.get(branch, "missing")
+        offset = target["inlineValue"]["rawOffset"] + 32 if branch == "inline-payload" else None
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": fixture == "DV", "expected": selected,
+                "faults": faults, "proofs": proofs, "requiredRepairs": {version_identity(data[0])} if branch == "inline-payload" else set(),
+                "metadataRepairs": {key}, "kind": kind, "offset": offset}
     if case_id == "heal.below-read-quorum":
         target = choose_target(snapshot, bucket, data[0], "data")
         read_quorum = target["logical"]["erasure"]["data_blocks"]
@@ -347,7 +418,8 @@ def run_topology(args, topology, nodes, fixture):
     require(list(BRANCHES[args.case_id]) == recipe["variants"], "executor omitted a source version branch")
     branches = [branch for branch in BRANCHES[args.case_id]
                 if (args.case_id != "heal.repeat-idempotency" or (branch == "versioned-repeat") == (fixture == "DV"))
-                and (args.case_id != "heal.below-read-quorum" or (branch == "r-minus-1-historical") == (fixture == "DV"))]
+                and (args.case_id != "heal.below-read-quorum" or (branch == "r-minus-1-historical") == (fixture == "DV"))
+                and (args.case_id != "heal.missing-or-corrupt-xlmeta" or (branch == "versioned-xlmeta") == (fixture == "DV"))]
     result = {"topology": topology, "fixture": fixture, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, admissions = [], []
     probe = Probe(binding)
@@ -363,6 +435,7 @@ def run_topology(args, topology, nodes, fixture):
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         for branch in branches:
             registrations = []
+            metadata_faults = {}
             try:
                 fleet.stop()
                 before = fleet.snapshot("physical-before-" + branch, quiescent=True)
@@ -370,7 +443,7 @@ def run_topology(args, topology, nodes, fixture):
                 fleet.record("fault-plan-" + branch, {**plan, "requiredRepairs": sorted(plan["requiredRepairs"]),
                                                      "metadataRepairs": sorted(plan["metadataRepairs"])})
                 for target in plan["proofs"]:
-                    verify_cohort(fleet, target, "baseline-bitrot-" + branch)
+                    verify_proof(fleet, target, "baseline-bitrot-" + branch)
                 prior = before
                 for index, target in enumerate(plan["faults"]):
                     params = {"disk": target["disk"], "faultId": recipe["code"] + "-" + branch + "-" + str(index)}
@@ -378,12 +451,15 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.faults.append(registration)
                     registrations.append(registration)
                     receipt = fleet.record("fault-" + branch, fleet.remote(target["node"], "apply-fault",
-                        **params, relativePath=target["relativePath"], expectedSha256=target["sha256"], kind="missing"))
-                    witnessed = fleet.snapshot("physical-fault-" + branch, quiescent=True)
+                        **params, relativePath=target["relativePath"], expectedSha256=target["sha256"],
+                        kind=plan.get("kind", "missing"), offset=plan.get("offset")))
+                    if target["relativePath"].endswith("/xl.meta") and receipt.get("fault"):
+                        metadata_faults.setdefault(target["node"], {})[target["relativePath"]] = receipt["fault"]
+                    witnessed = fleet.snapshot("physical-fault-" + branch, quiescent=True, metadata_faults=metadata_faults)
                     validate_fault(prior, witnessed, target, receipt)
                     prior = witnessed
                 fleet.start()
-                witness = fleet.snapshot("physical-before-trigger-" + branch)
+                witness = fleet.snapshot("physical-before-trigger-" + branch, metadata_faults=metadata_faults)
                 require(physical_content(prior) == physical_content(witness),
                         "ATTRIBUTION_NOT_OBSERVED: version fault changed before the manual token")
                 if plan.get("negative"):
@@ -398,7 +474,7 @@ def run_topology(args, topology, nodes, fixture):
                 status = run_task(probe, fleet, plan["scope"], 2, active,
                                   option_overrides={"recursive": plan["recursive"]}, admissions=admissions)
                 fleet.stop()
-                repaired = fleet.snapshot("physical-after-" + branch, quiescent=True)
+                repaired = fleet.snapshot("physical-after-" + branch, quiescent=True, metadata_faults=metadata_faults)
                 negative_proof = None
                 if plan.get("negative"):
                     require(physical_content(prior) == physical_content(repaired),
@@ -418,7 +494,7 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.stop()
                     repaired = fleet.snapshot("physical-after-negative-recovery-task", quiescent=True)
                 physical = validate_repaired_physical(before, repaired, plan["proofs"][0], repair_targets=plan["proofs"])
-                bitrot = [verify_cohort(fleet, target, "repaired-bitrot-" + branch) for target in plan["proofs"]]
+                bitrot = [verify_proof(fleet, target, "repaired-bitrot-" + branch) for target in plan["proofs"]]
                 fleet.start()
                 s3 = verify_version_s3(probe, fleet, bucket, expected, baseline, "s3-after-" + branch, fixture=fixture)
                 # These faults have now been independently repaired and fully
@@ -463,7 +539,7 @@ def run_topology(args, topology, nodes, fixture):
                         after_repeat = fleet.snapshot("physical-repeat-" + branch, quiescent=True)
                         validate_repaired_physical(post_heal, after_repeat, plan["proofs"][0], repair_targets=plan["proofs"])
                         for target in plan["proofs"]:
-                            verify_cohort(fleet, target, "repeat-bitrot-" + branch)
+                            verify_proof(fleet, target, "repeat-bitrot-" + branch)
                         fleet.start()
                         proof["s3"] = verify_version_s3(probe, fleet, bucket, expected, baseline, "s3-repeat-" + branch, fixture=fixture)
                         repeats.append(proof)
@@ -477,7 +553,7 @@ def run_topology(args, topology, nodes, fixture):
                 result["branches"][branch] = {"verdict": "FAIL", "failure": {"type": type(exc).__name__, "message": str(exc)}}
                 try:
                     fleet.stop()
-                    fleet.snapshot("physical-failure-" + branch, quiescent=True)
+                    fleet.snapshot("physical-failure-" + branch, quiescent=True, metadata_faults=metadata_faults)
                     for registration in reversed(registrations):
                         node, params = registration
                         fleet.record("rescue-" + branch, fleet.remote(node, "recover-fault", **params))
@@ -522,7 +598,7 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes), "four current Heal nodes required")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
-    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum"} else ("DV",)
+    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta"} else ("DV",)
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):

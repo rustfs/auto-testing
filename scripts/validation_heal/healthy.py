@@ -150,7 +150,7 @@ class Fleet:
     def remote(self, node, action, **params):
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
-        if action in {"apply-fault", "recover-fault", "verify-part"}:
+        if action in {"apply-fault", "recover-fault", "verify-part", "verify-inline"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
         source += "\nmain(" + repr(value) + ")\n"
@@ -159,8 +159,9 @@ class Fleet:
         require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")
         return json.loads(result.stdout)
 
-    def snapshot(self, label, *, quiescent=False):
-        return self.record(label, {node: self.remote(node, "snapshot", quiescent=quiescent) for node in self.nodes})
+    def snapshot(self, label, *, quiescent=False, metadata_faults=None):
+        return self.record(label, {node: self.remote(node, "snapshot", quiescent=quiescent,
+            metadataFaults=(metadata_faults or {}).get(node, {})) for node in self.nodes})
 
     def stop(self):
         with ThreadPoolExecutor(max_workers=len(self.nodes)) as executor:
