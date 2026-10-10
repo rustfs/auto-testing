@@ -22,11 +22,18 @@ DELETE, payload SHA-256, metadata, ETag, and `NoSuchKey` checks on one fixture.
 It has local mock coverage; live evidence against an immutable candidate is
 still required before calling the migration verified.
 
+`scanner.usage-convergence` has a dedicated executor on `single-4disk`. It
+uses the storage suite's deployment and SigV4 Admin client, accelerates the
+scanner cycle, records the 20-object fixture, and checks a successful leader
+cycle after upload plus a newer complete usage snapshot with exact object and
+logical-byte counts. The old STOR-134 threshold remains a separate regression
+test. This case also awaits a live candidate run.
+
 The eight planned cases have these concrete reuse candidates:
 
 | Validation ID | Candidate IDs | Specific item to verify |
 | --- | --- | --- |
-| `scanner.usage-convergence` | STOR-134 | Existing test checks 20 objects appear in Admin usage; add scanner result and fixture agreement. |
+| `scanner.usage-convergence` | STOR-134 | Dedicated executor added; live candidate evidence is pending. |
 | `kms.sse-kms-round-trip` | KMS-104, KMS-301, KMS-214 | Compare key/metadata semantics and failure redaction. |
 | `tiering.transition-and-restore` | TIER-105, TIER-107 | Compare remote tier restore and object checksum. |
 | `events.delivery` | EVT-103, EVT-104 | Freeze and verify the exact delivery count contract. |

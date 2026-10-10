@@ -8,6 +8,8 @@ on:
       - scripts/validation_report.py
       - scripts/validation_result.py
       - test_validation_migration.py
+      - rustfs-storage-test.sh
+      - test_validation_scanner_usage.sh
       - .github/workflows/validation-catalog-tests.yml
   push:
     branches: [main]
@@ -17,6 +19,8 @@ on:
       - scripts/validation_report.py
       - scripts/validation_result.py
       - test_validation_migration.py
+      - rustfs-storage-test.sh
+      - test_validation_scanner_usage.sh
       - .github/workflows/validation-catalog-tests.yml
 
 permissions:
@@ -32,3 +36,5 @@ jobs:
           persist-credentials: false
       - run: python3 scripts/validation_catalog.py check
       - run: python3 -B -m unittest -v test_validation_migration.py
+      - run: bash -n rustfs-storage-test.sh test_validation_scanner_usage.sh
+      - run: bash test_validation_scanner_usage.sh

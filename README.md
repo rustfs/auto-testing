@@ -31,9 +31,13 @@ ready; missing or unverified cases fail that gate. Without a gate status, the
 report shows migration progress and still rejects malformed or false PASS
 results.
 
-The first executable canonical case is `s3.basic-object-round-trip`, using
-the existing single-disk S3 suite deployment. It requires a candidate manifest
-with `source_sha`, `package_url`, and `package_sha256`. The installed binary
+The executable canonical cases currently include `s3.basic-object-round-trip`
+and `scanner.usage-convergence`. The S3 case uses the existing single-disk
+deployment. The scanner case uses the storage suite's single-node four-disk
+deployment, waits for a post-upload successful scanner cycle, and requires a
+complete usage snapshot with exactly 20 objects and 20,690 logical bytes.
+Both require a candidate manifest with `source_sha`, `package_url`, and
+`package_sha256`. The installed binary
 SHA-256 is measured on the test node and included in result provenance:
 
 ```bash
@@ -44,13 +48,20 @@ SHA-256 is measured on the test node and included in result provenance:
   --validation-artifacts-dir /absolute/path/new-artifacts-dir \
   --yes
 
+./rustfs-storage-test.sh \
+  --validation-case scanner.usage-convergence \
+  --candidate-manifest /absolute/path/candidate.json \
+  --testing-commit "$(git rev-parse HEAD)" \
+  --validation-artifacts-dir /absolute/path/another-new-artifacts-dir \
+  --yes
+
 python3 scripts/validation_report.py \
   --results-dir /absolute/path/new-artifacts-dir/cases \
   --output /absolute/path/new-artifacts-dir/report.md
 ```
 
-The report's full implemented-case gate is intentionally not enabled by this
-single-case run. Run it with `--gate-status implemented` only after all 66
+The report's full implemented-case gate is intentionally not enabled by these
+runs. Run it with `--gate-status implemented` only after all 66
 implemented source cases have verified executors and live results.
 
 ## Fault-tolerance suite
