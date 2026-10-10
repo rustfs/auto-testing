@@ -2,6 +2,7 @@
 
 import copy
 import time
+import uuid
 
 try:
     from .heal_probe import Probe, canonical, compare_inventories, require
@@ -16,7 +17,73 @@ except ImportError:
 
 
 BRANCHES = ("new-disk-data", "new-disk-versioned")
+AUTOMATIC_BRANCHES = ("replacement-unversioned", "replacement-versioned-marker")
 FORMAT_SECONDS = 90
+REBUILD_SECONDS = 300
+STATUS_PATH = "/rustfs/admin/v4/heal/replacement-recovery"
+
+
+def replacement_records(probe, fleet, label):
+    observed = {}
+    for endpoint in probe.binding["endpoints"]:
+        value = fleet.record(label, {"endpoint": endpoint,
+            **Probe(probe.binding, endpoint).admin(STATUS_PATH, [], b"", method="GET")})
+        body = value.get("response", {})
+        cluster = body.get("cluster", {})
+        require(value.get("httpStatus") == 200 and type(body.get("contractVersion")) is int
+                and body["contractVersion"] == 2 and body.get("scope") == "cluster_survivor_disks"
+                and cluster.get("definitive") is True and cluster.get("reason") is None
+                and isinstance(cluster.get("records"), list), "replacement source status is partial, unknown or incompatible")
+        observed[endpoint] = cluster["records"]
+    return observed
+
+
+def generation(records, endpoint, earliest, *, original=None, completed=False):
+    require(isinstance(records, list) and len(records) == 1 and isinstance(records[0], dict),
+            "replacement did not expose exactly one owned target generation")
+    record = records[0]
+    token = record.get("taskId")
+    require(isinstance(token, str) and str(uuid.UUID(token)) == token and record.get("generation") == token
+            and record.get("setDiskId") == "pool_0_set_0" and record.get("targetSlots") == [endpoint],
+            "replacement generation is not bound to the exact target endpoint/set")
+    binding = {name: record[name] for name in ("taskId", "generation", "setDiskId", "targetSlots")}
+    require(original is None or binding == original, "automatic repair crossed replacement generations or target members")
+    require(record.get("state") in {"waiting_for_replacement", "running", "cleanup_pending", "completed"}
+            and record.get("reason") is None, "replacement generation is incomplete, unrecoverable or unknown")
+    if record["state"] == "completed":
+        require(type(record.get("verifiedAt")) is int and earliest <= record["verifiedAt"] <= int(time.time()) + 5,
+                "replacement completion is stale or has no actual verification timestamp")
+    else: require(record.get("verifiedAt") is None, "unfinished replacement claimed a completion timestamp")
+    require(not completed or record["state"] == "completed", "replacement generation has not completed its responsibility")
+    return binding
+
+
+def automatic_completion(probe, fleet, endpoint, earliest):
+    deadline, original, timeline = time.monotonic() + REBUILD_SECONDS, None, []
+    while True:
+        observed = replacement_records(probe, fleet, "automatic-replacement-generation-window")
+        ready = True
+        for peer, records in observed.items():
+            if not records:
+                ready = False
+                continue
+            bound = generation(records, endpoint, earliest, original=original)
+            original = original or bound
+            ready = ready and records[0]["state"] == "completed"
+        timeline.append(observed)
+        if ready and original is not None:
+            require(len({canonical(records[0]) for records in observed.values()}) == 1,
+                    "completed replacement responsibility differs across peers")
+            break
+        require(time.monotonic() < deadline, "ATTRIBUTION_NOT_OBSERVED: original automatic replacement generation did not complete on every peer")
+        time.sleep(2)
+    for index in range(2):
+        repeated = replacement_records(probe, fleet, "automatic-replacement-completion-repeat")
+        for records in repeated.values(): generation(records, endpoint, earliest, original=original, completed=True)
+        require(canonical(repeated) == canonical(observed), "completed replacement generation changed after its terminal observation")
+    return {"source": "automatic-replacement", "generation": original, "observations": len(timeline),
+            "completionObservedOnEveryPeer": True, "budgetSeconds": REBUILD_SECONDS,
+            "adminHealMutations": 0, "targetS3ReadsBeforePhysicalProof": 0}
 
 
 def wait_format(fleet, node, disk):
@@ -100,8 +167,17 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
         from .versions import map_inline_target, validate_version_receipts, verify_version_s3
     except ImportError:
         from versions import map_inline_target, validate_version_receipts, verify_version_s3
-    require(branch in BRANCHES, "unknown formatted replacement branch")
+    automatic = branch in AUTOMATIC_BRANCHES
+    require(branch in (*BRANCHES, *AUTOMATIC_BRANCHES), "unknown replacement branch")
+    require(not automatic or fleet.runtime_profile == "replacement", "automatic replacement lacks its isolated source configuration")
     before = fleet.snapshot("replacement-original-" + branch, quiescent=True)
+    if automatic:
+        fleet.start()
+        healthy = replacement_records(recorder.probe, fleet, "automatic-replacement-empty-baseline")
+        require(all(not records for records in healthy.values()), "replacement baseline retained an older generation")
+        fleet.stop()
+        require(files(before) == files(fleet.snapshot("replacement-original-after-source-preflight", quiescent=True)),
+                "replacement source preflight changed an acknowledged original file")
     node, disk = fleet.nodes[-1], 3
     member = node, disk
     physical_format = next(entry for entry in before[node]["formats"] if entry["disk"] == disk)
@@ -115,6 +191,7 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
             else map_target(before, bucket, entry["key"], "data", 1, entry["versionId"], latest_required=False)
         shard = next(value for value in target["cohort"] if (value["node"], value["disk"]) == member)
         proofs.append({**target, **shard})
+    earliest = int(time.time())
     replaced = fleet.record("replacement-original-root-isolated", fleet.remote(node, "replace-drive", disk=disk,
         expectedFormatSha256=physical_format["sha256"]))
     require(replaced.get("oldRootMovedIntact") is True and replaced.get("newDataRootEmpty") is True
@@ -126,14 +203,19 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
     wait_format(fleet, node, disk)
     initialized = fleet.snapshot("replacement-candidate-initialization")
     fleet.record("replacement-new-format-proof", format_identity(before, initialized, member))
-    require(not any(item["disk"] == disk for item in initialized[node]["files"]),
-            "ATTRIBUTION_NOT_OBSERVED: new drive received object files before its manual repair token")
+    if not automatic:
+        require(not any(item["disk"] == disk for item in initialized[node]["files"]),
+                "ATTRIBUTION_NOT_OBSERVED: new drive received object files before its manual repair token")
     require({key: value for key, value in files(initialized).items() if key[:2] != member} ==
             {key: value for key, value in indexed.items() if key[:2] != member}, "replacement initialization changed surviving objects")
-    status = run_task(recorder.probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
-                      option_overrides={"recursive": True}, admissions=admissions)
-    receipts = validate_version_receipts(status, bucket, expected, 2,
-        required_repairs=[(entry["key"], entry["versionId"]) for entry in expected])
+    if automatic:
+        endpoint = replaced["dataPath"] if len(fleet.nodes) == 1 else f"http://rustfs-node{fleet.nodes.index(node) + 1}:9000{replaced['dataPath']}"
+        receipts = automatic_completion(recorder.probe, fleet, endpoint, earliest)
+    else:
+        status = run_task(recorder.probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
+                          option_overrides={"recursive": True}, admissions=admissions)
+        receipts = validate_version_receipts(status, bucket, expected, 2,
+            required_repairs=[(entry["key"], entry["versionId"]) for entry in expected])
     fleet.stop()
     after = fleet.snapshot("replacement-after-manual", quiescent=True)
     physical = fleet.record("replacement-full-physical-proof", physical_rebuild(before, after, member))
@@ -157,7 +239,7 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
         streaming.append({"key": target["key"], "versionId": target["versionId"], "proof": proof})
     fleet.start()
     fleet.record("replacement-backup-service-refusal-after", fleet.remote(node, "replacement-probe"))
-    fixture = "DB" if branch == "new-disk-data" else "DV"
+    fixture = "DB" if branch in {"new-disk-data", "replacement-unversioned"} else "DV"
     s3 = verify_version_s3(recorder.probe, fleet, bucket, expected, baseline, "replacement-s3-after", fixture=fixture)
     peers = []
     for endpoint in recorder.probe.binding["endpoints"]:

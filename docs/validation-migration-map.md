@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 114 currently dispatchable IDs include all 74 non-Heal cases and forty Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
+case evidence. The 115 currently dispatchable IDs include all 74 non-Heal cases and forty-one Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 44 Heal cases remain
+The other 43 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -792,3 +792,22 @@ snapshot. The executor now observes a registered 90-second, read-only format
 initialization window before requiring distinct new UUID/set-slot evidence;
 service health still cannot certify replacement acceptance. Neither result
 increases the complete live PASS count.
+
+E06 `heal.replacement-auto-rebuild` now dispatches both H1/H2 DB/DV branches
+using the same whole-root replacement isolation and complete shard oracles as
+B03. Its isolated runtime enables only automatic disk replacement (10-second
+interval), with scanner and MRF disabled. The current lab's private directory
+roots explicitly use the candidate's directory-backed replacement fallback;
+physical-device replacement readiness is not claimed. Every peer must expose
+one fresh, stable generation bound to the exact target endpoint and set, with
+completed state and a fresh verification timestamp. Missing/partial/unknown
+status, a changed generation or divergent terminal records fail. No Admin heal
+mutation or target S3 read occurs before full same-role physical reconstruction
+and streaming verification. The old archive remains inaccessible to the service
+and unchanged. A healthy service or empty queue cannot finish the case. This
+executor still requires complete live evidence.
+
+E04 `38083897141` and C06 `38084060749` retained FAIL/cleanup PASS because the
+first paginated collector used journald's default JSON field-size limit, which
+can omit a long MESSAGE. The collector now requests `--all`, decodes complete
+UTF-8 byte-array messages and rejects missing fields; original failures remain.

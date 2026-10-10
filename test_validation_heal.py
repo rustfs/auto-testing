@@ -3043,6 +3043,56 @@ class HealWholeDriveReplacementTest(unittest.TestCase):
         fleet.remote = lambda *args: {**present, "originalArchiveUnchanged": False}
         with self.assertRaisesRegex(ValueError, "archive witness"): replacement.wait_format(fleet, "node1", 3)
 
+    def test_automatic_replacement_generation_rejects_unknown_wrong_target_and_stale_completion(self):
+        endpoint = "http://rustfs-node4:9000/private/new/data"
+        row = {"taskId": "12345678-1234-4234-8234-123456789abc", "generation": "12345678-1234-4234-8234-123456789abc",
+               "setDiskId": "pool_0_set_0", "targetSlots": [endpoint], "state": "completed", "reason": None, "verifiedAt": 101}
+        with patch("scripts.validation_heal.replacement.time.time", return_value=102):
+            binding = replacement.generation([row], endpoint, 100, completed=True)
+            for kind in ("state", "reason", "stale", "target", "set", "generation", "task", "missing", "duplicate"):
+                with self.subTest(kind=kind):
+                    bad = copy.deepcopy(row)
+                    rows = [bad]
+                    if kind == "state": bad["state"] = "unknown"
+                    elif kind == "reason": bad["reason"] = "incomplete"
+                    elif kind == "stale": bad["verifiedAt"] = 99
+                    elif kind == "target": bad["targetSlots"] = [endpoint + "-different"]
+                    elif kind == "set": bad["setDiskId"] = "pool_1_set_0"
+                    elif kind == "generation": bad["generation"] = "other"
+                    elif kind == "task": bad["taskId"] = bad["generation"] = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+                    elif kind == "missing": rows = []
+                    else: rows *= 2
+                    with self.assertRaises(ValueError): replacement.generation(rows, endpoint, 100, original=binding, completed=True)
+            running = {**row, "state": "running", "verifiedAt": None}
+            replacement.generation([running], endpoint, 100, original=binding)
+            with self.assertRaisesRegex(ValueError, "not completed"): replacement.generation([running], endpoint, 100, completed=True)
+
+    def test_automatic_replacement_requires_every_peer_and_stable_completed_generation(self):
+        endpoint = "/private/new/data"
+        row = {"taskId": "12345678-1234-4234-8234-123456789abc", "generation": "12345678-1234-4234-8234-123456789abc",
+               "setDiskId": "pool_0_set_0", "targetSlots": [endpoint], "state": "completed", "reason": None, "verifiedAt": 101}
+        complete = {"node1": [row], "node2": [copy.deepcopy(row)]}
+        with patch("scripts.validation_heal.replacement.replacement_records", side_effect=[{"node1": [row], "node2": []}, complete, complete, complete]), \
+             patch("scripts.validation_heal.replacement.time.sleep"), \
+             patch("scripts.validation_heal.replacement.time.monotonic", return_value=0), \
+             patch("scripts.validation_heal.replacement.time.time", return_value=102):
+            proof = replacement.automatic_completion(None, None, endpoint, 100)
+            self.assertTrue(proof["completionObservedOnEveryPeer"])
+            self.assertEqual(proof["adminHealMutations"], 0)
+            self.assertEqual(proof["observations"], 2)
+        changed = copy.deepcopy(complete); changed["node2"][0]["verifiedAt"] = 102
+        with patch("scripts.validation_heal.replacement.replacement_records", return_value=changed), \
+             patch("scripts.validation_heal.replacement.time.time", return_value=102), self.assertRaisesRegex(ValueError, "differs across peers"):
+            replacement.automatic_completion(None, None, endpoint, 100)
+
+    def test_automatic_replacement_profile_enables_only_its_registered_source(self):
+        config = runtime_config("replacement")
+        self.assertEqual(config["RUSTFS_HEAL_AUTO_HEAL_ENABLE"], "true")
+        self.assertEqual(config["RUSTFS_HEAL_MRF_ENABLE"], "false")
+        self.assertEqual(config["RUSTFS_SCANNER_ENABLED"], "false")
+        self.assertEqual(config["RUSTFS_HEAL_INTERVAL_SECS"], "10")
+        self.assertEqual(list(replacement.AUTOMATIC_BRANCHES), select("E06")[0]["variants"])
+
     def test_remote_replacement_module_initializes_and_all_source_branches_remain(self):
         import sys
         self.assertEqual(list(replacement.BRANCHES), select("B03")[0]["variants"])
