@@ -86,6 +86,12 @@ class AuthorizationBoundaryTest(unittest.TestCase):
                 with self.subTest(mode=mode, response=poisoned), self.assertRaises(ValueError):
                     validate_denial(poisoned, mode)
 
+    def test_unsigned_route_refusal_is_not_the_unreachable_handler_error(self):
+        self.assertEqual(DENIALS["anonymous"], (403, "AccessDenied"))
+        validate_denial({"httpStatus": 403, "response": '<Error><Code>AccessDenied</Code><Message>Signature is required</Message></Error>'}, "anonymous")
+        with self.assertRaises(ValueError):
+            validate_denial({"httpStatus": 400, "response": {"Code": "InvalidRequest"}}, "anonymous")
+
     def test_iam_evidence_redacts_credentials_without_modifying_oracle_input(self):
         with tempfile.TemporaryDirectory() as directory:
             fleet = Fleet([], Path(directory), "manual-auth-test")

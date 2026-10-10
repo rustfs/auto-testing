@@ -20,7 +20,9 @@ except ImportError:
     from healthy import physical_content
 
 
-DENIALS = {"anonymous": (400, "InvalidRequest"), "bad-signature": (403, "SignatureDoesNotMatch"),
+# The candidate's S3Router::check_access rejects unsigned Admin traffic
+# before authorize_admin_request (whose missing-credential error is 400).
+DENIALS = {"anonymous": (403, "AccessDenied"), "bad-signature": (403, "SignatureDoesNotMatch"),
            "expired-signature": (403, "RequestTimeTooSkewed"), "denied-user": (403, "AccessDenied")}
 
 
