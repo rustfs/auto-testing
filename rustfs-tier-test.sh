@@ -365,6 +365,11 @@ RESULTS_DIR=""
 RESULT_LOG_DIR=""
 PROVENANCE_FILE=""
 RESIDUE_FILE=""
+VALIDATION_CASE=""
+VALIDATION_ARTIFACTS_DIR=""
+VALIDATION_CANDIDATE_MANIFEST=""
+VALIDATION_TESTING_COMMIT=""
+VALIDATION_BINARY_SHA256=""
 
 # ==================== Helpers ====================
 
@@ -1511,6 +1516,39 @@ run_test() {
   write_case_result "${status}" "${rc}" "$([ "${cleanup_rc}" -eq 0 ] && printf PASS || printf FAIL)" "$((SECONDS-started))" "${cleanup_detail}"
 }
 
+validation_write_evidence() {
+  local evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}" item
+  mkdir -p "${evidence_dir}"
+  cp "${TEST_TMP}/test.out" "${evidence_dir}/test.log"
+  cp "${RESULTS_DIR}/${CURRENT_TOPOLOGY}--${VALIDATION_CASE}.json" "${evidence_dir}/suite-result.json"
+  for item in validation-transition.json validation-head.json validation-restore-head.json validation-object.json; do
+    if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
+  done
+}
+
+validation_write_result() {
+  local verdict="$1" reason="$2" cleanup_status="$3"
+  local args=("${SCRIPT_DIR}/scripts/validation_result.py"
+    --case-id "${VALIDATION_CASE}" --profile lifecycle-b
+    --result-file "${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
+    --verdict "${verdict}" --cleanup-status "${cleanup_status}")
+  if [ -n "${reason}" ]; then args+=(--reason "${reason}"); fi
+  if [ "${verdict}" != RUNNING ]; then
+    args+=(--candidate-manifest "${VALIDATION_CANDIDATE_MANIFEST}"
+      --rc-bin "${RC_BIN}" --testing-commit "${VALIDATION_TESTING_COMMIT}"
+      --binary-sha256 "${VALIDATION_BINARY_SHA256}"
+      --evidence "evidence/${VALIDATION_CASE}/test.log"
+      --evidence "evidence/${VALIDATION_CASE}/suite-result.json")
+  fi
+  if [ "${verdict}" = PASS ]; then
+    local item
+    for item in validation-transition.json validation-head.json validation-restore-head.json validation-object.json; do
+      args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
+    done
+  fi
+  python3 "${args[@]}"
+}
+
 rc_run() {
   if RC_OUT="$(run_bounded "${COMMAND_TIMEOUT}" "${RC_BIN}" "$@" 2>&1)"; then RC_CODE=0; else RC_CODE=$?; fi
   return "${RC_CODE}"
@@ -1955,6 +1993,61 @@ final_summary() {
 }
 
 # ==================== Tier / Event / Audit test cases ====================
+
+test_validation_tiering_transition_and_restore() {
+  local bucket="val-tier-${RUN_TOKEN}" source="${TEST_TMP}/validation-source.bin"
+  local downloaded="${TEST_TMP}/validation-downloaded.bin" key=round-trip.bin
+  local transition job waited=0 source_sha downloaded_sha transitioned_sha
+  new_bucket "${bucket}" || return 1
+  add_tier rustfs "${TIER_NAME}" "${TARGET_ENDPOINT}" "${TIER_BUCKET}" "${ACCESS_KEY}" "${SECRET_KEY}"
+  assert_rc_ok || return 1
+  rc_run ilm rule add "local/${bucket}" --storage-class "${TIER_NAME}" --transition-days 0
+  assert_rc_ok || return 1
+  make_test_file "${source}" 1048576
+  source_sha="$(sha256_file "${source}")"
+  [[ "${source_sha}" =~ ^[0-9a-f]{64}$ ]] || { echo "source checksum unavailable"; return 1; }
+  aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${source}"
+  assert_aws_ok || return 1
+  transition="$(run_transition "${bucket}")" || return 1
+  printf '%s\n' "${transition}" > "${TEST_TMP}/validation-transition.json"
+  job="$(printf '%s' "${transition}" | jq -r '.job_id // empty')"
+  if [ -n "${job}" ]; then wait_transition_job "${job}" >/dev/null || return 1; fi
+  while [ "${waited}" -lt 120 ]; do
+    aws_run s3api head-object --bucket "${bucket}" --key "${key}"
+    if [ "${AWS_CODE}" -eq 0 ] && printf '%s' "${AWS_OUT}" | jq -e --arg tier "${TIER_NAME}" \
+      '.StorageClass == $tier' >/dev/null 2>&1; then break; fi
+    sleep 3; waited=$((waited+3))
+  done
+  [ "${waited}" -lt 120 ] || { echo "object did not reach warm tier: ${AWS_OUT}"; return 1; }
+  printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-head.json"
+  aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${downloaded}"
+  assert_aws_ok || return 1
+  downloaded_sha="$(sha256_file "${downloaded}")"
+  [ "${downloaded_sha}" = "${source_sha}" ] || { echo "transitioned object checksum mismatch"; return 1; }
+  transitioned_sha="${downloaded_sha}"
+  aws_run s3api restore-object --bucket "${bucket}" --key "${key}" --restore-request '{"Days":1}'
+  assert_aws_ok || return 1
+  waited=0
+  while [ "${waited}" -lt 90 ]; do
+    aws_run s3api head-object --bucket "${bucket}" --key "${key}"
+    if [ "${AWS_CODE}" -eq 0 ] && printf '%s' "${AWS_OUT}" | jq -e \
+      '(.Restore // ."x-amz-restore" // "") | startswith("ongoing-request=\"false\"")' \
+      >/dev/null 2>&1; then break; fi
+    sleep 3; waited=$((waited+3))
+  done
+  [ "${waited}" -lt 90 ] || { echo "restore state did not appear: ${AWS_OUT}"; return 1; }
+  printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-restore-head.json"
+  aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${downloaded}"
+  assert_aws_ok || return 1
+  downloaded_sha="$(sha256_file "${downloaded}")"
+  [ "${downloaded_sha}" = "${source_sha}" ] || { echo "restored object checksum mismatch"; return 1; }
+  jq -nc --arg bucket "${bucket}" --arg key "${key}" --arg source_sha256 "${source_sha}" \
+    --arg transitioned_sha256 "${transitioned_sha}" --arg restored_sha256 "${downloaded_sha}" \
+    --arg tier "${TIER_NAME}" \
+    '{bucket:$bucket,key:$key,source_sha256:$source_sha256,transitioned_sha256:$transitioned_sha256,
+      restored_sha256:$restored_sha256,tier:$tier,restore_complete:true}' \
+    > "${TEST_TMP}/validation-object.json"
+}
 
 run_all_tests() {
   run_test TIER-101 "TierAddValidation"    test_tier101
@@ -2786,6 +2879,10 @@ Usage:
   --rc-bin <path>           Exact rc binary to execute (default: resolve rc from PATH once)
   --expected-rc-sha256 <h>  Fail before setup unless the rc binary matches this SHA-256
   --artifacts-dir <path>    Persist structured case results, provenance, logs, and residue
+  --validation-case <id>    Run one canonical validation case on the existing Tier topology
+  --validation-artifacts-dir <path>  Unique canonical result and evidence directory
+  --candidate-manifest <path>       Immutable candidate URL, package SHA-256 and source SHA
+  --testing-commit <sha>           Exact auto-testing checkout commit
   --keep-env                Do not tear down the environment after the last run
   --ssh-user <user>         SSH user for the test nodes (default: azureuser)
   --log-file <path>         Tee output to a log file
@@ -2809,6 +2906,10 @@ main() {
       --rc-bin) RC_BIN_REQUEST="$1"; shift ;;
       --expected-rc-sha256) RUSTFS_EXPECTED_RC_SHA256="$1"; shift ;;
       --artifacts-dir) ARTIFACTS_DIR="$1"; shift ;;
+      --validation-case) VALIDATION_CASE="$1"; shift ;;
+      --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
+      --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
+      --testing-commit) VALIDATION_TESTING_COMMIT="$1"; shift ;;
       --keep-env) KEEP_ENV=1 ;;
       --ssh-user) SSH_USER="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
@@ -2821,6 +2922,27 @@ main() {
   start_log_capture
   if [ "${all}" -eq 1 ]; then
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}")
+  fi
+  if [ -n "${VALIDATION_CASE}" ]; then
+    [ "${VALIDATION_CASE}" = tiering.transition-and-restore ] || die "unknown validation case: ${VALIDATION_CASE}"
+    [ "${all}" -eq 0 ] || die "--validation-case cannot run all topologies"
+    [ "${#SELECTED_TOPOLOGIES[@]}" -eq 1 ] || die "--validation-case requires one topology"
+    [ "${SELECTED_TOPOLOGIES[0]}" = "${TOPO_SINGLE_SINGLE}" ] || die "validation case requires single-single topology"
+    [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
+    if [ "${DRY_RUN}" -eq 0 ]; then
+      [ -n "${VALIDATION_ARTIFACTS_DIR}" ] || die "--validation-case requires --validation-artifacts-dir"
+      [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "--validation-case requires --candidate-manifest"
+      [ -n "${VALIDATION_TESTING_COMMIT}" ] || die "--validation-case requires --testing-commit"
+      [ ! -e "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation artifacts directory already exists"
+      PACKAGE_URL="$(jq -er '.package_url' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate URL missing"
+      PACKAGE_SHA256="$(jq -er '.package_sha256' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate package SHA missing"
+      [[ "${PACKAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid candidate package SHA"
+      jq -e '.source_sha | test("^[0-9a-f]{40}$")' "${VALIDATION_CANDIDATE_MANIFEST}" >/dev/null \
+        || die "candidate source commit missing"
+      [ "${VALIDATION_TESTING_COMMIT}" = "$(git -C "${SCRIPT_DIR}" rev-parse HEAD)" ] \
+        || die "testing commit does not match this checkout"
+      mkdir -p "${VALIDATION_ARTIFACTS_DIR}"
+    fi
   fi
   [ "${#SELECTED_TOPOLOGIES[@]}" -gt 0 ] || die "no topology selected (--all-topologies / --topology)"
 
@@ -2849,15 +2971,36 @@ main() {
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
     CURRENT_TOPOLOGY="${topo}"
     log "== topology: ${topo} =="
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      validation_write_result RUNNING "validation case started" PENDING
+    fi
     env_setup "${topo}"
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      VALIDATION_BINARY_SHA256="$(printf 'sha256sum /usr/bin/rustfs\n' | run_remote "${SOURCE_NODE}" | awk '{print $1}')"
+      [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
+    fi
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
-    run_all_tests
+    if [ -n "${VALIDATION_CASE}" ]; then
+      run_test "${VALIDATION_CASE}" "TransitionAndRestore" test_validation_tiering_transition_and_restore
+    else
+      run_all_tests
+    fi
     results_summary
     record_topology_result "${topo}"
-    if [ "${KEEP_ENV}" -eq 0 ]; then
-      env_teardown "${topo}"
+    local cleanup_status=PASS
+    if [ "${KEEP_ENV}" -eq 0 ]; then env_teardown "${topo}" || cleanup_status=FAIL; fi
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      validation_write_evidence
+      if [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
+        validation_write_result PASS "" PASS
+      elif [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ]; then
+        validation_write_result INFRA_ERROR "environment teardown failed" FAIL
+      else
+        validation_write_result FAIL "case failed or unsupported; inspect evidence" "${cleanup_status}"
+      fi
     fi
     if [ "${FAIL}" -gt 0 ]; then overall_fail=1; fi
+    if [ "${UNSUPPORTED}" -gt 0 ] || [ "${cleanup_status}" != PASS ]; then overall_fail=1; fi
   done
   final_summary
   [ "${overall_fail}" -eq 0 ] || exit 1

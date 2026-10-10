@@ -34,13 +34,42 @@ KMS single-disk deployment. It checks the same object's encryption key,
 metadata, and payload, then requires an invalid-key PUT to fail without
 exposing plaintext or key material. Its live candidate run is pending.
 
+`tiering.transition-and-restore` has a dedicated executor using the Tier
+suite's existing `single-single` source and warm-tier nodes. It verifies the
+same object's transition state, readable bytes after transition, restore
+state, and SHA-256 after restore. The case is recorded under the source
+`lifecycle-b` environment profile. Its live candidate run is pending.
+
+"Existing validation environment" means the fleet used by `auto-testing`
+and the RustFS `smoke-testing` workflows, with `RUSTFS_NODES` and
+`RUSTFS_SSH_USER` supplied there. For Heal, reuse the nodes deployed by
+`rustfs_heal_test.sh`; the source H1-H6 names describe required topology and
+fault capabilities, not a separate SSH fleet. The ten `heal-extended` cases
+have no source target-environment field, so their runtime binding must record
+the actual auto-testing Heal nodes and topology before any result is scored.
+The source's standalone ZIP, port 9100/9200, and dedicated systemd profiles
+are reference implementations for assertions, not deployment targets here.
+
+The RustFS Functional Chain workflow has a manual validation lane on the same
+`smoke-testing` runner and `rustfs-shared-functional-tests-v2` concurrency
+group. Set `build_run_id` and `build_run_attempt` to one successful nightly
+build with its retained candidate artifact, `auto_testing_sha` to an exact
+commit, and `validation_case` to one migrated ID. The lane resolves the
+immutable package URL and SHA-256 from that build attempt, then calls
+`scripts/run_validation_case.sh`. The dispatcher rejects an ID without an
+executor before touching the fleet and runs the result report with
+`--gate-case`, so a missing, failed, or incomplete selected case fails the
+workflow. Each run uploads its candidate identity, canonical result, and
+case evidence. The four currently dispatchable IDs are the S3, scanner, KMS,
+and tiering cases above; the other 154 IDs remain unverified.
+
 The eight planned cases have these concrete reuse candidates:
 
 | Validation ID | Candidate IDs | Specific item to verify |
 | --- | --- | --- |
 | `scanner.usage-convergence` | STOR-134 | Dedicated executor added; live candidate evidence is pending. |
 | `kms.sse-kms-round-trip` | KMS-104, KMS-301, KMS-214 | Dedicated executor added; live candidate evidence is pending. |
-| `tiering.transition-and-restore` | TIER-105, TIER-107 | Compare remote tier restore and object checksum. |
+| `tiering.transition-and-restore` | TIER-105, TIER-107 | Dedicated executor added; live candidate evidence is pending. |
 | `events.delivery` | EVT-103, EVT-104 | Freeze and verify the exact delivery count contract. |
 | `audit.request-correlation` | AUD-102, AUD-104, AUD-106 | Verify request correlation and secret redaction in the same event trail. |
 | `iam.policy-enforcement` | IAM-105, IAM-109 | Verify explicit deny and allowed action on the same principal/policy fixture. |

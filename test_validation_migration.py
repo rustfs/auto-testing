@@ -59,6 +59,16 @@ class ReportTest(unittest.TestCase):
         _, errors = validate_results(self.catalog, self.results, gate_statuses={"implemented"})
         self.assertIn(f"missing gate result: {self.case['id']}", errors)
 
+    def test_selected_case_requires_live_pass(self) -> None:
+        _, errors = validate_results(
+            self.catalog, self.results, gate_statuses=set(), gate_cases={self.case["id"]},
+        )
+        self.assertIn(f"missing gate result: {self.case['id']}", errors)
+        with self.assertRaisesRegex(ValueError, "unknown gate case"):
+            validate_results(
+                self.catalog, self.results, gate_statuses=set(), gate_cases={"missing.case"},
+            )
+
     def test_duplicate_and_running_fail(self) -> None:
         self.write_result("one.json", verdict="RUNNING")
         self.write_result("two.json", verdict="RUNNING")

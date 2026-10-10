@@ -123,19 +123,25 @@ def check_result(
     return errors
 
 
-def validate_results(catalog: dict, directory: Path, *, gate_statuses: set[str]) -> tuple[list[dict], list[str]]:
+def validate_results(
+    catalog: dict, directory: Path, *, gate_statuses: set[str], gate_cases: set[str] | None = None,
+) -> tuple[list[dict], list[str]]:
     validate_snapshot(catalog)
     cases = {
         case["id"]: (case, module["target_environments"])
         for module in catalog["modules"] for case in module["cases"]
     }
+    gate_cases = gate_cases or set()
+    unknown = gate_cases - set(cases)
+    if unknown:
+        raise ValueError(f"unknown gate case: {', '.join(sorted(unknown))}")
     records, errors = load_results(directory)
     for case_id in sorted(set(records) - set(cases)):
         errors.append(f"unexpected case ID: {case_id}")
     rows = []
     for case_id, (case, target_environments) in cases.items():
         result = records.get(case_id)
-        gated = case["source_status"] in gate_statuses
+        gated = case["source_status"] in gate_statuses or case_id in gate_cases
         if result is None:
             if gated:
                 errors.append(f"missing gate result: {case_id}")
@@ -168,10 +174,14 @@ def main() -> int:
     parser.add_argument("--results-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--gate-status", action="append", choices=sorted(GATE_SOURCE_STATUSES), default=[])
+    parser.add_argument("--gate-case", action="append", default=[])
     args = parser.parse_args()
     try:
         catalog = json.loads(args.catalog.read_text(encoding="utf-8"))
-        rows, errors = validate_results(catalog, args.results_dir, gate_statuses=set(args.gate_status))
+        rows, errors = validate_results(
+            catalog, args.results_dir,
+            gate_statuses=set(args.gate_status), gate_cases=set(args.gate_case),
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(render_report(rows, errors), encoding="utf-8")
     except (OSError, ValueError, json.JSONDecodeError) as exc:

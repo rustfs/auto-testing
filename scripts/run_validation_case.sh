@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [ "$#" -ne 4 ]; then
+  printf 'usage: %s CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR\n' "$0" >&2
+  exit 2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CASE_ID="$1"
+CANDIDATE_MANIFEST="$2"
+TESTING_COMMIT="$3"
+ARTIFACTS_DIR="$4"
+
+case "${CASE_ID}" in
+  s3.basic-object-round-trip)
+    SUITE=rustfs-s3-compat-test.sh; EXTRA_ARGS=() ;;
+  scanner.usage-convergence)
+    SUITE=rustfs-storage-test.sh; EXTRA_ARGS=() ;;
+  kms.sse-kms-round-trip)
+    SUITE=rustfs-kms-test.sh; EXTRA_ARGS=() ;;
+  tiering.transition-and-restore)
+    SUITE=rustfs-tier-test.sh; EXTRA_ARGS=(--topology single-single) ;;
+  *)
+    printf 'validation executor is not migrated: %s\n' "${CASE_ID}" >&2
+    exit 2 ;;
+esac
+
+[ -f "${CANDIDATE_MANIFEST}" ] || { printf 'candidate manifest missing\n' >&2; exit 2; }
+[[ "${TESTING_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || { printf 'invalid testing commit\n' >&2; exit 2; }
+[ "${TESTING_COMMIT}" = "$(git -C "${SCRIPT_DIR}" rev-parse HEAD)" ] || {
+  printf 'testing commit does not match checkout\n' >&2; exit 2;
+}
+[ ! -e "${ARTIFACTS_DIR}" ] || { printf 'artifacts directory already exists\n' >&2; exit 2; }
+
+mkdir -p -- "${ARTIFACTS_DIR}"
+case_dir="${ARTIFACTS_DIR}/${CASE_ID}"
+suite_rc=0
+"${SCRIPT_DIR}/${SUITE}" --validation-case "${CASE_ID}" "${EXTRA_ARGS[@]}" \
+  --candidate-manifest "${CANDIDATE_MANIFEST}" \
+  --testing-commit "${TESTING_COMMIT}" \
+  --validation-artifacts-dir "${case_dir}" -y \
+  || suite_rc=$?
+
+report_rc=0
+python3 "${SCRIPT_DIR}/scripts/validation_report.py" \
+  --catalog "${SCRIPT_DIR}/validation-cases.json" \
+  --results-dir "${case_dir}/cases" \
+  --output "${ARTIFACTS_DIR}/report.md" \
+  --gate-case "${CASE_ID}" || report_rc=$?
+
+if [ "${suite_rc}" -ne 0 ]; then exit "${suite_rc}"; fi
+exit "${report_rc}"
