@@ -20,7 +20,7 @@ try:
     from .healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
     from .matrix import select
-    from .bucket_records import bucket_path
+    from .bucket_records import bucket_path, IAM_SENSITIVE_SUBTREES
     from .versions import validate_version_receipts
     from .stop import idle_fleet
 except ImportError:
@@ -29,7 +29,7 @@ except ImportError:
     from healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
     from matrix import select
-    from bucket_records import bucket_path
+    from bucket_records import bucket_path, IAM_SENSITIVE_SUBTREES
     from versions import validate_version_receipts
     from stop import idle_fleet
 
@@ -38,12 +38,13 @@ CASE_ID = "heal.bucket-metadata-integrity"
 BRANCHES = ("versioning-config", "bucket-policy-tags", "lock-config", "unknown-record-negative")
 REFERENCE = {"candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926", "sourceFiles": {
     "crates/ecstore/src/bucket/metadata.rs": "3b4f9ed4dba259f259653ba4bf1568c54a10b71ff0f6111135394e225a38d990",
-    "crates/filemeta/src/filemeta/codec.rs": "ef82b3390b0a377e423f99fb384c6a8a96beaf5722b0c907852cc0c904c4f04d"},
+    "crates/filemeta/src/filemeta/codec.rs": "ef82b3390b0a377e423f99fb384c6a8a96beaf5722b0c907852cc0c904c4f04d",
+    "crates/iam/src/manager.rs": "c58d60946204973f8c5cfc81f08130614abb51102f31de0494ba4e22b88aa97c"},
     "physicalRecord": ".rustfs.sys/buckets/<owned-bucket>/.metadata.bin/xl.meta",
     "representation": "system object XL2 envelope, not a raw JSON or raw inner bucket-msgpack file",
     "unknownNegative": "outer XL2 major 1 -> 2; all other bytes retained; decoder rejects before checksum",
     "repairSourcesAllowed": ["candidate startup/config read", "explicit bucket Heal"],
-    "credentialBoundary": "fresh owned service; IAM subtree must remain absent; never enumerated"}
+    "credentialBoundary": "fresh owned root-only service; exact non-sensitive IAM format read-only; sensitive subtrees absent and never traversed"}
 GETTERS = ("get_bucket_versioning", "get_bucket_policy", "get_bucket_tagging", "get_object_lock_configuration")
 
 
@@ -100,8 +101,10 @@ def system_files(value):
     result = {(node, row["disk"], row["path"]): {name: row[name] for name in ("size", "sha256")}
               for node, sample in value.items() for row in sample["files"]}
     require(len(result) == sum(len(sample["files"]) for sample in value.values()), "duplicate system file identity")
-    require(all(sample["credentialsRead"] is False and all(row["present"] is False and row["traversed"] is False
-        for row in sample["iamNamespace"]) for sample in value.values()), "credential boundary changed")
+    require(all(sample["credentialsRead"] is False and bool(sample["iamNamespace"])
+        and all(row["traversed"] is False and row["formatOnlyRead"] is True
+                and row["sensitiveSubtrees"] == dict.fromkeys(IAM_SENSITIVE_SUBTREES, False)
+                for row in sample["iamNamespace"]) for sample in value.values()), "credential boundary changed")
     return result
 
 

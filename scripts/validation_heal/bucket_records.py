@@ -6,6 +6,10 @@ import re
 import uuid
 
 
+IAM_SENSITIVE_SUBTREES = ("users", "service-accounts", "sts", "groups", "policies", "policydb")
+IAM_FORMAT_KEY = "config/iam/format.json"
+
+
 def require(value, message):
     if not value:
         raise ValueError(message)
@@ -116,69 +120,79 @@ def snapshot(roots, owner, request, checked, digest, tool, command):
     buckets = request["buckets"]
     require(isinstance(buckets, list) and len(buckets) == 2 and len(set(buckets)) == 2
             and owner["bucketPrefix"] in buckets, "exact primary/control bucket pair required")
+    for bucket in buckets:
+        bucket_path(bucket, owner["bucketPrefix"])
     entries, iam = [], []
     for disk, root in enumerate(roots):
         data = root / "data"
-        # Root credentials live in the owned service environment. An IAM
-        # subtree is a precondition failure: never enumerate credential files.
+        # Startup writes the non-sensitive IAM format object even for a fresh
+        # root-only service. Check sensitive subtrees by exact path only; never
+        # enumerate the IAM namespace or read any credential/config payload.
         iam_root = checked(data / ".rustfs.sys/config/iam", data)
-        iam.append({"disk": disk, "present": iam_root.exists(), "traversed": False})
-        require(not iam_root.exists(), "D11 requires the fresh owned namespace without persisted IAM records")
-        for bucket in buckets:
-            for record_name in (".metadata.bin", ".bucket-incarnation"):
-                base = bucket_path(bucket, owner["bucketPrefix"]).rsplit("/", 1)[0] + "/" + record_name
-                folder = checked(data / base, data)
-                if not folder.exists():
-                    continue
-                for directory, children, names in os.walk(folder, followlinks=False):
-                    for name in (*children, *names):
-                        checked(type(folder)(directory) / name, data)
-                    for name in sorted(names):
-                        path = type(folder)(directory) / name
-                        relative = path.relative_to(folder).as_posix()
-                        segments = relative.split("/")
-                        valid = relative == "xl.meta" or len(segments) == 2 and bool(re.fullmatch(
-                            r"part\.[1-9][0-9]*(?:\.integrity\.[a-z0-9-]+)?", segments[1]))
-                        if len(segments) == 2:
-                            require(str(uuid.UUID(segments[0])) == segments[0], "noncanonical bucket-config dataDir")
-                        require(valid and len(entries) < 128 and path.stat().st_size <= 4 * 1024**2,
-                                "bucket-config record exceeds the exact file/byte allowlist")
-                        entry = {"disk": disk, "bucket": bucket, "path": str(path.relative_to(data)),
-                            "size": path.stat().st_size, "sha256": digest(path)}
-                        if relative == "xl.meta":
-                            decoded = command(str(tool), str(path), ".rustfs.sys", f"buckets/{bucket}/{record_name}", check=False)
-                            if decoded.returncode == 0:
-                                entry["metadata"] = json.loads(decoded.stdout)
-                                versions = entry["metadata"].get("versions", [])
-                                require(len(versions) == 1 and not versions[0].get("deleted"),
-                                        "system streaming proof requires one live record")
-                                version = versions[0]
-                                version_id = version.get("versionId") or "null"
-                                args = [str(tool), "--verify-inline", str(path), ".rustfs.sys",
-                                        f"buckets/{bucket}/{record_name}", version_id]
-                                if version.get("inline") is not None:
-                                    entry["streaming"] = [json.loads(command(*args).stdout)]
-                                else:
-                                    data_dir = version.get("dataDir")
-                                    require(isinstance(data_dir, str) and str(uuid.UUID(data_dir)) == data_dir,
-                                            "system record lacks a canonical external dataDir")
-                                    proofs = []
-                                    for part in version["parts"]:
-                                        number = part["number"]
-                                        require(type(number) is int and 0 < number <= 8, "unbounded system record part")
-                                        part_path = checked(folder / data_dir / f"part.{number}", data)
-                                        proofs.append(json.loads(command(str(tool), "--verify-part", str(path), ".rustfs.sys",
-                                            f"buckets/{bucket}/{record_name}", str(part_path), version_id, str(number)).stdout))
-                                    require(proofs, "system record has no streaming part proof")
-                                    entry["streaming"] = proofs
-                                require(all(proof.get("physicalBitrotVerified") is True and proof.get("bucket") == ".rustfs.sys"
-                                    and proof.get("key") == f"buckets/{bucket}/{record_name}" for proof in entry["streaming"]),
-                                    "system record streaming proof differs from its exact identity")
+        sensitive = {name: checked(iam_root / name, data).exists() for name in IAM_SENSITIVE_SUBTREES}
+        require(not any(sensitive.values()), "D11 requires no persisted sensitive IAM subtree")
+        iam.append({"disk": disk, "present": iam_root.exists(), "traversed": False,
+                    "sensitiveSubtrees": sensitive, "formatOnlyRead": True})
+        objects = [(bucket, f"buckets/{bucket}/{name}", "bucket-record") for bucket in buckets
+                   for name in (".metadata.bin", ".bucket-incarnation")]
+        objects.append((None, IAM_FORMAT_KEY, "iam-format"))
+        for bucket, key, record_class in objects:
+            base = ".rustfs.sys/" + key
+            folder = checked(data / base, data)
+            if not folder.exists():
+                continue
+            for directory, children, names in os.walk(folder, followlinks=False):
+                for name in (*children, *names):
+                    checked(type(folder)(directory) / name, data)
+                for name in sorted(names):
+                    path = type(folder)(directory) / name
+                    relative = path.relative_to(folder).as_posix()
+                    segments = relative.split("/")
+                    valid = relative == "xl.meta" or len(segments) == 2 and bool(re.fullmatch(
+                        r"part\.[1-9][0-9]*(?:\.integrity\.[a-z0-9-]+)?", segments[1]))
+                    if len(segments) == 2:
+                        require(str(uuid.UUID(segments[0])) == segments[0], "noncanonical bucket-config dataDir")
+                    require(valid and len(entries) < 128 and path.stat().st_size <= 4 * 1024**2,
+                            "bucket-config record exceeds the exact file/byte allowlist")
+                    entry = {"disk": disk, "bucket": bucket, "recordClass": record_class, "path": str(path.relative_to(data)),
+                        "size": path.stat().st_size, "sha256": digest(path)}
+                    if relative == "xl.meta":
+                        decoded = command(str(tool), str(path), ".rustfs.sys", key, check=False)
+                        if decoded.returncode == 0:
+                            entry["metadata"] = json.loads(decoded.stdout)
+                            require(entry["metadata"].get("bucket") == ".rustfs.sys"
+                                    and entry["metadata"].get("key") == key, "system decoder identity differs")
+                            versions = entry["metadata"].get("versions", [])
+                            require(len(versions) == 1 and not versions[0].get("deleted"),
+                                    "system streaming proof requires one live record")
+                            version = versions[0]
+                            version_id = version.get("versionId") or "null"
+                            args = [str(tool), "--verify-inline", str(path), ".rustfs.sys",
+                                    key, version_id]
+                            if version.get("inline") is not None:
+                                entry["streaming"] = [json.loads(command(*args).stdout)]
                             else:
-                                expected = request.get("metadataFaults", {}).get(f"{disk}:{entry['path']}")
-                                require(expected == {name: entry[name] for name in ("size", "sha256")},
-                                        "bucket record decoding failed outside its exact witnessed mutation")
-                                entry["decodeFailure"] = True
-                        entries.append(entry)
+                                data_dir = version.get("dataDir")
+                                require(isinstance(data_dir, str) and str(uuid.UUID(data_dir)) == data_dir,
+                                        "system record lacks a canonical external dataDir")
+                                proofs = []
+                                for part in version["parts"]:
+                                    number = part["number"]
+                                    require(type(number) is int and 0 < number <= 8, "unbounded system record part")
+                                    part_path = checked(folder / data_dir / f"part.{number}", data)
+                                    proofs.append(json.loads(command(str(tool), "--verify-part", str(path), ".rustfs.sys",
+                                        key, str(part_path), version_id, str(number)).stdout))
+                                require(proofs, "system record has no streaming part proof")
+                                entry["streaming"] = proofs
+                            require(all(proof.get("physicalBitrotVerified") is True and proof.get("bucket") == ".rustfs.sys"
+                                and proof.get("key") == key for proof in entry["streaming"]),
+                                "system record streaming proof differs from its exact identity")
+                        else:
+                            expected = request.get("metadataFaults", {}).get(f"{disk}:{entry['path']}")
+                            require(record_class == "bucket-record"
+                                    and expected == {name: entry[name] for name in ("size", "sha256")},
+                                    "bucket record decoding failed outside its exact witnessed mutation")
+                            entry["decodeFailure"] = True
+                    entries.append(entry)
     return {"files": entries, "iamNamespace": iam, "credentialsRead": False,
-            "scope": "two exact owned bucket metadata object directories; no system-directory traversal"}
+            "scope": "two exact owned bucket metadata object directories plus read-only IAM format; no IAM namespace walk"}

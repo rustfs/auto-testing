@@ -1,6 +1,9 @@
 import copy
+import hashlib
+import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -49,7 +52,7 @@ class BucketMetadataTests(unittest.TestCase):
     def test_faults_keep_originals_and_reject_unrecognized_post_fault_writes(self):
         for kind in ("missing", "truncate", "future-xl-schema"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
+                root = Path(temp).resolve()
                 path, owner, request = self.scene(root, kind)
                 with fault.directory(root) as fd:
                     receipt = backend.apply(fd, owner, fault, request)
@@ -72,7 +75,7 @@ class BucketMetadataTests(unittest.TestCase):
     def test_symlink_and_hardlink_record_targets_are_rejected_before_mutation(self):
         for kind in ("symlink", "hardlink"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
+                root = Path(temp).resolve()
                 path, owner, request = self.scene(root, "truncate")
                 other = root / "unrelated"
                 other.write_bytes(self.value)
@@ -99,21 +102,89 @@ class BucketMetadataTests(unittest.TestCase):
             executor.configuration({"acknowledged": True, "resultUnknown": False, "response": {"ResponseMetadata": {}}},
                                    "get_bucket_versioning")
 
-    def test_duplicate_files_or_persisted_iam_block_the_oracle(self):
+    def test_duplicate_files_or_sensitive_iam_block_the_oracle(self):
         row = {"disk": 0, "path": "exact-record", "size": 5, "sha256": "a" * 64}
         sample = {"node": {"credentialsRead": False, "files": [row],
-            "iamNamespace": [{"disk": 0, "present": False, "traversed": False}]}}
+            "iamNamespace": [{"disk": 0, "present": True, "traversed": False, "formatOnlyRead": True,
+                              "sensitiveSubtrees": dict.fromkeys(backend.IAM_SENSITIVE_SUBTREES, False)}]}}
         executor.system_files(sample)
         for kind in ("duplicate", "iam", "traversal"):
             broken = copy.deepcopy(sample)
             if kind == "duplicate":
                 broken["node"]["files"].append(row)
             elif kind == "iam":
-                broken["node"]["iamNamespace"][0]["present"] = True
+                broken["node"]["iamNamespace"][0]["sensitiveSubtrees"]["users"] = True
             else:
                 broken["node"]["iamNamespace"][0]["traversed"] = True
             with self.assertRaises(ValueError):
                 executor.system_files(broken)
+
+    def observe_format(self, root, *, corrupt=False):
+        path = root / "data/.rustfs.sys" / backend.IAM_FORMAT_KEY / "xl.meta"
+        calls, reads = [], []
+
+        def digest(file):
+            reads.append(file)
+            return hashlib.sha256(file.read_bytes()).hexdigest()
+
+        def command(*args, **kwargs):
+            calls.append(args)
+            if corrupt:
+                return SimpleNamespace(returncode=1, stdout="")
+            if args[1] == "--verify-inline":
+                value = {"physicalBitrotVerified": True, "bucket": ".rustfs.sys", "key": backend.IAM_FORMAT_KEY}
+            else:
+                value = {"bucket": ".rustfs.sys", "key": backend.IAM_FORMAT_KEY,
+                         "versions": [{"deleted": False, "versionId": "null", "inline": {"length": 42}}]}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(value))
+
+        result = backend.snapshot((root,), {"bucketPrefix": self.bucket},
+            {"buckets": [self.bucket, self.bucket + "-control"],
+             "metadataFaults": {"0:" + str(path.relative_to(root / "data")):
+                                {"size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}}},
+            node.checked, digest, Path('/inspector'), command)
+        return result, reads, calls
+
+    def test_startup_format_is_read_only_frozen_and_verified_without_payload_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            path = root / "data/.rustfs.sys" / backend.IAM_FORMAT_KEY / "xl.meta"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(self.value)
+            observed, reads, calls = self.observe_format(root)
+            self.assertEqual(reads, [path])
+            self.assertEqual([call[-1] for call in calls], [backend.IAM_FORMAT_KEY, "null"])
+            self.assertEqual(observed["files"][0]["recordClass"], "iam-format")
+            self.assertTrue(observed["iamNamespace"][0]["present"])
+            self.assertNotIn("same-run-config-envelope", json.dumps(observed))
+            before = executor.system_files({"node": observed})
+            path.write_bytes(self.value + b"changed")
+            after, _, _ = self.observe_format(root)
+            self.assertNotEqual(before, executor.system_files({"node": after}))
+            with self.assertRaises(ValueError):
+                backend.record_parts(str(path.relative_to(root / "data")), self.bucket, self.bucket)
+
+    def test_sensitive_subtree_presence_blocks_before_any_walk_or_file_read(self):
+        for subtree in backend.IAM_SENSITIVE_SUBTREES:
+            with self.subTest(subtree=subtree), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                folder = root / "data/.rustfs.sys/config/iam" / subtree
+                folder.mkdir(parents=True)
+                (folder / "never-read").write_bytes(b"sensitive")
+                with patch.object(backend.os, "walk", side_effect=AssertionError("IAM walk")), \
+                     self.assertRaisesRegex(ValueError, "sensitive IAM subtree"):
+                    backend.snapshot((root,), {"bucketPrefix": self.bucket},
+                        {"buckets": [self.bucket, self.bucket + "-control"]}, node.checked,
+                        lambda _: self.fail("credential read"), Path('/inspector'), lambda *_: self.fail("decode"))
+
+    def test_iam_format_decode_failure_cannot_use_bucket_fault_exception(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            path = root / "data/.rustfs.sys" / backend.IAM_FORMAT_KEY / "xl.meta"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(self.value)
+            with self.assertRaisesRegex(ValueError, "decoding failed"):
+                self.observe_format(root, corrupt=True)
 
     def test_remote_node_script_compiles_with_dedicated_backend(self):
         directory = Path(__file__).parent / "scripts/validation_heal"
@@ -136,7 +207,7 @@ class BucketMetadataTests(unittest.TestCase):
     @unittest.skipUnless(Path('/proc/self/fdinfo').is_dir(), 'Linux fd/mount guard required')
     def test_first_system_fault_creates_a_checked_mount_and_lease_marker(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             path, _, request = self.scene(root, "missing")
             owner = {"runId": "test-run", "bucket": self.bucket}
             with patch.object(node, "owned", return_value=(root, (root,), owner)), patch.object(node, "stopped"), \

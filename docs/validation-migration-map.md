@@ -991,8 +991,12 @@ D11 now dispatches all four source branches separately on H1/H2 (eight fresh
 instances). Its dedicated node backend derives only two owned bucket-config
 object paths and their incarnation controls. It never widens the general
 user-object fault allowlist, walks IAM records, or prints bucket-policy/inline
-payload bytes from physical metadata. A fresh namespace with no persisted IAM
-subtree is required before and after execution. Exact system object geometry
+payload bytes from physical metadata. The candidate startup persists a non-sensitive
+`config/iam/format.json` object even in a fresh root-only service. Its exact
+physical files and streaming proofs are read-only controls before and after
+execution; mutation never targets that object. The six exact sensitive IAM
+subtrees are checked for absence without traversal or payload reads. The reviewed
+IAM manager source hash is bound alongside the bucket/XL2 contracts. Exact system object geometry
 binds each shard index to the original disk UUID/set slot; current inline or
 external bytes require candidate-bound streaming verification.
 
@@ -1031,14 +1035,14 @@ four regression verdicts have their own archive and never increment a fleet or
 canonical-case PASS count. Existing tests assert captured lock events internally;
 the collector does not fabricate emitted barrier logs. Missing critical-point
 fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps.
-The current implementation has 239 focused Heal/catalog checks, including the
+The current implementation has 242 focused Heal/catalog checks, including the
 Linux-only D11 ownership/mount/recovery checks. Native compilation and execution
 still require the separate hosted job; local parser checks are not native PASS.
 
 
-J03 corrected-budget run `38089238767` passed every within-window,
-past-retention-gap, cross-node and terminal-truncation branch on both H1 and
-H2. It retained complete DX responsibility, real running-status windows,
+J03 corrected-budget run `38089238767` passed every applicable within-window,
+past-retention-gap and terminal-truncation branch on H1/H2. The cross-node
+branch is explicitly NOT_APPLICABLE on single-node H1 and passed on H2. It retained complete DX responsibility, real running-status windows,
 physical/streaming integrity, all-peer S3 evidence, cleanup PASS and the
 independent canonical selected-case gate. This increases complete live PASS
 to 45/158; branch-only successes and native regressions remain outside that
