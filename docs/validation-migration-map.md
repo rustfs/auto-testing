@@ -1018,3 +1018,19 @@ run `38088777413` also retained FAIL/cleanup PASS in both H2 DB/DV branches:
 replacement source status was partial, unknown or incompatible. The bounded
 file census no longer prevented either run; these product/evidence failures
 are not converted into successful restart coverage.
+
+
+The optional native-regression tools job builds the unmodified candidate's
+optimized ecstore test executable on hosted Linux, retains Cargo/lock/toolchain
+identities, enumerates actual full test names, and runs each selected name with
+`--exact` in a fresh process and a fixed 120-second deadline. It currently
+collects two real read-repair/namespace barrier regressions and two uncontrolled
+overwrite/delete concurrency regressions. Zero-test filters, ignored tests,
+foreign source/collector identities and other-name success are rejected. The
+four regression verdicts have their own archive and never increment a fleet or
+canonical-case PASS count. Existing tests assert captured lock events internally;
+the collector does not fabricate emitted barrier logs. Missing critical-point
+fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps.
+The current implementation has 239 focused Heal/catalog checks, including the
+Linux-only D11 ownership/mount/recovery checks. Native compilation and execution
+still require the separate hosted job; local parser checks are not native PASS.
