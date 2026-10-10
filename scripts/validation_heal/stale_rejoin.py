@@ -7,6 +7,7 @@ try:
     from .heal_probe import Probe, canonical, payload, require
     from .heal_workload import verify_seed
     from .healthy import physical_content
+    from .fleet_node import PROCESS_FIELDS
     from .shards import files, map_target, run_task, verify_cohort
     from .markers import add_marker, verify_markers
     from .scanner_repair import JournalWindow
@@ -14,6 +15,7 @@ except ImportError:
     from heal_probe import Probe, canonical, payload, require
     from heal_workload import verify_seed
     from healthy import physical_content
+    from fleet_node import PROCESS_FIELDS
     from shards import files, map_target, run_task, verify_cohort
     from markers import add_marker, verify_markers
     from scanner_repair import JournalWindow
@@ -210,12 +212,22 @@ def run_branch(recorder, fleet, bucket, branch, expected, active, admissions, co
     fleet.record("stale-transition-contract", {"branch": branch, **ack})
     baseline = fleet.record("stale-online-ack-inventory", recorder.probe.inventory(bucket, unversioned_current_tags=branch == "unversioned-overwrite"))
     fleet.record("stale-online-ack-proof", {"expected": manifest, **verify_seed(manifest, baseline)})
-    fleet.stop()
-    authority = fleet.snapshot("stale-online-authorities", quiescent=True)
+    # Restarting the fleet here can perform startup reconciliation before the
+    # manual token. ACKs have settled; freeze two unchanged live observations,
+    # then release only the exact permission gate in the original process.
+    authority = fleet.snapshot("stale-online-authorities")
+    require(physical_content(authority) == physical_content(fleet.snapshot("stale-online-authorities-stable")),
+            "NOT_OBSERVED: offline ACK authority is not physically stable before live rejoin")
     witness = fleet.record("stale-generation-authority-proof", authority_witness(before, authority, bucket, key, manifest, target))
-    fleet.record("stale-original-member-rejoin", fleet.remote(node, "drive-gate", mode="clear"))
+    processes = {peer: fleet.remote(peer, "process") for peer in fleet.nodes}
+    release = fleet.record("stale-original-member-rejoin", fleet.remote(node, "drive-gate-release-live"))
+    require(release.get("sameOriginalProcess") is True and release.get("serviceRestarted") is False,
+            "stale member rejoin restarted or replaced the original process")
     fleet.drive_gates.remove(node)
-    fleet.start()
+    rejoined = {peer: fleet.remote(peer, "process") for peer in fleet.nodes}
+    require(all(all(processes[peer].get(name) == rejoined[peer].get(name) for name in PROCESS_FIELDS) for peer in fleet.nodes),
+            "stale live rejoin changed an original peer process/unit/candidate/environment")
+    fleet.record("stale-live-rejoin-process-proof", {"before": processes, "after": rejoined, "allOriginalProcessesPreserved": True})
     require(physical_content(authority) == physical_content(fleet.snapshot("stale-before-manual")),
             "ATTRIBUTION_NOT_OBSERVED: stale namespace changed before its manual token")
     status = run_task(recorder.probe, fleet, {"bucket": bucket, "key": key}, 2, active,

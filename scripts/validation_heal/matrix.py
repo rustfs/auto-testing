@@ -25,7 +25,7 @@ AUTOMATIC_CASES = {"heal.admin-healthy-noop", "heal.admin-invalid-request", "hea
                    "heal.data-shard-bitrot", "heal.parity-shard-bitrot", "heal.truncated-and-zeroed-shard",
                    "heal.completed-multipart-object", "heal.range-head-and-conditions", "heal.manual-normal-attribution", "heal.manual-deep-attribution",
                    "heal.historical-versions", "heal.repeat-idempotency", "heal.versioning-suspended-null", "heal.below-read-quorum",
-                   "heal.missing-or-corrupt-xlmeta", "heal.object-metadata-and-tags", "heal.multiple-shard-loss", "heal.special-keys-and-pagination", "heal.object-size-boundaries", "heal.admin-authorization", "heal.node-outage-rejoin", "heal.object-lock-retention", "heal.metadata-payload-mismatch", "heal.read-repair-attribution", "heal.disk-readonly-and-permission", "heal.scanner-cold-object-repair", "heal.delete-marker-semantics", "heal.status-partial-disabled-unknown", "heal.incremental-cursor-and-truncation", "heal.admin-stop-and-stale-token", "heal.cancelled-task-restart", "heal.admin-overlap-and-force-start", "heal.root-graceful-coordinator-restart", "heal.read-quorum-boundary", "heal.stale-version-rejoin", "heal.disk-loss-and-repair"}
+                   "heal.missing-or-corrupt-xlmeta", "heal.object-metadata-and-tags", "heal.multiple-shard-loss", "heal.special-keys-and-pagination", "heal.object-size-boundaries", "heal.admin-authorization", "heal.node-outage-rejoin", "heal.object-lock-retention", "heal.metadata-payload-mismatch", "heal.read-repair-attribution", "heal.disk-readonly-and-permission", "heal.scanner-cold-object-repair", "heal.delete-marker-semantics", "heal.status-partial-disabled-unknown", "heal.incremental-cursor-and-truncation", "heal.admin-stop-and-stale-token", "heal.cancelled-task-restart", "heal.admin-overlap-and-force-start", "heal.root-graceful-coordinator-restart", "heal.read-quorum-boundary", "heal.stale-version-rejoin", "heal.disk-loss-and-repair", "heal.disk-replacement-formatted"}
 
 
 def require(condition: bool, message: str) -> None:
@@ -237,7 +237,8 @@ def main() -> int:
         result = {"baseCases": len(inventory), "operatorBranches": sum(len(item["variants"]) for item in inventory),
                   "topologyBranchTemplates": len(full["instances"]), "automaticCaseCount": len(AUTOMATIC_CASES), "livePassClaimed": False}
         if args.command == "list":
-            result["cases"] = [{"code": item["code"], "id": item["id"], "variants": item["variants"]} for item in inventory]
+            result["cases"] = [{"code": item["code"], "id": item["id"], "variants": item["variants"],
+                                "automaticExecutor": item["id"] in AUTOMATIC_CASES} for item in inventory]
         print(json.dumps(result, ensure_ascii=False))
     elif args.command == "show":
         print(json.dumps(select(args.selection), ensure_ascii=False, indent=2))

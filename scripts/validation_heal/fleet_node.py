@@ -217,7 +217,8 @@ def start(request):
             *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") == "root-restart" else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
-            *gate_module().start_properties(gate_module().checked_gate(state, roots)), str(state / "rustfs"), *owner["volumes"])
+            *gate_module().start_properties(gate_module().checked_gate(state, roots)),
+            *replacement_module().start_properties(state, roots), str(state / "rustfs"), *owner["volumes"])
     return {"unit": owner["unit"], "started": True}
 
 
@@ -337,6 +338,43 @@ def gate_module():
     return drive_gate
 
 
+def replacement_module():
+    if "replacement" in globals(): return globals()["replacement"]
+    from . import replace_drive
+    return replace_drive
+
+
+def replace_drive(request):
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    require(gate_module().checked_gate(state, roots) is None, "replacement cannot share an active drive gate")
+    return replacement_module().begin(state, roots, request.get("disk"), request.get("expectedFormatSha256"))
+
+
+def replacement_state(request):
+    state, roots, owner = owned(request["runId"])
+    require(digest(state / "rustfs") == owner["binarySha256"], "replacement candidate changed")
+    evidence = replacement_module().attest(state, roots)
+    formats = []
+    for disk, root in enumerate(roots):
+        path = checked(root / "data/.rustfs.sys/format.json", root)
+        if path.exists():
+            require(path.stat().st_size < 65536, "replacement format exceeds its bound")
+            formats.append({"disk": disk, "present": True, "sha256": digest(path), "value": json.loads(path.read_text())})
+        else: formats.append({"disk": disk, "present": False})
+    return {**evidence, "formats": formats, "binarySha256": owner["binarySha256"], "readOnly": True}
+
+
+def replacement_probe(request):
+    state, roots, _ = owned(request["runId"])
+    before = process(request)
+    result = replacement_module().probe(state, roots, before["pid"])
+    after = process(request)
+    require(all(before.get(name) == after.get(name) for name in PROCESS_FIELDS),
+            "replacement backup probe crossed a service process change")
+    return {**result, "sameOriginalServiceProcess": True}
+
+
 def drive_gate(request):
     state, roots, owner = owned(request["runId"])
     stopped(owner)
@@ -366,6 +404,21 @@ def drive_gate_activate(request):
 def drive_gate_state(request):
     state, roots, _ = owned(request["runId"])
     return gate_module().checked_gate(state, roots) or {"state": "CLEAR"}
+
+
+def drive_gate_release_live(request):
+    state, roots, _ = owned(request["runId"])
+    gate = gate_module().checked_gate(state, roots)
+    require(gate and gate.get("mode") == "permission-denied" and gate.get("phase") == "active",
+            "live rejoin only releases an actual active permission fault")
+    before = process(request)
+    require(before["pid"] > 1, "live rejoin requires the original running candidate")
+    receipt = gate_module().release_gate(state, roots)
+    after = process(request)
+    require(all(before.get(name) == after.get(name) for name in PROCESS_FIELDS),
+            "live rejoin crossed the original process identity")
+    return {**receipt, "processBefore": before, "processAfter": after,
+            "sameOriginalProcess": True, "serviceRestarted": False}
 
 
 def fault_root(request):
@@ -560,6 +613,7 @@ def cleanup(request):
     pid = command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"], check=False).stdout.strip()
     require(pid in {"", "0"}, "run-owned service remains active")
     gate_module().release_gate(state, roots)
+    replacement_module().attest(state, roots)
     command("systemctl", "reset-failed", owner["unit"], check=False)
     for root in (*roots, state):
         for directory, children, names in os.walk(root, followlinks=False):
@@ -638,8 +692,10 @@ def main(request):
                "logs": logs, "cleanup": cleanup, "audit-finalize": audit_finalize, "install-inspector": install_inspector,
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part, "verify-parts": verify_parts,
                "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe,
-               "drive-gate-activate": drive_gate_activate, "gate-state": drive_gate_state}
+               "drive-gate-activate": drive_gate_activate, "gate-state": drive_gate_state,
+               "drive-gate-release-live": drive_gate_release_live}
     actions["task-records"] = task_records
+    actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"process": process, "process-signal": process_signal, "process-graceful": process_graceful})
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

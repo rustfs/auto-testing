@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 112 currently dispatchable IDs include all 74 non-Heal cases and thirty-eight Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
+case evidence. The 113 currently dispatchable IDs include all 74 non-Heal cases and thirty-nine Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 46 Heal cases remain
+The other 45 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -650,7 +650,7 @@ A08 `heal.admin-authorization` passed live in RustFS Actions run
 `38069648003`, harness `0789743d439fd91b967c2d6fba85c06e29f844c5`. All five
 source branches passed independently on H1 and H2; the canonical gate,
 complete summary, cleanup and workflow all passed with the fixed candidate.
-The prior A08 failures remain recorded. Forty-six Heal executors remain
+The prior A08 failures remain recorded. Forty-five Heal executors remain
 to be migrated; automatic dispatch and local tests do not claim live PASS.
 
 
@@ -716,3 +716,43 @@ retaining exact version/marker/currentness/length/digest comparisons. A
 regression check exercises nonce-bearing ACKs against real public inventory
 shape, including wrong content and version negatives. Fresh live evidence
 is required for both corrected collectors.
+
+
+B03 `heal.disk-replacement-formatted` now dispatches both source branches on
+H1/H2, with full DB and historical/marker DV fixtures. A stopped, owned adapter
+moves exactly one complete private data root into same-mount quarantine and
+creates a genuinely empty new root. Before/after whole-tree digest and original
+inode/device preserve every old file, including system records; no shared
+mount is detached. The actual service uses a private namespace with quarantine
+masked and both DAC bypass capabilities removed. Same-process EACCES proves
+that the original cannot supply rebuild bytes. The candidate must initialize
+a distinct new disk UUID in the same original pool/set slot without replacing
+another member or changing geometry. Every original target version, marker,
+inline value and external part must rebuild through one exact deep task, with
+truthful complete receipts/counters, original same-role hashes, protected
+streaming checks and full all-peer S3 manifests. Missing/unchanged UUID or early
+automatic repair cannot satisfy this manual case. Partial rename/mkdir intent
+remains recoverable; archive drift retains the namespace. Live proof is pending.
+
+B01 run `38081858808` retained FAIL and cleanup PASS. Both H1/H2 had real
+same-service read/write EACCES, but the exact Admin disk never became explicitly
+offline within the registered 90-second observation window. Degraded ACKs were
+therefore not started. The missing double witness remains NOT_OBSERVED in the
+failure evidence; ready, cached online state and an inaccessible directory do
+not substitute for the required Admin offline proof.
+
+
+B06 corrected run `38082447868` retained FAIL and cleanup PASS. Both exact-R
+GET and independent manual branches now pass on H1/H2; all three H2 branches
+pass. H1's R-1 GET still returns 500/InternalError rather than the frozen
+503/SlowDownRead, so no complete canonical PASS is claimed.
+
+C06 corrected run `38082227039` retained FAIL and cleanup PASS after proving
+ACK authorities: full fleet restart allowed physical changes before the manual
+token and the attribution check stopped execution. Rejoin now restores only
+the exact active permission gate in the same live process. Two identical live
+physical observations freeze the settled ACK authority; every peer's actual
+process birth/unit/candidate/environment must remain unchanged, and the fault
+must still exist immediately before the independent manual token. Startup
+reconciliation cannot contribute to the manual proof. Fresh live evidence is
+pending; the original attribution failures remain unchanged.

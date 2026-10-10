@@ -2,7 +2,7 @@
 
 此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 301 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
 
-公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 支持 A01、A03、A04、A07、C01–C04、D02、D07、E01、E02，使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
+公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 39 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
 
 ## 1. 使用入口与交付物
 

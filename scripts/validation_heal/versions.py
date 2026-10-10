@@ -34,6 +34,7 @@ try:
                           marker_plan, prepare_stale, verify_markers, reveal_current)
     from .stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
     from .disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch
+    from .replacement import BRANCHES as REPLACEMENT_BRANCHES, run_branch as replacement_branch
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -53,6 +54,7 @@ except ImportError:
                          marker_plan, prepare_stale, verify_markers, reveal_current)
     from stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
     from disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch
+    from replacement import BRANCHES as REPLACEMENT_BRANCHES, run_branch as replacement_branch
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -76,6 +78,7 @@ BRANCHES = {
     "heal.delete-marker-semantics": MARKER_BRANCHES,
     "heal.stale-version-rejoin": STALE_BRANCHES,
     "heal.disk-loss-and-repair": DISK_LOSS_BRANCHES,
+    "heal.disk-replacement-formatted": REPLACEMENT_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -738,6 +741,8 @@ def run_topology(args, topology, nodes, fixture):
                 and (args.case_id != "heal.missing-or-corrupt-xlmeta" or (branch == "versioned-xlmeta") == (fixture == "DV"))]
     if args.case_id == "heal.stale-version-rejoin":
         branches = [branch for branch in STALE_BRANCHES if (branch == "unversioned-overwrite") == (fixture == "DB")]
+    if args.case_id == "heal.disk-replacement-formatted":
+        branches = [branch for branch in REPLACEMENT_BRANCHES if (branch == "new-disk-data") == (fixture == "DB")]
     result = {"topology": topology, "fixture": fixture, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, admissions = [], []
     probe = Probe(binding)
@@ -822,6 +827,11 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
                         key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-before-" + branch))
                 fleet.stop()
+                if args.case_id == "heal.disk-replacement-formatted":
+                    stale_marker_started = True
+                    result["branches"][branch] = replacement_branch(recorder, fleet, bucket, branch, expected, baseline, active, admissions)
+                    stale_marker_started = False
+                    continue
                 if args.case_id == "heal.disk-loss-and-repair":
                     stale_marker_started = True  # ACKs may create a new authority; never restore an older fixture.
                     expected, baseline, proof = disk_loss_branch(recorder, fleet, bucket, branch, expected, active, admissions, contract)
@@ -1012,6 +1022,10 @@ def run_topology(args, topology, nodes, fixture):
                 result["branches"][branch] = {"verdict": "FAIL", "failure": {"type": type(exc).__name__, "message": str(exc)}}
                 try:
                     fleet.stop()
+                    if args.case_id == "heal.disk-replacement-formatted":
+                        for node in fleet.nodes:
+                            fleet.record("replacement-failure-format-and-original", {"node": node,
+                                **fleet.remote(node, "replacement-state")})
                     if gate_node is not None:
                         fleet.record("gate-error-rescue", fleet.remote(gate_node, "drive-gate", mode="clear"))
                         fleet.drive_gates.remove(gate_node)
@@ -1064,7 +1078,7 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes), "four current Heal nodes required")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
-    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss", "heal.read-repair-attribution", "heal.stale-version-rejoin"} else ("DV",)
+    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss", "heal.read-repair-attribution", "heal.stale-version-rejoin", "heal.disk-replacement-formatted"} else ("DV",)
     if args.case_id == "heal.object-metadata-and-tags":
         fixtures = ("DS",)
     if args.case_id == "heal.special-keys-and-pagination":

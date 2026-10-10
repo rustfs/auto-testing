@@ -55,6 +55,7 @@ from scripts.validation_heal import root_restart, fleet_node
 from scripts.validation_heal import quorum_boundary
 from scripts.validation_heal import stale_rejoin
 from scripts.validation_heal import disk_loss
+from scripts.validation_heal import replace_drive, replacement
 import errno
 import stat
 
@@ -2859,6 +2860,164 @@ class HealDiskLossTest(unittest.TestCase):
         self.assertEqual(len(expected), 7)
         with self.assertRaisesRegex(ValueError, "already has"):
             disk_loss.offline_ack(recorder, fleet, bucket, disk_loss.BRANCHES[0], expected)
+
+
+class HealWholeDriveReplacementTest(unittest.TestCase):
+    def test_live_permission_rejoin_restores_same_inode_and_requires_same_process(self):
+        for changed_process in (False, True):
+            with self.subTest(changed_process=changed_process), tempfile.TemporaryDirectory() as folder:
+                state, root = self.fixture(folder)
+                identity = HealRootRestartOracleTest().process()
+                after = {**identity, "startTicks": identity["startTicks"] + int(changed_process)}
+                with self.root_owned():
+                    apply_gate(state, (root,), 0, "permission-denied")
+                    activate_gate(state, (root,))
+                    original_inode = (root / "data").stat().st_ino
+                    with patch.object(fleet_node, "owned", return_value=(state, (root,), {})), \
+                         patch.object(fleet_node, "process", side_effect=[identity, after]), \
+                         patch.object(fleet_node, "stopped") as stopped_service:
+                        if changed_process:
+                            with self.assertRaisesRegex(ValueError, "process identity"):
+                                fleet_node.drive_gate_release_live({"runId": "owned-run"})
+                        else:
+                            proof = fleet_node.drive_gate_release_live({"runId": "owned-run"})
+                            self.assertTrue(proof["sameOriginalProcess"])
+                            self.assertFalse(proof["serviceRestarted"])
+                    stopped_service.assert_not_called()
+                    self.assertEqual((root / "data").stat().st_ino, original_inode)
+                    self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0o700)
+                    self.assertIsNone(checked_gate(state, (root,)))
+
+    def test_live_rejoin_rejects_unactivated_gate_without_mutating_root(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state, root = self.fixture(folder)
+            with self.root_owned():
+                apply_gate(state, (root,), 0, "permission-denied")
+                with patch.object(fleet_node, "owned", return_value=(state, (root,), {})), \
+                     patch.object(fleet_node, "process") as process, self.assertRaisesRegex(ValueError, "active permission"):
+                    fleet_node.drive_gate_release_live({"runId": "owned-run"})
+                process.assert_not_called()
+                self.assertEqual(checked_gate(state, (root,))["phase"], "armed")
+                self.assertEqual(stat.S_IMODE((root / "data").stat().st_mode), 0o700)
+
+    def replaced_scene(self):
+        before = HealShardOracleTest().snapshot()
+        member = "node1", 3
+        after = copy.deepcopy(before)
+        for entry in after["node1"]["formats"]:
+            entry["value"]["xl"]["sets"][0][3] = "new-member"
+            if entry["disk"] == 3: entry["value"]["xl"]["this"] = "new-member"
+        return before, after, member
+
+    def test_new_disk_requires_same_pool_set_slot_and_distinct_uuid(self):
+        before, after, member = self.replaced_scene()
+        self.assertEqual(replacement.format_identity(before, after, member)["newDiskUUID"], "new-member")
+        for kind in ("same-uuid", "new-cluster", "wrong-slot", "changed-survivor"):
+            changed = copy.deepcopy(after)
+            if kind == "same-uuid": changed = copy.deepcopy(before)
+            elif kind == "new-cluster":
+                for entry in changed["node1"]["formats"]: entry["value"]["id"] = "another-cluster"
+            elif kind == "wrong-slot": changed["node1"]["formats"][3]["value"]["xl"]["this"] = "0"
+            else: changed["node1"]["formats"][0]["value"]["version"] = "future"
+            with self.subTest(kind=kind), self.assertRaises(ValueError): replacement.format_identity(before, changed, member)
+
+    def test_rebuild_requires_all_same_role_original_parts_and_unchanged_survivors(self):
+        before, after, member = self.replaced_scene()
+        self.assertFalse(replacement.physical_rebuild(before, after, member)["backupRestorationUsed"])
+        for kind in ("missing-target", "bad-target", "donor", "version", "orphan"):
+            changed = copy.deepcopy(after)
+            target = next(entry for entry in changed["node1"]["files"] if entry["disk"] == member[1]
+                          and entry["path"].endswith("part.1"))
+            if kind == "missing-target": changed["node1"]["files"].remove(target)
+            elif kind == "bad-target": target["sha256"] = "wrong-shard"
+            elif kind == "donor": changed["node1"]["files"][0]["sha256"] = "changed-donor"
+            elif kind == "version":
+                next(entry for entry in changed["node1"]["files"] if entry["disk"] == member[1]
+                     and entry.get("metadata"))["metadata"]["versions"][0]["versionId"] = "foreign-version"
+            else: changed["node1"]["files"].append({"disk": member[1], "path": "run/key/orphan", "size": 82, "sha256": "orphan"})
+            with self.subTest(kind=kind), self.assertRaises(ValueError): replacement.physical_rebuild(before, changed, member)
+
+    def fixture(self, folder):
+        state, root = Path(folder) / "state", Path(folder) / "root"
+        state.mkdir(mode=0o700)
+        (root / "data/.rustfs.sys").mkdir(parents=True, mode=0o700)
+        (root / "data").chmod(0o700)
+        (root / "quarantine").mkdir(mode=0o700)
+        (root / "data/.rustfs.sys/format.json").write_bytes(b'{"original":"format"}')
+        (root / "data/ack-part").write_bytes(b"original-ack-shard")
+        return state, root
+
+    def root_owned(self):
+        original = Path.lstat
+        def observed(path):
+            value = original(path)
+            return types.SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_nlink=value.st_nlink,
+                st_size=value.st_size, st_dev=value.st_dev, st_ino=value.st_ino)
+        return patch.object(Path, "lstat", observed)
+
+    def test_replacement_keeps_whole_original_and_rejects_drift_or_second_begin(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state, root = self.fixture(folder)
+            with self.root_owned():
+                before = replace_drive.tree_identity(root / "data")
+                proof = replace_drive.begin(state, (root,), 0, replace_drive.digest(root / "data/.rustfs.sys/format.json"))
+                self.assertTrue(proof["newDataRootEmpty"])
+                self.assertEqual(replace_drive.tree_identity(root / "quarantine/old-disk"), before)
+                self.assertEqual((root / "quarantine/old-disk/ack-part").read_bytes(), b"original-ack-shard")
+                self.assertTrue(replace_drive.attest(state, (root,))["originalArchiveUnchanged"])
+                self.assertIn("--property=InaccessiblePaths=" + str(root / "quarantine"), replace_drive.start_properties(state, (root,)))
+                with self.assertRaises(ValueError): replace_drive.begin(state, (root,), 0, proof["originalFormatSha256"])
+                (root / "quarantine/old-disk/ack-part").write_bytes(b"changed-old-backup")
+                with self.assertRaisesRegex(ValueError, "drifted"): replace_drive.attest(state, (root,))
+
+    def test_partial_begin_retains_recovery_intent_and_never_copies_original_back(self):
+        for boundary in ("rename", "mkdir"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as folder:
+                state, root = self.fixture(folder)
+                with self.root_owned():
+                    digest = replace_drive.digest(root / "data/.rustfs.sys/format.json")
+                    if boundary == "rename": failure = patch.object(replace_drive.os, "rename", side_effect=OSError("interrupted rename"))
+                    else: failure = patch.object(Path, "mkdir", side_effect=OSError("interrupted mkdir"))
+                    with failure, self.assertRaises(OSError): replace_drive.begin(state, (root,), 0, digest)
+                    proof = replace_drive.attest(state, (root,))
+                    self.assertTrue(proof["originalArchiveUnchanged"])
+                    self.assertEqual(proof["originalStillAtDataRoot"], boundary == "rename")
+                    original = root / ("data" if boundary == "rename" else "quarantine/old-disk")
+                    self.assertEqual((original / "ack-part").read_bytes(), b"original-ack-shard")
+
+    def test_archive_rejects_links_and_wrong_format_before_mutation(self):
+        for kind in ("symlink", "hardlink", "format"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as folder:
+                state, root = self.fixture(folder)
+                if kind == "symlink": (root / "data/link").symlink_to(root / "data/ack-part")
+                elif kind == "hardlink": __import__("os").link(root / "data/ack-part", root / "data/another")
+                with self.root_owned(), self.assertRaises(ValueError): replace_drive.begin(state, (root,), 0, "0" * 64)
+                self.assertFalse((state / "disk-replacement.json").exists())
+                self.assertFalse((root / "quarantine/old-disk").exists())
+                self.assertEqual((root / "data/ack-part").read_bytes(), b"original-ack-shard")
+
+    def test_remote_replacement_module_initializes_and_all_source_branches_remain(self):
+        import sys
+        self.assertEqual(list(replacement.BRANCHES), select("B03")[0]["variants"])
+        prior = sys.modules.get("drive_gate")
+        observed = []
+        def invoke(args, **kwargs):
+            source = kwargs["input"].rsplit("\nmain(", 1)[0]
+            scope = {"__name__": "private-node-script"}
+            exec(source, scope)
+            self.assertEqual(scope["replacement_module"]().DENY_DAC_CAPS, (1 << 1) | (1 << 2))
+            self.assertTrue(callable(scope["replacement_module"]().begin))
+            observed.append(source)
+            return types.SimpleNamespace(returncode=0, stdout='{"compiled":true}', stderr="")
+        try:
+            with tempfile.TemporaryDirectory() as folder, patch("scripts.validation_heal.healthy.subprocess.run", side_effect=invoke):
+                fleet = Fleet(["node1"], Path(folder), "gh-12345-1-h1")
+                for action in ("start", "cleanup", "replace-drive", "replacement-state", "replacement-probe"):
+                    self.assertTrue(fleet.remote("node1", action)["compiled"])
+        finally:
+            if prior is None: sys.modules.pop("drive_gate", None)
+            else: sys.modules["drive_gate"] = prior
+        self.assertEqual(len(observed), 5)
 
 
 if __name__ == "__main__":

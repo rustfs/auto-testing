@@ -170,9 +170,13 @@ class Fleet:
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
-        if action in {"start", "cleanup", "audit-finalize", "drive-gate", "drive-gate-probe", "drive-gate-activate", "gate-state"}:
+        replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe"}
+        if action in {"drive-gate", "drive-gate-probe", "drive-gate-activate", "gate-state", "drive-gate-release-live"} | replacement_actions:
             source += "\nimport types\ngate = types.ModuleType('drive_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("drive_gate.py").read_text()) + ", gate.__dict__)\n"
+        if action in replacement_actions:
+            source += "\nimport sys\nsys.modules['drive_gate'] = gate\nreplacement = types.ModuleType('replace_drive')\nexec(" + repr(
+                NODE_SOURCE.with_name("replace_drive.py").read_text()) + ", replacement.__dict__)\n"
         source += "\nmain(" + repr(value) + ")\n"
         timeout = 600 if self.resource_profile == "cursor" and action == "snapshot" else 180
         result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
