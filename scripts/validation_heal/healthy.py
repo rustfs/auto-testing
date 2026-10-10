@@ -175,6 +175,8 @@ class Fleet:
     def deploy(self, binary_sha, bucket, access, secret):
         checked = {node: self.remote(node, "preflight") for node in self.nodes}
         self.record("preflight", checked)
+        require(len({value["hostname"] for value in checked.values()}) == len(self.nodes),
+                "Heal node aliases must resolve to distinct actual hosts")
         paths = checked[self.nodes[0]]["dataRoots"]
         volumes = paths if len(self.nodes) == 1 else [f"http://rustfs-node{index}:9000{path}"
                     for index in range(1, 5) for path in paths]

@@ -6,7 +6,7 @@
 
 入口为 `scripts/validation_heal/matrix.py`、[逐例操作卡](validation-heal-cases.md) 和 [执行手册](validation-heal-operations.md)。运行环境是当前 auto-testing 的 Heal 节点；候选及 rc 使用当前 validation lane 的不可变包和实际二进制摘要。源仓库历史 pilot 结果不能计入本次通过数量。
 
-9 个用例已接入自动分发：A01、A07、C01–C04、D02、E01、E02。分片执行器保留新增 7 项的全部 24 个源分支和 H1/H2 拓扑，使用实际盘角色、停止服务后的文件故障、原始同角色分片摘要与逐块 HighwayHash 校验。其余 75 项保留源 `operator-assisted` 方式。每项的实际执行状态见 [迁移映射](validation-migration-map.md)。方案、计划或完整文件归档均不能代替 live PASS。
+10 个用例已接入自动分发：A01、A03、A07、C01–C04、D02、E01、E02。分片执行器保留新增 7 项的全部 24 个源分支和 H1/H2 拓扑，使用实际盘角色、停止服务后的文件故障、原始同角色分片摘要与逐块 HighwayHash 校验。A03 的两个分支只执行 H2，比较协调者、独立 peer 和固定节点入口的任务身份、终态及完整 outcome。其余 74 项保留源 `operator-assisted` 方式。每项的实际执行状态见 [迁移映射](validation-migration-map.md)。方案、计划或完整文件归档均不能代替 live PASS。
 
 H07 的单 set 两个分支只属于 H3，双 set 两个分支只属于 H4；四个不匹配组合记为 `nonApplicableCombinations`。缺少机器属于资源阻塞。
 

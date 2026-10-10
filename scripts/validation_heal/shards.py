@@ -34,6 +34,9 @@ except ImportError:
 # Every branch uses a distinct object. Positions refer to physical bytes,
 # including the checksum header; multipart numbers come from decoded metadata.
 BRANCHES = {
+    "heal.admin-token-cross-node-status": [
+        ("coordinator-to-peer", "objects/0008.bin", "data", 1, "missing", None, 2),
+        ("coordinator-to-stable-endpoint", "objects/0017.bin", "data", 1, "missing", None, 2)],
     "heal.missing-part-file": [
         ("data-single-part", "objects/0008.bin", "data", 1, "missing", None, 2),
         ("parity-single-part", "objects/0017.bin", "parity", 1, "missing", None, 2),
@@ -78,7 +81,7 @@ def files(snapshot):
     return entries
 
 
-def map_target(snapshot, bucket, key, role, part_number, version_id="null"):
+def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None):
     validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2")
     indexed = files(snapshot)
     cohort, logical = [], None
@@ -129,7 +132,8 @@ def map_target(snapshot, bucket, key, role, part_number, version_id="null"):
             and len({entry["index"] for entry in cohort}) == len(cohort)
             and len({entry["sha256"] for entry in cohort}) == len(cohort),
             "independent full-set shard identity or nonrepeating content is missing")
-    target = next((entry for entry in cohort if entry["role"] == role), None)
+    target = next((entry for entry in cohort if entry["role"] == role
+                   and (preferred_nodes is None or entry["node"] in preferred_nodes)), None)
     require(target is not None, "requested shard role is not present")
     return {**target, "bucket": bucket, "key": key, "poolIndex": 0, "setIndex": 0,
             "cohort": cohort, "logical": logical}
@@ -217,7 +221,15 @@ def validate_repaired_status(status, target):
             "task finish or unknown receipt does not prove repair")
 
 
-def run_task(probe, fleet, target, mode, active):
+def peer_status_equal(coordinator, peer):
+    return (coordinator.get("summary") == "finished" and peer.get("summary") == "finished"
+            and coordinator.get("startTime") is not None and peer.get("startTime") == coordinator["startTime"]
+            and canonical(coordinator.get("outcome")) == canonical(peer.get("outcome"))
+            and coordinator.get("outcome", {}).get("coverage") == "complete"
+            and peer.get("truncated", False) is False)
+
+
+def run_task(probe, fleet, target, mode, active, *, status_endpoints=()):
     path = "/rustfs/admin/v3/heal/" + quote(target["bucket"], safe="") + "/" + quote(target["key"], safe="/")
     started = fleet.record("trigger", probe.admin(path, [], json.dumps({**BASE_OPTIONS, "scanMode": mode}).encode()))
     require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict), "repair admission failed")
@@ -239,6 +251,22 @@ def run_task(probe, fleet, target, mode, active):
         require(repeat.get("httpStatus") == 200 and repeat.get("response", {}).get("summary") == status.get("summary")
                 and canonical(repeat["response"].get("outcome")) == canonical(status.get("outcome")),
                 "terminal repair responsibility changed")
+    convergence_deadline = time.monotonic() + 30
+    for endpoint in status_endpoints:
+        remote_probe = Probe(probe.binding, endpoint)
+        require(remote_probe.endpoint != probe.endpoint, "peer status must query another actual endpoint")
+        while True:
+            observed = fleet.record("cross-node-control", remote_probe.admin(path, [("clientToken", token)], b""))
+            require(observed.get("httpStatus") == 200 and isinstance(observed.get("response"), dict),
+                    "cross-node status is missing; 404/unknown cannot certify task completion")
+            if peer_status_equal(status, observed["response"]):
+                break
+            require(time.monotonic() < convergence_deadline, "peer responsibility did not converge within 30 seconds")
+            time.sleep(0.2)
+    if status_endpoints:
+        fleet.record("cross-node-convergence", {"path": path, "clientToken": token,
+            "coordinator": probe.endpoint_name, "queriedEndpoints": list(status_endpoints), "budgetSeconds": 30,
+            "taskStartTimeAndCompleteOutcomeEqual": True})
     return status
 
 
@@ -317,7 +345,13 @@ def run_topology(args, topology, nodes):
             require(all(head.get(name) == value for name, value in entry["properties"].items()), "HEAD differs from GET baseline")
         fleet.stop()
         original = fleet.snapshot("physical-baseline", quiescent=True)
-        targets = [(branch, map_target(original, bucket, branch[1], branch[2], branch[3]))
+        cross_node = args.case_id == "heal.admin-token-cross-node-status"
+        if cross_node:
+            fleet.record("cross-node-binding", {"coordinator": "node1", "peer": "node2", "stableEndpoint": "node3",
+                "endpoints": binding["endpoints"], "stableEndpointKind": "fixed current auto-testing node address",
+                "faultTargetExcludesCoordinator": True})
+        targets = [(branch, map_target(original, bucket, branch[1], branch[2], branch[3],
+                   preferred_nodes=nodes[1:] if cross_node else None))
                    for branch in BRANCHES[args.case_id]]
         fleet.record("fault-plan", {"caseId": args.case_id, "topology": topology,
             "branches": [{"variant": branch[0], "faultBackend": "logical-file-fault", "target": target,
@@ -342,7 +376,8 @@ def run_topology(args, topology, nodes):
                 witness = fleet.snapshot("physical-before-trigger-" + name)
                 require(physical_content(after_fault) == physical_content(witness),
                         "ATTRIBUTION_NOT_OBSERVED: fault changed before the manual task")
-                status = run_task(probe, fleet, target, mode, active)
+                status = run_task(probe, fleet, target, mode, active,
+                                  status_endpoints=("node2", "node3") if cross_node else ())
                 fleet.stop()
                 repaired = fleet.snapshot("physical-after-" + name, quiescent=True)
                 physical = validate_repaired_physical(before, repaired, target)
@@ -351,6 +386,11 @@ def run_topology(args, topology, nodes):
                 fleet.start()
                 current = fleet.record("s3-after-" + name, probe.inventory(bucket, unversioned_current_tags=True))
                 comparison = compare_inventories(baseline, current)
+                if cross_node:
+                    for endpoint in binding["endpoints"]:
+                        peer_s3 = fleet.record("s3-entry-" + endpoint, Probe(binding, endpoint).inventory(
+                            bucket, unversioned_current_tags=True))
+                        compare_inventories(baseline, peer_s3)
                 ranges = verify_ranges(probe, fleet, bucket, key)
                 if pending is not None:
                     require(fleet.record("mpu-after-" + name, pending_inventory(probe, bucket)) == pending,
@@ -404,13 +444,16 @@ def main():
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
     results = []
+    topologies = set(select(args.case_id)[0]["contract"]["probes"]["topology"].split(","))
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
+            if topology not in topologies:
+                continue
             results.append(run_topology(args, topology, selected))
             if results[-1]["cleanup"] != "PASS":
                 break
     finally:
-        complete = len(results) == 2 and all(value["verdict"] == "PASS" and value["cleanup"] == "PASS" for value in results)
+        complete = len(results) == len(topologies) and all(value["verdict"] == "PASS" and value["cleanup"] == "PASS" for value in results)
         save(args.evidence / "healthy-summary.json", {"caseId": args.case_id, "results": results,
              "cleanup": "PASS" if results and all(value["cleanup"] == "PASS" for value in results) else "FAIL", "complete": complete})
     require(complete, "Heal case requires every source H1/H2 branch; inspect topology-result evidence")

@@ -13,7 +13,7 @@ from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, c
 from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection
 from scripts.validation_heal.fleet_node import paths, stopped
 from scripts.validation_heal.inspector import verify as verify_inspector
-from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status
+from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal
 from scripts.validation_heal.heal_fault import mutation
 
 
@@ -197,7 +197,20 @@ class HealShardOracleTest(unittest.TestCase):
         for case_id, branches in BRANCHES.items():
             self.assertEqual([branch[0] for branch in branches], inventory[case_id]["variants"])
             self.assertEqual(len({branch[1] for branch in branches}), len(branches))
-            self.assertEqual(inventory[case_id]["contract"]["probes"]["topology"], "H1,H2")
+            self.assertEqual(inventory[case_id]["contract"]["probes"]["topology"],
+                             "H2" if case_id == "heal.admin-token-cross-node-status" else "H1,H2")
+
+    def test_peer_status_cannot_converge_with_wrong_task_unknown_or_incomplete_receipts(self):
+        coordinator = {**HealHealthyOracleTest().receipt("repaired"), "startTime": "exact-task-start"}
+        self.assertTrue(peer_status_equal(coordinator, copy.deepcopy(coordinator)))
+        for invalid in ("task-start", "summary", "coverage", "outcome", "truncated"):
+            peer = copy.deepcopy(coordinator)
+            if invalid == "task-start": peer["startTime"] = "different task"
+            elif invalid == "summary": peer["summary"] = "unknown"
+            elif invalid == "coverage": peer["outcome"]["coverage"] = "partial"
+            elif invalid == "outcome": peer["outcome"]["counters"]["unknown"] = 1
+            else: peer["truncated"] = True
+            with self.subTest(invalid=invalid): self.assertFalse(peer_status_equal(coordinator, peer))
 
     def test_target_role_comes_from_metadata_and_actual_format_slot(self):
         before = self.snapshot()
