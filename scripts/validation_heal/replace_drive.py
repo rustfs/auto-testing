@@ -1,11 +1,13 @@
 """Whole private logical-root replacement; the shared mount stays attached."""
 
+import base64
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
+import uuid
 
 if __package__:
     from .drive_gate import DENY_DAC_CAPS, READ_PROBE_SOURCE, process_identity
@@ -100,6 +102,57 @@ def attest(state, roots):
     original_path = backup if backup.exists() else data
     require(tree_identity(original_path) == value["original"], "original replacement archive drifted; retain namespace")
     return {**value, "originalArchiveUnchanged": True, "originalStillAtDataRoot": original_path == data}
+
+
+def install_foreign(state, roots, raw_base64, expected_sha256):
+    value = attest(state, roots)
+    require(not value.get("replacementAbsent") and not value["originalStillAtDataRoot"], "foreign format requires an isolated original member")
+    data = Path(value["dataPath"])
+    require(not any(data.iterdir()), "foreign format requires the witnessed empty replacement root")
+    raw = base64.b64decode(raw_base64, validate=True)
+    require(len(raw) < 65536 and hashlib.sha256(raw).hexdigest() == expected_sha256, "foreign donor bytes differ from their exported digest")
+    donor = json.loads(raw)
+    original = json.loads((Path(value["backupPath"]) / ".rustfs.sys/format.json").read_bytes())
+    require(donor.get("version") == "1" and donor.get("format") == "xl" and donor.get("xl", {}).get("version") == "3",
+            "foreign donor is not a supported released candidate format")
+    donor_id, original_id = uuid.UUID(donor["id"]), uuid.UUID(original["id"])
+    members = [member for group in donor["xl"]["sets"] for member in group]
+    original_members = {member for group in original["xl"]["sets"] for member in group}
+    require(donor_id.int != 0 and donor_id != original_id and donor["xl"]["this"] in members
+            and len(members) == len(set(members)) and all(uuid.UUID(member).int != 0 for member in members)
+            and not set(members) & original_members, "foreign donor reused the original cluster or a member identity")
+    folder = data / ".rustfs.sys"
+    folder.mkdir(mode=0o700)
+    descriptor = os.open(folder / "format.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(descriptor)
+    finally: os.close(descriptor)
+    return {"disk": value["disk"], "foreignFormatSha256": expected_sha256, "foreignClusterId": str(donor_id),
+            "foreignDiskUUID": donor["xl"]["this"], "actualDonorBytesCopiedUnchanged": True,
+            "originalArchiveUnchanged": True, "syntheticFormatOrUUIDUsed": False}
+
+
+def restore_original(state, roots):
+    value = attest(state, roots)
+    require(not value.get("replacementAbsent") and not value["originalStillAtDataRoot"], "original member is not at its witnessed archive")
+    backup, data = Path(value["backupPath"]), Path(value["dataPath"])
+    rejected = backup.parent / "rejected-root"
+    require(not rejected.exists() and not rejected.is_symlink(), "rejected replacement archive already exists")
+    rejected_identity = tree_identity(data)
+    # Retain the rejected scene; this recovery is explicitly not a product
+    # rebuild. The existing intent still makes a partial rename recoverable.
+    os.rename(data, rejected)
+    os.rename(backup, data)
+    require(tree_identity(data) == value["original"] and tree_identity(rejected) == rejected_identity,
+            "original-member recovery changed its frozen bytes or rejected scene")
+    descriptor = os.open(data.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(descriptor)
+    finally: os.close(descriptor)
+    (state / "disk-replacement.json").unlink()
+    return {"disk": value["disk"], "originalRestoredExactly": True, "rejectedScene": rejected_identity,
+            "backupRestorationUsed": True, "productRepairClaimed": False, "sharedMountDetached": False}
 
 
 def start_properties(state, roots):

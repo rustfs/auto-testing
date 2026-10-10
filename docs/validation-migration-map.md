@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 118 currently dispatchable IDs include all 74 non-Heal cases and forty-four Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
+case evidence. The 119 currently dispatchable IDs include all 74 non-Heal cases and forty-five Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 40 Heal cases remain
+The other 39 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -873,3 +873,29 @@ historical-version deletion and marker creation in run `38085554143` at harness
 PASS and cleanup PASS; downloaded canonical evidence passed the independent
 selected-case gate. This raises the full live PASS total to 44. Older incomplete
 journal-window runs remain FAIL.
+
+
+B04 `heal.disk-replacement-unformatted` now dispatches both H1/H2 source
+branches with independent 128-object ACK fixtures. A second released-process
+H1 service generates the actual foreign format; the read-only exporter retains
+its exact bytes, digest, candidate binary and cluster/member identities before
+complete donor cleanup. The replacement adapter copies only those verified
+format bytes into the witnessed empty run-owned root, rejects reused original
+identities, and never manufactures a disk UUID or edits the old archive.
+
+Blank initialization must expose the candidate's new UUID in its exact original
+slot, complete the same automatic replacement generation, reconstruct every
+original same-role shard, pass streaming verification and preserve all peer
+ACK inventories. Refusal instead needs the exact Admin slot to remain explicitly
+offline/unformatted/corrupt throughout a registered 90-second window, with all
+other UUIDs/formats/user files unchanged and no target user writes. Foreign
+format bytes must stay exact. The negative branch then retains the rejected
+scene and restores the original archive only for recovery; it explicitly makes
+no product-rebuild claim. Complete all-peer S3 and physical checks are still
+required. B04 has no live PASS claim yet.
+
+E06 `38085937937` retained FAIL/cleanup PASS in every H1/H2 DB/DV instance.
+Three instances generated a format without a distinct replacement UUID; the
+H2 unversioned instance instead exposed partial/unknown/incompatible cluster
+replacement status. Neither directory-root fallback nor a format file alone
+certifies actual replacement readiness or responsibility.

@@ -8,6 +8,7 @@ units and mounts are derived here; no shell program or fault path is accepted.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -403,6 +404,37 @@ def replacement_probe(request):
     return {**result, "sameOriginalServiceProcess": True}
 
 
+def format_export(request):
+    require(set(request) == {"runId", "action", "disk"}, "format export accepts one owned member only")
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    disk = request["disk"]
+    require(type(disk) is int and 0 <= disk < len(roots), "invalid exported disk")
+    path = checked(roots[disk] / "data/.rustfs.sys/format.json", roots[disk])
+    require(path.stat().st_size < 65536, "exported format exceeds its bound")
+    sha = digest(path)
+    raw = path.read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == sha == digest(path) and digest(state / "rustfs") == owner["binarySha256"],
+            "released donor format or candidate changed during export")
+    return {"runId": owner["runId"], "disk": disk, "binarySha256": owner["binarySha256"],
+            "sha256": sha, "rawBase64": base64.b64encode(raw).decode(), "value": json.loads(raw), "readOnly": True}
+
+
+def foreign_format(request):
+    require(set(request) == {"runId", "action", "rawBase64", "sha256"}, "foreign format accepts exact exported bytes only")
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    require(owner.get("runtimeProfile") == "replacement", "foreign format requires the isolated replacement runtime")
+    return replacement_module().install_foreign(state, roots, request["rawBase64"], request["sha256"])
+
+
+def restore_replacement(request):
+    require(set(request) == {"runId", "action"}, "replacement recovery accepts no paths")
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    return replacement_module().restore_original(state, roots)
+
+
 def drive_gate(request):
     state, roots, owner = owned(request["runId"])
     stopped(owner)
@@ -614,6 +646,12 @@ def snapshot(request):
                             entry.update(inspect_metadata(tool, path, bucket, key, entry, request.get("metadataFaults", {})))
                         files.append(entry)
         path = checked(data / ".rustfs.sys/format.json", data)
+        if not path.exists() and request.get("allowUnformattedReplacement") is True:
+            replacement = replacement_module().attest(state, roots)
+            require(not replacement.get("replacementAbsent") and replacement["disk"] == index
+                    and not replacement["originalStillAtDataRoot"], "missing format is outside the exact isolated replacement member")
+            formats.append({"disk": index, "present": False, "unformattedReplacement": True})
+            continue
         require(path.stat().st_size < 65536, "disk format exceeds budget")
         formats.append({"disk": index, "sha256": digest(path), "value": json.loads(path.read_text())})
     return {"hostname": owner["hostname"], "unit": owner["unit"], "pid": pid,
@@ -762,6 +800,7 @@ def main(request):
                "drive-gate-release-live": drive_gate_release_live}
     actions["task-records"] = task_records
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
+    actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
     actions.update({"process": process, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

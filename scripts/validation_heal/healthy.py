@@ -178,7 +178,7 @@ class Fleet:
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
-        replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe"}
+        replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot"}
         if action in {"drive-gate", "drive-gate-probe", "drive-gate-activate", "gate-state", "drive-gate-release-live"} | replacement_actions:
             source += "\nimport types\ngate = types.ModuleType('drive_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("drive_gate.py").read_text()) + ", gate.__dict__)\n"
