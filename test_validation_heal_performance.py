@@ -188,5 +188,19 @@ class PerformanceTests(unittest.TestCase):
             with patch.object(node, "process", side_effect=[identity, {**identity, "startTicks": 901}]):
                 with self.assertRaises(ValueError): node.process_metrics({"runId": "gh-1-1-h2", "action": "process-metrics"})
 
+    def test_exit_race_refreshes_systemd_and_never_infers_an_exit_from_proc_absence(self):
+        request = {"runId": "gh-1-1-h2", "action": "process"}
+        missing = FileNotFoundError(2, "process exited", "/proc/123/stat")
+        terminal = {"pid": 0, "service": {"ExecMainCode": "1", "ExecMainStatus": "0", "Result": "success"}}
+        with patch.object(node, "process_once", side_effect=[missing, terminal]) as reader, patch.object(node.time, "sleep"):
+            self.assertEqual(node.process(request), terminal)
+            self.assertEqual(reader.call_count, 2)
+        with patch.object(node, "process_once", side_effect=missing), patch.object(node.time, "sleep"):
+            with self.assertRaisesRegex(ValueError, "did not settle"): node.process(request)
+        wrong_path = FileNotFoundError(2, "candidate missing", "/var/lib/rustfs-auto-testing/heal/rustfs")
+        with patch.object(node, "process_once", side_effect=wrong_path) as reader:
+            with self.assertRaises(FileNotFoundError): node.process(request)
+            self.assertEqual(reader.call_count, 1)
+
 
 if __name__ == "__main__": unittest.main()

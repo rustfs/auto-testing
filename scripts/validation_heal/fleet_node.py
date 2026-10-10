@@ -260,7 +260,7 @@ PROCESS_FIELDS = ("pid", "startTicks", "bootId", "unit", "executable", "binarySh
                   "commandSha256", "environmentFileSha256", "settings")
 
 
-def process(request):
+def process_once(request):
     state, _, owner = owned(request["runId"])
     fields = ("MainPID", "ActiveState", "SubState", "ExecMainCode", "ExecMainStatus", "Result")
     service = dict(line.split("=", 1) for line in command("systemctl", "show", owner["unit"],
@@ -287,6 +287,21 @@ def process(request):
     after = (root / "stat").read_text().rpartition(") ")[2].split()
     require(after[19] == before[19], "process identity changed while collecting evidence")
     return result
+
+
+def process(request):
+    # systemd's MainPID can remain visible briefly after /proc disappears.
+    # Refresh the whole service snapshot; absence alone never proves exit or
+    # permits an invented PID=0. Exact exit code/result checks remain in the
+    # graceful/crash observer, and pidfd callers still compare process birth.
+    for attempt in range(3):
+        try:
+            return process_once(request)
+        except FileNotFoundError as exc:
+            if not isinstance(exc.filename, str) or not re.match(r"^/proc/[1-9][0-9]*/", exc.filename):
+                raise
+            require(attempt < 2, "owned process/service state did not settle after process exit")
+            time.sleep(.05)
 
 
 def pidfd_signal(request, signum):

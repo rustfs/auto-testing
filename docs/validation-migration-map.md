@@ -939,3 +939,12 @@ positive verified repair throughput and bounded resources. All twelve phases
 and every paired difference are reported; no phase may be omitted or reordered
 and functional success cannot substitute for performance acceptance. J06 has
 no live PASS claim yet.
+
+
+F05 `38087158034` passed the expanded physical census and reached the real
+all-peer graceful exit, then retained FAIL/cleanup PASS when the original
+process exited between systemd MainPID and `/proc/PID/stat` reads. The node
+observer now refreshes the complete service observation up to three times
+only for disappearing `/proc/PID` entries. It never infers PID zero from
+absence, accepts arbitrary file loss, or relaxes exact normal exit code zero,
+service identity and pidfd birth checks. A fresh run is required.
