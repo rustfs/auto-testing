@@ -6,6 +6,7 @@ on:
       - rustfs-s3-compat-test.sh
       - test_rustfs_s3_usage.py
       - test_rustfs_s3_signing.py
+      - test_validation_s3_basic.sh
       - .github/workflows/s3-script-tests.yml
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - rustfs-s3-compat-test.sh
       - test_rustfs_s3_usage.py
       - test_rustfs_s3_signing.py
+      - test_validation_s3_basic.sh
       - .github/workflows/s3-script-tests.yml
 
 permissions:
@@ -32,3 +34,5 @@ jobs:
         run: python3 -m pip install botocore==1.43.19
       - name: Test S3 cases and signatures without a cluster
         run: python3 -m unittest test_rustfs_s3_usage.py test_rustfs_s3_signing.py
+      - name: Test validation S3 round trip without a cluster
+        run: bash test_validation_s3_basic.sh

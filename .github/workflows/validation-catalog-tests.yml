@@ -1,0 +1,34 @@
+name: Validation Catalog Tests
+
+on:
+  pull_request:
+    paths:
+      - validation-cases.json
+      - scripts/validation_catalog.py
+      - scripts/validation_report.py
+      - scripts/validation_result.py
+      - test_validation_migration.py
+      - .github/workflows/validation-catalog-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - validation-cases.json
+      - scripts/validation_catalog.py
+      - scripts/validation_report.py
+      - scripts/validation_result.py
+      - test_validation_migration.py
+      - .github/workflows/validation-catalog-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  contract-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - run: python3 scripts/validation_catalog.py check
+      - run: python3 -B -m unittest -v test_validation_migration.py
