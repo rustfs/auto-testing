@@ -9,6 +9,40 @@ import re
 import subprocess
 
 
+def quorum_contract(source: Path, commit: str) -> dict:
+    """Freeze only recognized candidate rules; unfamiliar source stays unsupported."""
+    paths = ("rustfs/src/error.rs", "crates/ecstore/src/set_disk/metadata.rs")
+    contents = {path: (source / path).read_text() for path in paths}
+    code_only = {path: re.sub(r'"(?:\\.|[^"\\])*"', '""',
+                    re.sub(r"/\*.*?\*/|//[^\n]*", "", value, flags=re.S)) for path, value in contents.items()}
+    compact = {path: re.sub(r"\s+", "", value) for path, value in code_only.items()}
+    metadata = compact[paths[1]]
+    signature = "pub(super)fnobject_quorum_from_meta("
+    start = metadata.find(signature)
+    function = ""
+    if start >= 0:
+        opening = metadata.find("{", start)
+        if opening >= 0:
+            depth = 0
+            for index in range(opening, len(metadata)):
+                depth += (metadata[index] == "{") - (metadata[index] == "}")
+                if depth == 0:
+                    function = metadata[opening:index + 1]
+                    break
+    errors = compact[paths[0]]
+    known_read = ("letdata_blocks=parts_metadata.len()asi32-parity_blocks;" in function
+                  and function.endswith("Ok((data_blocks,write_quorum))}"))
+    known_error = ('StorageError::ErasureReadQuorum|StorageError::InsufficientReadQuorum(_,_)=>{'
+                   'S3ErrorCode::Custom(SLOW_DOWN_READ_CODE.into())}' in errors
+                   and 'S3ErrorCode::Custom(custom)if&**custom==SLOW_DOWN_READ_CODE=>Some(StatusCode::SERVICE_UNAVAILABLE)' in errors)
+    code = re.search(r'const\s+SLOW_DOWN_READ_CODE\s*:\s*&str\s*=\s*"([A-Za-z0-9]+)"\s*;', contents[paths[0]])
+    return {"candidateCommit": commit, "recognized": bool(known_read and known_error and code),
+            "readQuorumRule": "decoded-data-blocks" if known_read else None,
+            "unrecoverableGet": {"httpStatus": 503, "code": code[1]} if known_error and code else None,
+            "sourceFiles": {path: hashlib.sha256(value.encode()).hexdigest() for path, value in contents.items()},
+            "extractorSourceSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+
+
 def prepare(source: Path, commit: str, output: Path) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("full candidate commit required")
@@ -36,6 +70,7 @@ def prepare(source: Path, commit: str, output: Path) -> None:
     (output / "source.json").write_text(json.dumps({"candidateCommit": head,
         "candidateLockSha256": hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest(),
         "helperSourceSha256": hashlib.sha256(text.encode()).hexdigest(),
+        "quorumContract": quorum_contract(source, head),
         "role": "read-only decoder; not the RustFS service under test",
         "built": False}, indent=2) + "\n")
 

@@ -16,7 +16,9 @@ from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
 from scripts.validation_heal.shards import validate_conditional_response
-from scripts.validation_heal.versions import BRANCHES as VERSION_BRANCHES, validate_version_receipts, branch_plan, suspend_fixture
+from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, validate_version_receipts,
+    branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract)
+from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract
 
 
 class HealContractTest(unittest.TestCase):
@@ -344,6 +346,55 @@ class HealShardOracleTest(unittest.TestCase):
 
 
 class HealVersionOracleTest(unittest.TestCase):
+    def test_below_quorum_needs_exact_failure_and_never_accepts_transport_or_false_repair(self):
+        status, expected = self.fixture()
+        outcome = status["outcome"]
+        outcome["execution"]["state"] = "completed_with_errors"
+        outcome["objects"][0]["disposition"] = {"state": "failed", "details": "retry_exhausted"}
+        outcome["counters"].update(unchanged=3, failed=1, attemptFailures=2)
+        validate_failed_version(status, "fixture", expected, expected[0])
+        for kind in ("completed", "unknown", "repaired", "wrong-version", "hidden-attempts", "wrong-counter"):
+            value = copy.deepcopy(status)
+            if kind == "completed": value["outcome"]["execution"]["state"] = "completed"
+            elif kind in {"unknown", "repaired"}: value["outcome"]["objects"][0]["disposition"]["state"] = kind
+            elif kind == "wrong-version": value["outcome"]["objects"][0]["identity"]["versionId"] = "different"
+            elif kind == "hidden-attempts": value["outcome"]["counters"]["attemptFailures"] = 0
+            else: value["outcome"]["counters"]["failed"] = True
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                validate_failed_version(value, "fixture", expected, expected[0])
+        contract = {"unrecoverableGet": {"httpStatus": 503, "code": "SlowDownRead"}}
+        observation = {"acknowledged": False, "resultUnknown": False,
+                       "response": {"ResponseMetadata": {"HTTPStatusCode": 503}, "Error": {"Code": "SlowDownRead"}}}
+        validate_unrecoverable_get(observation, contract)
+        for changed in ({**observation, "resultUnknown": True}, {**observation, "payload": {"size": 0}},
+                        {**observation, "acknowledged": True}):
+            with self.assertRaises(ValueError): validate_unrecoverable_get(changed, contract)
+
+    def test_tool_freezes_recognized_candidate_quorum_and_rejects_stale_or_changed_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            error = root / "rustfs/src/error.rs"
+            metadata = root / "crates/ecstore/src/set_disk/metadata.rs"
+            error.parent.mkdir(parents=True)
+            metadata.parent.mkdir(parents=True)
+            error.write_text('const SLOW_DOWN_READ_CODE: &str = "SlowDownRead";\n'
+                'StorageError::ErasureReadQuorum | StorageError::InsufficientReadQuorum(_, _) => '
+                '{ S3ErrorCode::Custom(SLOW_DOWN_READ_CODE.into()) }\n'
+                'S3ErrorCode::Custom(custom) if &**custom == SLOW_DOWN_READ_CODE => Some(StatusCode::SERVICE_UNAVAILABLE)')
+            metadata.write_text('pub(super) fn object_quorum_from_meta() {\n'
+                'let data_blocks = parts_metadata.len() as i32 - parity_blocks;\nOk((data_blocks, write_quorum))\n}')
+            contract = quorum_contract(root, "a" * 40)
+            self.assertTrue(contract["recognized"])
+            verify_quorum_contract({"quorumContract": contract}, {"source_sha": "a" * 40})
+            for changed in ({**contract, "candidateCommit": "b" * 40},
+                            {**contract, "extractorSourceSha256": "0" * 64}, {**contract, "recognized": False}):
+                with self.assertRaises(ValueError):
+                    verify_quorum_contract({"quorumContract": changed}, {"source_sha": "a" * 40})
+            metadata.write_text('pub(super) fn object_quorum_from_meta() {\n'
+                'let data_blocks = parts_metadata.len() as i32 - parity_blocks;\n'
+                '// Ok((data_blocks, write_quorum))\nOk((data_blocks + 1, write_quorum))\n}')
+            self.assertFalse(quorum_contract(root, "a" * 40)["recognized"])
+
     def test_suspended_null_fixture_retains_historical_identities_and_requires_real_marker_acks(self):
         historical = [{"key": f"objects/{index:04d}.bin", "versionId": f"history-{index}-{version}",
                        "deleteMarker": False, "isLatest": version == 2}
@@ -471,6 +522,12 @@ class HealVersionOracleTest(unittest.TestCase):
         self.assertEqual(len(plan["expected"]), 4)
         self.assertEqual(len(plan["proofs"]), 3)
         self.assertTrue(any(entry["deleteMarker"] for entry in plan["expected"]))
+        plan = branch_plan("heal.below-read-quorum", "r-minus-1-historical", snapshot, bucket, expected, "DV")
+        self.assertEqual(plan["readQuorum"], 2)
+        self.assertEqual(len(plan["retainedShards"]), 1)
+        self.assertEqual(len(plan["faults"]), 3)
+        self.assertEqual(len({entry["versionId"] for entry in plan["faults"]}), 1)
+        self.assertTrue(all(entry["versionId"] == "00000000-0000-0000-0000-000000000004" for entry in plan["faults"]))
 
 
 if __name__ == "__main__":

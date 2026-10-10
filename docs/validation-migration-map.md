@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 89 currently dispatchable IDs include all 74 non-Heal cases and fifteen Heal cases. Thirty-seven have live PASS evidence; the other 121 have no live PASS claim.
+case evidence. The 90 currently dispatchable IDs include all 74 non-Heal cases and sixteen Heal cases. Thirty-eight have live PASS evidence; the other 120 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -166,7 +166,18 @@ xl.meta containing the current null marker and historical versions, verifies
 every exact identity, then re-enables versioning and checks a new non-null
 version plus the unchanged original version set. These three executors still
 require live evidence.
-The other 69 Heal cases remain
+B07 `heal.below-read-quorum` now retains exactly R-1 same-version authorities
+and isolates all other part files, separately for never-versioned and historical
+fixtures. The exact candidate tool build freezes the recognized metadata read
+quorum rule, S3 HTTP/error mapping and source digests. Unrecognized or stale
+contracts cannot dispatch the negative case. GET must return the frozen refusal
+without payload or an unknown transport outcome; manual deep Heal must retain
+the exact failed version and complete truthful counters. All good parts and
+metadata must remain unchanged. Only after that failure proof may backups be
+restored and a new token verify recovered integrity; recovery never proves
+product repair during the negative window. This executor still requires live
+evidence and a fresh tool build containing the quorum contract.
+The other 68 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -211,3 +222,6 @@ but failed DV receipt completeness with cleanup PASS. The executor had used a
 nonrecursive object request, which gives latest-object responsibility rather
 than all historical versions. DV requests now explicitly set recursive=true
 for the exact object prefix; the original FAIL remains and a new run is required.
+The corrected recursive DV request passed all DB/DV H1/H2 branches in run
+`38057908339` with clean finalization, including complete dry_run_observed
+version/marker receipts and byte-for-byte no-mutation proof.

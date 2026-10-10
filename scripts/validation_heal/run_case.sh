@@ -19,7 +19,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "${case_id}" in
   heal.admin-healthy-noop|heal.admin-invalid-request) ;;
-  heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null) driver=versions.py ;;
+  heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null|heal.below-read-quorum) driver=versions.py ;;
   heal.admin-token-cross-node-status|heal.admin-dry-run|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.range-head-and-conditions|heal.manual-normal-attribution|heal.manual-deep-attribution)
     driver=shards.py ;;
   *) die "automatic Heal executor is not migrated: ${case_id}" ;;

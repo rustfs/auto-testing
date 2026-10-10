@@ -38,6 +38,7 @@ BRANCHES = {
                                  "recursive-all-versions", "multiple-version-targets"),
     "heal.repeat-idempotency": ("normal-repeat", "deep-repeat", "repeat-after-restart", "versioned-repeat"),
     "heal.versioning-suspended-null": ("enabled-to-suspended", "null-overwrite", "null-delete-marker"),
+    "heal.below-read-quorum": ("r-minus-1-unversioned", "r-minus-1-historical"),
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 
@@ -92,6 +93,68 @@ def validate_version_receipts(status, bucket, expected, mode, *, required_repair
                 for name, value in wanted_counters.items()), "version counters differ from complete receipt dispositions")
     return {"completeVersionAndMarkerResponsibility": True, "receipts": len(actual), "repaired": healed,
             "mode": mode, "bucketIncarnationId": incarnation}
+
+
+def verify_quorum_contract(manifest, candidate):
+    contract = manifest.get("quorumContract") or {}
+    extractor = Path(__file__).with_name("prepare_heal_meta_inspector.py")
+    require(contract.get("recognized") is True and contract.get("candidateCommit") == candidate["source_sha"]
+            and contract.get("readQuorumRule") == "decoded-data-blocks"
+            and contract.get("extractorSourceSha256") == hashlib.sha256(extractor.read_bytes()).hexdigest()
+            and set(contract.get("sourceFiles", {})) == {"rustfs/src/error.rs", "crates/ecstore/src/set_disk/metadata.rs"}
+            and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in contract["sourceFiles"].values())
+            and contract.get("unrecoverableGet", {}).get("httpStatus") == 503
+            and isinstance(contract.get("unrecoverableGet", {}).get("code"), str),
+            "negative quorum case requires a fresh recognized exact-candidate contract artifact")
+    return contract
+
+
+def validate_unrecoverable_get(observation, contract):
+    expected = contract["unrecoverableGet"]
+    response = observation.get("response") or {}
+    require(observation.get("acknowledged") is False and observation.get("resultUnknown") is False
+            and "payload" not in observation
+            and response.get("ResponseMetadata", {}).get("HTTPStatusCode") == expected["httpStatus"]
+            and response.get("Error", {}).get("Code") == expected["code"],
+            "below-quorum GET returned data, an unknown transport outcome or a different frozen S3 error")
+
+
+def validate_failed_version(status, bucket, expected, target):
+    outcome = status.get("outcome") or {}
+    require(status.get("summary") == "finished" and status.get("truncated", False) is False
+            and outcome.get("execution", {}).get("state") == "completed_with_errors"
+            and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False,
+            "negative Heal task hid failed execution or incomplete responsibility")
+    objects = outcome.get("objects", [])
+    wanted = {version_identity(entry): entry for entry in expected}
+    require(version_identity(target) in wanted and len(objects) == len(wanted), "negative Heal omitted a version or marker")
+    actual = set()
+    for receipt in objects:
+        identity = receipt.get("identity", {})
+        pair = identity.get("object"), identity.get("versionId") or "null"
+        require(pair in wanted and pair not in actual and identity.get("bucket") == bucket
+                and type(identity.get("poolIndex")) is int and identity["poolIndex"] == 0
+                and type(identity.get("setIndex")) is int and identity["setIndex"] == 0,
+                "negative Heal attributed the failure to another version or set")
+        disposition = receipt.get("disposition", {})
+        if pair == version_identity(target):
+            require(disposition.get("state") == "failed"
+                    and disposition.get("details") in {"recoverable", "retry_exhausted", "permanent"},
+                    "unrecoverable version was reported repaired, healthy, absent, skipped or unknown")
+        else:
+            require(disposition.get("state") == ("metadata_healthy" if wanted[pair]["deleteMarker"] else "verified_healthy"),
+                    "negative Heal lost another historical version's positive integrity")
+        actual.add(pair)
+    require(actual == set(wanted), "negative Heal changed the responsibility set")
+    wanted_counters = {"processed": len(wanted), "healed": 0, "unchanged": len(wanted) - 1,
+                       "failed": 1, "skipped": 0, "unknown": 0, "overflowed": False}
+    counters = outcome.get("counters", {})
+    require(all(type(counters.get(name)) is type(value) and counters[name] == value
+                for name, value in wanted_counters.items())
+            and type(counters.get("attemptFailures")) is int and counters["attemptFailures"] >= 1,
+            "negative Heal failure counters hide attempts or claim repair")
+    return {"failedVersion": version_identity(target), "completeResponsibility": True,
+            "attemptFailures": counters["attemptFailures"], "repairPassClaimed": False}
 
 
 def choose_target(snapshot, bucket, entry, role, *, excluded_drives=()):
@@ -175,6 +238,16 @@ def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
         key = "objects/0000.bin"
     selected = [entry for entry in expected if entry["key"] == key]
     data = [entry for entry in selected if not entry["deleteMarker"]]
+    if case_id == "heal.below-read-quorum":
+        target = choose_target(snapshot, bucket, data[0], "data")
+        read_quorum = target["logical"]["erasure"]["data_blocks"]
+        ordered = sorted(target["cohort"], key=lambda entry: entry["index"])
+        retained, missing = ordered[:read_quorum - 1], ordered[read_quorum - 1:]
+        require(len(retained) == read_quorum - 1 and missing, "below-quorum fault did not retain exactly R-1 authorities")
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": True, "expected": selected,
+                "faults": [{**target, **shard} for shard in missing], "proofs": [target],
+                "requiredRepairs": set(), "metadataRepairs": set(), "negative": True,
+                "readQuorum": read_quorum, "retainedShards": retained}
     if case_id == "heal.versioning-suspended-null":
         historical = [entry for entry in data if entry["versionId"] != "null"]
         require(len(historical) == 3, "suspended fixture lost enabled-period historical versions")
@@ -257,7 +330,8 @@ def run_topology(args, topology, nodes, fixture):
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory)
     candidate = json.loads(args.candidate.read_text())
-    fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
+    tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
+    contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id == "heal.below-read-quorum" else None
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
@@ -272,7 +346,8 @@ def run_topology(args, topology, nodes, fixture):
     recipe = select(args.case_id)[0]
     require(list(BRANCHES[args.case_id]) == recipe["variants"], "executor omitted a source version branch")
     branches = [branch for branch in BRANCHES[args.case_id]
-                if args.case_id != "heal.repeat-idempotency" or (branch == "versioned-repeat") == (fixture == "DV")]
+                if (args.case_id != "heal.repeat-idempotency" or (branch == "versioned-repeat") == (fixture == "DV"))
+                and (args.case_id != "heal.below-read-quorum" or (branch == "r-minus-1-historical") == (fixture == "DV"))]
     result = {"topology": topology, "fixture": fixture, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, admissions = [], []
     probe = Probe(binding)
@@ -311,10 +386,37 @@ def run_topology(args, topology, nodes, fixture):
                 witness = fleet.snapshot("physical-before-trigger-" + branch)
                 require(physical_content(prior) == physical_content(witness),
                         "ATTRIBUTION_NOT_OBSERVED: version fault changed before the manual token")
+                if plan.get("negative"):
+                    target = plan["proofs"][0]
+                    fleet.record("quorum-contract", {"contract": contract, "readQuorum": plan["readQuorum"],
+                        "availableSameVersionShards": len(plan["retainedShards"]), "poolIndex": 0, "setIndex": 0})
+                    denied = fleet.record("negative-get", probe.s3("get_object", {
+                        "Bucket": bucket, "Key": target["key"], "VersionId": target["versionId"]}))
+                    validate_unrecoverable_get(denied, contract)
+                    require(physical_content(prior) == physical_content(fleet.snapshot("physical-after-negative-get")),
+                            "negative read widened damage or silently healed below-quorum fragments")
                 status = run_task(probe, fleet, plan["scope"], 2, active,
                                   option_overrides={"recursive": plan["recursive"]}, admissions=admissions)
                 fleet.stop()
                 repaired = fleet.snapshot("physical-after-" + branch, quiescent=True)
+                negative_proof = None
+                if plan.get("negative"):
+                    require(physical_content(prior) == physical_content(repaired),
+                            "below-quorum Heal deleted metadata, changed good shards or falsely persisted repair")
+                    negative_proof = validate_failed_version(status, bucket, plan["expected"], plan["proofs"][0])
+                    fleet.record("negative-before-rescue-proof", negative_proof)
+                    for registration in reversed(registrations):
+                        node, params = registration
+                        fleet.record("negative-rescue", fleet.remote(node, "recover-fault", **params))
+                        fleet.faults.remove(registration)
+                    registrations.clear()
+                    recovered = fleet.snapshot("physical-backup-recovered-" + branch, quiescent=True)
+                    require(physical_content(before) == physical_content(recovered), "negative fixture rescue differs from original")
+                    fleet.start()
+                    status = run_task(probe, fleet, plan["scope"], 2, active,
+                        option_overrides={"recursive": True}, admissions=admissions)
+                    fleet.stop()
+                    repaired = fleet.snapshot("physical-after-negative-recovery-task", quiescent=True)
                 physical = validate_repaired_physical(before, repaired, plan["proofs"][0], repair_targets=plan["proofs"])
                 bitrot = [verify_cohort(fleet, target, "repaired-bitrot-" + branch) for target in plan["proofs"]]
                 fleet.start()
@@ -367,6 +469,10 @@ def run_topology(args, topology, nodes, fixture):
                         repeats.append(proof)
                 result["branches"][branch] = {"verdict": "PASS", "physical": physical, "bitrot": bitrot,
                     "s3": s3, "responsibility": responsibility, "repeats": repeats}
+                if negative_proof is not None:
+                    result["branches"][branch]["negative"] = negative_proof
+                    result["branches"][branch]["physical"]["backupUsedAfterFailureProof"] = True
+                    result["branches"][branch]["physical"]["productRepairClaimed"] = False
             except (Exception, KeyboardInterrupt) as exc:
                 result["branches"][branch] = {"verdict": "FAIL", "failure": {"type": type(exc).__name__, "message": str(exc)}}
                 try:
@@ -416,7 +522,7 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes), "four current Heal nodes required")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
-    fixtures = ("DB", "DV") if args.case_id == "heal.repeat-idempotency" else ("DV",)
+    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum"} else ("DV",)
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
