@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEST_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-validation-tier.XXXXXX")"
 export RUSTFS_TIER_TEST_TMP="${TEST_ROOT}/source"
 export TIER_SOURCE_ONLY=1
 # shellcheck source=rustfs-tier-test.sh
-source "${SCRIPT_DIR}/rustfs-tier-test.sh"
+source "${TEST_SCRIPT_DIR}/rustfs-tier-test.sh"
+[ "${SCRIPT_DIR}" = "${TEST_SCRIPT_DIR}" ]
 trap 'rm -rf -- "${TEST_ROOT}"' EXIT
 
 RUN_TOKEN=unit-1
@@ -67,7 +68,7 @@ if test_validation_tiering_transition_and_restore; then
   exit 1
 fi
 
-TIER_SOURCE_ONLY=0 "${SCRIPT_DIR}/rustfs-tier-test.sh" --validation-case tiering.transition-and-restore \
+TIER_SOURCE_ONLY=0 "${TEST_SCRIPT_DIR}/rustfs-tier-test.sh" --validation-case tiering.transition-and-restore \
   --topology single-single --dry-run --yes --package-url https://example.invalid/rustfs.deb \
   > "${TEST_ROOT}/validation-dry-run.log"
 grep -q '\[DRY-RUN\] tiering.transition-and-restore TransitionAndRestore' "${TEST_ROOT}/validation-dry-run.log"

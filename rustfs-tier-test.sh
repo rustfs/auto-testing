@@ -20,6 +20,7 @@
 #   ./rustfs-tier-test.sh --topology single-single -y --version 1.0.0-rc.4-preview.1
 #
 set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Per-run temp dir (shared runners may leave stale /tmp files owned by other users).
 # Tests may inject an isolated directory while sourcing this file.
