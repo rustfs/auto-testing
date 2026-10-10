@@ -117,7 +117,9 @@ def mutation(value: bytes, kind: str, offset: int | None = None) -> bytes | None
         return None
     require(bool(value), "empty file cannot witness this fault")
     if kind == "truncate":
-        return value[:len(value) // 2]
+        length = len(value) // 2 if offset is None else offset
+        require(type(length) is int and 0 <= length < len(value), "truncate length outside file")
+        return value[:length]
     if kind == "zero":
         changed = bytes(len(value))
     elif kind == "header":

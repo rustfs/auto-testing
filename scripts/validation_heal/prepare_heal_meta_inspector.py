@@ -29,7 +29,9 @@ def prepare(source: Path, commit: str, output: Path) -> None:
     (output / "src/main.rs").write_text(text)
     manifest = ('[package]\nname = "heal-meta-inspect"\nversion = "0.1.0"\nedition = "2024"\n'
                 '[workspace]\n[dependencies]\nserde_json = "1"\n'
-                'rustfs-filemeta = { path = ' + json.dumps(str(crate)) + ' }\n')
+                'rustfs-filemeta = { path = ' + json.dumps(str(crate)) + ' }\n'
+                'rustfs-utils = { path = ' + json.dumps(str(source / "crates/utils"))
+                + ', default-features = false, features = ["hash"] }\n')
     (output / "Cargo.toml").write_text(manifest)
     (output / "source.json").write_text(json.dumps({"candidateCommit": head,
         "candidateLockSha256": hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest(),

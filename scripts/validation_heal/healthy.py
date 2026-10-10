@@ -135,6 +135,7 @@ class Fleet:
         self.tool_directory = tool_directory
         self.sequence = 0
         self.reserved = []
+        self.faults = []
 
     def record(self, label, value):
         self.sequence += 1
@@ -149,13 +150,27 @@ class Fleet:
     def remote(self, node, action, **params):
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text() + "\nmain(" + repr(value) + ")\n"
+        if action in {"apply-fault", "recover-fault", "verify-part"}:
+            source = "import types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
+                NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n" + source
         result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
                                 input=source, capture_output=True, text=True, timeout=180)
         require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")
         return json.loads(result.stdout)
 
-    def snapshot(self, label):
-        return self.record(label, {node: self.remote(node, "snapshot") for node in self.nodes})
+    def snapshot(self, label, *, quiescent=False):
+        return self.record(label, {node: self.remote(node, "snapshot", quiescent=quiescent) for node in self.nodes})
+
+    def stop(self):
+        with ThreadPoolExecutor(max_workers=len(self.nodes)) as executor:
+            results = list(executor.map(lambda node: self.remote(node, "stop"), self.nodes))
+        return self.record("quiescent", dict(zip(self.nodes, results, strict=True)))
+
+    def start(self):
+        with ThreadPoolExecutor(max_workers=len(self.nodes)) as executor:
+            results = list(executor.map(lambda node: self.remote(node, "start"), self.nodes))
+        self.record("started", dict(zip(self.nodes, results, strict=True)))
+        self.wait_ready()
 
     def deploy(self, binary_sha, bucket, access, secret):
         checked = {node: self.remote(node, "preflight") for node in self.nodes}
@@ -181,9 +196,9 @@ class Fleet:
                                           input=tool.read_bytes(), capture_output=True, timeout=120)
                 require(transfer.returncode == 0, "exclusive inspector upload failed: " + transfer.stderr.decode()[-800:])
                 self.record("inspector-upload", {"node": node, **self.remote(node, "install-inspector")})
-        with ThreadPoolExecutor(max_workers=len(self.nodes)) as executor:
-            results = list(executor.map(lambda node: self.remote(node, "start"), self.nodes))
-        self.record("started", {node: value for node, value in zip(self.nodes, results, strict=True)})
+        self.start()
+
+    def wait_ready(self):
         opener = request.build_opener(request.ProxyHandler({}))
         deadline = time.monotonic() + 180
         pending = {f"http://rustfs-node{index}:9000" for index in range(1, len(self.nodes) + 1)}
@@ -206,10 +221,19 @@ class Fleet:
                 self.record("logs", {"node": node, **self.remote(node, "logs")})
             except Exception as exc:
                 self.record("logs-error", {"node": node, "error": str(exc)})
+        if self.faults:
             try:
-                self.record("cleanup", {"node": node, **self.remote(node, "cleanup")})
+                self.stop()
+                for node, params in self.faults:
+                    self.record("fault-recovery", {"node": node, **self.remote(node, "recover-fault", **params)})
             except Exception as exc:
-                failures.append({"node": node, "error": str(exc)})
+                failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
+        if not failures:
+            for node in self.reserved:
+                try:
+                    self.record("cleanup", {"node": node, **self.remote(node, "cleanup")})
+                except Exception as exc:
+                    failures.append({"node": node, "error": str(exc)})
         self.record("recovery", {"cleanup": "FAIL" if failures else "PASS", "errors": failures})
         return not failures
 

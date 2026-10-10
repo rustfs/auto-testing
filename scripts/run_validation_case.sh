@@ -29,7 +29,7 @@ case "${CASE_ID}" in
     SUITE=rustfs-security-test.sh; EXTRA_ARGS=() ;;
   oidc.login-and-session)
     SUITE=scripts/validation_oidc/run_case.sh; EXTRA_ARGS=() ;;
-  heal.admin-healthy-noop|heal.admin-invalid-request)
+  heal.admin-healthy-noop|heal.admin-invalid-request|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.manual-normal-attribution|heal.manual-deep-attribution)
     SUITE=scripts/validation_heal/run_case.sh; EXTRA_ARGS=() ;;
   *)
     printf 'validation executor is not migrated: %s\n' "${CASE_ID}" >&2

@@ -109,13 +109,18 @@ class Recorder:
 
 
 def seed(recorder: Recorder, bucket: str, fixture: str, count: int, sizes: list[int],
-         *, key_prefix: str = "objects/") -> list[dict]:
+         *, key_prefix: str = "objects/", existing_bucket: bool = False) -> list[dict]:
     bucket_allowed(recorder.probe.binding, bucket)
     require(1 <= count <= 2048 and bool(sizes) and all(0 <= size <= 64 * 1024**2 for size in sizes),
             "invalid bounded fixture dimensions")
     require(key_prefix in {"objects/", "objects-"} and (key_prefix == "objects/" or fixture == "DB"),
             "flat keys are only supported for the bounded DB fixture")
-    recorder.call("create_bucket", {"Bucket": bucket})
+    if not existing_bucket:
+        recorder.call("create_bucket", {"Bucket": bucket})
+    else:
+        mode = recorder.call("get_bucket_versioning", {"Bucket": bucket})
+        require(fixture == "DM" and mode.get("Status") is None,
+                "appended multipart fixtures require the run's never-versioned bucket")
     expected = []
     if fixture == "DV":
         recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})

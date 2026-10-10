@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUSTFS_HEAL_SCRIPT_SOURCE_ONLY=1 source "${ROOT}/rustfs_heal_test.sh"
 ASSUME_YES=1
 candidate="" testing_commit="" artifacts="" case_id=""
+driver=healthy.py
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --validation-case) case_id="$2"; shift 2 ;;
@@ -18,13 +19,15 @@ while [ "$#" -gt 0 ]; do
 done
 case "${case_id}" in
   heal.admin-healthy-noop|heal.admin-invalid-request) ;;
+  heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.manual-normal-attribution|heal.manual-deep-attribution)
+    driver=shards.py ;;
   *) die "automatic Heal executor is not migrated: ${case_id}" ;;
 esac
-[ "${#NODES[@]}" -ge 4 ] || die "A01 H1/H2 requires four current auto-testing Heal nodes"
+[ "${#NODES[@]}" -ge 4 ] || die "H1/H2 requires four current auto-testing Heal nodes"
 NODES=("${NODES[0]}" "${NODES[1]}" "${NODES[2]}" "${NODES[3]}")
 if [ "${DRY_RUN}" -eq 1 ]; then
-  log "A01: current Heal nodes ${NODES[*]}, immutable deb install, run-owned H1/H2 service and four roots per node"
-  log "DB ACK ledger, exact normal metadata_healthy/deep verified_healthy receipts, repeated status, unchanged physical/S3 inventories"
+  log "${case_id}: current Heal nodes ${NODES[*]}, immutable deb install, run-owned H1/H2 service and four roots per node"
+  log "Source branches, ACK ledger, candidate-bound physical evidence, exact task outcomes, full S3 verification and cleanup"
   exit 0
 fi
 for program in python3 ssh curl jq rc; do need_cmd "${program}" "Heal validation"; done
@@ -40,6 +43,7 @@ tool_args=()
 if [ -n "${VALIDATION_HEAL_TOOL_DIRECTORY:-}" ]; then
   tool_args=(--tool-directory "${VALIDATION_HEAL_TOOL_DIRECTORY}")
 fi
+[ "${driver}" != shards.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "external-shard cases require candidate-bound bitrot tools"
 evidence="${artifacts}/evidence/${case_id}"
 mkdir -p "${artifacts}/cases" "${evidence}"
 python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
@@ -107,7 +111,7 @@ if [ "${bootstrap_rc}" -eq 0 ]; then
     if [ -n "${binary_sha}" ] && [ "${binary_sha}" != "${node_sha}" ]; then die "node candidate digests differ"; fi
     binary_sha="${node_sha}"
   done
-  python3 -B "${ROOT}/scripts/validation_heal/healthy.py" --candidate "${candidate}" \
+  python3 -B "${ROOT}/scripts/validation_heal/${driver}" --candidate "${candidate}" \
     --case-id "${case_id}" \
     "${tool_args[@]}" \
     --testing-commit "${testing_commit}" --binary-sha "${binary_sha}" --rc-bin "$(command -v rc)" \

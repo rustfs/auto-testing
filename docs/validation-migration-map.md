@@ -60,7 +60,7 @@ The driver reuses the existing auto-testing Pool suite's two-node seed and
 expansion operations, supplies marker-guarded reset/topology/restart/physical
 census hooks, and requires source case evidence plus physical cleanup before
 canonical PASS. `pool.status` passed live in RustFS Actions run `38047001285`;
-`pool.decommission` and `pool.decommission-cancel-clear-resume` also passed in runs `38051227313` and `38052304396`; the other ten Pool cases still require live evidence.
+`pool.decommission` and `pool.decommission-cancel-clear-resume` also passed in runs `38051227313` and `38052304396`. `pool.decommission-live-io`, `pool.decommission-restart-recovery`, `pool.decommission-versioned-integrity`, `pool.expand-and-rebalance`, and `pool.expansion-restart-persistence` passed in runs `38053444515`, `38053814812`, `38054128863`, `38054208114`, and `38054287896`. `pool.decommission-multipart-integrity` failed in run `38053715867`: no fresh owned-bucket MPU drain failure evidence was found; cleanup passed. The remaining four Pool cases still require live evidence.
 
 The 18 bucket-replication and 20 site-replication IDs now dispatch to the
 source black-box checks. The driver uses the existing auto-testing four-node
@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 76 currently dispatchable IDs include all 74 non-Heal cases, `heal.admin-healthy-noop`, and `heal.admin-invalid-request`. Twenty-eight have live PASS evidence; the other 130 remain unverified.
+case evidence. The 83 currently dispatchable IDs include all 74 non-Heal cases and nine Heal cases. Thirty-three have live PASS evidence; the other 125 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -145,12 +145,13 @@ mounts, run-owned services/data roots, exact normal/deep responsibility
 receipts, repeated status, physical hashes and complete S3 inventories. It
 failed live in run `38052673980`: the candidate returned an `unknown` receipt for a fresh zero-byte object with no bucket-incarnation identity, violating the source healthy-object contract. Cleanup passed; the oracle remains strict.
 `heal.admin-invalid-request` passed all six branches on both H1 and H2 in run `38052868969`, with complete peer coverage and unchanged physical/S3 fixtures.
-The other 82 Heal cases remain
+The external-shard executor also dispatches C01–C04, D02, E01 and E02 with all 24 source branches on H1/H2. It freezes exact version/dataDir/part, actual erasure role/set slot/disk UUID and full original shard hashes, stops all run-owned services before fault injection, witnesses the same fault immediately before the manual token, and checks complete physical repair plus streaming HighwayHash before any target GET. Full S3 inventories, cross-part Range, HEAD and pending MPU controls retain source semantics. Backups are used only for failed-case rescue or finalization; an unexpected new generation keeps the namespace DIRTY. These seven executors still require live evidence.
+The other 75 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
 
-The RustFS tool-build lane produced the candidate-bound metadata inspector in run `38052536366`. Set `validation_tools_only=true` with the pinned build and auto-testing SHA to build it. Heal live runs consume `validation_tools_run_id`/`validation_tools_run_attempt`; the workflow verifies the successful build attempt, candidate/helper identities and binary/lock digests. The node adapter installs the verified tool under its run-owned root and uses it only to decode object metadata. The decoder explicitly does not claim physical bitrot verification. Ordinary live execution needs no RustFS source checkout.
+The RustFS tool-build lane produced the initial candidate-bound metadata inspector in run `38052536366`; A07 also passed with that tool in run `38053214984`. Set `validation_tools_only=true` with the pinned build and auto-testing SHA to build the current helper. Heal live runs consume `validation_tools_run_id`/`validation_tools_run_attempt`; the workflow verifies the successful build attempt, candidate/helper identities and binary/lock digests. The node adapter installs the verified tool under its run-owned root. Plain metadata decoding makes no payload-integrity claim; the new explicit part-verification mode validates current and legacy streaming HighwayHash. The build checks 24 healthy shards captured from external released processes and rejects 12 controlled corruptions. Ordinary live execution needs no RustFS source checkout.
 
 The eight planned cases have these concrete reuse candidates:
 

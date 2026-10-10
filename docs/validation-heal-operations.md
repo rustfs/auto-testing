@@ -2,7 +2,7 @@
 
 此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 301 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
 
-公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh heal.admin-healthy-noop CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
+公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 支持 A01、A07、C01–C04、D02、E01、E02，使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
 
 ## 1. 使用入口与交付物
 
@@ -27,6 +27,8 @@ python scripts/validation_heal/matrix.py plan --selection A01,A04,C01,C02,C04,J0
 | `heal_workload.py` | DB/DV/DM/DS/DX 真实夹具；有界并发、同key前台修改串行、请求前及ACK后持久落盘 | 不替用户推导竞态后的最终版本；超时写必须单独解析 |
 | `heal_fault.py` | Linux 描述符相对寻址、mount ID 保护、单文件 missing/bitflip/truncate/zero/header、快照和恢复 | 文件故障不是物理掉盘；不修改系统 metadata；不盲目恢复新代次 |
 | `prepare_heal_meta_inspector.py` | 为精确候选源码准备只读 Rust metadata 解析器工程 | 需在批准的构建机编译；解析 metadata 不是验证 bitrot/EC |
+| `shards.py` | C01–C04、D02、E01、E02 全 24 分支；静默故障、真实角色、同角色原片与 HighwayHash、先物理后 GET/Range、MPU control | 有自动入口不等于候选通过；任务 unknown、目标只恢复 metadata 或救援备份均不能记 PASS |
+| `check_bitrot_tool.py` | 在固定 MinIO/历史 RustFS 产物上检查 24 个健康片和 12 个坏片负例 | 工具验证不等于 live 用例通过；不调用被测 RustFS 服务 |
 
 ## 2. 先绑定环境，禁止直接猜节点
 
@@ -329,7 +331,7 @@ hf snapshot --bucket "$B"
 
 快照对整桶每个文件保存长度/hash，目录描述符逐层拒绝 symlink/hardlink/不同mount ID（含同设备bind mount）；最多10,000文件/8GiB，每文件64MiB。四阶段 before/fault/after/restart 每盘各一份。外部part与**同一个角色、同版本的健康原片**字节完全相同是独立重建对照；数据应不重复且四片摘要不同。不得读取 quarantine 来辅助服务器重建。
 
-xl.meta 可合法重写；比较解析后的版本/引用，而非要求所有内部字节不变。允许的 xl.meta.bkp 必须属于同目标data_dir且摘要等于原xl.meta，不能泛化豁免任意额外文件。metadata恢复/换代后涉及bitrot重新编码时，要用匹配候选验证器/固定合法解码集证明；此解析器不验证HighwayHash或重新编码，报告必须如实写验证深度，不能只因解析成功记深度物理PASS。
+xl.meta 可合法重写；比较解析后的版本/引用，而非要求所有内部字节不变。允许的 xl.meta.bkp 必须属于同目标data_dir且摘要等于原xl.meta，不能泛化豁免任意额外文件。普通解析模式不验证 payload；`--verify-part XL_META BUCKET KEY PART_FILE VERSION_ID PART_NUMBER` 按候选 metadata 的实际版本、part 和 legacy/current framing 逐块验证 HighwayHash，同时拒绝短读、尾随字节和不支持的格式。分片执行器还逐项要求所有同版本片与故障前原始同角色长度/hash 完全一致，并确认基线全文、真实 set slot 及不重复分片摘要。它不支持加密/压缩、inline 或改变编码形态的物理验收；这些用例仍保留各自工具要求。
 
 <a id="FAULT"></a>
 

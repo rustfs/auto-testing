@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import shutil
@@ -168,6 +169,8 @@ def owned(run_id):
 
 def start(request):
     state, _, owner = owned(request["runId"])
+    stopped(owner)
+    command("systemctl", "reset-failed", owner["unit"], check=False)
     require(digest(state / "rustfs") == owner["binarySha256"], "candidate changed before start")
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
@@ -175,6 +178,90 @@ def start(request):
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"), str(state / "rustfs"), *owner["volumes"])
     return {"unit": owner["unit"], "started": True}
+
+
+def stopped(owner):
+    values = command("systemctl", "show", owner["unit"], "-p", "MainPID", "-p", "ActiveState",
+                     "-p", "ControlGroup", check=False).stdout
+    state = dict(line.split("=", 1) for line in values.splitlines() if "=" in line)
+    require(state.get("MainPID") == "0" and state.get("ActiveState") in {"inactive", "failed"},
+            "file operations require the run-owned service to be stopped")
+    group = state.get("ControlGroup", "")
+    if group:
+        require(group.startswith("/") and ".." not in Path(group).parts, "invalid systemd control group")
+        root = Path("/sys/fs/cgroup") / group.lstrip("/")
+        if root.exists():
+            require(all(not entry.read_text().strip() for entry in root.rglob("cgroup.procs")),
+                    "run-owned control group still has live processes")
+    return state
+
+
+def stop(request):
+    _, _, owner = owned(request["runId"])
+    command("systemctl", "stop", owner["unit"], check=False)
+    return {"unit": owner["unit"], "quiescent": True, "service": stopped(owner)}
+
+
+def fault_module():
+    # SSH requests carry this exact repository module in memory; local imports
+    # support contract tests without creating an importable file on a node.
+    if "fault" in globals():
+        return globals()["fault"]
+    from . import heal_fault
+    return heal_fault
+
+
+def fault_root(request):
+    _, roots, owner = owned(request["runId"])
+    stopped(owner)
+    index = request.get("disk")
+    require(type(index) is int and 0 <= index < len(roots), "invalid physical disk index")
+    return roots[index], owner
+
+
+def apply_fault(request):
+    root, owner = fault_root(request)
+    module = fault_module()
+    with module.directory(root) as fd:
+        marker = root / "fault-owner.json"
+        if not marker.exists():
+            module.new_file(fd, marker.name, module.encode({"schemaVersion": 1, "runId": owner["runId"],
+                "bucketPrefix": owner["bucket"], "mountId": module.mount_id(fd), "device": os.fstat(fd).st_dev,
+                "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()}))
+        binding = module.checked_owner(fd, owner["runId"])
+        return module.apply_fault(fd, binding, request["relativePath"], request["faultId"], request["kind"],
+                                  request["expectedSha256"], request.get("offset"))
+
+
+def recover_fault(request):
+    root, owner = fault_root(request)
+    module = fault_module()
+    with module.directory(root) as fd:
+        return module.recover_fault(fd, module.checked_owner(fd, owner["runId"], recovery=True), request["faultId"])
+
+
+def verify_part(request):
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    require(owner.get("inspectorSha256"), "candidate-bound bitrot verifier is required")
+    module = fault_module()
+    relative = request["relativePath"]
+    parts = module.target_parts(relative, owner["bucket"])
+    require(parts[-1] != "xl.meta" and type(request.get("partNumber")) is int
+            and parts[-1] == f"part.{request['partNumber']}", "part identity differs from request")
+    root, _ = fault_root(request)
+    data = root / "data"
+    part = checked(data / relative, data)
+    metadata = checked(part.parent.parent / "xl.meta", data)
+    key = metadata.parent.relative_to(data / owner["bucket"]).as_posix()
+    tool = checked(state / "heal-meta-inspect", state)
+    require(digest(tool) == owner["inspectorSha256"], "bitrot verifier changed")
+    result = json.loads(command(str(tool), "--verify-part", str(metadata), owner["bucket"], key,
+                                str(part), request["versionId"], str(request["partNumber"])).stdout)
+    require(result.get("physicalBitrotVerified") is True and result.get("key") == key
+            and result.get("versionId") == request["versionId"]
+            and result.get("partNumber") == request["partNumber"], "bitrot proof identity differs")
+    return {**result, "sha256": digest(part), "relativePath": relative, "disk": request["disk"]}
 
 
 def install_inspector(request):
@@ -187,15 +274,19 @@ def install_inspector(request):
 
 def snapshot(request):
     state, roots, owner = owned(request["runId"])
-    pid = int(command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"]).stdout.strip())
-    require(pid > 0, "run-owned service has no live PID")
-    executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
-    require(executable == state / "rustfs" and digest(executable) == owner["binarySha256"],
-            "running binary differs from candidate")
-    environment = dict(value.split("=", 1) for value in Path(f"/proc/{pid}/environ").read_bytes().decode().split("\0")
-                       if "=" in value)
-    require(all(environment.get(key) == value for key, value in BACKGROUND_CONFIG.items()),
-            "background repair isolation configuration differs")
+    pid = int(command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"], check=False).stdout.strip() or "0")
+    if request.get("quiescent") is True:
+        stopped(owner)
+        require(digest(state / "rustfs") == owner["binarySha256"], "stopped candidate changed")
+    else:
+        require(pid > 0, "run-owned service has no live PID")
+        executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+        require(executable == state / "rustfs" and digest(executable) == owner["binarySha256"],
+                "running binary differs from candidate")
+        environment = dict(value.split("=", 1) for value in Path(f"/proc/{pid}/environ").read_bytes().decode().split("\0")
+                           if "=" in value)
+        require(all(environment.get(key) == value for key, value in BACKGROUND_CONFIG.items()),
+                "background repair isolation configuration differs")
     files, formats = [], []
     tool = state / "heal-meta-inspect"
     if owner.get("inspectorSha256"):
@@ -224,7 +315,8 @@ def snapshot(request):
         require(path.stat().st_size < 65536, "disk format exceeds budget")
         formats.append({"disk": index, "sha256": digest(path), "value": json.loads(path.read_text())})
     return {"hostname": owner["hostname"], "unit": owner["unit"], "pid": pid,
-            "binarySha256": owner["binarySha256"], "backgroundConfig": BACKGROUND_CONFIG,
+            "binarySha256": owner["binarySha256"], "quiescent": request.get("quiescent") is True,
+            "backgroundConfig": None if request.get("quiescent") is True else BACKGROUND_CONFIG,
             "files": sorted(files, key=lambda value: (value["disk"], value["path"])), "formats": formats}
 
 
@@ -250,7 +342,8 @@ def cleanup(request):
 
 def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
-    actions = {"preflight": preflight, "reserve": reserve, "start": start, "snapshot": snapshot,
-               "logs": logs, "cleanup": cleanup, "install-inspector": install_inspector}
+    actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
+               "logs": logs, "cleanup": cleanup, "install-inspector": install_inspector,
+               "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part}
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

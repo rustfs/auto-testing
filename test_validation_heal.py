@@ -6,12 +6,15 @@ from pathlib import Path
 import tempfile
 import unittest
 import copy
+import types
 from unittest.mock import patch
 
 from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, cases, compile_plan, select
 from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection
-from scripts.validation_heal.fleet_node import paths
+from scripts.validation_heal.fleet_node import paths, stopped
 from scripts.validation_heal.inspector import verify as verify_inspector
+from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status
+from scripts.validation_heal.heal_fault import mutation
 
 
 class HealContractTest(unittest.TestCase):
@@ -166,6 +169,106 @@ class HealHealthyOracleTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "run ID"):
                 paths(value)
 
+
+class HealShardOracleTest(unittest.TestCase):
+    def snapshot(self):
+        bucket, key, data_dir = "rv-heal-0123456789abcdef", "objects/0008.bin", "12345678-1234-1234-1234-123456789abc"
+        disks, distribution = [str(index) for index in range(4)], [4, 1, 2, 3]
+        observation = {"formats": [], "files": []}
+        for disk, index in enumerate(distribution):
+            observation["formats"].append({"disk": disk, "value": {"format": "xl", "id": "pool",
+                "xl": {"sets": [disks], "this": disks[disk]}}})
+            metadata = {"bucket": bucket, "key": key, "versions": [{"versionId": None, "isLatest": True,
+                "deleted": False, "dataDir": data_dir, "size": 100, "inline": None, "usesLegacyChecksum": False,
+                "role": "data" if index <= 2 else "parity", "parts": [{"number": 1, "size": 100, "actualSize": 100}],
+                "erasure": {"index": index, "data_blocks": 2, "parity_blocks": 2, "block_size": 1048576,
+                            "distribution": distribution, "algorithm": "rs-vandermonde"}}]}
+            observation["files"].extend([
+                {"disk": disk, "path": f"{bucket}/{key}/xl.meta", "size": 600, "sha256": "m" + str(disk), "metadata": metadata},
+                {"disk": disk, "path": f"{bucket}/{key}/{data_dir}/part.1", "size": 82, "sha256": "s" + str(disk)},
+                {"disk": disk, "path": f"{bucket}/control/xl.meta", "size": 600, "sha256": "c" + str(disk)}])
+        return {"node1": observation}
+
+    def target(self, before, role="data"):
+        return map_target(before, "rv-heal-0123456789abcdef", "objects/0008.bin", role, 1)
+
+    def test_executor_preserves_each_source_branch_and_uses_distinct_objects(self):
+        inventory = {item["id"]: item for item in cases()}
+        for case_id, branches in BRANCHES.items():
+            self.assertEqual([branch[0] for branch in branches], inventory[case_id]["variants"])
+            self.assertEqual(len({branch[1] for branch in branches}), len(branches))
+            self.assertEqual(inventory[case_id]["contract"]["probes"]["topology"], "H1,H2")
+
+    def test_target_role_comes_from_metadata_and_actual_format_slot(self):
+        before = self.snapshot()
+        self.assertEqual(self.target(before)["disk"], 1)
+        self.assertEqual(self.target(before, "parity")["disk"], 0)
+        for invalid in ("index", "role", "dataDir", "missing-part", "same-shards"):
+            changed = copy.deepcopy(before)
+            metadata = changed["node1"]["files"][0]["metadata"]["versions"][0]
+            if invalid == "index": metadata["erasure"]["index"] = 1
+            elif invalid == "role": metadata["role"] = "data"
+            elif invalid == "dataDir": metadata["dataDir"] = "../control"
+            elif invalid == "missing-part": changed["node1"]["files"].pop(1)
+            else:
+                for entry in changed["node1"]["files"]:
+                    if entry["path"].endswith("part.1"): entry["sha256"] = "same"
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.target(changed)
+
+    def test_fault_requires_exact_target_and_unchanged_controls_and_metadata(self):
+        before = self.snapshot()
+        target = self.target(before)
+        after = copy.deepcopy(before)
+        after["node1"]["files"] = [entry for entry in after["node1"]["files"]
+            if not (entry["disk"] == target["disk"] and entry["path"] == target["relativePath"])]
+        receipt = {"relativePath": target["relativePath"], "before": {"sha256": target["sha256"], "size": 82}, "fault": None}
+        validate_fault(before, after, target, receipt)
+        with self.assertRaisesRegex(ValueError, "baseline file"):
+            validate_repaired_physical(before, after, target)
+        changed = copy.deepcopy(after)
+        changed["node1"]["files"][0]["sha256"] = "metadata changed"
+        with self.assertRaisesRegex(ValueError, "metadata, controls"):
+            validate_fault(before, changed, target, receipt)
+        validate_repaired_physical(before, before, target)
+        rewritten = copy.deepcopy(before)
+        rewritten["node1"]["files"][0]["sha256"] = "legitimate rewrite"
+        rewritten["node1"]["files"][0]["metadata"]["versions"][0]["erasure"]["checksums"] = ["new checksum record"]
+        validate_repaired_physical(before, rewritten, target)
+        rewritten["node1"]["files"][0]["metadata"]["versions"][0]["dataDir"] = "other generation"
+        with self.assertRaisesRegex(ValueError, "version/part identity"):
+            validate_repaired_physical(before, rewritten, target)
+        changed = copy.deepcopy(before)
+        changed["node1"]["files"][-1]["sha256"] = "control changed"
+        with self.assertRaisesRegex(ValueError, "changed a control"):
+            validate_repaired_physical(before, changed, target)
+
+    def test_unknown_or_wrong_version_receipt_cannot_certify_physical_repair(self):
+        target = self.target(self.snapshot())
+        receipt = HealHealthyOracleTest().receipt("repaired")
+        receipt["outcome"]["counters"].update(healed=1, unchanged=0)
+        receipt["outcome"]["objects"][0]["identity"].update(bucket=target["bucket"], object=target["key"], versionId=None)
+        validate_repaired_status(receipt, target)
+        for invalid in ("unknown", "wrong-version", "missing-incarnation"):
+            changed = copy.deepcopy(receipt)
+            if invalid == "unknown": changed["outcome"]["counters"]["unknown"] = 1
+            elif invalid == "wrong-version": changed["outcome"]["objects"][0]["identity"]["versionId"] = "another"
+            else: changed["outcome"]["objects"][0]["identity"].pop("bucketIncarnationId")
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_repaired_status(changed, target)
+
+    def test_fault_requires_actual_service_quiescence_and_exact_truncate_length(self):
+        for value in ("MainPID=99\nActiveState=inactive\nControlGroup=\n", "MainPID=0\nActiveState=active\n", ""):
+            with patch("scripts.validation_heal.fleet_node.command", return_value=types.SimpleNamespace(stdout=value)):
+                with self.assertRaisesRegex(ValueError, "service to be stopped"):
+                    stopped({"unit": "owned.service"})
+        with patch("scripts.validation_heal.fleet_node.command", return_value=types.SimpleNamespace(
+                stdout="MainPID=0\nActiveState=inactive\nControlGroup=\n")):
+            stopped({"unit": "owned.service"})
+        self.assertEqual(mutation(b"abcdef", "truncate", 5), b"abcde")
+        for length in (-1, 6, True):
+            with self.assertRaisesRegex(ValueError, "truncate length"):
+                mutation(b"abcdef", "truncate", length)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,120 @@
 // Read-only inspector linked to the exact candidate's rustfs-filemeta crate.
 // Do not print inline bytes, user metadata, encryption envelopes, or IAM data.
 use rustfs_filemeta::FileMeta;
+use rustfs_utils::HashAlgorithm;
 use serde_json::json;
+
+fn bounded_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 * 1024 {
+        return Err("expected bounded, non-symlink evidence file".into());
+    }
+    Ok(std::fs::read(path)?)
+}
+
+// This path checks stored framing without invoking the service or repairing
+// anything. EC reconstruction is checked separately against the frozen shard.
+fn verify_part(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.len() != 8 {
+        return Err(
+            "usage: --verify-part XL_META BUCKET KEY PART_FILE VERSION_ID PART_NUMBER".into(),
+        );
+    }
+    let meta = FileMeta::load(&bounded_file(&args[2])?)?;
+    let versions = meta.into_file_info_versions(&args[3], &args[4], true)?;
+    let matches: Vec<_> = versions
+        .versions
+        .iter()
+        .filter(|info| {
+            info.version_id
+                .filter(|id| !id.is_nil())
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "null".to_owned())
+                == args[6]
+        })
+        .collect();
+    if matches.len() != 1 {
+        return Err("part verification requires one exact metadata version".into());
+    }
+    let info = matches[0];
+    let number: usize = args[7].parse()?;
+    let part = info
+        .parts
+        .iter()
+        .find(|part| part.number == number)
+        .ok_or("part is absent from metadata")?;
+    let path = std::path::Path::new(&args[5]);
+    let data_dir = info
+        .data_dir
+        .ok_or("external part has no data directory")?
+        .to_string();
+    if info.deleted
+        || info.inline_data()
+        || info.erasure.data_blocks == 0
+        || info.erasure.block_size == 0
+        || part.size <= 0
+        || path.file_name().and_then(|name| name.to_str())
+            != Some(format!("part.{number}").as_str())
+        || path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            != Some(data_dir.as_str())
+    {
+        return Err("unsupported external part identity or geometry".into());
+    }
+    let algorithm = if info.uses_legacy_checksum {
+        HashAlgorithm::HighwayHash256SLegacy
+    } else {
+        info.erasure.get_checksum_info(number).algorithm
+    };
+    if !matches!(
+        algorithm,
+        HashAlgorithm::HighwayHash256S | HashAlgorithm::HighwayHash256SLegacy
+    ) {
+        return Err("unsupported bitrot framing; no integrity claim".into());
+    }
+    let bytes = bounded_file(&args[5])?;
+    let mut remaining = usize::try_from(part.size)?;
+    let mut offset: usize = 0;
+    let mut blocks: usize = 0;
+    while remaining > 0 {
+        let logical = remaining.min(info.erasure.block_size);
+        let length = logical.div_ceil(info.erasure.data_blocks);
+        let length = if info.uses_legacy_checksum {
+            (length + 1) & !1
+        } else {
+            length
+        };
+        let end = offset
+            .checked_add(32 + length)
+            .ok_or("part size overflow")?;
+        let block = bytes.get(offset..end).ok_or("short shard read")?;
+        if algorithm.hash_encode(&block[32..]).as_ref() != &block[..32] {
+            return Err(format!("bitrot hash mismatch in block {blocks}").into());
+        }
+        offset = end;
+        remaining -= logical;
+        blocks += 1;
+    }
+    if offset != bytes.len() {
+        return Err("unexpected trailing shard bytes".into());
+    }
+    println!(
+        "{}",
+        json!({"schemaVersion": 1, "bucket": args[3], "key": args[4],
+        "versionId": args[6], "partNumber": number, "dataDir": data_dir,
+        "algorithm": algorithm, "blocksVerified": blocks, "physicalSize": bytes.len(),
+        "physicalBitrotVerified": true, "ecReconstructionVerified": false})
+    );
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|value| value == "--verify-part") {
+        return verify_part(&args);
+    }
     if args.len() != 4 {
         return Err("usage: heal-meta-inspect XL_META_FILE BUCKET KEY".into());
     }
@@ -44,22 +154,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
-            let inline = decoded_inline.as_ref().filter(|data| !data.is_empty()).map(|data| {
-                let offsets: Vec<_> = bytes
-                    .windows(data.len())
-                    .enumerate()
-                    .filter_map(|(offset, candidate)| (candidate == data.as_slice()).then_some(offset))
-                    .collect();
-                json!({
-                    "length": data.len(),
-                    "rawOccurrenceCount": offsets.len(),
-                    "rawOffset": (offsets.len() == 1).then_some(offsets[0])
-                })
-            });
+            let inline = decoded_inline
+                .as_ref()
+                .filter(|data| !data.is_empty())
+                .map(|data| {
+                    let offsets: Vec<_> = bytes
+                        .windows(data.len())
+                        .enumerate()
+                        .filter_map(|(offset, candidate)| {
+                            (candidate == data.as_slice()).then_some(offset)
+                        })
+                        .collect();
+                    json!({
+                        "length": data.len(),
+                        "rawOccurrenceCount": offsets.len(),
+                        "rawOffset": (offsets.len() == 1).then_some(offsets[0])
+                    })
+                });
             Ok(json!({
                 "versionId": info.version_id.map(|id| id.to_string()),
                 "isLatest": info.is_latest, "deleted": info.deleted,
                 "dataDir": info.data_dir.map(|id| id.to_string()), "size": info.size,
+                "usesLegacyChecksum": info.uses_legacy_checksum,
                 "inline": inline,
                 "erasure": info.erasure, "role": role,
                 "parts": info.parts.iter().map(|part| json!({
