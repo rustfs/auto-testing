@@ -190,6 +190,15 @@ def validate_repaired_physical(before, after, target, *, repair_targets=None):
     left, right = files(before), files(after)
     repair_targets = repair_targets or [target]
     meta_paths = {f"{item['bucket']}/{item['key']}/xl.meta" for item in repair_targets}
+    backups = {(item["node"], item["disk"], f"{item['bucket']}/{item['key']}/{item['dataDir']}/xl.meta.bkp"):
+               left.get((item["node"], item["disk"], f"{item['bucket']}/{item['key']}/xl.meta"))
+               for item in repair_targets}
+    completed_sidecars = {(item["node"], item["disk"],
+                          f"{item['bucket']}/{item['key']}/{item['dataDir']}/part.{part['number']}.meta")
+                         for item in repair_targets for part in item["logical"]["parts"]}
+    def exact_backup(identity, actual):
+        original = backups.get(identity)
+        return bool(original and actual and actual["sha256"] == original["sha256"] and actual["size"] == original["size"])
     for node in before:
         require(before[node]["formats"] == after[node]["formats"], "repair changed disk format")
     for identity, entry in left.items():
@@ -197,13 +206,14 @@ def validate_repaired_physical(before, after, target, *, repair_targets=None):
         # Complete MPU commits the authoritative part manifest into xl.meta.
         # A healed target directory can discard only its stale per-part sidecars;
         # other versions, drives, pending uploads and payload files stay exact.
-        completed_sidecars = {(item["node"], item["disk"],
-                              f"{item['bucket']}/{item['key']}/{item['dataDir']}/part.{part['number']}.meta")
-                             for item in repair_targets for part in item["logical"]["parts"]}
         if actual is None and identity in completed_sidecars:
             continue
         require(actual is not None, "repair lost a baseline file or control")
-        if identity[2] not in meta_paths:
+        if identity in backups and actual != entry:
+            # Repeated repair replaces only this target's rollback metadata
+            # with the exact authoritative bytes observed before this repair.
+            require(exact_backup(identity, actual), "target rollback backup is not the exact pre-repair metadata")
+        elif identity[2] not in meta_paths:
             require(actual == entry, "repair did not restore exact part bytes or changed a control")
         else:
             def semantics(metadata):
@@ -215,11 +225,7 @@ def validate_repaired_physical(before, after, target, *, repair_targets=None):
             require(actual.get("metadata") and semantics(actual["metadata"]) == semantics(entry["metadata"]),
                     "repair changed decoded version/part identity")
     for identity in set(right) - set(left):
-        allowed = {(item["node"], item["disk"], f"{item['bucket']}/{item['key']}/{item['dataDir']}/xl.meta.bkp")
-                   for item in repair_targets}
-        original = left.get((identity[0], identity[1], identity[2].rsplit("/", 2)[0] + "/xl.meta"))
-        require(identity in allowed and original
-                and right[identity]["sha256"] == original["sha256"] and right[identity]["size"] == original["size"],
+        require(exact_backup(identity, right[identity]),
                 "repair created an unexpected physical file")
     return {"targetLengthAndFullSha256Restored": True, "controlFilesUnchanged": True,
             "decodedVersionsUnchanged": True, "formatUnchanged": True, "readBeforeRepair": False}

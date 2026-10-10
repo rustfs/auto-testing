@@ -344,6 +344,37 @@ class HealShardOracleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lost a baseline file"):
             validate_repaired_physical(before, after, target)
 
+    def test_repeated_target_backup_requires_exact_current_metadata_and_target_identity(self):
+        before = self.snapshot()
+        target = self.target(before)
+        meta = next(entry for entry in before["node1"]["files"]
+                    if entry["disk"] == target["disk"] and entry["path"] == f"{target['bucket']}/{target['key']}/xl.meta")
+        backup = {"disk": target["disk"], "path": f"{target['bucket']}/{target['key']}/{target['dataDir']}/xl.meta.bkp",
+                  "size": 599, "sha256": "previous-repair-metadata"}
+        before["node1"]["files"].append(backup)
+        after = copy.deepcopy(before)
+        after["node1"]["files"][-1].update(size=meta["size"], sha256=meta["sha256"])
+        validate_repaired_physical(before, after, target)
+        for invalid in ("bytes", "length", "other-drive", "other-generation", "payload"):
+            changed_before, changed_after = copy.deepcopy(before), copy.deepcopy(after)
+            if invalid == "bytes": changed_after["node1"]["files"][-1]["sha256"] = "not-authoritative"
+            elif invalid == "length": changed_after["node1"]["files"][-1]["size"] += 1
+            elif invalid == "other-drive":
+                for value in (changed_before, changed_after): value["node1"]["files"][-1]["disk"] = 0
+            elif invalid == "other-generation":
+                for value in (changed_before, changed_after): value["node1"]["files"][-1]["path"] = backup["path"].replace(target["dataDir"], "other-generation")
+            else:
+                changed_after["node1"]["files"][1]["sha256"] = "changed-payload"
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_repaired_physical(changed_before, changed_after, target)
+        added_before = self.snapshot()
+        added_after = copy.deepcopy(added_before)
+        added_after["node1"]["files"].append(after["node1"]["files"][-1])
+        validate_repaired_physical(added_before, added_after, target)
+        added_after["node1"]["files"][-1]["sha256"] = "unexpected"
+        with self.assertRaisesRegex(ValueError, "unexpected physical file"):
+            validate_repaired_physical(added_before, added_after, target)
+
     def test_unknown_or_wrong_version_receipt_cannot_certify_physical_repair(self):
         target = self.target(self.snapshot())
         receipt = HealHealthyOracleTest().receipt("repaired")
