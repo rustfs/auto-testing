@@ -15,7 +15,7 @@ try:
     from .healthy import BASE_OPTIONS, physical_content
     from .cursor import OBJECTS, TASK_SECONDS, complete_outcome, wanted_pairs, run_topology as dx_topology, main as dx_main
     from .shards import files, validate_repaired_physical
-    from .stop import status, wait_partial, idle_fleet, validate_retired_stop
+    from .stop import status, wait_partial, idle_fleet, validate_unknown_token
     from .cancel_restart import REFERENCE as JOURNAL_REFERENCE
     from .fleet_node import PROCESS_FIELDS
     from .versions import public_version_id
@@ -24,7 +24,7 @@ except ImportError:
     from healthy import BASE_OPTIONS, physical_content
     from cursor import OBJECTS, TASK_SECONDS, complete_outcome, wanted_pairs, run_topology as dx_topology, main as dx_main
     from shards import files, validate_repaired_physical
-    from stop import status, wait_partial, idle_fleet, validate_retired_stop
+    from stop import status, wait_partial, idle_fleet, validate_unknown_token
     from cancel_restart import REFERENCE as JOURNAL_REFERENCE
     from fleet_node import PROCESS_FIELDS
     from versions import public_version_id
@@ -143,7 +143,7 @@ def recovery_status(probe, fleet, token):
             return observed["response"]
         # The exact absent-token error is an observation during admission
         # replay, never completion evidence. All other failures remain errors.
-        validate_retired_stop(observed, token)
+        validate_unknown_token(observed, token)
         require(time.monotonic() < deadline, "original root token stayed unavailable beyond the 15-second recovery budget")
         time.sleep(0.1)
 

@@ -554,8 +554,9 @@ A06 `heal.admin-stop-and-stale-token` now uses the same pre-registered 1025
 external-object DX fixture on H1/H2. Cancellation requires actual running,
 nonzero partial canonical progress and both repaired and still-missing targets.
 The frozen candidate policy requires active stop acknowledgement, retained
-aborted/cancelled partial responsibility, and exact 500/InternalError with the
-retired token for repeat/stale stops. Three complete physical snapshots with
+aborted/cancelled partial responsibility, and exact HTTP 200/stopped
+idempotent acknowledgements for repeat/stale stops of a durable terminal token.
+Unknown tokens remain a separate exact 500/InternalError contract. Three complete physical snapshots with
 five-second gaps keep the service running after cancellation; stopping the
 process cannot substitute for task write quiescence. Actual restored shard
 counts must equal the retained cancellation counters, and remaining shards
@@ -1035,7 +1036,7 @@ four regression verdicts have their own archive and never increment a fleet or
 canonical-case PASS count. Existing tests assert captured lock events internally;
 the collector does not fabricate emitted barrier logs. Missing critical-point
 fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps.
-The current implementation has 252 focused Heal/catalog checks, including the
+The current implementation has 253 focused Heal/catalog checks, including the
 Linux-only D11 ownership/mount/recovery checks. Native compilation and execution
 still require the separate hosted job; local parser checks are not native PASS.
 
@@ -1084,3 +1085,16 @@ idempotent stop, so the public response is HTTP 200/stopped, rather than the
 unknown-token HTTP 500 assumed by the harness. The original result remains
 unchanged. Fixing the candidate-bound assertion and repeating the complete
 canonical run are required; the observed acknowledgement alone is not PASS.
+
+
+The A06/F06 durable-retired-token assertion is corrected against all four
+reviewed source hashes, including `root_recovery::cancel_pending`. It now
+requires the exact signed old-token request and the candidate's HTTP 200,
+stopped acknowledgement shape. Its default acknowledgement settings and new
+response timestamp are not mistaken for task identity or original task options.
+The old settled canonical outcome must remain byte-equivalent immediately
+after both repeat and stale stops, and the new task must stay running across
+the stale request. Unknown-token queries and forceStart-retired tokens without
+a retained durable terminal keep their independent exact 500/InternalError
+checks. Both archived A06 acknowledgement samples satisfy the corrected shape;
+that replay is not fresh live acceptance. Complete A06/F06 reruns remain required.

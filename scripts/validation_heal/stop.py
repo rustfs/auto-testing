@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 import json
 import sys
 import time
@@ -31,10 +32,18 @@ BRANCHES = ("stop-active", "repeat-stop", "old-status", "old-stop-new-task")
 QUIET_SECONDS = 5
 POLICY = {"referenceCandidate": "072b57b37559fbe626aeda8abf61617fdcbdd926",
     "cancelActive": {"httpStatus": 200, "summary": "stopped"},
-    "repeatOrRetiredTokenStop": {"httpStatus": 500, "code": "InternalError", "messagePrefix": "Heal task not found: "},
+    "repeatOrRetiredTokenStop": {"httpStatus": 200, "summary": "stopped", "detail": "",
+        "reason": "root_recovery::cancel_pending returns true for a retained terminal record"},
+    "unknownTokenStop": {"httpStatus": 500, "code": "InternalError", "messagePrefix": "Heal task not found: "},
     "oldStatus": "retained aborted/cancelled outcome, partial coverage; same path/token",
     "sources": ["crates/heal/src/heal/manager.rs:cancel_task", "crates/heal/src/heal/channel.rs:process_cancel_request",
+                "crates/heal/src/heal/manager/root_recovery.rs:cancel_pending retained-terminal branch",
                 "rustfs/src/admin/handlers/heal.rs:force_stop handler"],
+    "sourceHashes": {
+        "crates/heal/src/heal/manager.rs": "ba9289942fbbe8ce2632686ae86b9d1be0ae9923420e3b091d67148b4ee02094",
+        "crates/heal/src/heal/channel.rs": "7f669ca43b9559db9b97fba6b419a6c76a94d76acd8526db132d74b7c534d6b0",
+        "crates/heal/src/heal/manager/root_recovery.rs": "ba6beba9d9d14985e4c5448d85727036388d3d72f28879ac5c67fc5f760048ba",
+        "rustfs/src/admin/handlers/heal.rs": "7e4007c29a8329ced8e48b88111400e79cffd845bd6ddc6243b79f3cd48e8199"},
     "unsupportedCandidates": "fail the frozen HTTP/body contract; do not accept arbitrary alternatives"}
 
 
@@ -77,17 +86,34 @@ def wait_partial(probe, fleet, path, token, targets, *, repair_required):
 
 
 def validate_retired_stop(observed, token):
-    require(observed.get("httpStatus") == 500 and not observed.get("transportError"),
+    require(observed.get("httpStatus") == 200 and not observed.get("transportError"),
             "retired token stop did not follow the frozen HTTP contract")
+    require(observed.get("query") == [["clientToken", token], ["forceStop", "true"]]
+            and observed.get("method") == "POST" and observed.get("auth") == "signed"
+            and observed.get("requestBody") == "" and isinstance(observed.get("path"), str)
+            and observed["path"].startswith("/rustfs/admin/v3/heal/"), "retired stop did not target the exact original token")
     body = observed.get("response")
-    if isinstance(body, str):
-        fields = {element.tag.rsplit("}", 1)[-1]: element.text for element in ET.fromstring(body).iter()}
-    else:
-        fields = body if isinstance(body, dict) else {}
+    defaults = {**BASE_OPTIONS, "scanMode": 1, "pool": None, "set": None}
+    require(isinstance(body, dict) and set(body) == {"summary", "detail", "startTime", "settings"}
+            and body["summary"] == "stopped" and body["detail"] == "" and body["settings"] == defaults,
+            "retired stop lacks the exact idempotent acknowledgement; ACK defaults are not task settings")
+    require(isinstance(body["startTime"], str) and datetime.fromisoformat(body["startTime"].replace("Z", "+00:00")).tzinfo is not None,
+            "retired stop acknowledgement lacks a valid response timestamp")
+    return {"httpStatus": 200, "summary": "stopped", "exactRetiredTaskId": token,
+            "responseEchoesTaskIdentity": False, "ackDefaultsAreOriginalTaskSettings": False,
+            "terminalResponsibilityMustRemainUnchanged": True}
+
+
+def validate_unknown_token(observed, token):
+    require(observed.get("httpStatus") == 500 and not observed.get("transportError"),
+            "unknown token did not follow the frozen HTTP contract")
+    body = observed.get("response")
+    fields = {element.tag.rsplit("}", 1)[-1]: element.text for element in ET.fromstring(body).iter()} \
+        if isinstance(body, str) else body if isinstance(body, dict) else {}
     require((fields.get("Code") or fields.get("code")) == "InternalError"
             and (fields.get("Message") or fields.get("message")) == "Heal task not found: " + token,
-            "retired-token response has the wrong exact structured error/task identity")
-    return {"httpStatus": 500, "code": "InternalError", "exactRetiredTaskId": token}
+            "unknown-token response has the wrong exact structured error/task identity")
+    return {"httpStatus": 500, "code": "InternalError", "exactUnknownTaskId": token}
 
 
 def validate_cancelled(current, bucket, expected, targets):
@@ -183,6 +209,7 @@ def idle_fleet(fleet, binding):
 
 
 def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, original, after_cancelled=None, force_new=False):
+    require(binding["candidateCommit"] == POLICY["referenceCandidate"], "cancel policy is unreviewed for this candidate")
     path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/objects/"
     fleet.record("frozen-cancel-policy", POLICY)
     old = start(probe, fleet, path, active)
@@ -226,6 +253,9 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     active.remove((path, old))
     repeated = fleet.record("repeat-stop", probe.admin(path, [("clientToken", old), ("forceStop", "true")], b""))
     repeated_proof = validate_retired_stop(repeated, old)
+    repeated_status = status(probe, fleet, path, old, "old-status-after-idempotent-stop")
+    require(canonical(repeated_status.get("outcome")) == canonical(cancelled["outcome"]),
+            "idempotent stop changed the original settled cancellation responsibility")
     restart_proof = after_cancelled(path, old, cancelled, quiet[-1]) if after_cancelled is not None else None
     new = start(probe, fleet, path, active, force=force_new)
     require(new != old, "new task reused a cancelled token")
@@ -235,6 +265,9 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     require(canonical(old_status["outcome"]) == canonical(cancelled["outcome"]), "new task overwrote old partial responsibility")
     stale = fleet.record("old-stop-during-new", probe.admin(path, [("clientToken", old), ("forceStop", "true")], b""))
     stale_proof = validate_retired_stop(stale, old)
+    stale_status = status(probe, fleet, path, old, "old-status-after-stale-stop")
+    require(canonical(stale_status.get("outcome")) == canonical(cancelled["outcome"]),
+            "stale stop changed the old task's terminal responsibility")
     after = status(probe, fleet, path, new, "new-after-stale-stop")
     require(after.get("summary") != "stopped", "old token actually stopped the new task")
     require(partial_window(after, remaining, repair_required=False),

@@ -12,7 +12,7 @@ import types
 from unittest.mock import patch, Mock
 
 from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, cases, compile_plan, select
-from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection, Fleet
+from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection, Fleet, BASE_OPTIONS
 from scripts.validation_heal.fleet_node import paths, stopped, inspect_metadata
 from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, files, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
@@ -46,7 +46,7 @@ from scripts.validation_heal.status import (validate_background, validate_replac
 from scripts.validation_heal.cursor import (Window, OBJECTS as CURSOR_OBJECTS, SIZE as CURSOR_SIZE,
     BRANCHES as CURSOR_BRANCHES, terminal_proof as cursor_terminal, validate_missing_batch, verify_all_parts)
 from scripts.validation_heal.fleet_node import resource_limits, verify_parts as node_verify_parts
-from scripts.validation_heal.stop import (partial_window, validate_retired_stop, validate_cancelled,
+from scripts.validation_heal.stop import (partial_window, validate_retired_stop, validate_unknown_token, validate_cancelled,
     cancelled_physical, idle_fleet as stop_idle_fleet, BRANCHES as STOP_BRANCHES)
 from scripts.validation_heal.cancel_restart import validate_journal, BRANCHES as CANCEL_RESTART_BRANCHES
 from scripts.validation_heal.fleet_node import task_records as node_task_records
@@ -2069,13 +2069,28 @@ class HealStopOracleTest(unittest.TestCase):
         changed["outcome"]["counters"]["unknown"] = 1
         with self.assertRaises(ValueError): partial_window(changed, targets, repair_required=True)
 
-    def test_repeat_stop_freezes_http_structured_code_and_the_retired_token(self):
-        response = {"httpStatus": 500, "response": "<Error><Code>InternalError</Code><Message>Heal task not found: old-token</Message></Error>"}
+    def test_repeat_stop_requires_idempotent_ack_for_the_exact_retained_token(self):
+        response = {"httpStatus": 200, "query": [["clientToken", "old-token"], ["forceStop", "true"]],
+            "method": "POST", "auth": "signed", "requestBody": "", "path": "/rustfs/admin/v3/heal/bucket/objects/",
+            "response": {"summary": "stopped", "detail": "", "startTime": "2026-10-10T22:16:17.150884876Z",
+                         "settings": {**BASE_OPTIONS, "scanMode": 1, "pool": None, "set": None}}}
         self.assertEqual(validate_retired_stop(response, "old-token")["exactRetiredTaskId"], "old-token")
+        self.assertFalse(validate_retired_stop(response, "old-token")["responseEchoesTaskIdentity"])
+        for changed in ({**response, "httpStatus": 500}, {**response, "transportError": "timeout"},
+                        {**response, "query": [["clientToken", "new-token"], ["forceStop", "true"]]},
+                        {**response, "response": {**response["response"], "summary": "finished"}},
+                        {**response, "response": {**response["response"], "outcome": {"execution": {"state": "completed"}}}},
+                        {**response, "response": {**response["response"], "settings": BASE_OPTIONS}},
+                        {**response, "response": "<Error><Code>InternalError</Code><Message>Heal task not found: old-token</Message></Error>"}):
+            with self.assertRaises(ValueError): validate_retired_stop(changed, "old-token")
+
+    def test_unknown_token_is_not_confused_with_retained_terminal_idempotency(self):
+        response = {"httpStatus": 500, "response": "<Error><Code>InternalError</Code><Message>Heal task not found: old-token</Message></Error>"}
+        self.assertEqual(validate_unknown_token(response, "old-token")["exactUnknownTaskId"], "old-token")
         for changed in ({**response, "httpStatus": 200}, {**response, "transportError": "timeout"},
                         {**response, "response": response["response"].replace("old-token", "new-token")},
                         {**response, "response": response["response"].replace("InternalError", "AccessDenied")}):
-            with self.assertRaises(ValueError): validate_retired_stop(changed, "old-token")
+            with self.assertRaises(ValueError): validate_unknown_token(changed, "old-token")
 
     def test_cancelled_physical_count_must_match_actual_original_shards(self):
         before = HealShardOracleTest().snapshot()
