@@ -23,6 +23,10 @@ from urllib.parse import unquote, urlencode, urlsplit
 
 
 MAX_BODY = 64 * 1024**2
+# The reviewed candidate's channel::encode_heal_task_status_payload allows
+# 8 MiB (channel.rs SHA-256 7f669ca43b9559db9b97fba6b419a6c76a94d76acd8526db132d74b7c534d6b0).
+# Retained H2 diagnostics can exceed 2 MiB without exceeding that wire contract.
+ADMIN_RESPONSE_LIMIT = 8 * 1024**2
 # Only compare monotonic observations from this collector process. Other
 # processes/hosts have a different domain even if wall clocks look aligned.
 CLOCK_DOMAIN = str(uuid.uuid4())
@@ -302,13 +306,15 @@ class Probe:
             response = exc
         with observation_phase(observation, 'responseBody'):
             with response:
-                raw = response.read(2 * 1024**2 + 1)
-                require(len(raw) <= 2 * 1024**2, "Admin response exceeds evidence budget")
+                raw = response.read(ADMIN_RESPONSE_LIMIT + 1)
+                require(len(raw) <= ADMIN_RESPONSE_LIMIT, "Admin response exceeds evidence budget")
                 length = response.headers.get('Content-Length')
                 require(length is None or (isinstance(length, str) and length.isdigit() and int(length) == len(raw)),
                         'Admin response Content-Length differs from complete body')
                 evidence["httpStatus"] = response.code
                 evidence["responseHeaders"] = dict(response.headers.items())
+                evidence["responseBytes"] = len(raw)
+                evidence["responseBudgetBytes"] = ADMIN_RESPONSE_LIMIT
         with observation_phase(observation, 'responseParsing'):
             try:
                 evidence["response"] = json.loads(raw)

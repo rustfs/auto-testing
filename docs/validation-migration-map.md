@@ -1128,3 +1128,14 @@ again. Backup rescue never earns product-repair credit; failed recovery retains
 the namespace and stops subsequent fleet use. C09 still requires fresh live
 evidence. Eleven targeted oracle/guard tests are added; its actual Linux
 FD/mount guard test runs in CI, not as a simulated macOS syscall claim.
+
+
+F01 `heal.root-graceful-coordinator-restart` run `38091619866` retained
+canonical FAIL with cleanup PASS. H1 passed both branches; H2 exceeded the
+collector's 2 MiB response limit during original-token recovery. The reviewed
+candidate `crates/heal/src/heal/channel.rs` permits an 8 MiB status payload
+(source SHA-256 `7f669ca43b9559db9b97fba6b419a6c76a94d76acd8526db132d74b7c534d6b0`).
+The collector now uses that explicit 8 MiB bound, records complete byte counts
+and still rejects overflow or Content-Length mismatch. A boundary regression
+covers a complete 8 MiB JSON response, one-byte overflow and truncated bodies.
+No F01 canonical PASS is claimed until a fresh complete rerun.

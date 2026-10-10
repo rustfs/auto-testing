@@ -3224,5 +3224,30 @@ class HealWholeDriveReplacementTest(unittest.TestCase):
         self.assertEqual(len(observed), 5)
 
 
+class HealAdminResponseBudgetTest(unittest.TestCase):
+    def test_complete_reviewed_8mib_response_and_strict_oversize_and_content_length(self):
+        from io import BytesIO
+        from test_validation_heal_authorization import binding
+        from scripts.validation_heal.heal_probe import ADMIN_RESPONSE_LIMIT
+        self.assertEqual(ADMIN_RESPONSE_LIMIT, 8 * 1024**2)
+        class Response(BytesIO):
+            code = 200
+            def __init__(self, raw, length=None):
+                super().__init__(raw)
+                self.headers = {"Content-Length": str(len(raw) if length is None else length)}
+        probe = Probe(binding())
+        raw = b'{"complete":"' + b'x' * (ADMIN_RESPONSE_LIMIT - len(b'{"complete":""}')) + b'"}'
+        with patch.object(probe, "credentials", return_value=("test-access", "test-secret")), \
+             patch.object(probe, "_open_admin", side_effect=lambda outgoing: Response(raw)):
+            observed = probe.admin("/rustfs/admin/v3/heal/", [], b"")
+        self.assertEqual(observed["responseBytes"], ADMIN_RESPONSE_LIMIT)
+        self.assertEqual(observed["responseBudgetBytes"], ADMIN_RESPONSE_LIMIT)
+        self.assertEqual(len(observed["response"]["complete"]), ADMIN_RESPONSE_LIMIT - len(b'{"complete":""}'))
+        for changed, length in ((raw + b" ", None), (b"{}", 3)):
+            with self.subTest(length=length), patch.object(probe, "credentials", return_value=("test-access", "test-secret")), \
+                 patch.object(probe, "_open_admin", side_effect=lambda outgoing: Response(changed, length)), self.assertRaises(ValueError):
+                probe.admin("/rustfs/admin/v3/heal/", [], b"")
+
+
 if __name__ == "__main__":
     unittest.main()
