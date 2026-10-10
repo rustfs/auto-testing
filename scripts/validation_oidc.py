@@ -31,8 +31,10 @@ def save(path: Path, value: dict) -> None:
 
 def docker(*arguments: str) -> str:
     result = subprocess.run(["docker", *arguments], capture_output=True, text=True, timeout=300)
+    if result.returncode and "permission denied while trying to connect" in result.stderr.lower():
+        result = subprocess.run(["sudo", "-n", "docker", *arguments], capture_output=True, text=True, timeout=300)
     if result.returncode:
-        raise RuntimeError(f"Keycloak container operation {arguments[0]} failed ({result.returncode})")
+        raise RuntimeError(f"Keycloak container operation {arguments[0]} failed ({result.returncode}): {result.stderr.strip()[:600]}")
     return result.stdout
 
 
