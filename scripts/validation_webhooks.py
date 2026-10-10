@@ -8,7 +8,12 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 from urllib.parse import unquote_plus
+
+
+class IncompleteAuditRecords(ValueError):
+    """The requested operations have not both arrived yet."""
 
 
 def records(path: Path) -> list[dict]:
@@ -54,8 +59,10 @@ def audit_summary(values: list[dict], bucket: str, key: str) -> dict:
         api = value.get("api") or {}
         if api.get("bucket") != bucket or api.get("object") != key:
             continue
-        name = api.get("name")
-        if name not in {"PutObject", "GetObject"}:
+        api_name = api.get("name")
+        name = {"PutObject": "PutObject", "GetObject": "GetObject",
+                "s3:PutObject": "PutObject", "s3:GetObject": "GetObject"}.get(api_name)
+        if name is None:
             continue
         request_id = value.get("requestID")
         if not isinstance(request_id, str) or not request_id:
@@ -66,9 +73,12 @@ def audit_summary(values: list[dict], bucket: str, key: str) -> dict:
         for header, content in headers.items():
             if header.lower() == "authorization" and isinstance(content, str) and content.strip("*"):
                 raise ValueError("audit payload exposes authorization header")
-        matches[name] = {"request_id": request_id, "status_code": 200}
+        matches[name] = {"api_name": api_name, "request_id": request_id, "status_code": 200}
     if set(matches) != {"PutObject", "GetObject"}:
-        raise ValueError("matching PUT and GET audit records were not both delivered")
+        raise IncompleteAuditRecords(
+            "matching PUT and GET audit records were not both delivered; "
+            f"observed operations: {sorted(matches)}"
+        )
     if matches["PutObject"]["request_id"] == matches["GetObject"]["request_id"]:
         raise ValueError("PUT and GET audit records share a request ID")
     return {"bucket": bucket, "key": key, "operations": matches, "secret_check": "PASS"}
@@ -81,9 +91,21 @@ def main() -> int:
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--key", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--timeout", type=float, default=0,
+                        help="Wait this many seconds for both audit operations; invalid records fail immediately.")
     args = parser.parse_args()
-    values = records(args.input)
-    result = (event_summary if args.mode == "events" else audit_summary)(values, args.bucket, args.key)
+    if args.timeout < 0 or args.timeout > 300:
+        parser.error("--timeout must be between 0 and 300 seconds")
+    deadline = time.monotonic() + args.timeout
+    while True:
+        values = records(args.input)
+        try:
+            result = (event_summary if args.mode == "events" else audit_summary)(values, args.bucket, args.key)
+            break
+        except IncompleteAuditRecords:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0
 

@@ -47,6 +47,22 @@ class ValidationWebhooksTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "line 2"):
                 records(path)
 
+    def test_audit_accepts_s3_operation_names_and_keeps_boundaries(self):
+        def entry(name, request_id, key="key"):
+            return {"api": {"name": name, "bucket": "bucket", "object": key, "status_code": 200},
+                    "requestID": request_id}
+        put = entry("s3:PutObject", "put-id")
+        get = entry("s3:GetObject", "get-id")
+        result = audit_summary([put, get], "bucket", "key")
+        self.assertEqual(result["operations"]["GetObject"]["api_name"], "s3:GetObject")
+        with self.assertRaisesRegex(ValueError, "not both delivered"):
+            audit_summary([put, entry("s3:GetObject", "other-id", "other-key")], "bucket", "key")
+        with self.assertRaisesRegex(ValueError, "not both delivered"):
+            audit_summary([put, entry("admin:GetObject", "admin-id")], "bucket", "key")
+        with patch.dict(os.environ, {"RUSTFS_SECRET_KEY": "private-value"}):
+            with self.assertRaisesRegex(ValueError, "exposes RUSTFS_SECRET_KEY"):
+                audit_summary([put, {**get, "accessKey": "private-value"}], "bucket", "key")
+
 
 if __name__ == "__main__":
     unittest.main()

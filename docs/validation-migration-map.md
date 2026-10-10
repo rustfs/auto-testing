@@ -54,7 +54,8 @@ All 13 Pool lifecycle IDs now dispatch to the source black-box pool checks.
 The driver reuses the existing auto-testing Pool suite's two-node seed and
 expansion operations, supplies marker-guarded reset/topology/restart/physical
 census hooks, and requires source case evidence plus physical cleanup before
-canonical PASS. These cases have not yet completed live validation.
+canonical PASS. `pool.status` passed live in RustFS Actions run `38047001285`;
+the other twelve Pool cases still require live evidence.
 
 The 18 bucket-replication and 20 site-replication IDs now dispatch to the
 source black-box checks. The driver uses the existing auto-testing four-node
@@ -83,8 +84,10 @@ distinct request IDs, successful status, and absence of known secrets.
 `events.delivery` passed live in RustFS Actions run `38046470999`. The audit
 attempt in run `38046574073` failed its secret check because the environment
 used the same value for the public access key and secret key. The audit case
-now generates a distinct secret key before deployment; it still requires a
-live rerun before it can be counted as verified.
+now generates a distinct secret key before deployment. Run `38046860333`
+exposed an executor parsing mismatch: the candidate emits `s3:PutObject` and
+`s3:GetObject`. The parser now recognizes those exact names and waits for both
+operations on the selected object; the case still requires a live rerun.
 
 `iam.policy-enforcement` has a dedicated executor on the Security suite's
 `single-single` deployment. It uses one principal with a policy that allows
@@ -114,7 +117,7 @@ executor before touching the fleet and runs the result report with
 workflow. Each run uploads its candidate identity, canonical result, and
 case evidence. The 73 currently dispatchable IDs are the S3, two scanner,
 KMS, tiering, events, audit, IAM, 14 additional ILM, 13 Pool, and 38
-replication cases above. Thirteen have live PASS evidence; the other 145 IDs
+replication cases above. Fourteen have live PASS evidence; the other 144 IDs
 remain unverified.
 
 The eight planned cases have these concrete reuse candidates:

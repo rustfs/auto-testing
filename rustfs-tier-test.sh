@@ -2102,11 +2102,10 @@ test_validation_audit_request_correlation() {
   aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${TEST_TMP}/validation-audit-read.bin"
   assert_aws_ok || return 1
   cmp "${TEST_TMP}/validation-audit-source.bin" "${TEST_TMP}/validation-audit-read.bin" || return 1
-  wait_audit 2 "${bucket}" || return 1
   VALIDATION_AUDIT_TOKEN="${AUDIT_TOKEN}" VALIDATION_NOTIFY_TOKEN="${NOTIFY_TOKEN}" \
     python3 "${SCRIPT_DIR}/scripts/validation_webhooks.py" audit \
       --input "${AUDIT_EVENTS}" --bucket "${bucket}" --key "${key}" \
-      --output "${TEST_TMP}/validation-audit.json"
+      --output "${TEST_TMP}/validation-audit.json" --timeout 300
 }
 
 run_all_tests() {
