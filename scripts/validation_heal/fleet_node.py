@@ -33,15 +33,19 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
     if profile == "lock-quorum":
         return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:8"}
     if profile == "scope-isolation":
         return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "8"}
-    if profile in {"durable-mrf", "mrf-crash"}:
-        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug",
+    if profile in {"durable-mrf", "mrf-crash", "flapping"}:
+        # Keep actual MRF admission/start/terminal evidence without enabling
+        # unrelated HTTP/HTTP2 frame debugging on the high-volume fleet.
+        logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true",
+                "RUSTFS_OBS_LOGGER_LEVEL": logging_filter, "RUST_LOG": logging_filter,
                 **({"RUSTFS_HEAL_MAX_CONCURRENT_HEALS": "1", "RUSTFS_HEAL_MAX_CONCURRENT_PER_SET": "1",
-                    "RUSTFS_HEAL_MRF_REPLAY_BATCH": "1"} if profile == "mrf-crash" else {})}
+                    "RUSTFS_HEAL_MRF_REPLAY_BATCH": "1"} if profile in {"mrf-crash", "flapping"} else {})}
     if profile in {"replacement", "replacement-target", "schema-refusal"}:
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "true" if profile == "replacement" else "false", "RUSTFS_HEAL_INTERVAL_SECS": "10",
                 "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
@@ -236,6 +240,8 @@ def start(request):
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
+            *(["--property=PrivateMounts=true", "--property=CapabilityBoundingSet=~CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"]
+              if owner.get("runtimeProfile") == "flapping" else []),
             *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "durable-mrf", "mrf-crash", "replacement", "replacement-target", "schema-refusal"} else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
@@ -548,6 +554,24 @@ def drive_gate_activate(request):
 def drive_gate_state(request):
     state, roots, _ = owned(request["runId"])
     return gate_module().checked_gate(state, roots) or {"state": "CLEAR"}
+
+
+def drive_gate_arm_live(request):
+    """Re-arm one owned root without changing the running service's birth."""
+    require(set(request) == {"runId", "action", "disk", "expected"}, "live arm requires an exact owned process binding")
+    state, roots, owner = owned(request["runId"])
+    require(owner.get("runtimeProfile") == "flapping", "live arm requires the preconfigured flapping service")
+    before = process(request)
+    require(before["pid"] > 1 and isinstance(request["expected"], dict)
+            and all(before.get(name) == request["expected"].get(name) for name in PROCESS_FIELDS),
+            "live drive gate crossed the expected process birth")
+    module = gate_module()
+    module.validate_live_boundary(before["pid"])
+    require(quorum_gate_module().checked(state, roots) is None, "live drive gate cannot share a quorum gate")
+    receipt = module.apply_gate(state, roots, request["disk"], "permission-denied")
+    after = process(request)
+    require(all(before.get(name) == after.get(name) for name in PROCESS_FIELDS), "live arm crossed its owned process identity")
+    return {**receipt, "processBefore": before, "processAfter": after, "sameOriginalProcess": True}
 
 
 def drive_gate_release_live(request):
@@ -942,7 +966,7 @@ def main(request):
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part, "verify-parts": verify_parts,
                "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe,
                "drive-gate-activate": drive_gate_activate, "gate-state": drive_gate_state,
-               "drive-gate-release-live": drive_gate_release_live}
+               "drive-gate-release-live": drive_gate_release_live, "drive-gate-arm-live": drive_gate_arm_live}
     actions["task-records"] = task_records
     for action in ("bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover"):
         actions[action] = bucket_record_operation

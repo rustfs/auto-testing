@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -200,10 +200,10 @@ class Fleet:
             source += "\nimport types\nencryption_runtime = types.ModuleType('encryption_runtime')\nexec(" + repr(
                 NODE_SOURCE.with_name("encryption_runtime.py").read_text()) + ", encryption_runtime.__dict__)\n"
         replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot", "format-schema-fault"}
-        if action in {"start", "cleanup", "audit-finalize", "drive-gate", "replace-drive", "quorum-gate", "quorum-gate-probe"}:
+        if action in {"start", "cleanup", "audit-finalize", "drive-gate", "drive-gate-arm-live", "replace-drive", "quorum-gate", "quorum-gate-probe"}:
             source += "\nimport types\nquorum_gate_backend = types.ModuleType('quorum_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("quorum_gate.py").read_text()) + ", quorum_gate_backend.__dict__)\n"
-        if action in {"drive-gate", "drive-gate-probe", "drive-gate-activate", "gate-state", "drive-gate-release-live"} | replacement_actions:
+        if action in {"drive-gate", "drive-gate-arm-live", "drive-gate-probe", "drive-gate-activate", "gate-state", "drive-gate-release-live"} | replacement_actions:
             source += "\nimport types\ngate = types.ModuleType('drive_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("drive_gate.py").read_text()) + ", gate.__dict__)\n"
         if action in replacement_actions:

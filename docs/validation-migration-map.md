@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 126 currently dispatchable IDs include all 74 non-Heal cases and fifty-two Heal cases. Forty-six have live PASS evidence; the other 112 have no live PASS claim.
+case evidence. The 127 currently dispatchable IDs include all 74 non-Heal cases and fifty-three Heal cases. Forty-six have live PASS evidence; the other 112 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -1246,3 +1246,39 @@ configuration source hash is archived. Two regression tests cover the default
 R=W read-only plan and fresh balanced lock fixture. H1's missing incarnation
 receipt remains a product/evidence FAIL; the identity oracle is not relaxed.
 A fresh full B08 run is required and no new live PASS is claimed.
+
+B10 `heal.disk-and-node-flapping` now executes all three H2 branches on the
+current auto-testing nodes. Each branch preregisters three cycles, 16/16/64
+unique degraded PUT ACKs, four foreground workers, exact fault/persistence/
+replay windows, a total deadline, queue/task/retry limits and CPU/FD/RSS
+budgets. The foreground ACK ledger records concurrent unique PUT, HEAD,
+control GET and LIST without retrying uncertain writes. Live drive rearming
+requires the exact original process birth, an independent service mount
+namespace and removal of DAC bypass from all capability sets. Every cycle
+has service read/write refusal plus exact-member Admin offline/online
+witnesses, or an owned-unit stop plus an exact connection refusal. Original
+host, candidate, runtime, disk UUID and set-slot identities remain bound.
+
+The third `interrupt-rebuild-again` cycle additionally requires an exact
+running MRF task and both completed and incomplete physical ACK targets;
+it loses the original node again, reproves incomplete physical progress
+and requires the original pending durable responsibility IDs/incarnations
+and nondecreasing owner sequences to survive. Every cycle then needs actual
+MRF admission/start/terminal proof, original responsibility retirement,
+complete physical cohorts and streaming integrity before target GET. The
+final gate rechecks every peer's full ACK inventory and unchanged physical
+results. Manual compensation and backups cannot satisfy convergence. This
+executor has no canonical live PASS yet; 31 Heal executors remain.
+
+E05 `38094551700` retains FAIL/cleanup PASS at `6354298`. Its PUT and marker
+branches exhausted the in-memory journal budget with unrelated HTTP/HTTP2
+frame debug events before they could prove complete replay. Its historical
+version DELETE branch had no exact committed durable MRF obligation within
+the registered persistence window; the final checkpoint held only unrelated
+system-bucket records, which cannot discharge the owned ACKs. The corrected
+MRF profiles use the candidate's reviewed tracing filter grammar to enable
+only Heal manager/task/MRF debug over an info baseline, attest both
+`RUST_LOG` and `RUSTFS_OBS_LOGGER_LEVEL`, and retain complete raw journal
+pages while selecting the required attribution targets in memory. The
+60,000-event/page budgets and exact durable responsibility assertions stay
+in force. All three E05 branches still require a fresh complete live run.

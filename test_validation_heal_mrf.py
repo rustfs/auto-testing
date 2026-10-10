@@ -175,7 +175,9 @@ class DurableMrfTests(unittest.TestCase):
             secret = roots[0] / "data" / ".rustfs.sys" / "credentials.json"; secret.write_text("private")
             owner = {"runtimeProfile": "durable-mrf", "binarySha256": hashlib.sha256(b"candidate").hexdigest()}
             with patch("scripts.validation_heal.mrf_records.os.walk", side_effect=AssertionError("no directory traversal")):
-                result = records.read_records(state, roots, owner, lambda path, boundary: path)
+                for profile in ("durable-mrf", "mrf-crash", "flapping"):
+                    result = records.read_records(state, roots, {**owner, "runtimeProfile": profile}, lambda path, boundary: path)
+                    self.assertTrue(result["stable"])
             self.assertTrue(result["stable"])
             self.assertTrue(records.checkpoint(result)["allAllowlistedFilesAbsent"])
             self.assertNotIn("private", json.dumps(result))
@@ -190,8 +192,29 @@ class DurableMrfTests(unittest.TestCase):
         self.assertEqual(config["RUSTFS_HEAL_MRF_ENABLE"], "true")
         self.assertEqual(config["RUSTFS_SCANNER_ENABLED"], "false")
         self.assertEqual(config["RUSTFS_HEAL_AUTO_HEAL_ENABLE"], "false")
+        self.assertEqual(config["RUST_LOG"], config["RUSTFS_OBS_LOGGER_LEVEL"])
+        self.assertTrue(config["RUST_LOG"].startswith("info,"))
+        for target in ("manager", "task", "mrf"):
+            self.assertIn("rustfs::heal::" + target + "=debug", config["RUST_LOG"])
         self.assertEqual(select("E05")[0]["variants"], list(replay.BRANCHES))
         self.assertIn(replay.CASE_ID, AUTOMATIC_CASES)
+
+    def test_source_filter_keeps_complete_raw_pages_and_exact_heal_events(self):
+        noise = {"target": "h2::codec::framed_read", "message": "frame"}
+        start = {"target": "rustfs::heal::task", "message": "Heal object started", "task_id": self.responsibility}
+        pages = []
+        def remote(node, action, **params):
+            if params.get("checkpoint"):
+                return {"complete": True, "afterCursor": "baseline"}
+            value = {"complete": True, "beforeCursor": params["afterCursor"], "afterCursor": "next", "hasMore": False,
+                "journal": "\n".join([json.dumps(noise)] * 20 + [json.dumps(start)])}
+            return value
+        fleet = types.SimpleNamespace(nodes=["node1"], remote=remote,
+            record=lambda label, value: pages.append(value) or value)
+        window = replay.JournalWindow(fleet, "MRF-rejoin", event_targets={"rustfs::heal::manager", "rustfs::heal::task"})
+        self.assertEqual(window.capture()["node1"], [start])
+        self.assertEqual(len(pages[-1]["journal"].splitlines()), 21)
+        self.assertIn("h2::codec::framed_read", pages[-1]["journal"])
 
     def test_replay_observer_uses_real_journal_interface_and_requires_exact_task_before_retirement(self):
         obligation = self.obligation()

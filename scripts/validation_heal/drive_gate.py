@@ -121,6 +121,18 @@ def start_properties(value):
     return properties
 
 
+def validate_live_boundary(pid):
+    require(type(pid) is int and pid > 1, "live drive gate requires a real owned process")
+    root = Path(f"/proc/{pid}")
+    require((root / "ns/mnt").readlink() != Path("/proc/self/ns/mnt").readlink(),
+            "live drive gate requires the preconfigured private mount namespace")
+    fields = dict(line.split(":", 1) for line in (root / "status").read_text().splitlines() if ":" in line)
+    require(all(name in fields and int(fields[name].strip(), 16) & DENY_DAC_CAPS == 0
+                for name in ("CapEff", "CapPrm", "CapBnd")),
+            "live drive gate requires DAC bypass removed from effective, permitted and bounding capabilities")
+    return {"privateMountNamespace": True, "dacBypassRemoved": True}
+
+
 def process_identity(pid):
     text = Path(f"/proc/{pid}/status").read_text()
     fields = dict(line.split(":", 1) for line in text.splitlines() if ":" in line)

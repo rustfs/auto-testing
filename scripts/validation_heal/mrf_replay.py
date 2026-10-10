@@ -207,9 +207,11 @@ def deleted_parts_absent(snapshot, targets):
 
 
 def wait_replay(fleet, window, binding, nodes, bucket, expected, obligations, bindings, rejoin_time,
-                before, authorities, deleted_targets):
+                before, authorities, deleted_targets, *, observe=None, deadline_limit=None):
     deadline, proofs = time.monotonic() + REPLAY_SECONDS, {}
+    if deadline_limit is not None: deadline = min(deadline, deadline_limit)
     while True:
+        if observe is not None: observe()
         events = window.capture()
         for obligation in obligations:
             key = identity(obligation)
@@ -308,7 +310,7 @@ def run_branch(args, branch, nodes, *, after_rejoin=None, put_count=3, fixture="
         require(physical_content({offline_node: frozen}) == physical_content({offline_node: still_offline}), "MRF ACKs reached the stopped original node")
         authorities = fleet.record("offline-physical-authority", {node: fleet.remote(node, "snapshot", quiescent=node == offline_node) for node in nodes})
         deleted_targets = [map_target(before, bucket, entry["key"], "data", 1, entry["versionId"], latest_required=False) for entry in deleted]
-        window = JournalWindow(fleet, "MRF-rejoin")
+        window = JournalWindow(fleet, "MRF-rejoin", event_targets={"rustfs::heal::manager", "rustfs::heal::task"})
         rejoin_time = datetime.now(timezone.utc)
         fleet.record("rejoin-original-node", fleet.remote(offline_node, "start"))
         fleet.wait_ready()
