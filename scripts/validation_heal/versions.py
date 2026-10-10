@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gzip
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -14,6 +15,7 @@ import re
 import secrets
 import signal
 import sys
+from urllib.parse import quote
 
 try:
     from .heal_probe import Probe, compare_inventories, payload, require, save
@@ -40,8 +42,47 @@ BRANCHES = {
     "heal.versioning-suspended-null": ("enabled-to-suspended", "null-overwrite", "null-delete-marker"),
     "heal.below-read-quorum": ("r-minus-1-unversioned", "r-minus-1-historical"),
     "heal.missing-or-corrupt-xlmeta": ("missing-xlmeta", "truncated-xlmeta", "corrupt-xlmeta", "inline-payload", "versioned-xlmeta"),
+    "heal.object-metadata-and-tags": ("user-metadata", "content-headers", "versioned-tags"),
 }
 VERSION_SIZE = 5 * 1024**2 + 123
+SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
+
+
+def semantic_body(bucket, key, nonce):
+    return gzip.compress(payload(f"{bucket}/{key}/{nonce}", VERSION_SIZE), mtime=0)
+
+
+def seed_semantics(recorder, bucket):
+    recorder.call("create_bucket", {"Bucket": bucket})
+    recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})
+    expected, public = [], []
+    for key in SEMANTIC_KEYS:
+        for nonce in range(3):
+            body = semantic_body(bucket, key, nonce)
+            metadata = {"UserKey": quote(f"中文值-{nonce}", safe=""), "generation": str(nonce)}
+            headers = {"ContentType": "application/octet-stream", "ContentEncoding": "gzip",
+                       "ContentDisposition": "attachment; filename*=UTF-8''" + quote("中文文件.bin", safe=""),
+                       "CacheControl": "no-store"}
+            color = "blue" if nonce % 2 == 0 else "red"
+            response = recorder.call("put_object", {"Bucket": bucket, "Key": key, "Metadata": metadata,
+                **headers, "Tagging": f"color={color}&generation=v{nonce}"}, body)
+            require(response.get("VersionId") not in {None, "null"}, "semantic fixture omitted its precise historical version")
+            expected.append({"key": key, "versionId": response["VersionId"], "deleteMarker": False, "isLatest": nonce == 2,
+                "payload": {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}})
+            public.append({"key": key, "versionId": response["VersionId"],
+                "properties": {**headers, "Metadata": {name.lower(): value for name, value in metadata.items()}},
+                "tags": [{"Key": "color", "Value": color}, {"Key": "generation", "Value": f"v{nonce}"}],
+                "payloadEncoding": "actual deterministic gzip bytes; no server-side compression claim"})
+    return expected, public
+
+
+def verify_semantics(public, baseline):
+    for spec in public:
+        entry = next((entry for entry in baseline["entries"] if version_identity(entry) == version_identity(spec)), None)
+        require(entry is not None and entry["tags"] == spec["tags"]
+                and all(entry["properties"].get(name) == value for name, value in spec["properties"].items()),
+                "semantic baseline lost normalized user metadata, actual encoding headers or exact versioned tags")
+    return {"versionedTagSetsAndPublicHeadersVerified": True, "expected": public}
 
 
 def version_identity(entry):
@@ -292,8 +333,23 @@ def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
         key = "objects/0000.bin"
     if case_id == "heal.missing-or-corrupt-xlmeta":
         key = "objects/0000.bin" if fixture == "DV" else f"objects/{branch_index + 1:04d}.bin"
+    if case_id == "heal.object-metadata-and-tags":
+        key = SEMANTIC_KEYS[branch_index]
     selected = [entry for entry in expected if entry["key"] == key]
     data = [entry for entry in selected if not entry["deleteMarker"]]
+    if case_id == "heal.object-metadata-and-tags":
+        require(len(data) == 3, "metadata/tag fixture lacks three independently acknowledged versions")
+        target = choose_target(snapshot, bucket, data[0] if branch == "user-metadata" else data[-1],
+                               "parity" if branch == "versioned-tags" else "data")
+        proofs, faults, required, metadata_keys = [target], [target], {version_identity(target)}, set()
+        if branch == "content-headers":
+            faults, required, metadata_keys = [metadata_target(snapshot, target)], set(), {key}
+            proofs = [choose_target(snapshot, bucket, entry, "data") for entry in data]
+            proofs = [{**item, **next(shard for shard in item["cohort"]
+                       if (shard["node"], shard["disk"]) == (target["node"], target["disk"]))} for item in proofs]
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": True, "expected": selected,
+                "faults": faults, "proofs": proofs, "requiredRepairs": required, "metadataRepairs": metadata_keys,
+                "kind": {"user-metadata": "missing", "content-headers": "header", "versioned-tags": "bitflip"}[branch]}
     if case_id == "heal.missing-or-corrupt-xlmeta":
         if fixture == "DB":
             target = map_inline_target(snapshot, bucket, data[0])
@@ -389,9 +445,11 @@ def verify_version_s3(probe, fleet, bucket, expected, baseline, label, *, fixtur
         nonce = next(index for index, item in enumerate(
             item for item in expected if item["key"] == entry["key"] and not item["deleteMarker"])
             if item["versionId"] == entry["versionId"])
+        body = semantic_body(bucket, entry["key"], nonce) if fixture == "DS" else payload(
+            f"{bucket}/{entry['key']}/{nonce}", entry["payload"]["size"])
         ranges.append({"key": entry["key"], "versionId": entry["versionId"], "proof": verify_ranges(
             probe, fleet, bucket, entry["key"], version_id=entry["versionId"],
-            expected_body=payload(f"{bucket}/{entry['key']}/{nonce}", entry["payload"]["size"]))})
+            expected_body=body)})
     return {"inventory": comparison, "historicalRanges": ranges}
 
 
@@ -427,12 +485,18 @@ def run_topology(args, topology, nodes, fixture):
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         recorder = Recorder(probe, directory / "fixture")
-        expected = seed(recorder, bucket, fixture,
-                        4 if fixture == "DV" else 128, [VERSION_SIZE] if fixture == "DV" else SIZES)
+        public = None
+        if fixture == "DS":
+            expected, public = seed_semantics(recorder, bucket)
+        else:
+            expected = seed(recorder, bucket, fixture,
+                            4 if fixture == "DV" else 128, [VERSION_SIZE] if fixture == "DV" else SIZES)
         if args.case_id == "heal.versioning-suspended-null":
             expected = suspend_fixture(recorder, bucket, expected)
         baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
+        if public is not None:
+            fleet.record("semantic-baseline", verify_semantics(public, baseline))
         for branch in branches:
             registrations = []
             metadata_faults = {}
@@ -599,6 +663,8 @@ def main():
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
     fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta"} else ("DV",)
+    if args.case_id == "heal.object-metadata-and-tags":
+        fixtures = ("DS",)
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):

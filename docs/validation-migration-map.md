@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 91 currently dispatchable IDs include all 74 non-Heal cases and seventeen Heal cases. Thirty-eight have live PASS evidence; the other 120 have no live PASS claim.
+case evidence. The 92 currently dispatchable IDs include all 74 non-Heal cases and eighteen Heal cases. Thirty-nine have live PASS evidence; the other 119 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -189,7 +189,15 @@ Legal metadata re-encoding may move an inline value while its exact length/hash
 stay fixed. The extended helper passed the 24/12 external shard oracle and one
 frozen released-process inline fixture with three corruption negatives locally;
 this executor still needs a new candidate-bound tool build and live evidence.
-The other 67 Heal cases remain
+D06 `heal.object-metadata-and-tags` preserves all three H1/H2 branches with
+three historical payloads per Unicode/space/literal-percent key, actual gzip
+content, encoded Chinese user metadata and two distinct tag groups. It checks
+the initial normalized metadata/Content-Type/Encoding/Disposition/Cache-Control
+and precise versioned tags, then faults an external data part, an entire xl.meta
+header, or a parity part. Exact physical/version references, complete S3
+inventories, HEAD and ranges must agree after repair. This executor still
+requires live evidence.
+The other 66 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -259,3 +267,11 @@ completely and passed H2 historical/current/recursive branches. H2's simultaneou
 multiple-version fault left one original current-version parity part missing.
 The exact physical oracle retained FAIL and clean backup-assisted finalization;
 that restoration does not count as product repair.
+
+Fresh corrected J04 run `38059567206` passed every DB/DV H1/H2 source branch,
+normal/deep independent-token repeats and same-unit process restarts, with clean
+finalization. The earlier same-candidate H2 unknown-marker failure in run
+`38058699913` is still retained; the new PASS does not rewrite that evidence or
+claim a product fix. Tool build `38060217084` successfully built the extended
+inline verifier and checked the 24 healthy/12 corrupt external shards plus the
+one healthy/three corrupt released-process inline samples.

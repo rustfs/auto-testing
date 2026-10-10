@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import copy
+import gzip
 import types
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from scripts.validation_heal.shards import run_task, verify_ranges
 from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, validate_version_receipts,
     branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract,
     map_inline_target, verify_proof)
+from scripts.validation_heal.versions import seed_semantics, verify_semantics
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract
 
 
@@ -386,6 +388,31 @@ class HealShardOracleTest(unittest.TestCase):
 
 
 class HealVersionOracleTest(unittest.TestCase):
+    def test_metadata_fixture_has_real_encoded_content_and_exact_distinct_version_tags(self):
+        uploaded = []
+        def call(operation, params, body=None):
+            if operation == "put_object":
+                self.assertEqual(params["ContentEncoding"], "gzip")
+                self.assertTrue(gzip.decompress(body))
+                self.assertEqual(len(gzip.decompress(body)), 5 * 1024**2 + 123)
+                self.assertTrue(all(value.isascii() for value in params["Metadata"].values()))
+                uploaded.append((params["Key"], params["Metadata"]["generation"]))
+                return {"VersionId": "version-" + str(len(uploaded))}
+            return {}
+        expected, public = seed_semantics(types.SimpleNamespace(call=call), "fixture")
+        self.assertEqual(len(expected), 9)
+        self.assertEqual(len({entry["versionId"] for entry in expected}), 9)
+        self.assertEqual(len({key for key, _ in uploaded}), 3)
+        baseline = {"entries": [{"key": spec["key"], "versionId": spec["versionId"],
+                   "properties": copy.deepcopy(spec["properties"]), "tags": copy.deepcopy(spec["tags"])} for spec in public]}
+        verify_semantics(public, baseline)
+        for kind in ("header", "metadata", "versioned-tags"):
+            changed = copy.deepcopy(baseline)
+            if kind == "header": changed["entries"][0]["properties"]["ContentEncoding"] = "identity"
+            elif kind == "metadata": changed["entries"][0]["properties"]["Metadata"]["userkey"] = "another"
+            else: changed["entries"][0]["tags"] = copy.deepcopy(changed["entries"][1]["tags"])
+            with self.subTest(kind=kind), self.assertRaises(ValueError): verify_semantics(public, changed)
+
     def test_decoder_failure_is_evidence_only_for_the_exact_witnessed_corruption(self):
         entry = {"path": "fixture/key/xl.meta", "sha256": "changed-sha", "size": 9}
         fault = {entry["path"]: {"sha256": "changed-sha", "size": 9}}
