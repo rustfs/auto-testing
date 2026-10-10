@@ -108,13 +108,22 @@ def mounts():
     return observed
 
 
+def resource_limits(profile):
+    require(profile in {"standard", "cursor"}, "unsupported Heal resource profile")
+    return {"maxSnapshotFiles": 12288 if profile == "cursor" else 4096,
+            "minimumDriveFreeBytes": (2 if profile == "cursor" else 1) * 1024**3,
+            "runtimeMaxSeconds": 2700 if profile == "cursor" else 1800}
+
+
 def preflight(request):
     state, roots = paths(request["runId"])
     require(not state.exists() and all(not root.exists() for root in roots), "run namespace already exists")
     observed = mounts()
-    require(all(shutil.disk_usage(mount).free >= 1024**3 for mount in MOUNTS), "1 GiB free per drive required")
+    limits = resource_limits(request.get("resourceProfile", "standard"))
+    require(all(shutil.disk_usage(mount).free >= limits["minimumDriveFreeBytes"] for mount in MOUNTS),
+            "insufficient free space for the explicit Heal resource profile")
     return {"hostname": socket.gethostname(), "mounts": observed, "statePath": str(state),
-            "dataRoots": [str(root / "data") for root in roots], "mutated": False}
+            "dataRoots": [str(root / "data") for root in roots], "resourceLimits": limits, "mutated": False}
 
 
 def reserve(request):
@@ -143,7 +152,8 @@ def reserve(request):
     state, roots = paths(run_id)
     owner = {"runId": run_id, "unit": unit(run_id), "hostname": observed["hostname"],
              "mounts": observed["mounts"], "binarySha256": binary_sha,
-             "bucket": request["bucket"], "volumes": volumes, "runtimeProfile": profile}
+             "bucket": request["bucket"], "volumes": volumes, "runtimeProfile": profile,
+             "resourceProfile": request.get("resourceProfile", "standard")}
     if request.get("inspectorSha256"):
         require(bool(re.fullmatch(r"[0-9a-f]{64}", request["inspectorSha256"])), "invalid inspector digest")
         owner["inspectorSha256"] = request["inspectorSha256"]
@@ -192,7 +202,8 @@ def start(request):
     require(digest(state / "rustfs") == owner["binarySha256"], "candidate changed before start")
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
-            "--property=RuntimeMaxSec=1800", "--property=MemoryMax=4G",
+            "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
+            "--property=MemoryMax=4G",
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)), str(state / "rustfs"), *owner["volumes"])
@@ -285,24 +296,44 @@ def verify_part(request):
     state, roots, owner = owned(request["runId"])
     stopped(owner)
     require(owner.get("inspectorSha256"), "candidate-bound bitrot verifier is required")
+    tool = checked(state / "heal-meta-inspect", state)
+    require(digest(tool) == owner["inspectorSha256"], "bitrot verifier changed")
+    return verify_part_owned(request, roots, owner, tool)
+
+
+def verify_part_owned(request, roots, owner, tool):
     module = fault_module()
     relative = request["relativePath"]
     parts = module.target_parts(relative, owner["bucket"])
     require(parts[-1] != "xl.meta" and type(request.get("partNumber")) is int
             and parts[-1] == f"part.{request['partNumber']}", "part identity differs from request")
-    root, _ = fault_root(request)
+    require(type(request.get("disk")) is int and 0 <= request["disk"] < len(roots), "invalid physical disk index")
+    root = roots[request["disk"]]
     data = root / "data"
     part = checked(data / relative, data)
     metadata = checked(part.parent.parent / "xl.meta", data)
     key = metadata.parent.relative_to(data / owner["bucket"]).as_posix()
-    tool = checked(state / "heal-meta-inspect", state)
-    require(digest(tool) == owner["inspectorSha256"], "bitrot verifier changed")
     result = json.loads(command(str(tool), "--verify-part", str(metadata), owner["bucket"], key,
                                 str(part), request["versionId"], str(request["partNumber"])).stdout)
     require(result.get("physicalBitrotVerified") is True and result.get("key") == key
             and result.get("versionId") == request["versionId"]
             and result.get("partNumber") == request["partNumber"], "bitrot proof identity differs")
     return {**result, "sha256": digest(part), "relativePath": relative, "disk": request["disk"]}
+
+
+def verify_parts(request):
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    entries = request.get("parts")
+    require(isinstance(entries, list) and 1 <= len(entries) <= 128
+            and all(isinstance(entry, dict) and set(entry) == {"disk", "relativePath", "versionId", "partNumber"}
+                    for entry in entries), "invalid bounded part verification batch")
+    require(len({(entry["disk"], entry["relativePath"], entry["versionId"], entry["partNumber"])
+                 for entry in entries}) == len(entries), "duplicate part in verification batch")
+    require(owner.get("inspectorSha256"), "candidate-bound bitrot verifier is required")
+    tool = checked(state / "heal-meta-inspect", state)
+    require(digest(tool) == owner["inspectorSha256"], "bitrot verifier changed")
+    return {"complete": True, "parts": [verify_part_owned(entry, roots, owner, tool) for entry in entries]}
 
 
 def verify_inline(request):
@@ -361,6 +392,7 @@ def snapshot(request):
         require(all(environment.get(key) == value for key, value in expected_config.items()),
                 "bound Heal runtime configuration differs")
     files, formats = [], []
+    limits = resource_limits(owner.get("resourceProfile", "standard"))
     tool = state / "heal-meta-inspect"
     if owner.get("inspectorSha256"):
         require(digest(checked(tool, state)) == owner["inspectorSha256"], "metadata inspector changed")
@@ -373,7 +405,8 @@ def snapshot(request):
                     checked(Path(directory) / name, data)
                 for name in sorted(names):
                     path = Path(directory) / name
-                    require(len(files) < 4096 and path.stat().st_size <= 64 * 1024**2, "fixture exceeds physical evidence budget")
+                    require(len(files) < limits["maxSnapshotFiles"] and path.stat().st_size <= 64 * 1024**2,
+                            "fixture exceeds physical evidence budget")
                     entry = {"disk": index, "path": str(path.relative_to(data)),
                              "size": path.stat().st_size, "sha256": digest(path)}
                     if path.name == "xl.meta" and owner.get("inspectorSha256"):
@@ -388,6 +421,7 @@ def snapshot(request):
             "backgroundConfig": None if request.get("quiescent") is True else expected_config,
             "storageClassEnvironment": None if request.get("quiescent") is True else {
                 key: environment.get(key) for key in ("RUSTFS_STORAGE_CLASS_INLINE_BLOCK", "RUSTFS_STORAGE_CLASS_STANDARD")},
+            "resourceLimits": limits,
             "files": sorted(files, key=lambda value: (value["disk"], value["path"])), "formats": formats}
 
 
@@ -456,7 +490,7 @@ def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
                "logs": logs, "cleanup": cleanup, "audit-finalize": audit_finalize, "install-inspector": install_inspector,
-               "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part,
+               "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part, "verify-parts": verify_parts,
                "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe}
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

@@ -279,9 +279,11 @@ def validate_dry_run_status(status, target, expected):
             "dry-run counters do not match the complete dry_run_observed responsibility set")
 
 
-def peer_status_equal(coordinator, peer):
+def peer_status_equal(coordinator, peer, *, task, peer_task):
+    # The candidate renders startTime at response serialization; it is not a
+    # persistent task epoch. Bind the actual signed queries to admission instead.
     return (coordinator.get("summary") == "finished" and peer.get("summary") == "finished"
-            and coordinator.get("startTime") is not None and peer.get("startTime") == coordinator["startTime"]
+            and isinstance(task, tuple) and len(task) == 2 and all(task) and task == peer_task
             and canonical(coordinator.get("outcome")) == canonical(peer.get("outcome"))
             and coordinator.get("outcome", {}).get("coverage") == "complete"
             and peer.get("truncated", False) is False)
@@ -322,14 +324,15 @@ def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_
             observed = fleet.record("cross-node-control", remote_probe.admin(path, [("clientToken", token)], b""))
             require(observed.get("httpStatus") == 200 and isinstance(observed.get("response"), dict),
                     "cross-node status is missing; 404/unknown cannot certify task completion")
-            if peer_status_equal(status, observed["response"]):
+            if peer_status_equal(status, observed["response"], task=(path, token), peer_task=(path, token)):
                 break
             require(time.monotonic() < convergence_deadline, "peer responsibility did not converge within 30 seconds")
             time.sleep(0.2)
     if status_endpoints:
         fleet.record("cross-node-convergence", {"path": path, "clientToken": token,
             "coordinator": probe.endpoint_name, "queriedEndpoints": list(status_endpoints), "budgetSeconds": 30,
-            "taskStartTimeAndCompleteOutcomeEqual": True})
+            "sameOriginalPathAndToken": True, "completeOutcomeEqual": True,
+            "responseStartTimeIsTaskIdentity": False})
     return status
 
 

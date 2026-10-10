@@ -130,11 +130,13 @@ def validate_healthy(status, bucket, key, disposition):
 
 
 class Fleet:
-    def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual"):
+    def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
         require(runtime_profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled"}, "unsupported Heal runtime profile")
+        require(resource_profile in {"standard", "cursor"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
         self.runtime_profile = runtime_profile
+        self.resource_profile = resource_profile
         self.sequence = 0
         self.reserved = []
         self.faults = []
@@ -164,15 +166,16 @@ class Fleet:
     def remote(self, node, action, **params):
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
-        if action in {"apply-fault", "recover-fault", "verify-part", "verify-inline"}:
+        if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
         if action in {"start", "cleanup", "audit-finalize", "drive-gate", "drive-gate-probe"}:
             source += "\nimport types\ngate = types.ModuleType('drive_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("drive_gate.py").read_text()) + ", gate.__dict__)\n"
         source += "\nmain(" + repr(value) + ")\n"
+        timeout = 600 if self.resource_profile == "cursor" and action == "snapshot" else 180
         result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
-                                input=source, capture_output=True, text=True, timeout=180)
+                                input=source, capture_output=True, text=True, timeout=timeout)
         require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")
         return json.loads(result.stdout)
 
@@ -193,7 +196,7 @@ class Fleet:
 
     def deploy(self, binary_sha, bucket, access, secret, *, before_start=None):
         self.secret_values.update({access, secret})
-        checked = {node: self.remote(node, "preflight") for node in self.nodes}
+        checked = {node: self.remote(node, "preflight", resourceProfile=self.resource_profile) for node in self.nodes}
         self.record("preflight", checked)
         require(len({value["hostname"] for value in checked.values()}) == len(self.nodes),
                 "Heal node aliases must resolve to distinct actual hosts")
@@ -214,7 +217,8 @@ class Fleet:
                 if self.tool_directory else None
             value = self.remote(node, "reserve", hostname=checked[node]["hostname"], mounts=checked[node]["mounts"],
                                 binarySha256=binary_sha, bucket=bucket, volumes=volumes, access=access, secret=secret,
-                                inspectorSha256=inspector_sha, runtimeProfile=self.runtime_profile)
+                                inspectorSha256=inspector_sha, runtimeProfile=self.runtime_profile,
+                                resourceProfile=self.resource_profile)
             self.record("reserved", {"node": node, **value})
             if self.tool_directory:
                 tool = self.tool_directory / "heal-meta-inspect"

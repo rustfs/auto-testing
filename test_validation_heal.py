@@ -43,6 +43,9 @@ from scripts.validation_heal.markers import (INSTANCES as MARKER_INSTANCES, seed
 from scripts.validation_heal.drive_gate import probe_gate
 from scripts.validation_heal.status import (validate_background, validate_replacement, validate_cli,
     reject_unsafe_completion, watch_startup, stable_status, Cli)
+from scripts.validation_heal.cursor import (Window, OBJECTS as CURSOR_OBJECTS, SIZE as CURSOR_SIZE,
+    BRANCHES as CURSOR_BRANCHES, terminal_proof as cursor_terminal, validate_missing_batch, verify_all_parts)
+from scripts.validation_heal.fleet_node import resource_limits, verify_parts as node_verify_parts
 import errno
 import stat
 
@@ -330,15 +333,19 @@ class HealShardOracleTest(unittest.TestCase):
 
     def test_peer_status_cannot_converge_with_wrong_task_unknown_or_incomplete_receipts(self):
         coordinator = {**HealHealthyOracleTest().receipt("repaired"), "startTime": "exact-task-start"}
-        self.assertTrue(peer_status_equal(coordinator, copy.deepcopy(coordinator)))
+        task = ("/rustfs/admin/v3/heal/fixture/object", "original-token")
+        self.assertTrue(peer_status_equal(coordinator, copy.deepcopy(coordinator), task=task, peer_task=task))
+        rerendered = {**copy.deepcopy(coordinator), "startTime": "fresh response timestamp"}
+        self.assertTrue(peer_status_equal(coordinator, rerendered, task=task, peer_task=task))
         for invalid in ("task-start", "summary", "coverage", "outcome", "truncated"):
             peer = copy.deepcopy(coordinator)
-            if invalid == "task-start": peer["startTime"] = "different task"
+            peer_task = task
+            if invalid == "task-start": peer_task = (task[0], "different-task")
             elif invalid == "summary": peer["summary"] = "unknown"
             elif invalid == "coverage": peer["outcome"]["coverage"] = "partial"
             elif invalid == "outcome": peer["outcome"]["counters"]["unknown"] = 1
             else: peer["truncated"] = True
-            with self.subTest(invalid=invalid): self.assertFalse(peer_status_equal(coordinator, peer))
+            with self.subTest(invalid=invalid): self.assertFalse(peer_status_equal(coordinator, peer, task=task, peer_task=peer_task))
 
     def test_target_role_comes_from_metadata_and_actual_format_slot(self):
         before = self.snapshot()
@@ -1767,6 +1774,163 @@ class HealObjectLockTest(unittest.TestCase):
                 fleet.cleanup.assert_not_called()
                 self.assertEqual(evidence["locked-finalization"][0]["state"], "RETAINED")
                 self.assertFalse(evidence["locked-finalization"][0]["namespaceDeletionAllowed"])
+
+
+class HealCursorOracleTest(unittest.TestCase):
+    bucket = "rv-heal-cursor-unit"
+
+    def expected(self):
+        return [{"key": f"objects/{index:04d}.bin", "versionId": "null", "deleteMarker": False,
+                 "payload": {"size": CURSOR_SIZE}} for index in range(CURSOR_OBJECTS)]
+
+    def window(self, endpoint="node1"):
+        return Window(self.bucket, self.expected(), "task", endpoint, "deployment/task")
+
+    def status(self, start=0, stop=3, *, minimum=1, truncated=False, finished=False):
+        items = [{"bucket": self.bucket, "object": f"objects/{index:04d}.bin", "versionId": "",
+                  "objectSize": CURSOR_SIZE} for index in range(start, stop)]
+        return {"summary": "finished" if finished else "running", "nextSeq": stop + 1, "minSeq": minimum,
+                "items": items, "truncated": truncated, "outcome": {"counters": {"processed": stop}}}
+
+    def consume(self, window, status, cursor):
+        return window.consume(status, cursor, token="task", endpoint=window.endpoint, epoch="deployment/task")
+
+    def test_exclusive_next_sequence_preserves_the_first_item_of_each_poll(self):
+        window = self.window()
+        self.assertEqual(self.consume(window, self.status(), 0)["exclusiveNextCursor"], 3)
+        self.assertEqual(self.consume(window, self.status(3, 6), 3)["exclusiveNextCursor"], 6)
+        self.assertEqual(len(window.seen), 6)
+        self.assertEqual(window.running_windows, 2)
+        with self.assertRaisesRegex(ValueError, "jumped"):
+            self.consume(window, self.status(6, 9), 7)
+
+    def test_truncated_payload_advances_only_over_transmitted_items(self):
+        window, status = self.window(), self.status(0, 8, truncated=True)
+        status["items"] = status["items"][:4]
+        self.assertEqual(self.consume(window, status, 0)["exclusiveNextCursor"], 4)
+        self.assertEqual(self.consume(window, self.status(4, 8, truncated=True), 4)["exclusiveNextCursor"], 8)
+        self.assertEqual(len(window.seen), 8)
+        status["truncated"] = False
+        with self.assertRaisesRegex(ValueError, "silently skip"):
+            self.window().check(status, 0)
+
+    def test_retention_gap_requires_a_real_moved_minimum_and_flag(self):
+        status = self.status(1, CURSOR_OBJECTS, minimum=2, truncated=True, finished=True)
+        proof = self.window().check(status, 0)
+        self.assertTrue(proof["retentionGap"])
+        self.assertEqual(proof["returnedItems"], 1024)
+        changed = copy.deepcopy(status)
+        changed["truncated"] = False
+        with self.assertRaisesRegex(ValueError, "silently omitted"):
+            self.window().check(changed, 0)
+        caught_up = self.status(CURSOR_OBJECTS, CURSOR_OBJECTS, minimum=2, truncated=True, finished=True)
+        self.assertEqual(self.window().check(caught_up, CURSOR_OBJECTS)["returnedItems"], 0)
+        self.assertFalse(self.window().check(caught_up, CURSOR_OBJECTS)["retentionGap"])
+
+    def test_duplicate_backward_wrong_scope_and_epoch_are_not_convergence(self):
+        for kind in ("duplicate", "backward", "bucket", "version", "size", "bounds", "flag", "terminal"):
+            with self.subTest(kind=kind):
+                window = self.window()
+                self.consume(window, self.status(), 0)
+                status = self.status(3, 6)
+                if kind == "duplicate": status["items"][0]["object"] = "objects/0000.bin"
+                if kind == "backward": status.update(nextSeq=3, items=[])
+                if kind == "bucket": status["items"][0]["bucket"] = "unowned"
+                if kind == "version": status["items"][0]["versionId"] = "different-generation"
+                if kind == "size": status["items"][0]["objectSize"] += 1
+                if kind == "bounds": status["nextSeq"] = True
+                if kind == "flag": status["truncated"] = "false"
+                if kind == "terminal": status["summary"] = "stopped"
+                with self.assertRaises(ValueError): self.consume(window, status, 3)
+        for name, value in (("token", "other-task"), ("endpoint", "node2"), ("epoch", "restarted/task")):
+            values = {"token": "task", "endpoint": "node1", "epoch": "deployment/task", name: value}
+            with self.assertRaisesRegex(ValueError, "crossed"):
+                self.window().consume(self.status(), 0, **values)
+
+    def terminal(self):
+        status = self.status(1, CURSOR_OBJECTS, minimum=2, truncated=True, finished=True)
+        receipts = [{"identity": {"bucket": self.bucket, "object": f"objects/{index:04d}.bin", "versionId": None,
+            "poolIndex": 0, "setIndex": 0, "bucketIncarnationId": "incarnation"},
+            "disposition": {"state": "repaired" if index == 1024 else "verified_healthy"}} for index in range(897, 1025)]
+        status["outcome"].update(execution={"state": "completed"}, coverage="complete", objectsTruncated=True,
+            objects=receipts, counters={"processed": CURSOR_OBJECTS, "healed": 1, "unchanged": CURSOR_OBJECTS - 1,
+                "skipped": 0, "failed": 0, "unknown": 0, "attemptFailures": 0, "overflowed": False})
+        return status
+
+    def test_terminal_truncation_cannot_hide_error_or_claim_complete_diagnostics(self):
+        repaired = {("objects/1024.bin", "null")}
+        proof = cursor_terminal(self.terminal(), self.bucket, self.expected(), repaired, self.window())
+        self.assertFalse(proof["diagnosticObjectsAreCompleteManifest"])
+        for kind in ("unknown", "failure", "attempt", "counter", "coverage", "truncation", "identity", "repair", "gap"):
+            status = self.terminal()
+            if kind == "unknown": status["outcome"]["counters"]["unknown"] = 1
+            if kind == "failure": status["outcome"]["counters"]["failed"] = 1
+            if kind == "attempt": status["outcome"]["counters"]["attemptFailures"] = 1
+            if kind == "counter": status["outcome"]["counters"]["processed"] -= 1
+            if kind == "coverage": status["outcome"]["coverage"] = "partial"
+            if kind == "truncation": status["outcome"]["objectsTruncated"] = False
+            if kind == "identity": status["outcome"]["objects"][0]["identity"]["bucketIncarnationId"] = "other"
+            if kind == "repair": status["outcome"]["objects"][-1]["disposition"]["state"] = "verified_healthy"
+            if kind == "gap": status["minSeq"] = 1
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                cursor_terminal(status, self.bucket, self.expected(), repaired, self.window())
+
+    def test_fault_group_checks_all_controls_and_all_exact_missing_parts(self):
+        before = HealShardOracleTest().snapshot()
+        target = map_target(before, "rv-heal-0123456789abcdef", "objects/0008.bin", "data", 1)
+        second = {**target, **next(shard for shard in target["cohort"] if shard["disk"] != target["disk"])}
+        targets = [target, second]
+        receipts = [{"relativePath": item["relativePath"], "fault": None,
+            "before": {"size": item["size"], "sha256": item["sha256"]}} for item in targets]
+        after = copy.deepcopy(before)
+        removed = {(item["disk"], item["relativePath"]) for item in targets}
+        after["node1"]["files"] = [entry for entry in after["node1"]["files"] if (entry["disk"], entry["path"]) not in removed]
+        self.assertEqual(validate_missing_batch(before, after, targets, receipts)["exactMissingParts"], 2)
+        after["node1"]["files"][0]["sha256"] = "changed-control"
+        with self.assertRaisesRegex(ValueError, "changed metadata"):
+            validate_missing_batch(before, after, targets, receipts)
+
+    def test_batch_bitrot_verifier_requires_every_exact_part_and_no_duplicates(self):
+        with patch("scripts.validation_heal.fleet_node.owned", return_value=(Path("/state"), [], {"inspectorSha256": "sha"})), \
+             patch("scripts.validation_heal.fleet_node.stopped"), patch("scripts.validation_heal.fleet_node.checked", side_effect=lambda path, boundary: path), \
+             patch("scripts.validation_heal.fleet_node.digest", return_value="sha"), \
+             patch("scripts.validation_heal.fleet_node.verify_part_owned", side_effect=lambda entry, *args: entry) as reads:
+            entry = {"disk": 0, "relativePath": "bucket/key/data/part.1", "versionId": "null", "partNumber": 1}
+            self.assertEqual(node_verify_parts({"runId": "run", "parts": [entry]})["parts"], [entry])
+            self.assertEqual(reads.call_count, 1)
+            for batch in ([], [entry, entry], [entry] * 129, [{**entry, "extra": "unbound"}]):
+                with self.assertRaises(ValueError): node_verify_parts({"runId": "run", "parts": batch})
+
+    def test_cursor_resources_are_explicit_bounded_and_source_branches_preserved(self):
+        self.assertEqual(resource_limits("standard")["maxSnapshotFiles"], 4096)
+        self.assertEqual(resource_limits("cursor")["maxSnapshotFiles"], 12288)
+        self.assertEqual(resource_limits("cursor")["minimumDriveFreeBytes"], 2 * 1024**3)
+        self.assertEqual(list(CURSOR_BRANCHES), select("J03")[0]["variants"])
+        with self.assertRaises(ValueError): resource_limits("unbounded")
+
+    def test_complete_part_manifest_rejects_omitted_or_wrong_original_bytes(self):
+        cohorts = [{"cohort": [{"node": "node1", "disk": disk, "relativePath": f"bucket/{index}/part.1",
+            "versionId": "null", "partNumber": 1, "sha256": f"sha-{index}-{disk}", "size": 100}
+            for disk in range(4)]} for index in range(CURSOR_OBJECTS)]
+        authority = {(item["disk"], item["relativePath"]): item for cohort in cohorts for item in cohort["cohort"]}
+        def remote(node, action, *, parts):
+            self.assertEqual(action, "verify-parts")
+            self.assertLessEqual(len(parts), 128)
+            return {"complete": True, "parts": [{**part, "sha256": authority[part["disk"], part["relativePath"]]["sha256"],
+                "physicalBitrotVerified": True, "physicalSize": 100} for part in parts]}
+        fleet = types.SimpleNamespace(nodes=["node1"], remote=remote, record=lambda label, value: value)
+        self.assertEqual(verify_all_parts(fleet, cohorts, "proof")["allPartsStreamingVerified"], CURSOR_OBJECTS * 4)
+        good = fleet.remote
+        for kind in ("omitted", "wrong-sha", "checksum", "size"):
+            def invalid(node, action, *, parts):
+                result = good(node, action, parts=parts)
+                if kind == "omitted": result["parts"].pop()
+                if kind == "wrong-sha": result["parts"][0]["sha256"] = "donor"
+                if kind == "checksum": result["parts"][0]["physicalBitrotVerified"] = False
+                if kind == "size": result["parts"][0]["physicalSize"] += 1
+                return result
+            fleet.remote = invalid
+            with self.subTest(kind=kind), self.assertRaises(ValueError): verify_all_parts(fleet, cohorts, "proof")
 
 
 if __name__ == "__main__":

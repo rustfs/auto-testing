@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 104 currently dispatchable IDs include all 74 non-Heal cases and thirty Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 105 currently dispatchable IDs include all 74 non-Heal cases and thirty-one Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 54 Heal cases remain
+The other 53 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -524,4 +524,27 @@ NOT_OBSERVED makes the complete case fail. Original formats/object files and
 full S3 manifests must remain unchanged. Temporary rc credentials use a 0600
 configuration outside artifacts and are removed during finalization. Local
 coverage/uncertainty/startup/config-cleanup negatives passed; live evidence
+remains pending.
+
+
+J03 `heal.incremental-cursor-and-truncation` now has a current-fleet DX
+executor with 1025 pre-registered external objects of 1MiB+73 bytes. The
+reference candidate retains 1024 result items, separately from its 128-object
+outcome diagnostics; a 257-object task cannot prove the retention-gap branch.
+The actual terminal minSeq must move and an old cursor must carry truncation.
+Incremental queries treat sinceSeq as exclusive and advance only over returned
+items, including when the response payload itself is cropped. Same-task bounds
+cannot move backwards or duplicate object/version identities. At least two
+useful running windows are mandatory; NOT_OBSERVED prevents a complete PASS.
+H2 queries every actual node with the admitted path/token and uninterrupted
+deployment epoch; H1 records why a cross-node query is inapplicable. The
+candidate renders startTime anew on each response, so A03 also binds its
+original query path/token instead of comparing that timestamp. Canonical
+counters must cover all 1025 ACKs with the exact 17 real missing-shard repairs,
+no failures/unknowns, and complete traversal. Bounded diagnostic receipts remain
+explicitly incomplete. Full physical manifests, every original same-role shard
+and streaming checksum, and all-peer S3 manifests independently cover every
+object before PASS. The case has a fixed 12288-file snapshot budget, 128-part
+verification batches, a 45-minute service/lease budget and 2GiB free per drive.
+Local cursor/gap/counter/scope/part-omission negatives passed; live evidence
 remains pending.
