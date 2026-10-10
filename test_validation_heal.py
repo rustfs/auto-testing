@@ -46,6 +46,8 @@ from scripts.validation_heal.status import (validate_background, validate_replac
 from scripts.validation_heal.cursor import (Window, OBJECTS as CURSOR_OBJECTS, SIZE as CURSOR_SIZE,
     BRANCHES as CURSOR_BRANCHES, terminal_proof as cursor_terminal, validate_missing_batch, verify_all_parts)
 from scripts.validation_heal.fleet_node import resource_limits, verify_parts as node_verify_parts
+from scripts.validation_heal.stop import (partial_window, validate_retired_stop, validate_cancelled,
+    cancelled_physical, idle_fleet as stop_idle_fleet, BRANCHES as STOP_BRANCHES)
 import errno
 import stat
 
@@ -1931,6 +1933,112 @@ class HealCursorOracleTest(unittest.TestCase):
                 return result
             fleet.remote = invalid
             with self.subTest(kind=kind), self.assertRaises(ValueError): verify_all_parts(fleet, cohorts, "proof")
+
+
+class HealStopOracleTest(unittest.TestCase):
+    def expected(self):
+        return HealCursorOracleTest().expected()
+
+    def cancelled(self):
+        status = HealCursorOracleTest().terminal()
+        objects = status["outcome"]["objects"][-2:]
+        objects[0]["disposition"]["state"] = "cancelled"
+        status.update(summary="stopped")
+        status["outcome"].update(execution={"state": "aborted", "reason": "cancelled"}, coverage="partial", objects=objects)
+        status["outcome"]["counters"].update(processed=4, healed=1, unchanged=2, skipped=1)
+        targets = [{"key": "objects/1023.bin", "versionId": "null"}, {"key": "objects/1024.bin", "versionId": "null"}]
+        return status, targets
+
+    def test_cancelled_receipts_cannot_claim_complete_or_repaired_unresolved_objects(self):
+        status, targets = self.cancelled()
+        proof = validate_cancelled(status, HealCursorOracleTest.bucket, self.expected(), targets)
+        self.assertEqual(proof["coverage"], "partial")
+        for kind in ("completed", "coverage", "unknown", "counter", "full-heal", "cancelled-as-repaired", "identity"):
+            changed = copy.deepcopy(status)
+            if kind == "completed": changed["outcome"]["execution"] = {"state": "completed"}
+            if kind == "coverage": changed["outcome"]["coverage"] = "complete"
+            if kind == "unknown": changed["outcome"]["counters"]["unknown"] = 1
+            if kind == "counter": changed["outcome"]["counters"]["processed"] += 1
+            if kind == "full-heal": changed["outcome"]["counters"]["healed"] = 2
+            if kind == "cancelled-as-repaired": changed["outcome"]["objects"][0]["disposition"]["state"] = "unknown"
+            if kind == "identity": changed["outcome"]["objects"][0]["identity"]["bucket"] = "other"
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                validate_cancelled(changed, HealCursorOracleTest.bucket, self.expected(), targets)
+
+    def test_active_window_requires_actual_partial_canonical_progress_and_no_errors(self):
+        status, targets = self.cancelled()
+        status.update(summary="running")
+        status["outcome"]["execution"] = {"state": "running"}
+        self.assertTrue(partial_window(status, targets, repair_required=True))
+        for name, value in (("processed", 0), ("processed", CURSOR_OBJECTS), ("healed", 0), ("healed", 2)):
+            changed = copy.deepcopy(status)
+            changed["outcome"]["counters"][name] = value
+            self.assertFalse(partial_window(changed, targets, repair_required=True))
+        changed = copy.deepcopy(status)
+        changed["outcome"]["counters"]["unknown"] = 1
+        with self.assertRaises(ValueError): partial_window(changed, targets, repair_required=True)
+
+    def test_repeat_stop_freezes_http_structured_code_and_the_retired_token(self):
+        response = {"httpStatus": 500, "response": "<Error><Code>InternalError</Code><Message>Heal task not found: old-token</Message></Error>"}
+        self.assertEqual(validate_retired_stop(response, "old-token")["exactRetiredTaskId"], "old-token")
+        for changed in ({**response, "httpStatus": 200}, {**response, "transportError": "timeout"},
+                        {**response, "response": response["response"].replace("old-token", "new-token")},
+                        {**response, "response": response["response"].replace("InternalError", "AccessDenied")}):
+            with self.assertRaises(ValueError): validate_retired_stop(changed, "old-token")
+
+    def test_cancelled_physical_count_must_match_actual_original_shards(self):
+        before = HealShardOracleTest().snapshot()
+        for entry in list(before["node1"]["files"]):
+            if "objects/0008.bin" not in entry["path"]: continue
+            cloned = copy.deepcopy(entry)
+            cloned["path"] = cloned["path"].replace("objects/0008.bin", "objects/0017.bin")
+            if "metadata" in cloned: cloned["metadata"]["key"] = "objects/0017.bin"
+            before["node1"]["files"].append(cloned)
+        target = map_target(before, "rv-heal-0123456789abcdef", "objects/0008.bin", "data", 1)
+        second = map_target(before, "rv-heal-0123456789abcdef", "objects/0017.bin", "data", 1)
+        quiet = copy.deepcopy(before)
+        quiet["node1"]["files"] = [entry for entry in quiet["node1"]["files"] if
+            (entry["disk"], entry["path"]) != (second["disk"], second["relativePath"])]
+        responsibility = {"canonicalCounters": {"healed": 1}, "diagnosticDispositions": [
+            {"key": target["key"], "versionId": "null", "state": "repaired"},
+            {"key": second["key"], "versionId": "null", "state": "cancelled"}]}
+        remaining, proof = cancelled_physical(before, quiet, [target, second], responsibility)
+        self.assertEqual(remaining, [second])
+        self.assertFalse(proof["backupRescueUsed"])
+        with self.assertRaisesRegex(ValueError, "disagrees"):
+            cancelled_physical(before, quiet, [target, second], {"canonicalCounters": {"healed": 0}})
+        wrong_disposition = copy.deepcopy(responsibility)
+        wrong_disposition["diagnosticDispositions"][0]["state"] = "cancelled"
+        with self.assertRaisesRegex(ValueError, "diagnostic disposition"):
+            cancelled_physical(before, quiet, [target, second], wrong_disposition)
+        next(entry for entry in quiet["node1"]["files"] if "/control/" in entry["path"])["sha256"] = "changed-control"
+        with self.assertRaises(ValueError): cancelled_physical(before, quiet, [target, second], responsibility)
+
+    def test_every_stop_source_branch_is_retained(self):
+        self.assertEqual(list(STOP_BRANCHES), select("A06")[0]["variants"])
+
+    def test_task_exit_waits_for_actual_drain_and_never_hides_partial_idle(self):
+        good = {"httpStatus": 200, "response": {"state": "idle", "clusterStatusComplete": True,
+            "coverage": {"expected": 1, "responded": 1, "unknown": 0, "reasons": []},
+            "healQueueLength": 0, "healActiveTasks": 0,
+            "healOperations": {"queueLength": 0, "activeTasks": 0, "retryingTasks": 0}}}
+        active = copy.deepcopy(good)
+        active["response"].update(state="active", healActiveTasks=1)
+        active["response"]["healOperations"]["activeTasks"] = 1
+        fleet = types.SimpleNamespace(record=lambda label, value: value)
+        client = types.SimpleNamespace(admin=types.SimpleNamespace())
+        from unittest.mock import Mock
+        client.admin = Mock(side_effect=[active, good])
+        binding = {"endpoints": {"node1": "url"}}
+        with patch("scripts.validation_heal.stop.Probe", return_value=client), patch("scripts.validation_heal.stop.time.sleep"):
+            self.assertEqual(stop_idle_fleet(fleet, binding)["node1"]["state"], "idle")
+        unsafe = copy.deepcopy(good)
+        unsafe["response"]["clusterStatusComplete"] = False
+        client.admin = Mock(side_effect=[unsafe, good])
+        with patch("scripts.validation_heal.stop.Probe", return_value=client):
+            with self.assertRaisesRegex(ValueError, "partial fleet"):
+                stop_idle_fleet(fleet, binding)
+        self.assertEqual(client.admin.call_count, 1)
 
 
 if __name__ == "__main__":

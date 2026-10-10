@@ -22,6 +22,7 @@ case "${case_id}" in
   heal.node-outage-rejoin) driver=node_outage.py ;;
   heal.status-partial-disabled-unknown) driver=status.py ;;
   heal.incremental-cursor-and-truncation) driver=cursor.py ;;
+  heal.admin-stop-and-stale-token) driver=stop.py ;;
   heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null|heal.below-read-quorum|heal.missing-or-corrupt-xlmeta|heal.object-metadata-and-tags|heal.multiple-shard-loss|heal.special-keys-and-pagination|heal.object-size-boundaries|heal.object-lock-retention|heal.metadata-payload-mismatch|heal.read-repair-attribution|heal.disk-readonly-and-permission|heal.scanner-cold-object-repair|heal.delete-marker-semantics) driver=versions.py ;;
   heal.admin-token-cross-node-status|heal.admin-dry-run|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.range-head-and-conditions|heal.manual-normal-attribution|heal.manual-deep-attribution)
     driver=shards.py ;;

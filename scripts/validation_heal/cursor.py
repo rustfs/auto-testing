@@ -214,7 +214,7 @@ def validate_missing_batch(before, after, targets, receipts):
     return {"exactMissingParts": len(removed), "otherFilesAndFormatsUnchanged": True}
 
 
-def observe_task(probe, fleet, binding, bucket, expected, targets, active):
+def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, original=None):
     path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/objects/"
     start = fleet.record("trigger", probe.admin(path, [], json.dumps({**BASE_OPTIONS, "recursive": True}).encode()))
     require(start.get("httpStatus") == 200 and isinstance(start.get("response"), dict), "cursor task admission failed")
@@ -274,7 +274,7 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active):
                 "completeManifestEvidenceRequired": True}}
 
 
-def run_topology(args, topology, nodes):
+def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANCHES):
     directory = args.evidence / topology
     directory.mkdir()
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
@@ -297,7 +297,8 @@ def run_topology(args, topology, nodes):
         "maxSnapshotFilesPerNode": 12288, "snapshotSecondsPerNode": 600, "verificationBatchItems": 128,
         "missingIndices": list(range(0, OBJECTS, 64)), "taskScope": "objects/ prefix; one result per ACK",
         "faultLeaseMinutes": 30, "serviceRuntimeSeconds": 2700, "topologyLeaseMinutes": 45})
-    require(select(args.case_id)[0]["variants"] == list(BRANCHES), "cursor executor omitted a source branch")
+    recipe = select(args.case_id)[0]
+    require(recipe["variants"] == list(branches), "DX executor omitted a source branch")
     result = {"topology": topology, "fixture": "DX", "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, probe = [], Probe(binding)
     try:
@@ -315,13 +316,14 @@ def run_topology(args, topology, nodes):
         receipts = []
         for index, target in enumerate(targets):
             params = {"disk": target["disk"], "relativePath": target["relativePath"], "kind": "missing",
-                "faultId": bounded_fault_id("J03", "retained-window", index), "expectedSha256": target["sha256"]}
+                "faultId": bounded_fault_id(recipe["code"], "dx-window", index), "expectedSha256": target["sha256"]}
             fleet.faults.append((target["node"], params))
             receipts.append(fleet.record("fault", {"node": target["node"], **fleet.remote(target["node"], "apply-fault", **params)}))
         faulted = fleet.snapshot("physical-fault", quiescent=True)
         fleet.record("fault-proof", validate_missing_batch(original, faulted, targets, receipts))
         fleet.start()
-        result["branches"] = observe_task(probe, fleet, binding, bucket, expected, targets, active)
+        result["branches"] = observer(probe, fleet, binding, bucket, expected, targets, active, original=original)
+        require(set(result["branches"]) == set(branches), "DX observer omitted or invented a source branch")
         fleet.stop()
         repaired = fleet.snapshot("physical-repaired-before-get", quiescent=True)
         fleet.record("physical-repair-proof", validate_repaired_physical(original, repaired, targets[0], repair_targets=targets))
@@ -335,7 +337,9 @@ def run_topology(args, topology, nodes):
         fleet.stop()
         require(physical_content(repaired) == physical_content(fleet.snapshot("physical-after-get", quiescent=True)),
                 "final GET changed physical files; prior repair attribution was incomplete")
-        result["branches"]["terminal-truncation"]["completePhysicalAndS3ManifestsVerified"] = True
+        result["completePhysicalAndS3ManifestsVerified"] = True
+        if "terminal-truncation" in result["branches"]:
+            result["branches"]["terminal-truncation"]["completePhysicalAndS3ManifestsVerified"] = True
         result["verdict"] = "PASS" if all(value["verdict"] == "PASS" or name == "cross-node-cursor"
             and topology == "H1" and value["verdict"] == "NOT_APPLICABLE" for name, value in result["branches"].items()) else "FAIL"
     except (Exception, KeyboardInterrupt) as exc:
@@ -356,13 +360,13 @@ def run_topology(args, topology, nodes):
     return result
 
 
-def main():
+def main(*, case_id=CASE_ID, observer=observe_task, branches=BRANCHES):
     def interrupted(signum, frame):
         raise KeyboardInterrupt(f"Heal workflow interrupted by signal {signum}")
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
-    parser.add_argument("--case-id", choices=(CASE_ID,), required=True)
+    parser.add_argument("--case-id", choices=(case_id,), required=True)
     parser.add_argument("--testing-commit", required=True)
     parser.add_argument("--binary-sha", required=True)
     parser.add_argument("--rc-bin", type=Path, required=True)
@@ -377,14 +381,14 @@ def main():
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
-            results.append(run_topology(args, topology, selected))
+            results.append(run_topology(args, topology, selected, observer=observer, branches=branches))
             if results[-1]["cleanup"] != "PASS":
                 break
     finally:
         complete = len(results) == 2 and all(item["verdict"] == "PASS" and item["cleanup"] == "PASS" for item in results)
         save(args.evidence / "healthy-summary.json", {"caseId": args.case_id, "results": results,
             "cleanup": "PASS" if results and all(item["cleanup"] == "PASS" for item in results) else "FAIL", "complete": complete})
-    require(complete, "cursor case requires every applicable H1/H2 branch; an unobserved running window is not PASS")
+    require(complete, f"{args.case_id} requires every applicable H1/H2 branch; an unobserved running window is not PASS")
 
 
 if __name__ == "__main__":

@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 105 currently dispatchable IDs include all 74 non-Heal cases and thirty-one Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 106 currently dispatchable IDs include all 74 non-Heal cases and thirty-two Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 53 Heal cases remain
+The other 52 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -548,3 +548,21 @@ object before PASS. The case has a fixed 12288-file snapshot budget, 128-part
 verification batches, a 45-minute service/lease budget and 2GiB free per drive.
 Local cursor/gap/counter/scope/part-omission negatives passed; live evidence
 remains pending.
+
+
+A06 `heal.admin-stop-and-stale-token` now uses the same pre-registered 1025
+external-object DX fixture on H1/H2. Cancellation requires actual running,
+nonzero partial canonical progress and both repaired and still-missing targets.
+The frozen candidate policy requires active stop acknowledgement, retained
+aborted/cancelled partial responsibility, and exact 500/InternalError with the
+retired token for repeat/stale stops. Three complete physical snapshots with
+five-second gaps keep the service running after cancellation; stopping the
+process cannot substitute for task write quiescence. Actual restored shard
+counts must equal the retained cancellation counters, and remaining shards
+must still be missing. A distinct new token must be running before and after
+old-token STATUS/STOP; unobserved brackets prevent PASS. The new task repairs
+only the remaining defects, and its completion must preserve the original
+cancelled outcome. Full streaming/physical and all-peer S3 verification happens
+before backup rescue. All four source branches remain explicit. Local
+cancellation/counter/quiet-physical/token/error negatives passed; full live
+proof remains pending.
