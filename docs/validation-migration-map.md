@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 118 currently dispatchable IDs include all 74 non-Heal cases and forty-four Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
+case evidence. The 118 currently dispatchable IDs include all 74 non-Heal cases and forty-four Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -865,3 +865,11 @@ per-drive free-space requirement and 45-minute service lease. E04
 `38085241447` verified complete journal collection on the corrected `--all`
 reader, then failed its healthy task's missing public pool/set responsibility
 identity; cleanup passed. The original failed runs remain unchanged.
+
+
+C06 `heal.stale-version-rejoin` passed complete H1/H2 unversioned overwrite,
+historical-version deletion and marker creation in run `38085554143` at harness
+`8d78ff32188412644a55776be7a794024a4f5614`. All six applicable instances have
+PASS and cleanup PASS; downloaded canonical evidence passed the independent
+selected-case gate. This raises the full live PASS total to 44. Older incomplete
+journal-window runs remain FAIL.
