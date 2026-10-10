@@ -280,7 +280,9 @@ def peer_status_equal(coordinator, peer):
 
 
 def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_overrides=None, admissions=None):
-    path = "/rustfs/admin/v3/heal/" + quote(target["bucket"], safe="") + "/" + quote(target["key"], safe="/")
+    path = "/rustfs/admin/v3/heal/" + quote(target["bucket"], safe="")
+    if target["key"]:
+        path += "/" + quote(target["key"], safe="/")
     started = fleet.record("trigger", probe.admin(path, [], json.dumps(
         {**BASE_OPTIONS, "scanMode": mode, **(option_overrides or {})}).encode()))
     require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict), "repair admission failed")

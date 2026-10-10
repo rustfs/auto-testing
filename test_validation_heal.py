@@ -16,6 +16,7 @@ from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
 from scripts.validation_heal.shards import validate_conditional_response
+from scripts.validation_heal.shards import run_task
 from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, validate_version_receipts,
     branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract)
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract
@@ -175,6 +176,26 @@ class HealHealthyOracleTest(unittest.TestCase):
 
 
 class HealShardOracleTest(unittest.TestCase):
+    def test_bucket_and_literal_object_routes_keep_the_original_token_for_status(self):
+        for key, expected_path in (("", "/rustfs/admin/v3/heal/fixture"),
+                                   ("literal%2F/key", "/rustfs/admin/v3/heal/fixture/literal%252F/key")):
+            calls = []
+            def admin(path, query, body):
+                calls.append((path, copy.deepcopy(query), body))
+                if not query:
+                    return {"httpStatus": 200, "response": {"clientToken": "original-token"}}
+                return {"httpStatus": 200, "response": HealHealthyOracleTest().receipt()}
+            active, admissions = [], []
+            run_task(types.SimpleNamespace(admin=admin), types.SimpleNamespace(record=lambda label, value: value),
+                     {"bucket": "fixture", "key": key}, 2, active,
+                     option_overrides={"recursive": True}, admissions=admissions)
+            self.assertEqual(len(calls), 4)
+            self.assertTrue(all(path == expected_path for path, _, _ in calls))
+            self.assertTrue(all(query == [("clientToken", "original-token")] for _, query, _ in calls[1:]))
+            self.assertTrue(json.loads(calls[0][2])["recursive"])
+            self.assertEqual(active, [])
+            self.assertEqual(admissions, [{"path": expected_path, "clientToken": "original-token"}])
+
     def test_condition_denial_is_not_a_transport_failure_or_success_payload(self):
         baseline = {"properties": {"ETag": '"etag"'}, "payload": {"size": 3, "sha256": "correct"}}
         good = {"response": {"ResponseMetadata": {"HTTPStatusCode": 412}, "Error": {"Code": "PreconditionFailed"}},

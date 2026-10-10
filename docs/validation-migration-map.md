@@ -225,3 +225,9 @@ for the exact object prefix; the original FAIL remains and a new run is required
 The corrected recursive DV request passed all DB/DV H1/H2 branches in run
 `38057908339` with clean finalization, including complete dry_run_observed
 version/marker receipts and byte-for-byte no-mutation proof.
+
+D03 run `38058420193` passed historical/current/multiple-version branches on
+both H1/H2, but its bucket-recursive branch used an extra trailing slash and
+received HTTP 501 before admission. Cleanup passed. The task URL now uses the
+registered exact bucket route; this harness failure remains retained and D03
+needs a fresh full run before a canonical PASS claim.
