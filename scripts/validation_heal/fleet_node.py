@@ -13,10 +13,12 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
+import signal
 import shutil
 import socket
 import stat
 import subprocess
+import time
 import uuid
 
 
@@ -30,7 +32,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart"}, "unsupported Heal runtime profile")
+    if profile == "root-restart":
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false"}
     if profile == "overlap":
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_OVERLAP_POLICY": "merge",
                 "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false"}
@@ -208,6 +212,7 @@ def start(request):
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
+            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") == "root-restart" else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)), str(state / "rustfs"), *owner["volumes"])
@@ -234,6 +239,85 @@ def stop(request):
     _, _, owner = owned(request["runId"])
     command("systemctl", "stop", owner["unit"], check=False)
     return {"unit": owner["unit"], "quiescent": True, "service": stopped(owner)}
+
+
+PROCESS_FIELDS = ("pid", "startTicks", "bootId", "unit", "executable", "binarySha256", "mountNamespace",
+                  "commandSha256", "environmentFileSha256", "settings")
+
+
+def process(request):
+    state, _, owner = owned(request["runId"])
+    fields = ("MainPID", "ActiveState", "SubState", "ExecMainCode", "ExecMainStatus", "Result")
+    service = dict(line.split("=", 1) for line in command("systemctl", "show", owner["unit"],
+        *(part for name in fields for part in ("-p", name)), check=False).stdout.splitlines() if "=" in line)
+    pid = int(service.get("MainPID", "0"))
+    base = {"pid": pid, "unit": owner["unit"], "service": service,
+            "bootId": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            "binarySha256": digest(state / "rustfs"), "environmentFileSha256": digest(state / "service.env")}
+    require(base["binarySha256"] == owner["binarySha256"], "process candidate changed")
+    if pid == 0:
+        return base
+    require(pid > 1, "invalid owned process PID")
+    root = Path(f"/proc/{pid}")
+    before = (root / "stat").read_text().rpartition(") ")[2].split()
+    require(len(before) >= 20 and before[19].isdigit(), "invalid process birth record")
+    executable = (root / "exe").resolve(strict=True)
+    require(executable == state / "rustfs" and digest(executable) == owner["binarySha256"], "signal target is not the owned candidate")
+    environment = dict(item.split("=", 1) for item in (root / "environ").read_bytes().decode().split("\0") if "=" in item)
+    settings = {**runtime_config(owner.get("runtimeProfile", "manual")), "RUSTFS_HEAL_TASK_TIMEOUT_SECS": "300"}
+    require(all(environment.get(key) == value for key, value in settings.items()), "owned process runtime changed")
+    result = {**base, "state": before[0], "startTicks": int(before[19]), "executable": str(executable),
+        "mountNamespace": os.readlink(root / "ns/mnt"), "commandSha256": hashlib.sha256((root / "cmdline").read_bytes()).hexdigest(),
+        "settings": settings}
+    after = (root / "stat").read_text().rpartition(") ")[2].split()
+    require(after[19] == before[19], "process identity changed while collecting evidence")
+    return result
+
+
+def pidfd_signal(request, signum):
+    expected = request.get("expected")
+    require(isinstance(expected, dict) and all(name in expected for name in PROCESS_FIELDS)
+            and type(expected["pid"]) is int and expected["pid"] > 1, "signal lacks an exact process birth identity")
+    require(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"), "safe process control requires Linux pidfd support")
+    descriptor = os.pidfd_open(expected["pid"], 0)
+    try:
+        current = process(request)
+        require(all(current.get(name) == expected[name] for name in PROCESS_FIELDS), "stale process identity; no signal sent")
+        signal.pidfd_send_signal(descriptor, signum, None, 0)
+    finally:
+        os.close(descriptor)
+    return current
+
+
+def process_signal(request):
+    name = request.get("signal")
+    require(name in {"SIGSTOP", "SIGCONT"}, "only owned-process pause/resume signals are allowed")
+    before = pidfd_signal(request, getattr(signal, name))
+    return {"signal": name, "before": before, "pidfdBound": True, "platformEventIssued": False}
+
+
+def process_graceful(request):
+    require(owned(request["runId"])[2].get("runtimeProfile") == "root-restart"
+            and process(request).get("state") == "T", "graceful observation requires the paused run-owned root service")
+    before = pidfd_signal(request, signal.SIGTERM)
+    # A paused process must receive CONT to handle TERM. Use the same pidfd
+    # and exact birth identity again; a recycled PID never receives a signal.
+    pidfd_signal(request, signal.SIGCONT)
+    deadline = time.monotonic() + 60
+    while True:
+        after = process(request)
+        if after["pid"] == 0:
+            break
+        require(all(after.get(name) == before[name] for name in PROCESS_FIELDS), "another process replaced the graceful target")
+        require(time.monotonic() < deadline, "owned coordinator did not exit gracefully in 60 seconds")
+        time.sleep(0.1)
+    service = after["service"]
+    require(after["bootId"] == before["bootId"] and after["binarySha256"] == before["binarySha256"]
+            and after["environmentFileSha256"] == before["environmentFileSha256"]
+            and service.get("ExecMainCode") == "1" and service.get("ExecMainStatus") == "0"
+            and service.get("Result") == "success", "process has no witnessed normal exit zero; signal/timeout exits are not graceful")
+    return {"before": before, "after": after, "signal": "SIGTERM", "actualExitCode": 0,
+            "pidfdBound": True, "platformEventIssued": False}
 
 
 def fault_module():
@@ -537,5 +621,6 @@ def main(request):
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part, "verify-parts": verify_parts,
                "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe}
     actions["task-records"] = task_records
+    actions.update({"process": process, "process-signal": process_signal, "process-graceful": process_graceful})
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

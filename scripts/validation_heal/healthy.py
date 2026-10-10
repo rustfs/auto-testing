@@ -131,7 +131,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap", "root-restart"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -142,6 +142,7 @@ class Fleet:
         self.faults = []
         self.drive_gates = set()
         self.secret_values = set()
+        self.frozen_processes = {}
 
     def record(self, label, value):
         self.sequence += 1
@@ -250,6 +251,15 @@ class Fleet:
 
     def cleanup(self):
         failures = []
+        for node, identity in tuple(self.frozen_processes.items()):
+            try:
+                current = self.remote(node, "process")
+                if current["pid"]:
+                    self.record("resume-for-finalization", {"node": node, **self.remote(node, "process-signal",
+                        signal="SIGCONT", expected=identity)})
+                del self.frozen_processes[node]
+            except Exception as exc:
+                failures.append({"node": node, "error": str(exc), "state": "DIRTY", "namespacesRetained": True})
         if self.drive_gates:
             try:
                 self.stop()

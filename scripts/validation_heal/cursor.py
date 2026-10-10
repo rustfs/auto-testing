@@ -125,7 +125,7 @@ class Window:
             "exclusiveNextCursor": self.cursor, "taskId": token, "endpoint": endpoint, "deploymentEpoch": epoch}
 
 
-def terminal_proof(status, bucket, expected, repaired, window):
+def complete_outcome(status, bucket, expected, repaired):
     wanted = wanted_pairs(expected)
     require(repaired and set(repaired) <= set(wanted), "cursor repair plan is empty or escapes ACKs")
     outcome = status.get("outcome") or {}
@@ -154,12 +154,16 @@ def terminal_proof(status, bucket, expected, repaired, window):
         require(receipt.get("disposition", {}).get("state") == ("repaired" if pair in repaired else "verified_healthy"),
                 "bounded diagnostics claimed false repair, unknown responsibility or incomplete integrity")
         seen.add(pair)
+    return {"canonicalCounters": counters, "bucketIncarnationId": incarnation,
+            "diagnosticObjects": len(receipts), "diagnosticObjectsAreCompleteManifest": False}
+
+
+def terminal_proof(status, bucket, expected, repaired, window):
+    proof = complete_outcome(status, bucket, expected, repaired)
     retained = window.check(status, 0)
     require(retained["retentionGap"] and retained["truncated"] and retained["nextSeq"] == OBJECTS + 1,
             "terminal task never actually exceeded its retained item window")
-    return {"canonicalCounters": counters, "bucketIncarnationId": incarnation,
-            "diagnosticObjects": len(receipts), "diagnosticObjectsAreCompleteManifest": False,
-            "retainedWindow": {name: value for name, value in retained.items() if name != "pairs"}}
+    return {**proof, "retainedWindow": {name: value for name, value in retained.items() if name != "pairs"}}
 
 
 def map_cohorts(snapshot, bucket, expected, *, count=OBJECTS):

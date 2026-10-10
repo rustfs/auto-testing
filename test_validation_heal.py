@@ -9,7 +9,7 @@ import copy
 import gzip
 from datetime import UTC, datetime, timedelta
 import types
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, cases, compile_plan, select
 from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection, Fleet
@@ -51,6 +51,7 @@ from scripts.validation_heal.stop import (partial_window, validate_retired_stop,
 from scripts.validation_heal.cancel_restart import validate_journal, BRANCHES as CANCEL_RESTART_BRANCHES
 from scripts.validation_heal.fleet_node import task_records as node_task_records
 from scripts.validation_heal import overlap
+from scripts.validation_heal import root_restart, fleet_node
 import errno
 import stat
 
@@ -2235,6 +2236,189 @@ class HealOverlapOracleTest(unittest.TestCase):
         self.assertEqual(runtime_config("overlap")["RUSTFS_HEAL_OVERLAP_POLICY"], "merge")
         # Parameterizing A05 physical fixtures must not weaken J03 retention.
         with self.assertRaises(ValueError): Window(self.bucket, self.expected(), "task", "node1", "epoch")
+
+
+class HealRootRestartOracleTest(unittest.TestCase):
+    token = "01234567-89ab-4def-8123-456789abcdef"
+
+    def intent(self):
+        return {"schema": 3, "task_id": self.token, "heal_type": {"type": "cluster"}, "priority": "High",
+                "created_at": {"secs_since_epoch": 10, "nanos_since_epoch": 0}, "retry_attempts": 0,
+                "options": {"scan_mode": 2, "remove_corrupted": False, "recreate_missing": False,
+                    "update_parity": False, "recursive": True, "dry_run": False, "no_lock": False,
+                    "pool_index": None, "set_index": None, "timeout": None}}
+
+    def records(self):
+        entries = [{"disk": disk, "kind": kind, "present": disk == 2 and kind == "intent",
+                    "relativePath": ".rustfs.sys/root-heal-" + self.token + ".json", "value": self.intent()}
+                   for disk in range(4) for kind in ("intent", "terminal", "report")]
+        return {"node1": {"readOnly": True, "taskId": self.token, "records": entries}}
+
+    def process(self, pid=10, start=50):
+        return {name: value for name, value in zip(fleet_node.PROCESS_FIELDS,
+            (pid, start, "boot", "unit", "/state/rustfs", "sha", "mnt:[1]", "command", "env", {"budget": "300"}), strict=True)} | {"state": "T"}
+
+    def test_root_owner_rejects_duplicate_missing_and_cross_scope_records(self):
+        self.assertEqual(root_restart.root_intent(self.records(), self.token, "node1")["disk"], 2)
+        for kind in ("missing", "duplicate", "scope", "schema", "selector", "read-repair", "retry", "coverage"):
+            observed = self.records()
+            entries = observed["node1"]["records"]
+            entry = next(row for row in entries if row["present"])
+            if kind == "missing": entry["present"] = False
+            if kind == "duplicate": entries[0]["present"] = True
+            if kind == "scope": entry["value"]["heal_type"] = {"type": "prefix", "bucket": "other", "prefix": "objects/"}
+            if kind == "schema": entry["value"]["schema"] = 2
+            if kind == "selector": entry["value"]["options"]["pool_index"] = 0
+            if kind == "read-repair": entry["value"]["options"]["no_lock"] = True
+            if kind == "retry": entry["value"]["retry_attempts"] = 1
+            if kind == "coverage": entries.pop()
+            with self.subTest(kind=kind), self.assertRaises(ValueError): root_restart.root_intent(observed, self.token, "node1")
+
+    def test_checkpoint_budget_cannot_be_removed_refunded_or_move_owner(self):
+        before = root_restart.root_intent(self.records(), self.token, "node1")
+        after = copy.deepcopy(before)
+        after["value"]["options"]["timeout"] = {"secs": 280, "nanos": 7}
+        proof = root_restart.same_owner(before, after)
+        self.assertEqual(proof["checkpointRemainingTimeoutNs"], 280_000_000_007)
+        for kind in ("absent", "refund", "zero", "disk", "identity", "scope", "option", "bool", "nanos"):
+            current = copy.deepcopy(after)
+            if kind == "absent": current["value"]["options"]["timeout"] = None
+            if kind == "refund": current["value"]["options"]["timeout"]["secs"] = 301
+            if kind == "zero": current["value"]["options"]["timeout"] = {"secs": 0, "nanos": 0}
+            if kind == "disk": current["disk"] = 3
+            if kind == "identity": current["value"]["task_id"] = "new-task"
+            if kind == "scope": current["value"]["heal_type"] = {"type": "bucket", "bucket": "other"}
+            if kind == "option": current["value"]["options"]["remove_corrupted"] = True
+            if kind == "bool": current["value"]["options"]["timeout"]["secs"] = True
+            if kind == "nanos": current["value"]["options"]["timeout"]["nanos"] = 1_000_000_000
+            with self.subTest(kind=kind), self.assertRaises(ValueError): root_restart.same_owner(before, current)
+        with self.assertRaises(ValueError): root_restart.same_owner(after, before)
+
+    def test_only_original_coordinator_changes_birth_identity(self):
+        before = {"node1": self.process(), "node2": self.process(11, 51)}
+        after = {"node1": self.process(12, 60), "node2": self.process(11, 51)}
+        self.assertTrue(root_restart.restart_identity(before, after, "node1")["onlyCoordinatorProcessChanged"])
+        for kind in ("no-restart", "peer-restart", "boot", "env", "namespace", "candidate", "missing"):
+            current = copy.deepcopy(after)
+            if kind == "no-restart": current["node1"] = copy.deepcopy(before["node1"])
+            if kind == "peer-restart": current["node2"]["startTicks"] += 1
+            if kind == "boot": current["node1"]["bootId"] = "new-boot"
+            if kind == "env": current["node1"]["environmentFileSha256"] = "new-env"
+            if kind == "namespace": current["node1"]["mountNamespace"] = "mnt:[2]"
+            if kind == "candidate": current["node1"]["binarySha256"] = "new-build"
+            if kind == "missing": del current["node2"]
+            with self.subTest(kind=kind), self.assertRaises(ValueError): root_restart.restart_identity(before, current, "node1")
+
+    def test_pidfd_revalidates_birth_identity_before_any_signal(self):
+        expected = self.process()
+        with patch.object(fleet_node.os, "pidfd_open", return_value=17, create=True), \
+             patch.object(fleet_node.signal, "pidfd_send_signal", create=True) as send, \
+             patch.object(fleet_node.os, "close") as close, patch.object(fleet_node, "process", return_value=expected):
+            fleet_node.pidfd_signal({"expected": expected}, fleet_node.signal.SIGSTOP)
+            send.assert_called_once_with(17, fleet_node.signal.SIGSTOP, None, 0)
+            close.assert_called_once_with(17)
+        changed = {**expected, "startTicks": expected["startTicks"] + 1}
+        with patch.object(fleet_node.os, "pidfd_open", return_value=17, create=True), \
+             patch.object(fleet_node.signal, "pidfd_send_signal", create=True) as send, \
+             patch.object(fleet_node.os, "close") as close, patch.object(fleet_node, "process", return_value=changed), self.assertRaisesRegex(ValueError, "stale"):
+            fleet_node.pidfd_signal({"expected": expected}, fleet_node.signal.SIGSTOP)
+        send.assert_not_called(); close.assert_called_once_with(17)
+        with self.assertRaises(ValueError): fleet_node.process_signal({"signal": "SIGKILL", "expected": expected})
+
+    def test_graceful_exit_requires_actual_exit_zero_and_preserves_identity(self):
+        before = self.process()
+        exited = {"pid": 0, "bootId": "boot", "binarySha256": "sha", "environmentFileSha256": "env",
+                  "service": {"ExecMainCode": "1", "ExecMainStatus": "0", "Result": "success"}}
+        for kind in ("good", "signal", "failed", "timeout", "boot", "candidate", "environment"):
+            current = copy.deepcopy(exited)
+            if kind == "signal": current["service"]["ExecMainCode"] = "2"
+            if kind == "failed": current["service"]["ExecMainStatus"] = "1"
+            if kind == "timeout": current["service"]["Result"] = "timeout"
+            if kind == "boot": current["bootId"] = "new-boot"
+            if kind == "candidate": current["binarySha256"] = "new-build"
+            if kind == "environment": current["environmentFileSha256"] = "new-env"
+            with self.subTest(kind=kind), patch.object(fleet_node, "owned", return_value=(None, None, {"runtimeProfile": "root-restart"})), \
+                 patch.object(fleet_node, "process", side_effect=[before, current]), patch.object(fleet_node, "pidfd_signal", return_value=before):
+                if kind == "good":
+                    self.assertEqual(fleet_node.process_graceful({"runId": "run", "expected": before})["actualExitCode"], 0)
+                else:
+                    with self.assertRaises(ValueError): fleet_node.process_graceful({"runId": "run", "expected": before})
+
+    def test_recovery_absence_is_bounded_observation_and_never_completion(self):
+        missing = {"httpStatus": 500, "response": {"Code": "InternalError", "Message": "Heal task not found: " + self.token}}
+        good = {"httpStatus": 200, "response": {"summary": "running"}}
+        client = types.SimpleNamespace(admin=Mock(side_effect=[missing, good]))
+        fleet = types.SimpleNamespace(record=lambda name, value: value)
+        with patch.object(root_restart.time, "sleep"):
+            self.assertEqual(root_restart.recovery_status(client, fleet, self.token)["summary"], "running")
+        client.admin = lambda *args: missing
+        with patch.object(root_restart.time, "monotonic", side_effect=[0, 16]), self.assertRaisesRegex(ValueError, "15-second"):
+            root_restart.recovery_status(client, fleet, self.token)
+        self.assertEqual(list(root_restart.BRANCHES), select("F01")[0]["variants"])
+
+    def test_completed_root_journal_retires_intent_and_preserves_checkpoint_options(self):
+        owner = root_restart.root_intent(self.records(), self.token, "node1")
+        owner["value"]["options"]["timeout"] = {"secs": 280, "nanos": 0}
+        expected = HealCursorOracleTest().expected()
+        bucket = HealCursorOracleTest.bucket
+        current = HealCursorOracleTest().terminal()
+        terminal = {"schema": 1, "task_id": self.token, "heal_type": {"type": "cluster"}, "status": "Completed",
+                    "options": owner["value"]["options"]}
+        report = {"schema": 1, "terminal": copy.deepcopy(terminal), "outcome": current["outcome"],
+            "next_seq": 1027, "min_seq": 3, "seqed_items": [[index + 2,
+                {"bucket": bucket, "object": entry["key"], "versionId": "", "objectSize": CURSOR_SIZE}]
+                for index, entry in enumerate(expected[1:], 1)]}
+        observed = self.records()
+        for entry in observed["node1"]["records"]:
+            entry["present"] = entry["disk"] == 2 and entry["kind"] in {"terminal", "report"}
+            if entry["present"]: entry["value"] = terminal if entry["kind"] == "terminal" else report
+        self.assertTrue(root_restart.root_terminal(observed, self.token, owner, current, bucket, expected)["runnableIntentRetiredOnEveryDrive"])
+        for kind in ("intent", "owner", "scope", "state", "refund", "outcome", "duplicate", "wrong-version", "wrong-size"):
+            changed = copy.deepcopy(observed)
+            rows = changed["node1"]["records"]
+            end = next(row for row in rows if row["present"] and row["kind"] == "terminal")
+            durable = next(row for row in rows if row["present"] and row["kind"] == "report")
+            if kind == "intent": rows[0]["present"] = True
+            if kind == "owner": end["disk"] = 3
+            if kind == "scope": end["value"]["heal_type"] = {"type": "bucket", "bucket": bucket}
+            if kind == "state": end["value"]["status"] = "Cancelled"
+            if kind == "refund": end["value"]["options"]["timeout"]["secs"] = 300
+            if kind == "outcome": durable["value"]["outcome"]["counters"]["unknown"] = 1
+            if kind == "duplicate": durable["value"]["seqed_items"][1][1] = copy.deepcopy(durable["value"]["seqed_items"][0][1])
+            if kind == "wrong-version": durable["value"]["seqed_items"][0][1]["versionId"] = "unacknowledged"
+            if kind == "wrong-size": durable["value"]["seqed_items"][0][1]["objectSize"] += 1
+            with self.subTest(kind=kind), self.assertRaises(ValueError): root_restart.root_terminal(changed, self.token, owner, current, bucket, expected)
+
+    def test_journal_reads_mark_the_actual_coordinator_as_stopped(self):
+        calls = []
+        fleet = types.SimpleNamespace(nodes=["node1", "node2", "node3", "node4"], record=lambda name, value: value,
+            remote=lambda node, action, **params: calls.append((node, params["quiescent"])) or {})
+        root_restart.records(fleet, self.token, "checkpoint", stopped_node="node3")
+        self.assertEqual(calls, [("node1", False), ("node2", False), ("node3", True), ("node4", False)])
+
+    def test_cleanup_resumes_only_the_proved_original_process_before_finalization(self):
+        fleet = Fleet(["node1"], Path("/tmp/unit-root-restart"), "run")
+        fleet.frozen_processes = {"node1": self.process()}
+        fleet.reserved = ["node1"]
+        calls = []
+        def remote(node, action, **kwargs):
+            calls.append((action, kwargs))
+            return {"pid": 10} if action == "process" else {}
+        fleet.remote = remote
+        fleet.record = lambda name, value: value
+        self.assertTrue(fleet.cleanup())
+        self.assertEqual([action for action, _ in calls[:2]], ["process", "process-signal"])
+        self.assertEqual(calls[1][1]["signal"], "SIGCONT")
+        self.assertEqual(calls[1][1]["expected"]["startTicks"], 50)
+        self.assertFalse(fleet.frozen_processes)
+        fleet.frozen_processes = {"node1": self.process()}
+        def stale(node, action, **kwargs):
+            calls.append((action, kwargs))
+            if action == "process-signal": raise ValueError("stale process")
+            return {"pid": 10} if action == "process" else {}
+        fleet.remote = stale; calls.clear()
+        self.assertFalse(fleet.cleanup())
+        self.assertFalse(any(action == "cleanup" for action, _ in calls))
 
 
 if __name__ == "__main__":

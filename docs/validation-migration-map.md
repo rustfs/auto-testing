@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 108 currently dispatchable IDs include all 74 non-Heal cases and thirty-four Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 109 currently dispatchable IDs include all 74 non-Heal cases and thirty-five Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 50 Heal cases remain
+The other 49 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -607,3 +607,23 @@ with the same processes. Complete same-role shard bytes, streaming checksums
 and all-peer full S3 manifests remain mandatory before PASS. Local
 scope/error/window/duplicate-repair/item-omission/cleanup-stop negatives
 passed. Full live evidence remains pending.
+
+F01 `heal.root-graceful-coordinator-restart` now dispatches both source
+branches on H1/H2 with the same fixed DX physical/S3 oracles. The coordinator
+comes from the unique admitted physical root intent, rather than a guessed
+node alias. Actual nonzero task progress and both restored/pending target
+shards must precede interruption. Linux pidfd binds pause, SIGTERM and resume
+to the original process birth; the original run-owned unit retains actual
+normal-exit-zero evidence. All peers retain their original process except
+that coordinator. The exact schema-3 root intent stays on the same drive,
+with original task/scope/options/priority/admission time and a finite
+remaining timeout that cannot increase. Pending peer writes must settle
+before same-unit/environment/volumes/candidate restart. The original token
+must recover, report complete exact responsibility and repair the remaining
+physical defects; no new START compensates for lost responsibility. Runnable
+intent must retire on every drive, while completed terminal/report remain on
+the original owner. A second coordinator restart preserves their bytes,
+completed outcome and all user files and remains idle. This proves durable
+admission replay, and makes no cursor-resume or record-disk failover claim.
+Local owner/budget/process-birth/exit/old-token/journal negatives passed;
+full live evidence remains pending.
