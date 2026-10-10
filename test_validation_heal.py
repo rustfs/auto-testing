@@ -2051,7 +2051,7 @@ class HealCancelledRestartOracleTest(unittest.TestCase):
         terminal = {"schema": 1, "task_id": self.token, "status": "Cancelled",
             "heal_type": {"type": "prefix", "bucket": HealCursorOracleTest.bucket, "prefix": "objects/"}}
         report = {"schema": 1, "terminal": terminal, "outcome": status["outcome"], "min_seq": 1, "next_seq": 2,
-            "seqed_items": [[1, {"bucket": HealCursorOracleTest.bucket, "object": "objects/0000.bin"}]]}
+            "seqed_items": [[1, {"bucket": HealCursorOracleTest.bucket, "object": "objects/0000.bin", "objectSize": CURSOR_SIZE}]]}
         records = [{"disk": disk, "kind": kind, "present": disk == 0 and kind != "intent",
             **({"value": terminal if kind == "terminal" else report, "sha256": "original", "size": 100}
                if disk == 0 and kind != "intent" else {})} for disk in range(4) for kind in ("intent", "terminal", "report")]
@@ -2059,8 +2059,9 @@ class HealCancelledRestartOracleTest(unittest.TestCase):
 
     def test_actual_cancelled_journal_rejects_runnable_duplicate_or_wrong_epoch_records(self):
         observed, status = self.journal()
-        self.assertTrue(validate_journal(observed, self.token, HealCursorOracleTest.bucket, status)["runnableIntentAbsentOnEveryDrive"])
-        for kind in ("intent", "duplicate", "scope", "status", "schema", "identity", "outcome", "cursor", "owner", "missing"):
+        expected = HealCursorOracleTest().expected()
+        self.assertTrue(validate_journal(observed, self.token, HealCursorOracleTest.bucket, status, expected)["runnableIntentAbsentOnEveryDrive"])
+        for kind in ("intent", "duplicate", "scope", "status", "schema", "identity", "outcome", "cursor", "owner", "missing", "item-key", "item-version", "item-size"):
             changed = copy.deepcopy(observed)
             records = changed["node1"]["records"]
             terminal, report = records[1]["value"], records[2]["value"]
@@ -2074,8 +2075,11 @@ class HealCancelledRestartOracleTest(unittest.TestCase):
             if kind == "cursor": report["seqed_items"][0][0] = report["next_seq"]
             if kind == "owner": records[2]["disk"] = 1
             if kind == "missing": records[2]["present"] = False
+            if kind == "item-key": report["seqed_items"][0][1]["object"] = "objects/unregistered.bin"
+            if kind == "item-version": report["seqed_items"][0][1]["versionId"] = "another-version"
+            if kind == "item-size": report["seqed_items"][0][1]["objectSize"] += 1
             with self.subTest(kind=kind), self.assertRaises(ValueError):
-                validate_journal(changed, self.token, HealCursorOracleTest.bucket, status)
+                validate_journal(changed, self.token, HealCursorOracleTest.bucket, status, expected)
 
     def test_node_reader_is_read_only_and_only_accepts_exact_task_filenames(self):
         with tempfile.TemporaryDirectory() as folder:

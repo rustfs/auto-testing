@@ -8,12 +8,14 @@ import sys
 try:
     from .heal_probe import canonical, require
     from .healthy import physical_content
-    from .cursor import main as dx_main
+    from .cursor import main as dx_main, wanted_pairs
+    from .versions import public_version_id
     from .stop import observe_task as stop_task, status, idle_fleet
 except ImportError:
     from heal_probe import canonical, require
     from healthy import physical_content
-    from cursor import main as dx_main
+    from cursor import main as dx_main, wanted_pairs
+    from versions import public_version_id
     from stop import observe_task as stop_task, status, idle_fleet
 
 
@@ -27,7 +29,8 @@ REFERENCE = {"candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926",
     "role": "exact run-owned read-only journal witness; no synthesized checkpoint or record replay"}
 
 
-def validate_journal(observed, token, bucket, cancelled):
+def validate_journal(observed, token, bucket, cancelled, expected):
+    wanted = wanted_pairs(expected)
     present, all_records = {}, []
     for node, value in observed.items():
         require(value.get("readOnly") is True and value.get("taskId") == token
@@ -62,7 +65,9 @@ def validate_journal(observed, token, bucket, cancelled):
     for item in report["seqed_items"]:
         require(isinstance(item, list) and len(item) == 2 and type(item[0]) is int
                 and max(previous + 1, report["min_seq"]) <= item[0] < report["next_seq"]
-                and item[1].get("bucket") == bucket and item[1].get("object", "").startswith("objects/"),
+                and item[1].get("bucket") == bucket
+                and (item[1].get("object"), public_version_id(item[1].get("versionId"))) in wanted
+                and item[1].get("objectSize") == wanted[item[1]["object"], public_version_id(item[1].get("versionId"))]["payload"]["size"],
                 "durable report cursor/item crossed the old task responsibility")
         previous = item[0]
     return {"ownerNode": terminal_node, "ownerDisk": terminal_entry["disk"], "cancelledTaskId": token,
@@ -77,7 +82,7 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
         fleet.stop()
         before = fleet.record("cancelled-journal-before-restart", {node: fleet.remote(node, "task-records", taskId=old,
             quiescent=True) for node in fleet.nodes})
-        journal = validate_journal(before, old, bucket, cancelled)
+        journal = validate_journal(before, old, bucket, cancelled, expected)
         archived.update(records=before, cancelled=cancelled, path=path, old=old)
         stopped = fleet.snapshot("cancelled-before-restart", quiescent=True)
         require(physical_content(stopped) == physical_content(quiet), "graceful stop changed cancelled object files/formats")
@@ -93,7 +98,7 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
             for node in fleet.nodes), "restart replaced topology/candidate/roots or failed to start new processes")
         after = fleet.record("cancelled-journal-after-restart", {node: fleet.remote(node, "task-records", taskId=old)
             for node in fleet.nodes})
-        validate_journal(after, old, bucket, old_after)
+        validate_journal(after, old, bucket, old_after, expected)
         require(canonical(before) == canonical(after), "restart rewrote the original cancelled task's journal")
         return {"journal": journal, "sameOriginalUnitsRootsAndCandidate": True, "newProcessOnEveryNode": True,
                 "oldCancelledOutcomePreserved": True, "oldJournalBytesPreserved": True, "allPeerIdle": idle}
@@ -102,7 +107,7 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     final_old = status(probe, fleet, archived["path"], archived["old"], "old-status-after-new-completion")
     final_journal = fleet.record("old-journal-after-new-completion", {node: fleet.remote(node, "task-records", taskId=archived["old"])
         for node in fleet.nodes})
-    validate_journal(final_journal, archived["old"], bucket, final_old)
+    validate_journal(final_journal, archived["old"], bucket, final_old, expected)
     require(canonical(final_journal) == canonical(archived["records"]),
             "new forceStart task rewrote or removed the original cancelled task's journal")
     return {"cancel-restart": {"verdict": "PASS", "cancellation": proof["stop-active"]},
