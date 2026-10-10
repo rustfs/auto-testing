@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 103 currently dispatchable IDs include all 74 non-Heal cases and twenty-nine Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 104 currently dispatchable IDs include all 74 non-Heal cases and thirty Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 55 Heal cases remain
+The other 54 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -506,3 +506,22 @@ remaining version/public-property manifest. A failed or ambiguous stale ACK
 stops the topology and retains its result; gate cleanup precedes physical
 finalization. Local ACK/order/authority/header/gate negatives passed; full live
 evidence remains pending.
+
+J01 `heal.status-partial-disabled-unknown` now has a dedicated current-fleet
+executor for H1/H2. Fresh manual and disabled deployments retain actual process
+configuration, complete physical fixtures and both raw Admin and rc JSON/text
+outputs. Peer coverage must balance exactly; absent peers need an explicit
+unknown count/reason and cannot report idle. Any raw or CLI sample that erases
+uncertainty fails immediately, including during bounded convergence. H2 stops
+one original peer, witnesses its process exit and connection refusal, and
+queries every survivor before restarting the same member. The source's step 2
+explicitly restricts that branch to H2; H1 records its applicability reason
+and instead proves an original-service restart followed by complete idle.
+A startup observer begins before any service starts and requires raw
+uninitialized status to bracket matching rc/replacement observations. A
+transport error or an already initialized service cannot prove that window;
+NOT_OBSERVED makes the complete case fail. Original formats/object files and
+full S3 manifests must remain unchanged. Temporary rc credentials use a 0600
+configuration outside artifacts and are removed during finalization. Local
+coverage/uncertainty/startup/config-cleanup negatives passed; live evidence
+remains pending.

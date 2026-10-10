@@ -29,7 +29,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "read-repair", "scanner"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled"}, "unsupported Heal runtime profile")
+    if profile == "disabled":
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_ENABLED": "false"}
     if profile == "scanner":
         return {**BACKGROUND_CONFIG, "RUSTFS_SCANNER_ENABLED": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug",
                 "RUSTFS_SCANNER_START_DELAY_SECS": "5", "RUSTFS_SCANNER_CYCLE": "5",

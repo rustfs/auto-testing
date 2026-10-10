@@ -41,6 +41,8 @@ from scripts.validation_heal.fleet_node import logs as node_logs
 from scripts.validation_heal.markers import (INSTANCES as MARKER_INSTANCES, seed_markers, marker_plan,
     stale_expected_scene, add_marker, remove_marker, validate_marker_error)
 from scripts.validation_heal.drive_gate import probe_gate
+from scripts.validation_heal.status import (validate_background, validate_replacement, validate_cli,
+    reject_unsafe_completion, watch_startup, stable_status, Cli)
 import errno
 import stat
 
@@ -1408,6 +1410,110 @@ class HealMarkerSemanticsTest(unittest.TestCase):
             self.assertIn("--mount=/proc/123/ns/mnt", command)
             self.assertIn("--bounding-set=-dac_override,-dac_read_search", command)
         self.assertEqual(invoke.call_args.args[0][-1], "/private/data/.rustfs.sys/format.json")
+
+
+class HealRuntimeStatusTest(unittest.TestCase):
+    def background(self, *, state="idle", missing=False):
+        return {"state": state, "clusterStatusComplete": not missing,
+                "coverage": {"expected": 4, "responded": 3 if missing else 4, "unknown": int(missing),
+                             "reasons": ["peer_status_unavailable"] if missing else []},
+                "healQueueLength": 0, "healActiveTasks": 0,
+                "healOperations": {"queueLength": 0, "activeTasks": 0, "retryingTasks": 0}}
+
+    def observation(self, *, state="uninitialized", missing=False):
+        background = self.background(state=state, missing=missing)
+        uncertain = missing or state in {"disabled", "uninitialized"}
+        return {"node1": {"background": {"httpStatus": 200, "response": background},
+            "replacement": {"httpStatus": 200, "response": {"contractVersion": 2, "scope": "cluster_survivor_disks",
+                "cluster": {"records": [], "definitive": not uncertain, "reason": "runtime unavailable" if uncertain else None}}},
+            "rcJson": {"exitCode": 0, "json": {"state": state, "clusterStatusComplete": not missing, "coverage": background["coverage"]}},
+            "rcText": {"exitCode": 0, "stdout": "Heal Status: " + state.capitalize()}}}
+
+    def test_raw_coverage_cannot_hide_peer_loss_retrying_work_or_disabled_state(self):
+        validate_background(self.background(), "enabled-idle", 4)
+        validate_background(self.background(state="degraded", missing=True), "missing-peer", 4)
+        for branch, state in (("disabled", "disabled"), ("uninitialized", "uninitialized")):
+            validate_background(self.background(state=state), branch, 4)
+        for mutation in ("bool", "lost-peer", "false-idle", "retry", "disabled-idle", "reason"):
+            missing = mutation in {"false-idle", "reason"}
+            value = self.background(state="degraded" if missing else "idle", missing=missing)
+            branch = "missing-peer" if missing else "disabled" if mutation == "disabled-idle" else "enabled-idle"
+            if mutation == "bool": value["coverage"]["responded"] = True
+            elif mutation == "lost-peer": value["coverage"]["unknown"] = 1
+            elif mutation == "false-idle": value["state"] = "idle"
+            elif mutation == "retry": value["healOperations"]["retryingTasks"] = 1
+            elif mutation == "reason": value["coverage"]["reasons"] = []
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): validate_background(value, branch, 4)
+
+    def test_replacement_does_not_convert_disabled_uninitialized_or_partial_to_definitive(self):
+        for branch, state in (("disabled", "disabled"), ("uninitialized", "uninitialized"), ("missing-peer", "degraded")):
+            value = self.observation(state=state, missing=branch == "missing-peer")["node1"]["replacement"]["response"]
+            validate_replacement(value, branch)
+            value["cluster"]["definitive"] = True
+            with self.assertRaises(ValueError): validate_replacement(value, branch)
+
+    def test_rc_fields_and_text_must_preserve_raw_runtime_and_peer_truth(self):
+        for branch, state in (("disabled", "disabled"), ("uninitialized", "uninitialized"), ("missing-peer", "degraded")):
+            value = self.observation(state=state, missing=branch == "missing-peer")["node1"]
+            validate_cli(value["rcJson"], value["rcText"], value["background"]["response"], branch, 4)
+            changed = copy.deepcopy(value)
+            changed["rcJson"]["json"]["state"] = "idle"
+            with self.assertRaises(ValueError): validate_cli(changed["rcJson"], changed["rcText"], changed["background"]["response"], branch, 4)
+            changed = copy.deepcopy(value)
+            changed["rcJson"]["json"]["coverage"] = copy.deepcopy(changed["rcJson"]["json"]["coverage"])
+            changed["rcJson"]["json"]["coverage"]["unknown"] += 1
+            with self.assertRaises(ValueError): validate_cli(changed["rcJson"], changed["rcText"], changed["background"]["response"], branch, 4)
+            with self.assertRaises(ValueError): validate_cli(value["rcJson"], {"exitCode": 0, "stdout": "Heal Status: Idle"}, value["background"]["response"], branch, 4)
+
+    def test_unsafe_convergence_sample_fails_immediately_and_is_not_retried_to_green(self):
+        observed = self.observation(state="degraded", missing=True)
+        observed["node1"]["rcText"]["stdout"] = "Heal Status: Idle"
+        with self.assertRaises(ValueError): reject_unsafe_completion(observed)
+        with patch("scripts.validation_heal.status.observations", return_value=observed) as reads, \
+             patch("scripts.validation_heal.status.time.sleep") as sleep:
+            with self.assertRaises(ValueError): stable_status(None, {"endpoints": {"node1": "url"}}, None, "missing-peer", ["node1"])
+            reads.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_startup_needs_raw_rc_window_bracket_transport_failure_is_not_observation(self):
+        good = self.observation()
+        fleet = types.SimpleNamespace(record=lambda label, value: value)
+        binding = {"endpoints": {"node1": "one", "node2": "two", "node3": "three", "node4": "four"}}
+        with patch("scripts.validation_heal.status.observations", return_value=good), \
+             patch("scripts.validation_heal.status.TimedProbe", return_value=types.SimpleNamespace(admin=lambda *args: good["node1"]["background"])):
+            result = watch_startup(fleet, binding, None, types.SimpleNamespace(is_set=lambda: False))
+            self.assertEqual(result["verdict"], "PASS")
+            self.assertTrue(result["rawBracketedCliWindow"])
+        bad = copy.deepcopy(good)
+        bad["node1"]["background"] = {"httpStatus": None, "error": "connection refused"}
+        with patch("scripts.validation_heal.status.observations", return_value=bad), \
+             patch("scripts.validation_heal.status.time.monotonic", side_effect=[0, 1, 31]), \
+             patch("scripts.validation_heal.status.time.sleep"):
+            result = watch_startup(fleet, binding, None, types.SimpleNamespace(is_set=lambda: False))
+            self.assertEqual(result["verdict"], "NOT_OBSERVED")
+        with patch("scripts.validation_heal.status.observations", return_value=good), \
+             patch("scripts.validation_heal.status.TimedProbe", return_value=types.SimpleNamespace(admin=lambda *args: {"httpStatus": 200, "response": self.background()})), \
+             patch("scripts.validation_heal.status.time.monotonic", side_effect=[0, 1, 31]), \
+             patch("scripts.validation_heal.status.time.sleep"):
+            self.assertEqual(watch_startup(fleet, binding, None, types.SimpleNamespace(is_set=lambda: False))["verdict"], "NOT_OBSERVED")
+
+    def test_cli_private_credentials_are_removed_and_never_enter_process_argv(self):
+        cli = Cli(Path("/usr/bin/rc"), {"endpoints": {"node1": "http://private:9000"}}, "runtime-access", "runtime-secret")
+        root = Path(cli.folder.name)
+        self.assertEqual(stat.S_IMODE((root / "config.toml").stat().st_mode), 0o600)
+        try:
+            with patch("scripts.validation_heal.status.subprocess.run", return_value=types.SimpleNamespace(
+                    returncode=0, stdout='{"state":"disabled"}', stderr="")) as invoked:
+                result = cli.read("node1", as_json=True)
+                self.assertEqual(result["json"]["state"], "disabled")
+                self.assertNotIn("runtime-access", repr(invoked.call_args.args))
+                self.assertNotIn("runtime-secret", repr(invoked.call_args.args))
+                self.assertEqual(invoked.call_args.kwargs["env"]["RC_CONFIG_DIR"], str(root))
+        finally: cli.close()
+        self.assertFalse(root.exists())
+        config = runtime_config("disabled")
+        self.assertEqual(config["RUSTFS_HEAL_ENABLED"], "false")
+        self.assertEqual({**config, "RUSTFS_HEAL_ENABLED": "true"}, BACKGROUND_CONFIG)
 
 
 class HealPayloadMismatchTest(unittest.TestCase):

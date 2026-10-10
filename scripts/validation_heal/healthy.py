@@ -131,7 +131,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual"):
-        require(runtime_profile in {"manual", "offline-replay", "read-repair", "scanner"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled"}, "unsupported Heal runtime profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
         self.runtime_profile = runtime_profile
@@ -191,7 +191,7 @@ class Fleet:
         self.record("started", dict(zip(self.nodes, results, strict=True)))
         self.wait_ready()
 
-    def deploy(self, binary_sha, bucket, access, secret):
+    def deploy(self, binary_sha, bucket, access, secret, *, before_start=None):
         self.secret_values.update({access, secret})
         checked = {node: self.remote(node, "preflight") for node in self.nodes}
         self.record("preflight", checked)
@@ -224,6 +224,8 @@ class Fleet:
                                           input=tool.read_bytes(), capture_output=True, timeout=120)
                 require(transfer.returncode == 0, "exclusive inspector upload failed: " + transfer.stderr.decode()[-800:])
                 self.record("inspector-upload", {"node": node, **self.remote(node, "install-inspector")})
+        if before_start is not None:
+            before_start()
         self.start()
 
     def wait_ready(self):
