@@ -23,6 +23,7 @@ try:
     from .healthy import Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
     from .matrix import select
+    from .heal_fault import bounded_fault_id
     from .boundaries import (BRANCHES as SIZE_BRANCHES, verify_size_contract, boundary_sizes,
                              seed_boundaries, verify_boundary_ranges)
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
@@ -33,6 +34,7 @@ except ImportError:
     from healthy import Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
     from matrix import select
+    from heal_fault import bounded_fault_id
     from boundaries import (BRANCHES as SIZE_BRANCHES, verify_size_contract, boundary_sizes,
                             seed_boundaries, verify_boundary_ranges)
     from shards import (SIZES, files, map_target, run_task, validate_fault,
@@ -670,7 +672,7 @@ def run_topology(args, topology, nodes, fixture):
                     verify_proof(fleet, target, "baseline-bitrot-" + branch)
                 prior = before
                 for index, target in enumerate(plan["faults"]):
-                    params = {"disk": target["disk"], "faultId": recipe["code"] + "-" + branch + "-" + str(index)}
+                    params = {"disk": target["disk"], "faultId": bounded_fault_id(recipe["code"], branch, index)}
                     registration = target["node"], params
                     fleet.faults.append(registration)
                     registrations.append(registration)

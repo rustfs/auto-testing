@@ -24,6 +24,12 @@ ROOT_PATTERN = re.compile(r"/data/rustfs[1-9][0-9]*/heal-validation/((?:gh|manua
 FAULTS = ("missing", "bitflip", "truncate", "zero", "header")
 
 
+def bounded_fault_id(code: str, branch: str, index: int) -> str:
+    require(bool(re.fullmatch(r"[A-J][0-9]{2}", code)) and isinstance(branch, str) and branch
+            and type(index) is int and index >= 0, "invalid fault identity inputs")
+    return code + "-" + hashlib.sha256(f"{branch}/{index}".encode()).hexdigest()[:32]
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)

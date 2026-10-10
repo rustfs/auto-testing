@@ -370,10 +370,32 @@ def cleanup(request):
     return {"cleanup": "PASS", "unitStopped": True, "rootsRemoved": True, "hostname": owner["hostname"]}
 
 
+def audit_finalize(request):
+    """Finalize only an invalid-ID rejection proved identical to its archived pre-fault scene."""
+    _, _, owner = owned(request["runId"])
+    stopped(owner)
+    fault_id = request.get("rejectedFaultId", "")
+    require(re.fullmatch(r"[A-J][0-9]{2}-[a-z0-9-]{49,128}", fault_id) is not None,
+            "audited finalization only supports an overlength ID rejected before injection")
+    require(request.get("binarySha256") == owner["binarySha256"], "audited candidate identity differs")
+    root, _ = fault_root(request)
+    for suffix in (".intent.json", ".original", ".applied.json"):
+        require(not checked(root / "quarantine" / (fault_id + suffix), root).exists(),
+                "rejected fault unexpectedly has intent or backup bytes; retain scene")
+    observed = snapshot({**request, "quiescent": True})
+    content = {key: observed[key] for key in ("files", "formats")}
+    scene_sha = hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    require(re.fullmatch(r"[0-9a-f]{64}", request.get("expectedSceneSha256", "")) is not None
+            and scene_sha == request["expectedSceneSha256"], "physical scene drifted from archived pre-fault evidence; retain namespace")
+    result = cleanup(request)
+    return {**result, "faultNeverApplied": True, "archivedPreFaultSceneEqual": True, "sceneSha256": scene_sha,
+            "backupRestorationUsed": False, "productRepairClaimed": False}
+
+
 def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
-               "logs": logs, "cleanup": cleanup, "install-inspector": install_inspector,
+               "logs": logs, "cleanup": cleanup, "audit-finalize": audit_finalize, "install-inspector": install_inspector,
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part,
                "verify-inline": verify_inline}
     require(request.get("action") in actions, "unsupported node operation")
