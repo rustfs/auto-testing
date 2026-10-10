@@ -185,16 +185,19 @@ def run_topology(args, topology, nodes):
                 key = entry["key"]
                 path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/" + quote(key, safe="/")
                 options = {"recursive": False, "remove": False, "recreate": False, "scanMode": mode,
-                           "dryRun": False, "poolIndex": 0, "setIndex": 0}
+                           "dryRun": False, "updateParity": False, "nolock": False,
+                           "readRepair": False, "pool": 0, "set": 0}
                 started = fleet.record("trigger-" + branch, probe.admin(path, [], json.dumps(options).encode()))
-                token = (started.get("response") or {}).get("clientToken")
-                require(started.get("httpStatus") == 200 and isinstance(token, str) and bool(token),
-                        "healthy Heal task admission failed")
+                require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict),
+                        f"healthy Heal task admission failed (HTTP {started.get('httpStatus')})")
+                token = started["response"].get("clientToken")
+                require(isinstance(token, str) and bool(token), "healthy Heal task admission omitted its token")
                 active.append((path, token))
                 deadline = time.monotonic() + 120
                 while True:
                     observed = fleet.record("status-" + branch, probe.admin(path, [("clientToken", token)], b""))
-                    require(observed.get("httpStatus") == 200, "Heal status request failed")
+                    require(observed.get("httpStatus") == 200 and isinstance(observed.get("response"), dict),
+                            "Heal status request failed")
                     terminal = observed.get("response") or {}
                     if terminal.get("summary") != "running":
                         break
