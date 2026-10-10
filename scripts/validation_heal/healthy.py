@@ -149,10 +149,11 @@ class Fleet:
 
     def remote(self, node, action, **params):
         value = {"runId": self.run_id, "action": action, **params}
-        source = NODE_SOURCE.read_text() + "\nmain(" + repr(value) + ")\n"
+        source = NODE_SOURCE.read_text()
         if action in {"apply-fault", "recover-fault", "verify-part"}:
-            source = "import types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
-                NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n" + source
+            source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
+                NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
+        source += "\nmain(" + repr(value) + ")\n"
         result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
                                 input=source, capture_output=True, text=True, timeout=180)
         require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")

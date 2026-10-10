@@ -10,7 +10,7 @@ import types
 from unittest.mock import patch
 
 from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, cases, compile_plan, select
-from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection
+from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection, Fleet
 from scripts.validation_heal.fleet_node import paths, stopped
 from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal
@@ -171,6 +171,19 @@ class HealHealthyOracleTest(unittest.TestCase):
 
 
 class HealShardOracleTest(unittest.TestCase):
+    def test_ssh_script_compiles_with_fault_module_and_keeps_structured_request(self):
+        observed = []
+        def invoke(args, **params):
+            source = params["input"]
+            compile(source, "ssh-node-script", "exec")
+            observed.append(source)
+            return types.SimpleNamespace(returncode=0, stdout='{"checked":true}', stderr="")
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.validation_heal.healthy.subprocess.run", side_effect=invoke):
+            fleet = Fleet(["node1"], Path(directory), "gh-12345-1-h1")
+            for action in ("preflight", "verify-part", "apply-fault", "recover-fault"):
+                self.assertTrue(fleet.remote("node1", action, disk=1, relativePath="literal$()'part.1")["checked"])
+        self.assertEqual(len(observed), 4)
+
     def snapshot(self):
         bucket, key, data_dir = "rv-heal-0123456789abcdef", "objects/0008.bin", "12345678-1234-1234-1234-123456789abc"
         disks, distribution = [str(index) for index in range(4)], [4, 1, 2, 3]
