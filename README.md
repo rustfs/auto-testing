@@ -33,8 +33,9 @@ results.
 
 The executable canonical cases currently include `s3.basic-object-round-trip`,
 `scanner.usage-convergence`, `kms.sse-kms-round-trip`,
-`tiering.transition-and-restore`, `events.delivery`, and
-`audit.request-correlation`. The S3 and KMS cases use single-disk
+`tiering.transition-and-restore`, `events.delivery`,
+`audit.request-correlation`, and `iam.policy-enforcement`. The S3, KMS, and IAM
+cases use single-disk
 deployment. The scanner case uses the storage suite's single-node four-disk
 deployment, waits for a post-upload successful scanner cycle, and requires a
 complete usage snapshot with exactly 20 objects and 20,690 logical bytes.
@@ -75,7 +76,8 @@ implemented source cases have verified executors and live results.
 
 S3, scanner, KMS, and tiering have live PASS evidence against nightly build
 `37958901959` attempt `1` on the current auto-testing fleet. Events and audit
-have local executor tests but still need live verification.
+have local executor tests but still need live verification. IAM also awaits a
+live run.
 
 ## Fault-tolerance suite
 

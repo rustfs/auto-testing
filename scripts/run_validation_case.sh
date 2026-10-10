@@ -21,6 +21,8 @@ case "${CASE_ID}" in
     SUITE=rustfs-kms-test.sh; EXTRA_ARGS=() ;;
   tiering.transition-and-restore|events.delivery|audit.request-correlation)
     SUITE=rustfs-tier-test.sh; EXTRA_ARGS=(--topology single-single) ;;
+  iam.policy-enforcement)
+    SUITE=rustfs-security-test.sh; EXTRA_ARGS=() ;;
   *)
     printf 'validation executor is not migrated: %s\n' "${CASE_ID}" >&2
     exit 2 ;;
@@ -36,7 +38,7 @@ esac
 mkdir -p -- "${ARTIFACTS_DIR}"
 case_dir="${ARTIFACTS_DIR}/${CASE_ID}"
 suite_rc=0
-"${SCRIPT_DIR}/${SUITE}" --validation-case "${CASE_ID}" "${EXTRA_ARGS[@]}" \
+bash "${SCRIPT_DIR}/${SUITE}" --validation-case "${CASE_ID}" "${EXTRA_ARGS[@]}" \
   --candidate-manifest "${CANDIDATE_MANIFEST}" \
   --testing-commit "${TESTING_COMMIT}" \
   --validation-artifacts-dir "${case_dir}" -y \
