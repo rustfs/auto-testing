@@ -35,6 +35,9 @@ from scripts.validation_heal.versions import mismatch_plan, seed_mismatch
 from scripts.validation_heal import heal_fault
 from scripts.validation_heal.read_repair import source_tasks, validate_read, tracked_read_task, ADMISSION_MESSAGE, ADMISSION_TARGET
 from scripts.validation_heal.drive_gate import apply_gate, release_gate, checked_gate, start_properties, validate_probe, validate_unwritable
+from scripts.validation_heal.scanner_repair import (source_tasks as scanner_sources, cycle_pairs,
+    observe_task as observe_scanner, JournalWindow)
+from scripts.validation_heal.fleet_node import logs as node_logs
 import errno
 import stat
 
@@ -1160,6 +1163,134 @@ class HealReadRepairTest(unittest.TestCase):
         self.assertEqual(plan["expected"][0]["versionId"], "v0")
         self.assertFalse(plan["expected"][0]["isLatest"])
         self.assertEqual(len(plan["expected"]), 1)
+
+
+class HealScannerSourceTest(unittest.TestCase):
+    bucket, key = "rv-heal-scanner-unit", "objects/0008.bin"
+
+    def events(self):
+        def row(second, **values):
+            return {"timestamp": f"2026-10-10T12:00:{second:02d}Z", **values}
+        return [
+            row(1, target="rustfs::scanner", event="scanner_cycle_state", state="started", cycle=7, scan_mode="Deep"),
+            row(2, target="rustfs::scanner::folder", event="scanner_heal_admission", state="request_started",
+                bucket=self.bucket, object=self.key, version_id="00000000-0000-0000-0000-000000000000"),
+            row(3, target="rustfs::heal::channel", state="start_received", request_id="task-one",
+                bucket=self.bucket, object_prefix=self.key),
+            row(4, target="rustfs::heal::manager", message="Heal queue request accepted", request_id="task-one",
+                source="scanner", result="accepted"),
+            row(5, target="rustfs::heal::task", message="Heal object started", stage="start", task_id="task-one",
+                bucket=self.bucket, object=self.key, version_id="None"),
+            row(6, target="rustfs::heal::manager", state="task_completed", task_id="task-one"),
+            row(7, target="rustfs::scanner", event="scanner_cycle_state", state="completed", cycle=0, scan_mode="Deep"),
+        ]
+
+    def entry(self):
+        return {"key": self.key, "versionId": "null", "deleteMarker": False}
+
+    def test_source_chain_requires_exact_scanner_admission_version_cycle_and_task(self):
+        rows = self.events()
+        self.assertEqual(scanner_sources({"host": rows}, self.bucket, self.entry())[0]["taskId"], "task-one")
+        mutations = ((1, "bucket", "other"), (1, "object", "other"), (1, "version_id", "historical"),
+                     (2, "object_prefix", "other"), (3, "source", "read-repair"), (3, "result", "merged_duplicate"),
+                     (4, "task_id", "another"), (4, "version_id", "historical"), (5, "task_id", "another"),
+                     (6, "state", "failed"), (0, "scan_mode", "Normal"), (1, "timestamp", "2026-10-10T12:00:08Z"))
+        for index, field, value in mutations:
+            changed = copy.deepcopy(rows)
+            changed[index][field] = value
+            with self.subTest(index=index, field=field):
+                self.assertFalse(scanner_sources({"host": changed}, self.bucket, self.entry()))
+        for index in (1, 4):
+            changed = copy.deepcopy(rows)
+            changed[index].pop("version_id")
+            self.assertFalse(scanner_sources({"host": changed}, self.bucket, self.entry()))
+        self.assertFalse(scanner_sources({"host": rows[:1] + rows[-1:]}, self.bucket, self.entry()))
+        self.assertFalse(scanner_sources({"host": rows[:4], "peer": rows[4:]}, self.bucket, self.entry()))
+
+    def test_task_may_start_after_discovery_cycle_but_cannot_precede_admission(self):
+        rows = self.events()
+        rows[4]["timestamp"] = "2026-10-10T12:00:08Z"
+        rows[5]["timestamp"] = "2026-10-10T12:00:09Z"
+        self.assertTrue(scanner_sources({"host": rows}, self.bucket, self.entry()))
+        rows[4]["timestamp"] = "2026-10-10T12:00:03Z"
+        self.assertFalse(scanner_sources({"host": rows}, self.bucket, self.entry()))
+
+    def test_cycle_pair_requires_ordered_positive_start_and_complete_boundary(self):
+        rows = self.events()
+        self.assertEqual(cycle_pairs(rows)[0]["cycle"], 7)
+        for change in ({"cycle": 9}, {"timestamp": "2026-10-10T11:00:00Z"}, {"timestamp": "invalid"}):
+            changed = copy.deepcopy(rows)
+            changed[-1].update(change)
+            self.assertFalse(cycle_pairs(changed))
+        failed = {**rows[-1], "state": "failed", "timestamp": "2026-10-10T12:00:06Z"}
+        self.assertFalse(cycle_pairs(rows[:-1] + [failed, rows[-1]]))
+
+    def test_observer_uses_status_only_and_rejects_healthy_substitution_for_repair(self):
+        fleet = types.SimpleNamespace(runtime_profile="scanner", nodes=["host"], record=lambda label, value: value)
+        window = types.SimpleNamespace(capture=lambda: {"host": self.events()})
+        def status(state):
+            return {"summary": "finished", "outcome": {"objects": [{"disposition": {"state": state}}]}}
+        client = types.SimpleNamespace(binding={})
+        calls = []
+        def query(path, args, body):
+            calls.append((path, args, body))
+            return {"httpStatus": 200, "response": status("repaired")}
+        with patch("scripts.validation_heal.scanner_repair.Probe", return_value=types.SimpleNamespace(admin=query)):
+            self.assertEqual(observe_scanner(client, fleet, window, self.bucket, self.entry(), "cold-missing"), status("repaired"))
+        self.assertEqual(calls, [("/rustfs/admin/v3/heal/" + self.bucket + "/" + self.key,
+                                [("clientToken", "task-one")], b"")])
+        observer = types.SimpleNamespace(admin=lambda *args: {"httpStatus": 200, "response": status("verified_healthy")})
+        with patch("scripts.validation_heal.scanner_repair.Probe", return_value=observer):
+            with self.assertRaisesRegex(ValueError, "required exact"):
+                observe_scanner(client, fleet, window, self.bucket, self.entry(), "cold-missing")
+            observe_scanner(client, fleet, window, self.bucket, self.entry(), "cold-missing", healthy=True)
+
+    def test_boundary_branch_requires_two_complete_post_fault_cycles(self):
+        fleet = types.SimpleNamespace(runtime_profile="scanner", nodes=["host"], record=lambda label, value: value)
+        window = types.SimpleNamespace(capture=lambda: {"host": self.events()})
+        with patch("scripts.validation_heal.scanner_repair.time.monotonic", side_effect=[0, 241]), \
+             patch("scripts.validation_heal.scanner_repair.Probe") as observer:
+            with self.assertRaisesRegex(ValueError, "ATTRIBUTION_NOT_OBSERVED"):
+                observe_scanner(types.SimpleNamespace(binding={}), fleet, window, self.bucket, self.entry(), "scanner-cycle-boundary")
+            observer.assert_not_called()
+
+    def test_cursor_windows_are_complete_and_old_events_are_excluded(self):
+        calls = []
+        observations = [{"complete": True, "afterCursor": "cursor-1", "journal": json.dumps(self.events()[0])},
+                        {"complete": True, "beforeCursor": "cursor-1", "afterCursor": "cursor-2", "journal": json.dumps(self.events()[1])}]
+        def remote(node, action, **params):
+            calls.append(params)
+            return observations.pop(0)
+        fleet = types.SimpleNamespace(nodes=["host"], record=lambda label, value: value, remote=remote)
+        window = JournalWindow(fleet, "unit")
+        self.assertEqual(window.capture(), {"host": [self.events()[1]]})
+        self.assertEqual(calls, [{"checkpoint": True}, {"afterCursor": "cursor-1"}])
+        window.fleet.remote = lambda *args, **kwargs: {"complete": False, "beforeCursor": "cursor-2", "afterCursor": "cursor-3"}
+        with self.assertRaisesRegex(ValueError, "completeness"): window.capture()
+
+    def test_remote_log_window_rejects_truncation_and_invalid_cursor(self):
+        owner = {"unit": "private.service"}
+        with patch("scripts.validation_heal.fleet_node.owned", return_value=(None, None, owner)), \
+             patch("scripts.validation_heal.fleet_node.command") as command:
+            command.return_value = types.SimpleNamespace(stdout='{"message":"fresh"}\n-- cursor: s=abc;i=def\n')
+            value = node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})
+            self.assertTrue(value["complete"])
+            self.assertEqual(value["afterCursor"], "s=abc;i=def")
+            self.assertIn("--after-cursor", command.call_args.args)
+            with self.assertRaisesRegex(ValueError, "invalid journal cursor"):
+                node_logs({"runId": "unit", "afterCursor": "invalid\n--help"})
+            command.return_value = types.SimpleNamespace(stdout="row\n" * 10000 + "-- cursor: s=abc;i=def\n")
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})
+
+    def test_scanner_profile_enables_only_scanner_source_and_fixed_deep_timing(self):
+        config = runtime_config("scanner")
+        self.assertEqual(config["RUSTFS_SCANNER_ENABLED"], "true")
+        for name in ("RUSTFS_HEAL_AUTO_HEAL_ENABLE", "RUSTFS_HEAL_MRF_ENABLE"):
+            self.assertEqual(config[name], "false")
+        self.assertEqual(config["RUSTFS_SCANNER_BITROT_CYCLE_SECS"], "0")
+        self.assertEqual(config["RUSTFS_SCANNER_DEEP_VERIFY_COOLDOWN_SECS"], "0")
+        self.assertEqual(config["RUSTFS_HEAL_OBJECT_SELECT_PROB"], "1")
 
 
 class HealPayloadMismatchTest(unittest.TestCase):

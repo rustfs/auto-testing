@@ -29,6 +29,7 @@ try:
     from .object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
     from .read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
     from .drive_gate import validate_unwritable
+    from .scanner_repair import BRANCHES as SCANNER_BRANCHES, JournalWindow, observe_task as scanner_task
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -43,6 +44,7 @@ except ImportError:
     from object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
     from read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
     from drive_gate import validate_unwritable
+    from scanner_repair import BRANCHES as SCANNER_BRANCHES, JournalWindow, observe_task as scanner_task
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -62,6 +64,7 @@ BRANCHES = {
     "heal.metadata-payload-mismatch": ("length-mismatch", "payload-mismatch", "insufficient-authority"),
     "heal.read-repair-attribution": READ_BRANCHES,
     "heal.disk-readonly-and-permission": ("read-only", "permission-denied"),
+    "heal.scanner-cold-object-repair": SCANNER_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -505,6 +508,15 @@ def reenable_and_verify(recorder, fleet, bucket, baseline):
 
 def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
     """Plans are derived from ACK order and decoded physical roles, never disk numbers."""
+    if case_id == "heal.scanner-cold-object-repair":
+        key = f"objects/{8 + 9 * SCANNER_BRANCHES.index(branch):04d}.bin"
+        selected = [entry for entry in expected if entry["key"] == key]
+        require(len(selected) == 1 and selected[0]["versionId"] == "null", "scanner fixture lacks a unique cold target")
+        target = choose_target(snapshot, bucket, selected[0], "parity" if branch == "cold-bitrot" else "data")
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": False, "expected": selected,
+                "faults": [target], "proofs": [target], "requiredRepairs": {version_identity(target)},
+                "metadataRepairs": set(), "kind": "bitflip" if branch == "cold-bitrot" else "missing",
+                "offset": 32 if branch == "cold-bitrot" else None}
     if case_id == "heal.disk-readonly-and-permission":
         key = f"objects/{8 + 9 * BRANCHES[case_id].index(branch):04d}.bin"
         selected = [entry for entry in expected if entry["key"] == key]
@@ -685,7 +697,8 @@ def run_topology(args, topology, nodes, fixture):
     directory.mkdir(parents=True)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory,
-                  runtime_profile="read-repair" if args.case_id == "heal.read-repair-attribution" else "manual")
+                  runtime_profile="scanner" if args.case_id == "heal.scanner-cold-object-repair" else
+                  "read-repair" if args.case_id == "heal.read-repair-attribution" else "manual")
     candidate = json.loads(args.candidate.read_text())
     tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id in {
@@ -717,6 +730,12 @@ def run_topology(args, topology, nodes, fixture):
         fleet.deploy(args.binary_sha, bucket, access, secret)
         processes = fleet.snapshot("deployed-topology")
         fleet.record("topology-proof", validate_topology(processes, topology))
+        scanner = args.case_id == "heal.scanner-cold-object-repair"
+        healthy_window = JournalWindow(fleet, "scanner-healthy") if scanner else None
+        if scanner:
+            fleet.record("scanner-registered-budget", {"perBranchSeconds": 240, "sourceBranches": list(SCANNER_BRANCHES),
+                "actualProcessConfiguration": {node: value["backgroundConfig"] for node, value in processes.items()},
+                "otherAutomaticSourcesDisabled": True, "targetReadsAfterFaultBeforePhysicalProof": 0})
         recorder = Recorder(probe, directory / "fixture")
         public, instances, sizes = None, None, None
         if size_rule:
@@ -750,6 +769,14 @@ def run_topology(args, topology, nodes, fixture):
             fleet.record("special-key-pagination-baseline", verify_pagination(baseline))
         if public is not None:
             fleet.record("semantic-baseline", verify_semantics(public, baseline))
+        if scanner:
+            healthy_before = fleet.snapshot("scanner-healthy-physical-before")
+            for branch in branches:
+                plan = branch_plan(args.case_id, branch, healthy_before, bucket, expected, fixture)
+                status = scanner_task(probe, fleet, healthy_window, bucket, plan["expected"][0], branch, healthy=True)
+                fleet.record("scanner-healthy-responsibility", validate_version_receipts(status, bucket, plan["expected"], 2))
+            require(physical_content(healthy_before) == physical_content(fleet.snapshot("scanner-healthy-physical-after")),
+                    "healthy scanner preflight changed acknowledged object files")
         if args.case_id == "heal.multiple-shard-loss":
             fleet.stop()
             instances = multi_loss_instances(fleet.snapshot("multi-loss-geometry", quiescent=True), bucket, expected, fixture)
@@ -769,6 +796,7 @@ def run_topology(args, topology, nodes, fixture):
                         key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-before-" + branch))
                 fleet.stop()
                 before = fleet.snapshot("physical-before-" + branch, quiescent=True)
+                scanner_window = JournalWindow(fleet, "scanner-fault-" + branch) if scanner else None
                 if size_rule:
                     plan = boundary_plan(next(entry for entry in instances if entry["name"] == branch), before, bucket, expected)
                 elif instances:
@@ -811,8 +839,9 @@ def run_topology(args, topology, nodes, fixture):
                 if gate_node is not None:
                     fleet.record("service-write-denial", fleet.remote(gate_node, "drive-gate-probe"))
                 witness = fleet.snapshot("physical-before-trigger-" + branch, metadata_faults=metadata_faults)
-                require(physical_content(prior) == physical_content(witness),
-                        "ATTRIBUTION_NOT_OBSERVED: version fault changed before the manual token")
+                if not scanner:
+                    require(physical_content(prior) == physical_content(witness),
+                            "ATTRIBUTION_NOT_OBSERVED: version fault changed before the manual token")
                 if plan.get("negative"):
                     target = plan["proofs"][0]
                     fleet.record("quorum-contract", {"contract": contract, "readQuorum": plan["readQuorum"],
@@ -824,6 +853,8 @@ def run_topology(args, topology, nodes, fixture):
                             "negative read widened damage or silently healed below-quorum fragments")
                 if args.case_id == "heal.read-repair-attribution":
                     status = tracked_read_task(probe, fleet, bucket, branch, plan["expected"][0])
+                elif scanner:
+                    status = scanner_task(probe, fleet, scanner_window, bucket, plan["expected"][0], branch)
                 else:
                     status = run_task(probe, fleet, plan["scope"], 2, active,
                                       option_overrides={"recursive": plan["recursive"]}, admissions=admissions)
@@ -990,7 +1021,7 @@ def main():
         fixtures = ("DB",)
     if args.case_id == "heal.object-lock-retention":
         fixtures = ("DO",)
-    if args.case_id == "heal.disk-readonly-and-permission":
+    if args.case_id in {"heal.disk-readonly-and-permission", "heal.scanner-cold-object-repair"}:
         fixtures = ("DB",)
     results = []
     try:

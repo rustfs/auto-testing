@@ -25,7 +25,7 @@ AUTOMATIC_CASES = {"heal.admin-healthy-noop", "heal.admin-invalid-request", "hea
                    "heal.data-shard-bitrot", "heal.parity-shard-bitrot", "heal.truncated-and-zeroed-shard",
                    "heal.completed-multipart-object", "heal.range-head-and-conditions", "heal.manual-normal-attribution", "heal.manual-deep-attribution",
                    "heal.historical-versions", "heal.repeat-idempotency", "heal.versioning-suspended-null", "heal.below-read-quorum",
-                   "heal.missing-or-corrupt-xlmeta", "heal.object-metadata-and-tags", "heal.multiple-shard-loss", "heal.special-keys-and-pagination", "heal.object-size-boundaries", "heal.admin-authorization", "heal.node-outage-rejoin", "heal.object-lock-retention", "heal.metadata-payload-mismatch", "heal.read-repair-attribution", "heal.disk-readonly-and-permission"}
+                   "heal.missing-or-corrupt-xlmeta", "heal.object-metadata-and-tags", "heal.multiple-shard-loss", "heal.special-keys-and-pagination", "heal.object-size-boundaries", "heal.admin-authorization", "heal.node-outage-rejoin", "heal.object-lock-retention", "heal.metadata-payload-mismatch", "heal.read-repair-attribution", "heal.disk-readonly-and-permission", "heal.scanner-cold-object-repair"}
 
 
 def require(condition: bool, message: str) -> None:

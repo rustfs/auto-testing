@@ -29,7 +29,13 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "read-repair"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "read-repair", "scanner"}, "unsupported Heal runtime profile")
+    if profile == "scanner":
+        return {**BACKGROUND_CONFIG, "RUSTFS_SCANNER_ENABLED": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug",
+                "RUSTFS_SCANNER_START_DELAY_SECS": "5", "RUSTFS_SCANNER_CYCLE": "5",
+                "RUSTFS_SCANNER_SPEED": "fastest", "RUSTFS_SCANNER_DELAY": "0",
+                "RUSTFS_SCANNER_BITROT_CYCLE_SECS": "0", "RUSTFS_SCANNER_DEEP_VERIFY_COOLDOWN_SECS": "0",
+                "RUSTFS_HEAL_OBJECT_SELECT_PROB": "1", "RUSTFS_DATA_USAGE_UPDATE_DIR_CYCLES": "1"}
     return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "offline-replay" else "false",
             "RUSTFS_OBS_LOGGER_LEVEL": "debug" if profile == "read-repair" else "info"}
 
@@ -385,6 +391,24 @@ def snapshot(request):
 
 def logs(request):
     _, _, owner = owned(request["runId"])
+    if request.get("checkpoint") is True or "afterCursor" in request:
+        cursor = request.get("afterCursor")
+        require(cursor is None or isinstance(cursor, str) and re.fullmatch(r"[A-Za-z0-9=;_-]{1,512}", cursor),
+                "invalid journal cursor")
+        args = ["journalctl", "-u", owner["unit"], "--no-pager", "-o", "cat", "--show-cursor"]
+        args += ["--after-cursor", cursor, "-n", "10001"] if cursor else ["-n", "1"]
+        output = command(*args).stdout
+        lines, observed_cursor = [], None
+        for line in output.splitlines():
+            if line.startswith("-- cursor: "):
+                observed_cursor = line[len("-- cursor: "):].strip()
+            else:
+                lines.append(line)
+        require(len(lines) < 10000, "journal window exceeds its bound; source attribution is incomplete")
+        require(observed_cursor is not None or cursor is not None and not lines,
+                "journal did not expose a complete cursor window")
+        return {"unit": owner["unit"], "journal": "\n".join(lines), "beforeCursor": cursor,
+                "afterCursor": observed_cursor or cursor, "complete": True}
     return {"unit": owner["unit"], "journal": command("journalctl", "-u", owner["unit"], "--no-pager", "-n", "2000").stdout}
 
 

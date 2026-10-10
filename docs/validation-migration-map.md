@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 101 currently dispatchable IDs include all 74 non-Heal cases and twenty-seven Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 102 currently dispatchable IDs include all 74 non-Heal cases and twenty-eight Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 57 Heal cases remain
+The other 56 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -472,3 +472,19 @@ precedes chmod/start and is recovered before any fault rescue or physical
 cleanup. Root drift or release failure retains the namespace. Focused tests
 exercise permission restoration, write refusal identity/errno, no root bypass,
 truthful unresolved receipts and cleanup retention. Live proof is pending.
+
+E04 `heal.scanner-cold-object-repair` now dispatches all three H1/H2 branches.
+It reads back the actual private process settings for five-second scanner
+cycles, every-cycle bitrot, zero deep cooldown and full object selection, while
+replacement auto-heal and best-effort MRF stay disabled. Before any fault, each
+cold target needs an exact healthy scanner task and unchanged physical files.
+Faults are injected with all run-owned processes stopped; the stopped scene
+proves damage immediately before restart. Cursor-bounded journal windows bind
+the exact object discovery to an accepted Scanner source request, task start,
+completed cycle and terminal task. The cycle-boundary branch requires two
+complete post-fault cycles. Observation issues status queries only; no target
+GET/HEAD or Admin mutation contributes to the repair. Exact repaired version
+responsibility, original physical shard bytes, streaming checksum and complete
+S3 inventories still gate PASS. Truncated logs, another source, a later healthy
+receipt or cycle counters alone cannot certify repair. The executor passed its
+local source/timing/cursor negatives; full live evidence remains pending.
