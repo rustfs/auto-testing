@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 120 currently dispatchable IDs include all 74 non-Heal cases and forty-six Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
+case evidence. The 121 currently dispatchable IDs include all 74 non-Heal cases and forty-seven Heal cases. Forty-four have live PASS evidence; the other 114 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 38 Heal cases remain
+The other 37 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -650,7 +650,7 @@ A08 `heal.admin-authorization` passed live in RustFS Actions run
 `38069648003`, harness `0789743d439fd91b967c2d6fba85c06e29f844c5`. All five
 source branches passed independently on H1 and H2; the canonical gate,
 complete summary, cleanup and workflow all passed with the fixed candidate.
-The prior A08 failures remain recorded. Thirty-eight Heal executors remain
+The prior A08 failures remain recorded. Thirty-seven Heal executors remain
 to be migrated; automatic dispatch and local tests do not claim live PASS.
 
 
@@ -948,3 +948,40 @@ observer now refreshes the complete service observation up to three times
 only for disappearing `/proc/PID` entries. It never infers PID zero from
 absence, accepts arbitrary file loss, or relaxes exact normal exit code zero,
 service identity and pidfd birth checks. A fresh run is required.
+
+
+B04 `38087657754` retained overall FAIL/cleanup PASS. H1 foreign-format passed
+its complete structured refusal window, unchanged original format/controls,
+rejected foreign bytes and all 128 ACK/S3 checks, with archive restoration
+explicitly excluded from product repair. Both blank branches lacked a distinct
+new candidate-generated disk UUID. H2 foreign-format did not make every bound
+peer ready; a startup failure alone is not relabeled as structured safe refusal.
+
+A02 `heal.admin-scope-isolation` now dispatches all five selectors with fresh
+H1/H2 fixtures, two owned buckets and exact `a/`, `ab/`, `b/`, nested, Unicode
+and literal encoded-slash keys. The candidate-bound H2 runtime preserves the
+current four nodes and sixteen independent mounts, explicitly configures two
+8-drive sets and interleaves original endpoints so each set spans all four
+hosts. Actual format UUIDs, complete set membership, metadata distribution and
+same-role shard identities bind every ACK to its physical set. Existing
+single-set executors retain their strict default and reject this layout unless
+it is explicitly requested. No format, UUID or second control set is invented.
+H1 retains its original four-drive set and records the physical applicability
+boundary for a nonexistent unselected set.
+
+Root covers the entire owned service manifest; bucket, exact object and `a/`
+prefix selectors preserve other buckets, adjacent keys/prefixes and control
+faults; pool/set selectors require real selected-set reconstruction and an
+unchanged missing shard in the other actual set. The complete responsibility
+set and canonical counters must match all selected ACKs, including healthy
+objects. On this exact candidate, unrestricted request selectors may remain
+null in raw receipts; independent complete physical mapping resolves their
+scope in separate evidence, without rewriting public fields or weakening
+shared validators. Explicit selectors require exact integer receipt scope;
+partial nulls, wrong sets, mixed incarnations, duplicates and unknowns fail.
+
+Full physical comparison and selected streaming integrity precede any target
+GET or unselected-control backup rescue. Rescue cannot certify product repair.
+Both complete S3 manifests through every peer and a final unchanged physical
+scene are required. A02 has no live PASS claim yet. Ten scope/topology/receipt/
+control negatives join the focused local checks; 226 checks now pass.

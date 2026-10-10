@@ -87,24 +87,30 @@ def physical_content(snapshot):
     return {node: {key: value[key] for key in ("files", "formats")} for node, value in snapshot.items()}
 
 
-def validate_topology(snapshot, topology):
+def validate_topology(snapshot, topology, *, expected_sets=1):
     require(topology in {"H1", "H2"} and len(snapshot) == (1 if topology == "H1" else 4),
             "wrong node count for Heal topology")
     records = [(node, value) for node, entry in snapshot.items() for value in entry["formats"]]
     require(len(records) == (4 if topology == "H1" else 16), "wrong physical disk count")
     values = [item["value"] for _, item in records]
     sets = values[0]["xl"]["sets"]
-    require(len(sets) == 1 and len(sets[0]) == len(records) and len(set(sets[0])) == len(records),
-            "A01 requires one complete independently formatted erasure set")
+    require(type(expected_sets) is int and (expected_sets == 1 or topology == "H2" and expected_sets == 2),
+            "unsupported explicit set layout")
+    identities = [identity for group in sets for identity in group]
+    require(len(sets) == expected_sets and all(len(group) == len(records) // expected_sets for group in sets)
+            and len(identities) == len(set(identities)) == len(records),
+            "explicit topology lacks complete independently formatted erasure sets")
     require(all(value["format"] == "xl" and value["xl"]["sets"] == sets
                 and value["id"] == values[0]["id"] for value in values)
-            and {value["xl"]["this"] for value in values} == set(sets[0]),
+            and {value["xl"]["this"] for value in values} == set(identities),
             "physical disk UUID, pool and set mapping differs")
     if topology == "H2":
-        require(all(len({item["value"]["xl"]["this"] for owner, item in records if owner == node}) == 4
-                    for node in snapshot), "H2 set does not span every node's four drives")
+        require(all(len({item["value"]["xl"]["this"] for owner, item in records if owner == node
+                         and item["value"]["xl"]["this"] in group}) == 4 // expected_sets
+                    for node in snapshot for group in sets), "each H2 set must span every original physical node")
     return {"topology": topology, "nodes": len(snapshot), "independentDrives": len(records),
-            "poolIndex": 0, "setIndex": 0, "diskUUIDs": sets[0]}
+            "poolIndex": 0, "setIndex": 0 if expected_sets == 1 else None, "diskUUIDs": identities,
+            "setCount": expected_sets, "actualSets": sets}
 
 
 def validate_healthy(status, bucket, key, disposition):
@@ -131,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -220,6 +226,9 @@ class Fleet:
         paths = checked[self.nodes[0]]["dataRoots"]
         volumes = paths if len(self.nodes) == 1 else [f"http://rustfs-node{index}:9000{path}"
                     for index in range(1, 5) for path in paths]
+        if self.runtime_profile == "scope-isolation":
+            require(len(self.nodes) == 4, "two-set isolation requires the four-node topology")
+            volumes = [f"http://rustfs-node{index}:9000{path}" for path in paths for index in range(1, 5)]
         self.record("integrity-fleet-attestation", {"scope": "this run's private H1/H2 endpoint set",
             "allParticipatingNodesUseCandidate": True, "binarySha256": binary_sha,
             "nodes": self.nodes, "volumes": volumes, "mixedVersionsAllowed": False,

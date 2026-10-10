@@ -33,7 +33,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "scope-isolation"}, "unsupported Heal runtime profile")
+    if profile == "scope-isolation":
+        return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "8"}
     if profile == "durable-mrf":
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
     if profile in {"replacement", "replacement-target"}:
@@ -170,6 +172,9 @@ def reserve(request):
     h1 = run_id.endswith("-h1")
     expected = local_paths if h1 else [f"http://rustfs-node{node}:9000{path}"
                                       for node in range(1, 5) for path in local_paths]
+    if profile == "scope-isolation":
+        require(not h1, "two-set runtime requires the four-node topology")
+        expected = [f"http://rustfs-node{node}:9000{path}" for path in local_paths for node in range(1, 5)]
     require(volumes == expected, "endpoint sequence differs from H1/H2 deployment contract")
     state, roots = paths(run_id)
     owner = {"runId": run_id, "unit": unit(run_id), "hostname": observed["hostname"],

@@ -2,7 +2,7 @@
 
 此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 301 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
 
-公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 46 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
+公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 47 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
 
 ## 1. 使用入口与交付物
 
@@ -640,3 +640,6 @@ audit检查完整性/路径/摘要，输出`EVIDENCE_COMPLETE_REVIEW_REQUIRED`�
 
 
 J06 的自动入口为 `heal.performance-abba`。执行器在部署前冻结三组 ABBA、每阶段 30 秒、2 并发、4 请求/秒、GET/PUT 各半与完整阈值；每阶段重启同一服务并按固定次数预热。每个 B 阶段的真实部分修复窗口必须包围 GET 和 PUT，否则整例不能 PASS。A 阶段持续检查完整 idle 与物理不变。所有排定请求（包括失败、未知和错过 admission 的请求）均计入分母；GET/PUT 独立报告 P95/P99，三组配对差异、实际修复分片吞吐与服务 CPU/IO/RSS/FD 分别留证。阈值保存在 `scripts/validation_heal/performance.py` 的 `PROTOCOL`，修改阈值必须产生新的 harness commit 和新验证记录；此入口不缩短 J05 的 24h/72h 要求。
+
+
+A02 的自动入口为 `heal.admin-scope-isolation`。H2 的专用 `scope-isolation` runtime 使用当前四节点/十六盘，按盘序交织节点并设置 `RUSTFS_ERASURE_SET_DRIVE_COUNT=8`，要求真实两个 set 各跨全部四个节点。普通执行器仍只接受原单 set。两个桶的完整 ACK/实际物理 set 清单冻结后，root/bucket/prefix/object/pool-set 各自新部署、注入选中与控制故障。完整物理和 streaming 证明必须先于 GET 和控制备份恢复。H1 保留原四盘单 set，明确记录不存在未选 set 的适用边界；不能拿同盘目录冒充第二个 set。未限制选择器的原始 receipt 在该固定候选中允许 null，单独保存实际物理映射，显式 pool/set 则必须严格匹配原始字段。

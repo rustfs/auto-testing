@@ -96,14 +96,22 @@ def files(snapshot):
     return entries
 
 
-def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None, latest_required=True):
-    validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2")
+def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None, latest_required=True,
+               multi_set=False, set_index=0):
+    require(type(multi_set) is bool and type(set_index) is int and 0 <= set_index < (2 if multi_set else 1),
+            "invalid explicit object set mapping")
+    validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2", expected_sets=2 if multi_set else 1)
     indexed = files(snapshot)
     cohort, logical = [], None
     for node, observation in snapshot.items():
         for format_entry in observation["formats"]:
             disk = format_entry["disk"]
             identity = (node, disk, f"{bucket}/{key}/xl.meta")
+            layout = format_entry["value"]["xl"]
+            if layout["this"] not in layout["sets"][set_index]:
+                require(not any(owner == node and drive == disk and path.startswith(f"{bucket}/{key}/")
+                                for owner, drive, path in indexed), "object files span the selected and unselected erasure sets")
+                continue
             metadata = indexed.get(identity, {}).get("metadata", {})
             require(metadata.get("bucket") == bucket and metadata.get("key") == key,
                     "missing authoritative metadata identity on a baseline drive")
@@ -120,9 +128,9 @@ def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, p
             distribution = erasure["distribution"]
             require(type(data) is int and type(parity) is int and data > 0 and parity > 0
                     and data + parity == len(distribution)
+                    and data + parity == len(layout["sets"][set_index])
                     and sorted(distribution) == list(range(1, data + parity + 1)), "invalid erasure geometry")
-            layout = format_entry["value"]["xl"]
-            slot = layout["sets"][0].index(layout["this"])
+            slot = layout["sets"][set_index].index(layout["this"])
             require(erasure["index"] == distribution[slot], "shard role does not match the disk's actual set slot")
             actual_role = "data" if erasure["index"] <= data else "parity"
             require(version.get("role") == actual_role, "decoded shard role differs from erasure index")
@@ -143,14 +151,14 @@ def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, p
                 "dataDir": data_dir, "diskUUID": layout["this"], "setSlot": slot,
                 "sha256": entry["sha256"], "size": entry["size"], "metadata": metadata,
                 "baselineMetadataSha256": indexed[identity]["sha256"]})
-    require(len(cohort) == logical["erasure"]["data_blocks"] + logical["erasure"]["parity_blocks"]
+    require(logical is not None and len(cohort) == logical["erasure"]["data_blocks"] + logical["erasure"]["parity_blocks"]
             and len({entry["index"] for entry in cohort}) == len(cohort)
             and len({entry["sha256"] for entry in cohort}) == len(cohort),
             "independent full-set shard identity or nonrepeating content is missing")
     target = next((entry for entry in cohort if entry["role"] == role
                    and (preferred_nodes is None or entry["node"] in preferred_nodes)), None)
     require(target is not None, "requested shard role is not present")
-    return {**target, "bucket": bucket, "key": key, "poolIndex": 0, "setIndex": 0,
+    return {**target, "bucket": bucket, "key": key, "poolIndex": 0, "setIndex": set_index,
             "cohort": cohort, "logical": logical}
 
 
