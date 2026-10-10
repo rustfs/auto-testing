@@ -50,14 +50,18 @@ live PASS evidence in RustFS Actions runs `38044956285`, `38045047518`,
 `ilm.delete-all-versions`, `ilm.delete-marker-expiration`,
 `ilm.multipart-expiration`, and `ilm.newer-noncurrent-retention` also passed
 live in runs `38049740183`, `38049817172`, `38049890130`, and `38049965929`.
-The remaining four ILM executors still require live evidence.
+`ilm.noncurrent-expiration`, `ilm.restart-persistence`,
+`ilm.transition-and-restore`, and `ilm.versioned-current-expiration` passed in
+runs `38050040606`, `38050434607`, `38050720293`, and `38051148291`.
+All 16 ILM/scanner cases now have live PASS evidence.
 
 All 13 Pool lifecycle IDs now dispatch to the source black-box pool checks.
 The driver reuses the existing auto-testing Pool suite's two-node seed and
 expansion operations, supplies marker-guarded reset/topology/restart/physical
 census hooks, and requires source case evidence plus physical cleanup before
 canonical PASS. `pool.status` passed live in RustFS Actions run `38047001285`;
-the other twelve Pool cases still require live evidence.
+`pool.decommission` also passed in run `38051227313`; the other eleven Pool
+cases still require live evidence.
 
 The 18 bucket-replication and 20 site-replication IDs now dispatch to the
 source black-box checks. The driver uses the existing auto-testing four-node
@@ -84,13 +88,11 @@ Actions run `38042759074`.
 on the Tier suite's `single-single` topology. Event delivery is counted for a
 unique object after a quiet window; audit checks matching PUT/GET records,
 distinct request IDs, successful status, and absence of known secrets.
-`events.delivery` passed live in RustFS Actions run `38046470999`. The audit
-attempt in run `38046574073` failed its secret check because the environment
-used the same value for the public access key and secret key. The audit case
-now generates a distinct secret key before deployment. Run `38046860333`
-exposed an executor parsing mismatch: the candidate emits `s3:PutObject` and
-`s3:GetObject`. The parser now recognizes those exact names and waits for both
-operations on the selected object; the case still requires a live rerun.
+`events.delivery` passed live in RustFS Actions run `38046470999`.
+`audit.request-correlation` passed in run `38050138583` with the candidate's
+`Records` envelope and exact S3 operation names. The audit fixture uses a
+distinct random secret and retains the secret-leak, request-ID,
+object-identity and successful-status assertions.
 
 `oidc.login-and-session` uses the Security suite's current single-node
 deployment and a run-owned Keycloak container with a pinned image. It performs
@@ -99,8 +101,10 @@ for STS credentials, and checks the readonly identity policy plus a narrower
 session policy on existing objects. Missing/invalid session tokens, tampered
 identity tokens, and wrong audiences must fail. Fixtures, containers, and the
 RustFS deployment must all be cleaned before PASS. Runtime credentials are
-excluded from evidence. This executor does not require a RustFS checkout and
-still requires live validation.
+excluded from evidence. This executor does not require a RustFS checkout.
+Its complete live candidate run passed in RustFS Actions run `38051425083`.
+Policy denials require `AccessDenied`; absent or mismatched temporary session
+tokens require the candidate authentication contract's `InvalidRequest`.
 
 `iam.policy-enforcement` has a dedicated executor on the Security suite's
 `single-single` deployment. It uses one principal with a policy that allows
@@ -128,10 +132,24 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 74 currently dispatchable IDs are the S3, two scanner,
-KMS, tiering, events, audit, IAM, 14 additional ILM, 13 Pool, and 38
-replication cases and OIDC above. Nineteen have live PASS evidence; the other 139 IDs
-remain unverified.
+case evidence. The 75 currently dispatchable IDs include all 74 non-Heal
+cases and `heal.admin-healthy-noop`. Twenty-six have live PASS evidence;
+the other 132 remain unverified.
+
+All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
+templates are preserved under `scripts/validation_heal`, with the public
+contract, operation book, signed probe, ACK-logged workload, guarded file-fault
+tool and source-bound metadata inspector source. `matrix.py plan` binds current
+auto-testing SSH nodes and required resources; its audit checks every branch
+and nine evidence stages without manufacturing PASS.
+`heal.admin-healthy-noop` now has an automatic H1/H2 executor using the existing
+Heal suite's immutable deb download, installed binary digest, independent disk
+mounts, run-owned services/data roots, exact normal/deep responsibility
+receipts, repeated status, physical hashes and complete S3 inventories. It
+still requires live validation. The other 83 Heal cases remain
+operator-assisted and are not claimed as migrated automatic executors.
+H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
+retain their platform and source-bound evidence requirements.
 
 The eight planned cases have these concrete reuse candidates:
 
@@ -141,9 +159,9 @@ The eight planned cases have these concrete reuse candidates:
 | `kms.sse-kms-round-trip` | KMS-104, KMS-301, KMS-214 | Dedicated executor and live PASS evidence. |
 | `tiering.transition-and-restore` | TIER-105, TIER-107 | Dedicated executor and live PASS evidence. |
 | `events.delivery` | EVT-103, EVT-104 | Dedicated executor and live PASS evidence. |
-| `audit.request-correlation` | AUD-102, AUD-104, AUD-106 | Dedicated executor; live evidence pending. |
+| `audit.request-correlation` | AUD-102, AUD-104, AUD-106 | Dedicated executor and live PASS evidence. |
 | `iam.policy-enforcement` | IAM-105, IAM-109 | Dedicated executor and live PASS evidence. |
-| `oidc.login-and-session` | OIDC-103 | Dedicated executor using real Keycloak login and STS session boundaries; live evidence pending. |
+| `oidc.login-and-session` | OIDC-103 | Dedicated executor using real Keycloak login and STS session boundaries; live PASS evidence. |
 | `s3.basic-object-round-trip` | S3C-101, 201, 203, 205, 206, 207 | Dedicated executor and live PASS evidence. |
 
 Migration work on an ID is complete only when its result contains the exact

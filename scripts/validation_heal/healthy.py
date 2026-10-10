@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Execute every A01 normal/deep branch on the current H1 and H2 Heal fleet."""
+
+from __future__ import annotations
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import signal
+import subprocess
+import sys
+import time
+from urllib import request
+from urllib.parse import quote
+
+try:
+    from .heal_probe import Probe, canonical, compare_inventories, require, save
+    from .heal_workload import Recorder, seed, verify_seed
+except ImportError:
+    from heal_probe import Probe, canonical, compare_inventories, require, save
+    from heal_workload import Recorder, seed, verify_seed
+
+
+NODE_SOURCE = Path(__file__).with_name("fleet_node.py")
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def physical_content(snapshot):
+    return {node: {key: value[key] for key in ("files", "formats")} for node, value in snapshot.items()}
+
+
+def validate_topology(snapshot, topology):
+    require(topology in {"H1", "H2"} and len(snapshot) == (1 if topology == "H1" else 4),
+            "wrong node count for Heal topology")
+    records = [(node, value) for node, entry in snapshot.items() for value in entry["formats"]]
+    require(len(records) == (4 if topology == "H1" else 16), "wrong physical disk count")
+    values = [item["value"] for _, item in records]
+    sets = values[0]["xl"]["sets"]
+    require(len(sets) == 1 and len(sets[0]) == len(records) and len(set(sets[0])) == len(records),
+            "A01 requires one complete independently formatted erasure set")
+    require(all(value["format"] == "xl" and value["xl"]["sets"] == sets
+                and value["id"] == values[0]["id"] for value in values)
+            and {value["xl"]["this"] for value in values} == set(sets[0]),
+            "physical disk UUID, pool and set mapping differs")
+    if topology == "H2":
+        require(all(len({item["value"]["xl"]["this"] for owner, item in records if owner == node}) == 4
+                    for node in snapshot), "H2 set does not span every node's four drives")
+    return {"topology": topology, "nodes": len(snapshot), "independentDrives": len(records),
+            "poolIndex": 0, "setIndex": 0, "diskUUIDs": sets[0]}
+
+
+def validate_healthy(status, bucket, key, disposition):
+    outcome = status.get("outcome") or {}
+    require(status.get("summary") == "finished" and status.get("truncated", False) is False
+            and outcome.get("execution", {}).get("state") == "completed"
+            and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False,
+            "Heal did not prove complete terminal coverage")
+    counters = outcome.get("counters", {})
+    expected = {"processed": 1, "healed": 0, "unchanged": 1, "skipped": 0,
+                "failed": 0, "unknown": 0, "attemptFailures": 0, "overflowed": False}
+    require(all(type(counters.get(name)) is type(value) and counters[name] == value
+                for name, value in expected.items()), "healthy object counters do not prove exactly one unchanged object")
+    objects = outcome.get("objects", [])
+    require(len(objects) == 1, "healthy task returned incomplete or additional object receipts")
+    identity = objects[0].get("identity", {})
+    require(identity.get("bucket") == bucket and identity.get("object") == key
+            and type(identity.get("poolIndex")) is int and identity["poolIndex"] == 0
+            and type(identity.get("setIndex")) is int and identity["setIndex"] == 0
+            and bool(identity.get("bucketIncarnationId")), "healthy receipt lacks the exact object responsibility identity")
+    require(objects[0].get("disposition", {}).get("state") == disposition,
+            f"expected {disposition} receipt; observed {objects[0].get('disposition')}")
+
+
+class Fleet:
+    def __init__(self, nodes, evidence, run_id):
+        self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
+        self.sequence = 0
+        self.reserved = []
+
+    def record(self, label, value):
+        self.sequence += 1
+        save(self.evidence / f"{self.sequence:05d}-{label}.json", value)
+        return value
+
+    def remote(self, node, action, **params):
+        value = {"runId": self.run_id, "action": action, **params}
+        source = NODE_SOURCE.read_text() + "\nmain(" + repr(value) + ")\n"
+        result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                 "-o", "StrictHostKeyChecking=accept-new", "-p", os.environ.get("RUSTFS_SSH_PORT", "22"),
+                                 os.environ.get("RUSTFS_SSH_USER", "azureuser") + "@" + node,
+                                 "sudo -n python3 -"], input=source, capture_output=True, text=True, timeout=180)
+        require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")
+        return json.loads(result.stdout)
+
+    def snapshot(self, label):
+        return self.record(label, {node: self.remote(node, "snapshot") for node in self.nodes})
+
+    def deploy(self, binary_sha, bucket, access, secret):
+        checked = {node: self.remote(node, "preflight") for node in self.nodes}
+        self.record("preflight", checked)
+        paths = checked[self.nodes[0]]["dataRoots"]
+        volumes = paths if len(self.nodes) == 1 else [f"http://rustfs-node{index}:9000{path}"
+                    for index in range(1, 5) for path in paths]
+        for node in self.nodes:
+            # Reserve may partially mutate before an SSH failure. Preserve its
+            # namespace unless the root-owned marker proves safe finalization.
+            self.reserved.append(node)
+            value = self.remote(node, "reserve", hostname=checked[node]["hostname"], mounts=checked[node]["mounts"],
+                                binarySha256=binary_sha, bucket=bucket, volumes=volumes, access=access, secret=secret)
+            self.record("reserved", {"node": node, **value})
+        with ThreadPoolExecutor(max_workers=len(self.nodes)) as executor:
+            results = list(executor.map(lambda node: self.remote(node, "start"), self.nodes))
+        self.record("started", {node: value for node, value in zip(self.nodes, results, strict=True)})
+        opener = request.build_opener(request.ProxyHandler({}))
+        deadline = time.monotonic() + 180
+        pending = {f"http://rustfs-node{index}:9000" for index in range(1, len(self.nodes) + 1)}
+        while pending and time.monotonic() < deadline:
+            for endpoint in tuple(pending):
+                try:
+                    with opener.open(endpoint + "/health/ready", timeout=5) as response:
+                        if response.status == 200:
+                            pending.remove(endpoint)
+                except OSError:
+                    pass
+            if pending:
+                time.sleep(2)
+        require(not pending, "Heal deployment did not make every node ready")
+
+    def cleanup(self):
+        failures = []
+        for node in self.reserved:
+            try:
+                self.record("logs", {"node": node, **self.remote(node, "logs")})
+            except Exception as exc:
+                self.record("logs-error", {"node": node, "error": str(exc)})
+            try:
+                self.record("cleanup", {"node": node, **self.remote(node, "cleanup")})
+            except Exception as exc:
+                failures.append({"node": node, "error": str(exc)})
+        self.record("recovery", {"cleanup": "FAIL" if failures else "PASS", "errors": failures})
+        return not failures
+
+
+def run_topology(args, topology, nodes):
+    directory = args.evidence / topology
+    directory.mkdir()
+    run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
+    fleet = Fleet(nodes, directory, run_id)
+    bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+    access, secret = secrets.token_hex(16), secrets.token_hex(24)
+    os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
+    candidate = json.loads(args.candidate.read_text())
+    binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,
+               "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+               "bucketPrefix": bucket, "endpoints": {f"node{index}": f"http://rustfs-node{index}:9000"
+                   for index in range(1, len(nodes) + 1)}, "defaultEndpoint": "node1",
+               "candidateCommit": candidate["source_sha"], "harnessCommit": args.testing_commit,
+               "candidatePackageSha256": candidate["package_sha256"], "candidateBinarySha256": args.binary_sha,
+               "rcBinarySha256": hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(),
+               "maxInventoryObjects": 128, "maxInventoryBytes": 512 * 1024**2}
+    fleet.record("binding", binding)
+    result = {"topology": topology, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
+    active = []
+    probe = Probe(binding)
+    try:
+        fleet.deploy(args.binary_sha, bucket, access, secret)
+        initial = fleet.snapshot("deployed-topology")
+        fleet.record("topology-proof", validate_topology(initial, topology))
+        recorder = Recorder(probe, directory / "fixture")
+        expected = seed(recorder, bucket, "DB", 128,
+                        [0, 1, 4095, 4096, 4097, 1024**2 - 1, 1024**2, 1024**2 + 1, 5 * 1024**2 + 123])
+        baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=True))
+        fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
+        before = fleet.snapshot("physical-baseline")
+        fleet.record("fault", {"fault": "F0", "injected": False, "backgroundRepairDisabled": True})
+        for branch, mode, disposition in (("normal", 1, "metadata_healthy"), ("deep", 2, "verified_healthy")):
+            receipts = []
+            for entry in expected:
+                key = entry["key"]
+                path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/" + quote(key, safe="/")
+                options = {"recursive": False, "remove": False, "recreate": False, "scanMode": mode,
+                           "dryRun": False, "poolIndex": 0, "setIndex": 0}
+                started = fleet.record("trigger-" + branch, probe.admin(path, [], json.dumps(options).encode()))
+                token = (started.get("response") or {}).get("clientToken")
+                require(started.get("httpStatus") == 200 and isinstance(token, str) and bool(token),
+                        "healthy Heal task admission failed")
+                active.append((path, token))
+                deadline = time.monotonic() + 120
+                while True:
+                    observed = fleet.record("status-" + branch, probe.admin(path, [("clientToken", token)], b""))
+                    require(observed.get("httpStatus") == 200, "Heal status request failed")
+                    terminal = observed.get("response") or {}
+                    if terminal.get("summary") != "running":
+                        break
+                    require(time.monotonic() < deadline, "healthy Heal task exceeded deadline")
+                    time.sleep(0.2)
+                validate_healthy(terminal, bucket, key, disposition)
+                active.remove((path, token))
+                for _ in range(2):
+                    repeated = fleet.record("repeat-" + branch, probe.admin(path, [("clientToken", token)], b""))
+                    require(repeated.get("httpStatus") == 200, "repeated Heal status request failed")
+                    validate_healthy(repeated.get("response") or {}, bucket, key, disposition)
+                    require(canonical(repeated["response"]["outcome"]) == canonical(terminal["outcome"]),
+                            "terminal responsibility changed on repeated status")
+                receipts.append({"key": key, "token": token, "disposition": disposition})
+            after = fleet.snapshot("physical-after-" + branch)
+            require(physical_content(before) == physical_content(after), "healthy Heal changed physical fixture or format")
+            inventory = fleet.record("s3-after-" + branch, probe.inventory(bucket, unversioned_current_tags=True))
+            comparison = compare_inventories(baseline, inventory)
+            result["branches"][branch] = {"verdict": "PASS", "receipts": receipts,
+                                           "physicalUnchanged": True, "s3": comparison}
+        result["verdict"] = "PASS"
+    except (Exception, KeyboardInterrupt) as exc:
+        result.update(verdict="FAIL", failure={"type": type(exc).__name__, "message": str(exc)})
+        if fleet.reserved:
+            try:
+                fleet.snapshot("physical-failure-scene")
+            except Exception as capture:
+                fleet.record("failure-scene-error", {"error": str(capture)})
+    finally:
+        for path, token in active:
+            try:
+                fleet.record("stop-unresolved", probe.admin(path, [("clientToken", token), ("forceStop", "true")], b""))
+            except Exception as exc:
+                fleet.record("stop-error", {"error": str(exc)})
+        result["cleanup"] = "PASS" if fleet.cleanup() else "FAIL"
+        fleet.record("topology-result", result)
+    return result
+
+
+def main():
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(f"Heal workflow interrupted by signal {signum}")
+    signal.signal(signal.SIGTERM, interrupted)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--testing-commit", required=True)
+    parser.add_argument("--binary-sha", required=True)
+    parser.add_argument("--rc-bin", type=Path, required=True)
+    parser.add_argument("--evidence", type=Path, required=True)
+    args = parser.parse_args()
+    nodes = os.environ.get("RUSTFS_NODES", "vm000 vm001 vm002 vm003").split()
+    require(len(nodes) >= 4 and len(set(nodes)) == len(nodes)
+            and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes),
+            "A01 H1/H2 requires the four current auto-testing Heal nodes")
+    require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid installed binary digest")
+    require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
+    results = []
+    try:
+        for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
+            result = run_topology(args, topology, selected)
+            results.append(result)
+            if result["verdict"] != "PASS" or result["cleanup"] != "PASS":
+                break
+    finally:
+        save(args.evidence / "healthy-summary.json", {"caseId": "heal.admin-healthy-noop", "results": results,
+             "cleanup": "PASS" if results and all(value["cleanup"] == "PASS" for value in results) else "FAIL",
+             "complete": len(results) == 2 and all(value["verdict"] == "PASS" and value["cleanup"] == "PASS" for value in results)})
+    require(len(results) == 2 and all(value["verdict"] == "PASS" and value["cleanup"] == "PASS" for value in results),
+            "A01 requires both H1/H2 and normal/deep; inspect topology-result evidence")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(f"Heal validation failed: {exc}", file=sys.stderr)
+        sys.exit(1)
