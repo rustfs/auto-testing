@@ -9,7 +9,7 @@ import copy
 from unittest.mock import patch
 
 from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, cases, compile_plan, select
-from scripts.validation_heal.healthy import validate_healthy, validate_topology
+from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection
 from scripts.validation_heal.fleet_node import paths
 
 
@@ -79,6 +79,14 @@ class HealContractTest(unittest.TestCase):
 
 
 class HealHealthyOracleTest(unittest.TestCase):
+    def test_request_rejection_needs_the_exact_server_code(self):
+        good = {"httpStatus": 400, "response": "<Error><Code>InvalidArgument</Code></Error>"}
+        validate_rejection(good, "InvalidArgument")
+        for bad in ({**good, "httpStatus": 200}, {"httpStatus": 400, "response": "<Error><Code>AccessDenied</Code></Error>"},
+                    {"httpStatus": 400, "response": {"Code": "InvalidArgument", "clientToken": "admitted"}}):
+            with self.assertRaises(ValueError):
+                validate_rejection(bad, "InvalidArgument")
+
     def receipt(self, disposition="metadata_healthy"):
         return {"summary": "finished", "outcome": {"execution": {"state": "completed"},
                 "coverage": "complete", "objectsTruncated": False,

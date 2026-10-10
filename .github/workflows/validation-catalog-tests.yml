@@ -15,6 +15,16 @@ on:
       - rustfs_pool_expand.sh
       - test_validation_replication.py
       - scripts/validation_replication/**
+      - test_validation_heal.py
+      - scripts/validation_heal/**
+      - docs/validation-heal-*.md
+      - rustfs_heal_test.sh
+      - test_validation_oidc.py
+      - scripts/validation_oidc.py
+      - scripts/validation_oidc/**
+      - test_validation_webhooks.py
+      - scripts/validation_webhooks.py
+      - scripts/run_validation_case.sh
       - rustfs-replication-test.sh
       - rustfs-storage-test.sh
       - test_validation_scanner_usage.sh
@@ -34,6 +44,16 @@ on:
       - rustfs_pool_expand.sh
       - test_validation_replication.py
       - scripts/validation_replication/**
+      - test_validation_heal.py
+      - scripts/validation_heal/**
+      - docs/validation-heal-*.md
+      - rustfs_heal_test.sh
+      - test_validation_oidc.py
+      - scripts/validation_oidc.py
+      - scripts/validation_oidc/**
+      - test_validation_webhooks.py
+      - scripts/validation_webhooks.py
+      - scripts/run_validation_case.sh
       - rustfs-replication-test.sh
       - rustfs-storage-test.sh
       - test_validation_scanner_usage.sh
@@ -55,5 +75,8 @@ jobs:
       - run: python3 -B -m unittest -v test_validation_ilm.py
       - run: python3 -B -m unittest -v test_validation_pool.py
       - run: python3 -B -m unittest -v test_validation_replication.py
+      - run: python3 -B -m unittest -v test_validation_heal.py test_validation_oidc.py test_validation_webhooks.py
+      - run: python3 -B scripts/validation_heal/matrix.py check
+      - run: bash -n scripts/run_validation_case.sh scripts/validation_heal/run_case.sh scripts/validation_oidc/run_case.sh
       - run: bash -n rustfs-storage-test.sh rustfs_pool_expand.sh rustfs-replication-test.sh scripts/validation_pool/run_case.sh scripts/validation_replication/run_case.sh test_validation_scanner_usage.sh
       - run: bash test_validation_scanner_usage.sh

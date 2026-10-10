@@ -18,6 +18,7 @@ import sys
 import time
 from urllib import request
 from urllib.parse import quote
+import xml.etree.ElementTree as ET
 
 try:
     from .heal_probe import Probe, canonical, compare_inventories, require, save
@@ -29,6 +30,55 @@ except ImportError:
 
 NODE_SOURCE = Path(__file__).with_name("fleet_node.py")
 ROOT = Path(__file__).resolve().parents[2]
+BASE_OPTIONS = {"recursive": False, "remove": False, "recreate": False, "scanMode": 2,
+                "dryRun": False, "updateParity": False, "nolock": False, "readRepair": False, "pool": 0, "set": 0}
+
+
+def validate_rejection(observed, expected_code):
+    require(observed.get("httpStatus") == 400, "invalid Heal request was not rejected with HTTP 400")
+    body = observed.get("response")
+    if isinstance(body, str):
+        code = next((element.text for element in ET.fromstring(body).iter()
+                     if element.tag.rsplit("}", 1)[-1] == "Code"), None)
+    elif isinstance(body, dict):
+        code = body.get("Code") or body.get("code")
+        require(not body.get("clientToken"), "invalid request admitted a Heal task")
+    else:
+        code = None
+    require(code == expected_code, f"invalid Heal request expected {expected_code}; observed {code}")
+
+
+def invalid_requests(probe, fleet, bucket, before, baseline):
+    path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/objects/0000.bin"
+    variants = [
+        ("duplicate-query", BASE_OPTIONS, [("clientToken", "a"), ("clientToken", "b")], "InvalidArgument", None),
+        ("invalid-bool", BASE_OPTIONS, [("forceStop", "not-a-bool")], "InvalidArgument", None),
+        ("invalid-scan", {**BASE_OPTIONS, "scanMode": 99}, [], "InvalidRequest", None),
+        ("conflicting-flags", BASE_OPTIONS, [("forceStart", "true"), ("forceStop", "true")], "InvalidRequest", None),
+        ("invalid-selector", {**BASE_OPTIONS, "pool": -1}, [], "InvalidRequest", None),
+        ("oversize-body", BASE_OPTIONS, [], "EntityTooLarge", b" " * (1024**2 + 1)),
+    ]
+    branches = {}
+    for name, options, query, code, raw in variants:
+        observed = fleet.record("trigger-" + name, probe.admin(path, query, raw if raw is not None else json.dumps(options).encode()))
+        validate_rejection(observed, code)
+        for endpoint in probe.binding["endpoints"]:
+            state = fleet.record("control-" + name, Probe(probe.binding, endpoint).admin(
+                "/rustfs/admin/v3/background-heal/status", [], b""))
+            require(state.get("httpStatus") == 200 and isinstance(state.get("response"), dict),
+                    "invalid-request task isolation status is unavailable")
+            value = state["response"]
+            coverage = value.get("coverage") or {}
+            require(value.get("clusterStatusComplete") is True
+                    and coverage.get("expected") == len(fleet.nodes) and coverage.get("responded") == len(fleet.nodes)
+                    and coverage.get("unknown") == 0 and value.get("healActiveTasks") == 0 and value.get("healQueueLength") == 0,
+                    "invalid request left active responsibility or incomplete peer coverage")
+        branches[name] = {"verdict": "PASS", "httpStatus": 400, "code": code, "noActiveResponsibility": True}
+    after = fleet.snapshot("physical-after-negatives")
+    require(physical_content(before) == physical_content(after), "invalid requests changed the physical fixture")
+    inventory = fleet.record("s3-after-negatives", probe.inventory(bucket, unversioned_current_tags=True))
+    fleet.record("negative-isolation-proof", {"physicalUnchanged": True, "s3": compare_inventories(baseline, inventory)})
+    return branches
 
 
 def physical_content(snapshot):
@@ -179,14 +229,16 @@ def run_topology(args, topology, nodes):
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         before = fleet.snapshot("physical-baseline")
         fleet.record("fault", {"fault": "F0", "injected": False, "backgroundRepairDisabled": True})
-        for branch, mode, disposition in (("normal", 1, "metadata_healthy"), ("deep", 2, "verified_healthy")):
+        if args.case_id == "heal.admin-invalid-request":
+            result["branches"] = invalid_requests(probe, fleet, bucket, before, baseline)
+        healthy_branches = (("normal", 1, "metadata_healthy"), ("deep", 2, "verified_healthy")) \
+            if args.case_id == "heal.admin-healthy-noop" else ()
+        for branch, mode, disposition in healthy_branches:
             receipts = []
             for entry in expected:
                 key = entry["key"]
                 path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/" + quote(key, safe="/")
-                options = {"recursive": False, "remove": False, "recreate": False, "scanMode": mode,
-                           "dryRun": False, "updateParity": False, "nolock": False,
-                           "readRepair": False, "pool": 0, "set": 0}
+                options = {**BASE_OPTIONS, "scanMode": mode}
                 started = fleet.record("trigger-" + branch, probe.admin(path, [], json.dumps(options).encode()))
                 require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict),
                         f"healthy Heal task admission failed (HTTP {started.get('httpStatus')})")
@@ -243,6 +295,8 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--case-id", choices=("heal.admin-healthy-noop", "heal.admin-invalid-request"),
+                        default="heal.admin-healthy-noop")
     parser.add_argument("--testing-commit", required=True)
     parser.add_argument("--binary-sha", required=True)
     parser.add_argument("--rc-bin", type=Path, required=True)
@@ -262,11 +316,11 @@ def main():
             if result["verdict"] != "PASS" or result["cleanup"] != "PASS":
                 break
     finally:
-        save(args.evidence / "healthy-summary.json", {"caseId": "heal.admin-healthy-noop", "results": results,
+        save(args.evidence / "healthy-summary.json", {"caseId": args.case_id, "results": results,
              "cleanup": "PASS" if results and all(value["cleanup"] == "PASS" for value in results) else "FAIL",
              "complete": len(results) == 2 and all(value["verdict"] == "PASS" and value["cleanup"] == "PASS" for value in results)})
     require(len(results) == 2 and all(value["verdict"] == "PASS" and value["cleanup"] == "PASS" for value in results),
-            "A01 requires both H1/H2 and normal/deep; inspect topology-result evidence")
+            "Heal case requires every H1/H2 branch; inspect topology-result evidence")
 
 
 if __name__ == "__main__":

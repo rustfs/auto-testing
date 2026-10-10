@@ -16,7 +16,10 @@ while [ "$#" -gt 0 ]; do
     *) die "unknown Heal validation option: $1" ;;
   esac
 done
-[ "${case_id}" = heal.admin-healthy-noop ] || die "automatic Heal executor is not migrated: ${case_id}"
+case "${case_id}" in
+  heal.admin-healthy-noop|heal.admin-invalid-request) ;;
+  *) die "automatic Heal executor is not migrated: ${case_id}" ;;
+esac
 [ "${#NODES[@]}" -ge 4 ] || die "A01 H1/H2 requires four current auto-testing Heal nodes"
 NODES=("${NODES[0]}" "${NODES[1]}" "${NODES[2]}" "${NODES[3]}")
 if [ "${DRY_RUN}" -eq 1 ]; then
@@ -101,6 +104,7 @@ if [ "${bootstrap_rc}" -eq 0 ]; then
     binary_sha="${node_sha}"
   done
   python3 -B "${ROOT}/scripts/validation_heal/healthy.py" --candidate "${candidate}" \
+    --case-id "${case_id}" \
     --testing-commit "${testing_commit}" --binary-sha "${binary_sha}" --rc-bin "$(command -v rc)" \
     --evidence "${evidence}" > "${evidence}/test.log" 2>&1 || case_rc=$?
   cat "${evidence}/test.log"
