@@ -18,7 +18,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "${case_id}" in
-  heal.admin-healthy-noop|heal.admin-invalid-request) ;;
+  heal.admin-healthy-noop|heal.admin-invalid-request|heal.admin-authorization) ;;
   heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null|heal.below-read-quorum|heal.missing-or-corrupt-xlmeta|heal.object-metadata-and-tags|heal.multiple-shard-loss|heal.special-keys-and-pagination|heal.object-size-boundaries) driver=versions.py ;;
   heal.admin-token-cross-node-status|heal.admin-dry-run|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.range-head-and-conditions|heal.manual-normal-attribution|heal.manual-deep-attribution)
     driver=shards.py ;;

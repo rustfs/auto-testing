@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 95 currently dispatchable IDs include all 74 non-Heal cases and twenty-one Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
+case evidence. The 96 currently dispatchable IDs include all 74 non-Heal cases and twenty-two Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 63 Heal cases remain
+The other 62 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -326,8 +326,9 @@ policy (the runtime derives these rather than guessing 256KiB). Each size tests
 both actual data/parity roles with missing and bitflip faults. Zero objects use
 metadata loss/header faults and never invent a payload part. Exact byte hashes,
 complete responsibility, HEAD/LIST and actual first/tail/stripe Range checks
-are required; zero Range is a strict S3 416/InvalidRange negative. D01 requires a
-fresh tool artifact carrying this size contract and has not yet run live.
+are required; zero Range is a strict S3 416/InvalidRange negative. Tool build
+`38062137032` successfully produced the recognized size and quorum contracts
+for the fixed candidate, with current extractor/source and binary identities.
 
 Corrected D05 run `38061843290` passed every H1/H2 suspended/null branch and
 clean finalization. Real enabled-period history, null overwrites and markers
@@ -335,3 +336,28 @@ retain precise S3 identities; the typed Admin nil UUID is mapped only to that
 acknowledged null version. The candidate then re-enabled versioning and created
 a distinct non-null version without changing old payloads or version/marker
 identities. The original literal-identity harness failure is still retained.
+
+A08 `heal.admin-authorization` now dispatches every H1/H2 source principal
+branch. Anonymous, deliberately bad, correctly signed but expired, and denied
+IAM requests each test start/status/stop with exact HTTP/error refusals and
+recursive JSON/XML task-disclosure rejection. A temporary principal with only
+`admin:Heal` admits, queries and stops its independent token while S3 reads stay
+denied. Temporary users/policy/tasks are finalized and credential revocation is
+verified; original physical/S3 fixtures must remain unchanged. Evidence redacts
+root and temporary credentials without altering oracle inputs. Nine focused
+tests cover independent SigV4 verification, denial leakage, lost IAM admission,
+cleanup failures and revocation. A08 still requires full live evidence.
+
+D01 run `38062610870` retained FAIL after 35 H1 parameter attempts. Three
+physical comparisons rejected changed target-side `xl.meta.bkp` files; archived
+per-drive comparison shows each new backup is the exact pre-repair authoritative
+`xl.meta`, while payload shards and decoded logical identities agree. The
+original verdict remains retained pending a new complete run with a bounded
+target-backup oracle. A fourth attempt was rejected before injection because
+its expanded fault ID exceeded the tool limit; retrying that invalid ID during
+finalization caused cleanup FAIL. Fault IDs now use branch/index digests within
+the allowed length. Recovery run `38063798238` independently proved stopped
+owned service, no injection intent, exact archived pre-fault physical scene and
+removed run roots. It records cleanup PASS, `originalVerdictRewritten=false`
+and no canonical/product-repair PASS claim. Serial deployment resumed only
+after inspecting that recovery evidence.

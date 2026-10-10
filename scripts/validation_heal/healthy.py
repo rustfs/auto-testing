@@ -136,10 +136,21 @@ class Fleet:
         self.sequence = 0
         self.reserved = []
         self.faults = []
+        self.secret_values = set()
 
     def record(self, label, value):
         self.sequence += 1
-        save(self.evidence / f"{self.sequence:05d}-{label}.json", value)
+        def sanitized(item):
+            if isinstance(item, str):
+                for secret in sorted(self.secret_values, key=len, reverse=True):
+                    item = item.replace(secret, "[REDACTED]")
+                return item
+            if isinstance(item, dict):
+                return {sanitized(key): sanitized(entry) for key, entry in item.items()}
+            if isinstance(item, list):
+                return [sanitized(entry) for entry in item]
+            return item
+        save(self.evidence / f"{self.sequence:05d}-{label}.json", sanitized(value))
         return value
 
     def ssh(self, node):
@@ -284,6 +295,12 @@ def run_topology(args, topology, nodes):
         fleet.record("fault", {"fault": "F0", "injected": False, "backgroundRepairDisabled": True})
         if args.case_id == "heal.admin-invalid-request":
             result["branches"] = invalid_requests(probe, fleet, bucket, before, baseline)
+        if args.case_id == "heal.admin-authorization":
+            try:
+                from .authorization import authorization_requests
+            except ImportError:
+                from authorization import authorization_requests
+            result["branches"] = authorization_requests(probe, fleet, bucket, before, baseline, active, BASE_OPTIONS)
         healthy_branches = (("normal", 1, "metadata_healthy"), ("deep", 2, "verified_healthy")) \
             if args.case_id == "heal.admin-healthy-noop" else ()
         for branch, mode, disposition in healthy_branches:
@@ -348,7 +365,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
-    parser.add_argument("--case-id", choices=("heal.admin-healthy-noop", "heal.admin-invalid-request"),
+    parser.add_argument("--case-id", choices=("heal.admin-healthy-noop", "heal.admin-invalid-request", "heal.admin-authorization"),
                         default="heal.admin-healthy-noop")
     parser.add_argument("--testing-commit", required=True)
     parser.add_argument("--binary-sha", required=True)
@@ -367,7 +384,7 @@ def main():
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
             result = run_topology(args, topology, selected)
             results.append(result)
-            if result["verdict"] != "PASS" or result["cleanup"] != "PASS":
+            if result["cleanup"] != "PASS":
                 break
     finally:
         save(args.evidence / "healthy-summary.json", {"caseId": args.case_id, "results": results,

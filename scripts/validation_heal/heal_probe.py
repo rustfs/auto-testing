@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import os
@@ -164,20 +164,26 @@ class NoRedirect(request.HTTPRedirectHandler):
 
 
 class Probe:
-    def __init__(self, binding: dict, endpoint: str | None = None):
+    def __init__(self, binding: dict, endpoint: str | None = None, *, credential_pair=None):
         validate_binding(binding)
         self.binding = binding
         self.endpoint_name = endpoint or binding["defaultEndpoint"]
         require(self.endpoint_name in binding["endpoints"], "endpoint is not bound")
         self.endpoint = binding["endpoints"][self.endpoint_name].rstrip("/")
+        require(credential_pair is None or isinstance(credential_pair, tuple) and len(credential_pair) == 2
+                and all(isinstance(value, str) and value for value in credential_pair), "invalid in-memory principal credentials")
+        self.credential_pair = credential_pair
+
+    def credentials(self):
+        return self.credential_pair or (os.environ["HEAL_ACCESS_KEY"], os.environ["HEAL_SECRET_KEY"])
 
     def s3_client(self):
         import boto3
         from botocore.config import Config
+        access, secret = self.credentials()
         return boto3.client("s3", endpoint_url=self.endpoint,
-                            aws_access_key_id=os.environ["HEAL_ACCESS_KEY"],
-                            aws_secret_access_key=os.environ["HEAL_SECRET_KEY"],
-                            aws_session_token=os.environ.get("HEAL_SESSION_TOKEN"),
+                            aws_access_key_id=access, aws_secret_access_key=secret,
+                            aws_session_token=None if self.credential_pair else os.environ.get("HEAL_SESSION_TOKEN"),
                             region_name="us-east-1",
                             config=Config(signature_version="s3v4", s3={"addressing_style": "path"},
                                           retries={"max_attempts": 0}, connect_timeout=5,
@@ -259,10 +265,17 @@ class Probe:
             url = self.endpoint + path + ("?" + urlencode(query) if query else "")
             headers = {"Content-Type": "application/json", "x-amz-content-sha256": hashlib.sha256(body).hexdigest()}
         with observation_phase(observation, 'signing'):
+            require(auth in {"signed", "anonymous", "bad-signature", "expired-signature"}, "unsupported Admin auth mode")
+            signing_time = None
             if auth != "anonymous":
-                secret = os.environ["HEAL_SECRET_KEY"] if auth == "signed" else "deliberately-invalid-heal-signature"
+                access, secret = self.credentials()
+                if auth == "bad-signature":
+                    secret = "deliberately-invalid-heal-signature"
+                if auth == "expired-signature":
+                    signing_time = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y%m%dT%H%M%SZ")
                 outgoing = AWSRequest(method=method, url=url, data=body, headers=headers)
-                sign_admin_request(outgoing, os.environ["HEAL_ACCESS_KEY"], secret, os.environ.get("HEAL_SESSION_TOKEN"))
+                sign_admin_request(outgoing, access, secret,
+                                   None if self.credential_pair else os.environ.get("HEAL_SESSION_TOKEN"), timestamp=signing_time)
                 headers = dict(outgoing.headers.items())
         started = time.monotonic()
         evidence = {"path": path, "query": query, "requestBody": body.decode(errors="replace"),
@@ -270,6 +283,8 @@ class Probe:
                     "startedAt": datetime.now(UTC).isoformat(), "clockDomain": CLOCK_DOMAIN,
                     "callStartedMonotonicNs": time.monotonic_ns(),
                     "timingScope": "client-call; not a server commit/lock witness"}
+        if signing_time:
+            evidence["isolatedClientSigningTimestamp"] = signing_time
         if observation is not None:
             evidence['statusObservation'] = dict(sessionId=observation['sessionId'], sequence=observation['sequence'])
             observation['callStartedMonotonicNs'] = evidence['callStartedMonotonicNs']
@@ -397,7 +412,7 @@ def main() -> int:
     admin.add_argument("--query", action="append", default=[])
     admin.add_argument("--body", default="")
     admin.add_argument("--body-file", type=Path)
-    admin.add_argument("--auth", choices=("signed", "anonymous", "bad-signature"), default="signed")
+    admin.add_argument("--auth", choices=("signed", "anonymous", "bad-signature", "expired-signature"), default="signed")
     admin.add_argument("--expect-http", type=int, default=200)
     s3 = subs.add_parser("s3")
     s3.add_argument("--operation", choices=sorted(S3_OPERATIONS), required=True)
