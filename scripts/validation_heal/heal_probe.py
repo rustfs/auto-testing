@@ -138,7 +138,7 @@ def bucket_allowed(binding: dict, bucket: str) -> None:
             and bool(re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", bucket)), "bucket is outside this run")
 
 
-def validate_s3_request(binding: dict, operation: str, params: dict) -> None:
+def validate_s3_request(binding: dict, operation: str, params: dict, *, allow_governance_bypass: bool = False) -> None:
     require(operation in S3_OPERATIONS, "S3 operation is not allowlisted")
     bucket_allowed(binding, params.get("Bucket", ""))
     source = params.get("CopySource")
@@ -149,7 +149,11 @@ def validate_s3_request(binding: dict, operation: str, params: dict) -> None:
         items = params.get("Delete", {}).get("Objects", [])
         require(0 < len(items) <= 1000 and all(isinstance(item.get("Key"), str) for item in items),
                 "invalid bounded batch deletion")
-    require(not params.get("BypassGovernanceRetention"), "retention bypass is prohibited")
+    if params.get("BypassGovernanceRetention"):
+        require(allow_governance_bypass is True and params["BypassGovernanceRetention"] is True
+                and operation == "delete_object" and isinstance(params.get("Key"), str) and params["Key"]
+                and isinstance(params.get("VersionId"), str) and params["VersionId"] not in {"", "null"},
+                "retention bypass requires an explicit owned-version DELETE proof or finalizer")
     require("Body" not in params, "use --size/--seed or --body-file; do not put payloads in JSON")
 
 
@@ -189,9 +193,9 @@ class Probe:
                                           retries={"max_attempts": 0}, connect_timeout=5,
                                           read_timeout=30, proxies={}))
 
-    def s3(self, operation: str, params: dict, body: bytes | None = None) -> dict:
+    def s3(self, operation: str, params: dict, body: bytes | None = None, *, allow_governance_bypass: bool = False) -> dict:
         validate_binding(self.binding)  # Recheck expiry before every mutation.
-        validate_s3_request(self.binding, operation, params)
+        validate_s3_request(self.binding, operation, params, allow_governance_bypass=allow_governance_bypass)
         outgoing = dict(params)
         for key in ("SSECustomerKey", "CopySourceSSECustomerKey"):
             if outgoing.get(key) == "$HEAL_SSE_C_KEY":

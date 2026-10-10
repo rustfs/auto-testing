@@ -105,7 +105,8 @@ def prove_locked(probe, fleet, bucket, context, *, key=None, label):
         denied = fleet.record(label + "-delete-denied", context["principal"].s3("delete_object", params))
         validate_protected_delete(denied)
         if spec.get("ObjectLockMode") == "GOVERNANCE":
-            denied = fleet.record(label + "-bypass-denied", context["principal"].s3("delete_object", {**params, "BypassGovernanceRetention": True}))
+            denied = fleet.record(label + "-bypass-denied", context["principal"].s3("delete_object",
+                {**params, "BypassGovernanceRetention": True}, allow_governance_bypass=True))
             validate_protected_delete(denied)
     return {"protectedVersions": len(selected), "exactProtectionMetadata": True, "nonBypassDeleteDenied": True,
             "serverTimeBeforeExpiry": True}
@@ -144,7 +145,8 @@ def finalize_locked(probe, fleet, bucket, context):
                     if (retention.get("response") or {}).get("Retention", {}).get("Mode") == "GOVERNANCE":
                         params["BypassGovernanceRetention"] = True
                 while True:
-                    deleted = fleet.record("locked-final-delete", probe.s3("delete_object", params))
+                    deleted = fleet.record("locked-final-delete", probe.s3("delete_object", params,
+                        **({"allow_governance_bypass": True} if params.get("BypassGovernanceRetention") else {})))
                     if deleted.get("acknowledged"):
                         require(deleted["response"].get("ResponseMetadata", {}).get("HTTPStatusCode") in {200, 204}, "protected final DELETE had an unexpected status")
                         break

@@ -24,7 +24,7 @@ from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, vali
     map_inline_target, verify_proof)
 from scripts.validation_heal.versions import seed_semantics, verify_semantics
 from scripts.validation_heal.versions import multi_loss_instances, multi_loss_plan, SPECIAL_KEYS, verify_pagination, boundary_plan
-from scripts.validation_heal.heal_probe import Probe
+from scripts.validation_heal.heal_probe import Probe, validate_s3_request
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract, size_contract
 from scripts.validation_heal.boundaries import verify_size_contract, boundary_sizes, verify_boundary_ranges
 from scripts.validation_heal.node_outage import quorum_plan, put_ack, delete_ack, replica_census, validate_deleted_read
@@ -1087,6 +1087,26 @@ class HealPayloadMismatchTest(unittest.TestCase):
 
 
 class HealObjectLockTest(unittest.TestCase):
+    def test_governance_bypass_requires_explicit_owned_version_and_reaches_the_sdk(self):
+        from test_validation_heal_authorization import binding
+        bound = binding()
+        params = {"Bucket": bound["bucketPrefix"], "Key": "locked/governance.bin", "VersionId": "owned-version",
+                  "BypassGovernanceRetention": True}
+        with self.assertRaises(ValueError): validate_s3_request(bound, "delete_object", params)
+        validate_s3_request(bound, "delete_object", params, allow_governance_bypass=True)
+        for operation, changed in (("put_object", params), ("delete_objects", params),
+                                   ("delete_object", {**params, "Bucket": "unowned"}),
+                                   ("delete_object", {**params, "VersionId": "null"}),
+                                   ("delete_object", {**params, "BypassGovernanceRetention": 1})):
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                validate_s3_request(bound, operation, changed, allow_governance_bypass=True)
+        sdk = unittest.mock.Mock()
+        sdk.delete_object.return_value = {"ResponseMetadata": {"HTTPStatusCode": 204}}
+        probe = Probe(bound)
+        with patch.object(probe, "s3_client", return_value=sdk):
+            self.assertTrue(probe.s3("delete_object", params, allow_governance_bypass=True)["acknowledged"])
+        sdk.delete_object.assert_called_once_with(**params)
+
     def seed(self, *, fail_after=None):
         calls, context = [], {}
         fleet = types.SimpleNamespace(secret_values=set(), record=lambda label, value: value)
