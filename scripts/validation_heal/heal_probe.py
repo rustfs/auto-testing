@@ -303,19 +303,26 @@ class Probe:
         opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
         return opener.open(outgoing, timeout=30)
 
-    def inventory(self, bucket: str, *, unversioned_current_tags: bool = False) -> dict:
+    def inventory(self, bucket: str, *, unversioned_current_tags: bool = False, page_size: int | None = None) -> dict:
         """Enumerate every version/marker, then hash complete version-addressed GETs.
 
         Only call before injection or after attribution/physical proof: a GET can
         itself trigger read repair. Never use this to watch scanner progress.
         """
         bucket_allowed(self.binding, bucket)
+        require(page_size is None or type(page_size) is int and 1 <= page_size <= 1000,
+                "invalid explicit inventory page size")
         client, entries, count, byte_count = self.s3_client(), [], 0, 0
+        pagination = {"requestedPageSize": page_size, "versionPageSizes": [], "currentPageSizes": []}
+        options = {"PaginationConfig": {"PageSize": page_size}} if page_size else {}
         if unversioned_current_tags:
             mode = self.s3("get_bucket_versioning", {"Bucket": bucket})
             require(mode["acknowledged"] and mode["response"].get("Status") is None,
                     "current-tag addressing requires a never-versioned fixture bucket")
-        for page in client.get_paginator("list_object_versions").paginate(Bucket=bucket):
+        for page in client.get_paginator("list_object_versions").paginate(Bucket=bucket, **options):
+            page_count = len(page.get("Versions", [])) + len(page.get("DeleteMarkers", []))
+            require(page_size is None or page_count <= page_size, "version LIST exceeded the requested page size")
+            pagination["versionPageSizes"].append(page_count)
             require(not unversioned_current_tags or not page.get("DeleteMarkers"),
                     "unversioned fixture unexpectedly has delete markers")
             for marker in page.get("DeleteMarkers", []):
@@ -352,7 +359,10 @@ class Probe:
         require(len(set(identities)) == len(identities), "duplicate version/marker in pagination")
         # Cross-check current LIST against the separately paginated version view.
         current = []
-        for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket):
+        for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, **options):
+            require(page_size is None or len(page.get("Contents", [])) <= page_size,
+                    "current LIST exceeded the requested page size")
+            pagination["currentPageSizes"].append(len(page.get("Contents", [])))
             current.extend((item["Key"], item["Size"], item["ETag"]) for item in page.get("Contents", []))
             require(len(current) <= self.binding["maxInventoryObjects"], "current LIST exceeds budget")
         expected = [(item["key"], item["payload"]["size"], item["properties"]["ETag"])
@@ -364,7 +374,8 @@ class Probe:
                     "fixture versioning changed during inventory")
         return {"bucket": bucket, "entries": sorted(entries, key=lambda item: (item["key"], item["versionId"])),
                 "objectsAndMarkers": count, "bytesRead": byte_count,
-                "tagAddressing": "current-never-versioned-fixture" if unversioned_current_tags else "explicit-version"}
+                "tagAddressing": "current-never-versioned-fixture" if unversioned_current_tags else "explicit-version",
+                "pagination": pagination}
 
 
 def compare_inventories(before: dict, after: dict) -> dict:

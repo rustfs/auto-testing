@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 93 currently dispatchable IDs include all 74 non-Heal cases and nineteen Heal cases. Thirty-nine have live PASS evidence; the other 119 have no live PASS claim.
+case evidence. The 94 currently dispatchable IDs include all 74 non-Heal cases and twenty Heal cases. Thirty-nine have live PASS evidence; the other 119 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 65 Heal cases remain
+The other 64 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -297,3 +297,11 @@ refusal. H2 returned 503/SlowDownRead, but Heal recorded a grace-window deferred
 receipt and completed execution rather than the source's required failed
 responsibility. Good-shard preservation and the raw task outcome remain
 archived; neither branch is promoted to PASS.
+
+D10 `heal.special-keys-and-pagination` now creates 265 unique objects, including
+Unicode, spaces, literal percent/encoded slash, real slash, nested paths and
+adjacent `a/`/`ab/` controls. Both version and current LIST explicitly request
+MaxKeys=17 and retain observed page sizes; the complete ACK manifest must match
+without missing or duplicate keys. Exact logical-key physical mappings precede
+part/xl.meta faults and signed object requests. Every control remains exact.
+D10 has not yet been validated live.

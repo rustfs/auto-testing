@@ -44,9 +44,42 @@ BRANCHES = {
     "heal.missing-or-corrupt-xlmeta": ("missing-xlmeta", "truncated-xlmeta", "corrupt-xlmeta", "inline-payload", "versioned-xlmeta"),
     "heal.object-metadata-and-tags": ("user-metadata", "content-headers", "versioned-tags"),
     "heal.multiple-shard-loss": ("loss-1-data", "loss-1-parity", "loss-2-through-m-data-parity"),
+    "heal.special-keys-and-pagination": ("unicode-space-percent", "encoded-slash", "adjacent-prefixes", "multi-page-list"),
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
+SPECIAL_KEYS = ("中文/空 格%25.bin", "space key/object.bin", "literal%2Fslash/object.bin",
+                "literal/slash/object.bin", "a/object.bin", "ab/object.bin", "b/object.bin", "nested/a/b/object.bin")
+
+
+def seed_special_keys(recorder, bucket):
+    recorder.call("create_bucket", {"Bucket": bucket})
+    expected = []
+    keys = [*SPECIAL_KEYS, *(f"pages/{index:04d}.bin" for index in range(257))]
+    for key in keys:
+        body = payload(f"{bucket}/{key}/0", VERSION_SIZE if key in SPECIAL_KEYS else 128)
+        response = recorder.call("put_object", {"Bucket": bucket, "Key": key,
+            "ContentType": "application/octet-stream", "Metadata": {"heal-fixture": "DS",
+                "logical-key-sha256": hashlib.sha256(key.encode()).hexdigest()}}, body)
+        require(response.get("VersionId") in {None, "null"}, "special-key fixture unexpectedly became versioned")
+        expected.append({"key": key, "versionId": "null", "deleteMarker": False, "isLatest": True,
+            "payload": {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}})
+    require(len(keys) == len(set(keys)) > 257, "special keys collided with the pagination fixture")
+    return expected
+
+
+def verify_pagination(inventory):
+    pagination = inventory.get("pagination") or {}
+    entries = inventory["entries"]
+    require(pagination.get("requestedPageSize") == 17 and len(entries) > 257
+            and {entry["key"] for entry in entries}.issuperset(SPECIAL_KEYS),
+            "special-key inventory omitted its explicit pagination or distinct logical keys")
+    for name in ("versionPageSizes", "currentPageSizes"):
+        pages = pagination.get(name, [])
+        require(len(pages) > 1 and all(type(count) is int and 0 <= count <= 17 for count in pages)
+                and sum(pages) == len(entries), "multi-page LIST omitted or duplicated acknowledged objects")
+    return {"maxKeys": 17, "versionPages": len(pagination["versionPageSizes"]),
+            "currentPages": len(pagination["currentPageSizes"]), "acknowledgedObjects": len(entries)}
 
 
 def semantic_body(bucket, key, nonce):
@@ -383,8 +416,18 @@ def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
         key = "objects/0000.bin" if fixture == "DV" else f"objects/{branch_index + 1:04d}.bin"
     if case_id == "heal.object-metadata-and-tags":
         key = SEMANTIC_KEYS[branch_index]
+    if case_id == "heal.special-keys-and-pagination":
+        key = SPECIAL_KEYS[(0, 2, 4, 7)[branch_index]]
     selected = [entry for entry in expected if entry["key"] == key]
     data = [entry for entry in selected if not entry["deleteMarker"]]
+    if case_id == "heal.special-keys-and-pagination":
+        require(len(data) == 1 and data[0]["versionId"] == "null", "special-key fault lost its exact logical identity")
+        target = choose_target(snapshot, bucket, data[0], "parity" if branch == "adjacent-prefixes" else "data")
+        metadata = branch in {"encoded-slash", "multi-page-list"}
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": False, "expected": selected,
+                "faults": [metadata_target(snapshot, target) if metadata else target], "proofs": [target],
+                "requiredRepairs": set() if metadata else {version_identity(data[0])},
+                "metadataRepairs": {key} if metadata else set()}
     if case_id == "heal.object-metadata-and-tags":
         require(len(data) == 3, "metadata/tag fixture lacks three independently acknowledged versions")
         target = choose_target(snapshot, bucket, data[0] if branch == "user-metadata" else data[-1],
@@ -477,8 +520,11 @@ def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
 
 
 def verify_version_s3(probe, fleet, bucket, expected, baseline, label, *, fixture="DV"):
-    current = fleet.record(label, probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
+    current = fleet.record(label, probe.inventory(bucket, unversioned_current_tags=fixture in {"DB", "DK"},
+                                                   page_size=17 if fixture == "DK" else None))
     comparison = compare_inventories(baseline, current)
+    if fixture == "DK":
+        comparison["pagination"] = verify_pagination(current)
     ranges = []
     for entry in expected:
         if entry["deleteMarker"]:
@@ -518,7 +564,7 @@ def run_topology(args, topology, nodes, fixture):
         "defaultEndpoint": "node1", "candidateCommit": candidate["source_sha"], "harnessCommit": args.testing_commit,
         "candidatePackageSha256": candidate["package_sha256"], "candidateBinarySha256": args.binary_sha,
         "rcBinarySha256": hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(),
-        "maxInventoryObjects": 256, "maxInventoryBytes": 512 * 1024**2}
+        "maxInventoryObjects": 512, "maxInventoryBytes": 512 * 1024**2}
     fleet.record("binding", binding)
     recipe = select(args.case_id)[0]
     require(list(BRANCHES[args.case_id]) == recipe["variants"], "executor omitted a source version branch")
@@ -534,7 +580,9 @@ def run_topology(args, topology, nodes, fixture):
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         recorder = Recorder(probe, directory / "fixture")
         public = None
-        if fixture == "DS":
+        if fixture == "DK":
+            expected = seed_special_keys(recorder, bucket)
+        elif fixture == "DS":
             expected, public = seed_semantics(recorder, bucket)
         else:
             expected = seed(recorder, bucket, fixture,
@@ -542,8 +590,11 @@ def run_topology(args, topology, nodes, fixture):
                             [VERSION_SIZE] if args.case_id == "heal.multiple-shard-loss" or fixture == "DV" else SIZES)
         if args.case_id == "heal.versioning-suspended-null":
             expected = suspend_fixture(recorder, bucket, expected)
-        baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
+        baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture in {"DB", "DK"},
+                                                              page_size=17 if fixture == "DK" else None))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
+        if fixture == "DK":
+            fleet.record("special-key-pagination-baseline", verify_pagination(baseline))
         if public is not None:
             fleet.record("semantic-baseline", verify_semantics(public, baseline))
         instances = None
@@ -725,6 +776,8 @@ def main():
     fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss"} else ("DV",)
     if args.case_id == "heal.object-metadata-and-tags":
         fixtures = ("DS",)
+    if args.case_id == "heal.special-keys-and-pagination":
+        fixtures = ("DK",)
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):

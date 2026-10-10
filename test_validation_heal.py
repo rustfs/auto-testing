@@ -22,7 +22,8 @@ from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, vali
     branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract,
     map_inline_target, verify_proof)
 from scripts.validation_heal.versions import seed_semantics, verify_semantics
-from scripts.validation_heal.versions import multi_loss_instances, multi_loss_plan
+from scripts.validation_heal.versions import multi_loss_instances, multi_loss_plan, SPECIAL_KEYS, verify_pagination
+from scripts.validation_heal.heal_probe import Probe
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract
 
 
@@ -389,6 +390,43 @@ class HealShardOracleTest(unittest.TestCase):
 
 
 class HealVersionOracleTest(unittest.TestCase):
+    def test_explicit_small_list_pages_preserve_distinct_special_keys(self):
+        bucket = "rv-heal-pages-unit"
+        keys = [*SPECIAL_KEYS, *(f"pages/{index:04d}.bin" for index in range(257))]
+        for failure in (None, "duplicate-version", "omitted-current", "oversized-page"):
+            calls = []
+            def paginator(operation):
+                def paginate(**params):
+                    calls.append((operation, params))
+                    self.assertEqual(params["PaginationConfig"], {"PageSize": 17})
+                    listed = list(keys)
+                    if failure == "duplicate-version" and operation == "list_object_versions": listed[-1] = listed[0]
+                    if failure == "omitted-current" and operation == "list_objects_v2": listed.pop()
+                    width = 18 if failure == "oversized-page" else 17
+                    for start in range(0, len(listed), width):
+                        page = listed[start:start + width]
+                        yield {"Versions": [{"Key": key, "VersionId": "null", "IsLatest": True} for key in page]} \
+                            if operation == "list_object_versions" else {"Contents": [{"Key": key, "Size": 1, "ETag": key} for key in page]}
+                return types.SimpleNamespace(paginate=paginate)
+            def s3(operation, params):
+                if operation == "get_object":
+                    return {"acknowledged": True, "response": {"ETag": params["Key"]}, "payload": {"size": 1, "sha256": "digest"}}
+                return {"acknowledged": True, "response": {}}
+            probe = Probe.__new__(Probe)
+            probe.binding = {"bucketPrefix": bucket, "maxInventoryObjects": 512, "maxInventoryBytes": 512}
+            probe.s3_client = lambda: types.SimpleNamespace(get_paginator=paginator)
+            probe.s3 = s3
+            if failure:
+                with self.subTest(failure=failure), self.assertRaises(ValueError):
+                    probe.inventory(bucket, unversioned_current_tags=True, page_size=17)
+            else:
+                observed = probe.inventory(bucket, unversioned_current_tags=True, page_size=17)
+                proof = verify_pagination(observed)
+                self.assertEqual(proof["acknowledgedObjects"], 265)
+                self.assertEqual(proof["currentPages"], 16)
+                self.assertEqual(proof["versionPages"], 16)
+                self.assertEqual({entry["key"] for entry in observed["entries"]}, set(keys))
+
     def test_multi_loss_covers_every_actual_loss_count_and_role_composition(self):
         cohort = {"logical": {"erasure": {"data_blocks": 12, "parity_blocks": 4}}, "cohort": list(range(16))}
         expected = [{"key": "object", "versionId": "old", "deleteMarker": False}]
