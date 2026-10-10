@@ -238,6 +238,10 @@ suite_exit() {
   if [ "${CASE_ACTIVE:-0}" -eq 1 ] && declare -F case_cleanup >/dev/null 2>&1; then
     case_cleanup "signal-or-exit" >> "${TEST_TMP}/test.out" 2>&1 || true
   fi
+  if [ "${VALIDATION_ENV_ACTIVE:-0}" -eq 1 ]; then
+    VALIDATION_ENV_ACTIVE=0
+    env_teardown "${CURRENT_TOPOLOGY}" || exit_code=1
+  fi
   if finish_log_capture "${exit_code}"; then
     exit_code=0
   else
@@ -371,6 +375,7 @@ VALIDATION_ARTIFACTS_DIR=""
 VALIDATION_CANDIDATE_MANIFEST=""
 VALIDATION_TESTING_COMMIT=""
 VALIDATION_BINARY_SHA256=""
+VALIDATION_ENV_ACTIVE=0
 
 # ==================== Helpers ====================
 
@@ -1120,14 +1125,15 @@ EOF
     # Create the warm-tier bucket on the target instance.
     aws_target_run s3api create-bucket --bucket "${TIER_BUCKET}" \
       || die "failed to create unique warm-tier bucket ${TIER_BUCKET}: ${AWS_OUT}"
-    receiver_start
-    mqtt_start
-    # Enable the notify + audit modules via the (API-managed) module switch so
-    # EVT-108 / AUD-107 can toggle them later. Not env-managed.
-    local mbody mcode
-    mbody="$(admin_api PUT /rustfs/admin/v3/module-switches "" '{"notify_enabled":true,"audit_enabled":true}')"; mcode="$(admin_api_code)"
-    [ "${mcode}" = "200" ] || { echo "enable modules -> HTTP ${mcode}: ${mbody}"; die "failed to enable notify/audit modules"; }
-    wait_targets_ready
+    if [ "${VALIDATION_CASE}" != tiering.transition-and-restore ]; then
+      receiver_start
+      mqtt_start
+      # EVT and AUD use the API-managed module switches.
+      local mbody mcode
+      mbody="$(admin_api PUT /rustfs/admin/v3/module-switches "" '{"notify_enabled":true,"audit_enabled":true}')"; mcode="$(admin_api_code)"
+      [ "${mcode}" = "200" ] || { echo "enable modules -> HTTP ${mcode}: ${mbody}"; die "failed to enable notify/audit modules"; }
+      wait_targets_ready
+    fi
     log "rc aliases local/target; warm bucket ${TIER_BUCKET} ready"
   fi
 }
@@ -2974,6 +2980,7 @@ main() {
     log "== topology: ${topo} =="
     if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
       validation_write_result RUNNING "validation case started" PENDING
+      VALIDATION_ENV_ACTIVE=1
     fi
     env_setup "${topo}"
     if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
@@ -2989,7 +2996,10 @@ main() {
     results_summary
     record_topology_result "${topo}"
     local cleanup_status=PASS
-    if [ "${KEEP_ENV}" -eq 0 ]; then env_teardown "${topo}" || cleanup_status=FAIL; fi
+    if [ "${KEEP_ENV}" -eq 0 ]; then
+      VALIDATION_ENV_ACTIVE=0
+      env_teardown "${topo}" || cleanup_status=FAIL
+    fi
     if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
       validation_write_evidence
       if [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then

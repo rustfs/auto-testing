@@ -42,7 +42,7 @@ aws_run() {
       ;;
     get-object)
       MOCK_GET_COUNT=$((MOCK_GET_COUNT + 1))
-      output="${@: -1}"
+      output="${*: -1}"
       if [ "${MOCK_CORRUPT}" -eq 1 ]; then
         printf 'corrupt' > "${output}"
       else
