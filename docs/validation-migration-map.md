@@ -756,3 +756,12 @@ process birth/unit/candidate/environment must remain unchanged, and the fault
 must still exist immediately before the independent manual token. Startup
 reconciliation cannot contribute to the manual proof. Fresh live evidence is
 pending; the original attribution failures remain unchanged.
+
+E04 journal evidence now reads the first bounded page after each exact cursor
+using `journalctl -n +10000` and per-entry journal cursors. Full pages are drained
+in order, with six pages per capture and a hard failure on incomplete or
+nonadvancing windows. Raw pages remain evidence; only source-attribution targets
+are retained in the scanner's in-memory index. The healthy checkpoint starts
+after seed, baseline and the initial physical snapshot, so a fresh complete
+scanner cycle must actually occur in the registered observation window. Earlier
+log-budget failures remain FAIL; this harness change has no live PASS claim.

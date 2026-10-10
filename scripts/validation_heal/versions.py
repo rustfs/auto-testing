@@ -29,7 +29,7 @@ try:
     from .object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
     from .read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
     from .drive_gate import validate_unwritable
-    from .scanner_repair import BRANCHES as SCANNER_BRANCHES, JournalWindow, observe_task as scanner_task
+    from .scanner_repair import BRANCHES as SCANNER_BRANCHES, SOURCE_TARGETS, JournalWindow, observe_task as scanner_task
     from .markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
                           marker_plan, prepare_stale, verify_markers, reveal_current)
     from .stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
@@ -49,7 +49,7 @@ except ImportError:
     from object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
     from read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
     from drive_gate import validate_unwritable
-    from scanner_repair import BRANCHES as SCANNER_BRANCHES, JournalWindow, observe_task as scanner_task
+    from scanner_repair import BRANCHES as SCANNER_BRANCHES, SOURCE_TARGETS, JournalWindow, observe_task as scanner_task
     from markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
                          marker_plan, prepare_stale, verify_markers, reveal_current)
     from stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
@@ -752,7 +752,6 @@ def run_topology(args, topology, nodes, fixture):
         processes = fleet.snapshot("deployed-topology")
         fleet.record("topology-proof", validate_topology(processes, topology))
         scanner = args.case_id == "heal.scanner-cold-object-repair"
-        healthy_window = JournalWindow(fleet, "scanner-healthy") if scanner else None
         if scanner:
             fleet.record("scanner-registered-budget", {"perBranchSeconds": 240, "sourceBranches": list(SCANNER_BRANCHES),
                 "actualProcessConfiguration": {node: value["backgroundConfig"] for node, value in processes.items()},
@@ -799,6 +798,7 @@ def run_topology(args, topology, nodes, fixture):
             fleet.record("semantic-baseline", verify_semantics(public, baseline))
         if scanner:
             healthy_before = fleet.snapshot("scanner-healthy-physical-before")
+            healthy_window = JournalWindow(fleet, "scanner-healthy", event_targets=SOURCE_TARGETS)
             for branch in branches:
                 plan = branch_plan(args.case_id, branch, healthy_before, bucket, expected, fixture)
                 status = scanner_task(probe, fleet, healthy_window, bucket, plan["expected"][0], branch, healthy=True)
@@ -845,7 +845,7 @@ def run_topology(args, topology, nodes, fixture):
                     stale_marker_started = False
                     continue
                 before = fleet.snapshot("physical-before-" + branch, quiescent=True)
-                scanner_window = JournalWindow(fleet, "scanner-fault-" + branch) if scanner else None
+                scanner_window = JournalWindow(fleet, "scanner-fault-" + branch, event_targets=SOURCE_TARGETS) if scanner else None
                 if size_rule:
                     plan = boundary_plan(next(entry for entry in instances if entry["name"] == branch), before, bucket, expected)
                 elif args.case_id == "heal.delete-marker-semantics":

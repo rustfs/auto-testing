@@ -13,6 +13,8 @@ except ImportError:
 
 BRANCHES = ("cold-missing", "cold-bitrot", "scanner-cycle-boundary")
 BUDGET_SECONDS = 240
+SOURCE_TARGETS = {"rustfs::scanner", "rustfs::scanner::folder", "rustfs::heal::channel",
+                  "rustfs::heal::manager", "rustfs::heal::task"}
 
 
 def event_time(event):
@@ -28,8 +30,9 @@ def null_version(value):
 
 
 class JournalWindow:
-    def __init__(self, fleet, label):
+    def __init__(self, fleet, label, *, event_targets=None):
         self.fleet, self.label = fleet, label
+        self.event_targets = event_targets
         self.events = {node: [] for node in fleet.nodes}
         self.cursors = {}
         for node in fleet.nodes:
@@ -39,15 +42,25 @@ class JournalWindow:
 
     def capture(self):
         for node in self.fleet.nodes:
-            observed = self.fleet.record(self.label + "-window", {"node": node,
-                **self.fleet.remote(node, "logs", afterCursor=self.cursors[node])})
-            require(observed.get("complete") is True and observed.get("beforeCursor") == self.cursors[node]
-                    and observed.get("afterCursor"), "journal window lost its checkpoint or completeness")
-            self.cursors[node] = observed["afterCursor"]
-            for line in observed.get("journal", "").splitlines():
-                try: event = json.loads(line)
-                except json.JSONDecodeError: continue
-                if isinstance(event, dict): self.events[node].append(event)
+            for page in range(6):
+                observed = self.fleet.record(self.label + "-window", {"node": node,
+                    **self.fleet.remote(node, "logs", afterCursor=self.cursors[node])})
+                require(observed.get("complete") is True and observed.get("beforeCursor") == self.cursors[node]
+                        and observed.get("afterCursor"), "journal window lost its checkpoint or completeness")
+                require(observed.get("hasMore") is not True or observed["afterCursor"] != self.cursors[node],
+                        "journal pagination did not advance")
+                self.cursors[node] = observed["afterCursor"]
+                for line in observed.get("journal", "").splitlines():
+                    try: event = json.loads(line)
+                    except json.JSONDecodeError: continue
+                    # Raw pages remain in immutable evidence; keep only source
+                    # attribution events in memory, not unrelated debug noise.
+                    if isinstance(event, dict) and (self.event_targets is None
+                            or event.get("target") in self.event_targets):
+                        self.events[node].append(event)
+                if observed.get("hasMore") is not True: break
+            else:
+                raise ValueError("journal window exceeds its page budget; source attribution is incomplete")
             require(len(self.events[node]) <= 60000, "scanner evidence exceeded its registered event budget")
         return self.events
 

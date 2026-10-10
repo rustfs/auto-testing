@@ -590,20 +590,29 @@ def logs(request):
         cursor = request.get("afterCursor")
         require(cursor is None or isinstance(cursor, str) and re.fullmatch(r"[A-Za-z0-9=;_-]{1,512}", cursor),
                 "invalid journal cursor")
-        args = ["journalctl", "-u", owner["unit"], "--no-pager", "-o", "cat", "--show-cursor"]
-        args += ["--after-cursor", cursor, "-n", "10001"] if cursor else ["-n", "1"]
+        args = ["journalctl", "-u", owner["unit"], "--no-pager", "-o", "json",
+                "--output-fields=__CURSOR,MESSAGE"]
+        # +N selects the FIRST N entries after the cursor. A plain -n N
+        # selects the tail and could silently drop the beginning of a window.
+        args += ["--after-cursor", cursor, "-n", "+10000"] if cursor else ["-n", "1"]
         output = command(*args).stdout
-        lines, observed_cursor = [], None
+        lines, observed_cursor, entries = [], None, 0
         for line in output.splitlines():
-            if line.startswith("-- cursor: "):
-                observed_cursor = line[len("-- cursor: "):].strip()
-            else:
-                lines.append(line)
-        require(len(lines) < 10000, "journal window exceeds its bound; source attribution is incomplete")
+            row = json.loads(line)
+            entry_cursor = row.get("__CURSOR")
+            require(isinstance(entry_cursor, str) and re.fullmatch(r"[A-Za-z0-9=;_-]{1,512}", entry_cursor)
+                    and entry_cursor not in {cursor, observed_cursor}, "journal page repeated or omitted its exact entry cursor")
+            message = row.get("MESSAGE")
+            require(isinstance(message, str), "journal message is not complete text")
+            entries += 1
+            require(entries <= 10000, "journal page exceeds its bound; source attribution is incomplete")
+            observed_cursor = entry_cursor
+            lines.append(message)
         require(observed_cursor is not None or cursor is not None and not lines,
                 "journal did not expose a complete cursor window")
         return {"unit": owner["unit"], "journal": "\n".join(lines), "beforeCursor": cursor,
-                "afterCursor": observed_cursor or cursor, "complete": True}
+                "afterCursor": observed_cursor or cursor, "complete": True,
+                "entries": entries, "hasMore": cursor is not None and entries == 10000}
     return {"unit": owner["unit"], "journal": command("journalctl", "-u", owner["unit"], "--no-pager", "-n", "2000").stdout}
 
 

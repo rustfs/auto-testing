@@ -1342,16 +1342,43 @@ class HealScannerSourceTest(unittest.TestCase):
         owner = {"unit": "private.service"}
         with patch("scripts.validation_heal.fleet_node.owned", return_value=(None, None, owner)), \
              patch("scripts.validation_heal.fleet_node.command") as command:
-            command.return_value = types.SimpleNamespace(stdout='{"message":"fresh"}\n-- cursor: s=abc;i=def\n')
+            command.return_value = types.SimpleNamespace(stdout=json.dumps({"MESSAGE": '{"message":"fresh"}',
+                "__CURSOR": "s=abc;i=def"}) + "\n")
             value = node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})
             self.assertTrue(value["complete"])
             self.assertEqual(value["afterCursor"], "s=abc;i=def")
             self.assertIn("--after-cursor", command.call_args.args)
+            self.assertIn("+10000", command.call_args.args)
+            self.assertFalse(value["hasMore"])
             with self.assertRaisesRegex(ValueError, "invalid journal cursor"):
                 node_logs({"runId": "unit", "afterCursor": "invalid\n--help"})
-            command.return_value = types.SimpleNamespace(stdout="row\n" * 10000 + "-- cursor: s=abc;i=def\n")
+            rows = [json.dumps({"MESSAGE": "row", "__CURSOR": f"s=abc;i={index}"}) for index in range(10000)]
+            command.return_value = types.SimpleNamespace(stdout="\n".join(rows))
+            page = node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})
+            self.assertTrue(page["hasMore"])
+            self.assertEqual(page["afterCursor"], "s=abc;i=9999")
+            command.return_value = types.SimpleNamespace(stdout="\n".join(rows + [json.dumps({"MESSAGE": "row", "__CURSOR": "s=abc;i=10000"})]))
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})
+
+    def test_cursor_pagination_keeps_early_attribution_and_does_not_skip_pages(self):
+        events = self.events()
+        observations = [{"complete": True, "afterCursor": "checkpoint"},
+            {"complete": True, "beforeCursor": "checkpoint", "afterCursor": "page-one", "hasMore": True,
+             "journal": json.dumps(events[0])},
+            {"complete": True, "beforeCursor": "page-one", "afterCursor": "page-two", "hasMore": False,
+             "journal": json.dumps(events[1])}]
+        calls = []
+        def remote(node, action, **params):
+            calls.append(params)
+            return observations.pop(0)
+        fleet = types.SimpleNamespace(nodes=["host"], record=lambda label, value: value, remote=remote)
+        window = JournalWindow(fleet, "unit")
+        self.assertEqual(window.capture(), {"host": events[:2]})
+        self.assertEqual(calls[1:], [{"afterCursor": "checkpoint"}, {"afterCursor": "page-one"}])
+        window.fleet.remote = lambda *args, **kwargs: {"complete": True, "beforeCursor": "page-two",
+            "afterCursor": "page-two", "hasMore": True}
+        with self.assertRaisesRegex(ValueError, "did not advance"): window.capture()
 
     def test_scanner_profile_enables_only_scanner_source_and_fixed_deep_timing(self):
         config = runtime_config("scanner")
