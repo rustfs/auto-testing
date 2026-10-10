@@ -131,7 +131,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual"):
-        require(runtime_profile in {"manual", "offline-replay"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "offline-replay", "read-repair"}, "unsupported Heal runtime profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
         self.runtime_profile = runtime_profile
@@ -188,6 +188,7 @@ class Fleet:
         self.wait_ready()
 
     def deploy(self, binary_sha, bucket, access, secret):
+        self.secret_values.update({access, secret})
         checked = {node: self.remote(node, "preflight") for node in self.nodes}
         self.record("preflight", checked)
         require(len({value["hostname"] for value in checked.values()}) == len(self.nodes),

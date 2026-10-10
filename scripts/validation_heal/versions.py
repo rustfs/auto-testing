@@ -27,6 +27,7 @@ try:
     from .boundaries import (BRANCHES as SIZE_BRANCHES, verify_size_contract, boundary_sizes,
                              seed_boundaries, verify_boundary_ranges)
     from .object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
+    from .read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -39,6 +40,7 @@ except ImportError:
     from boundaries import (BRANCHES as SIZE_BRANCHES, verify_size_contract, boundary_sizes,
                             seed_boundaries, verify_boundary_ranges)
     from object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
+    from read_repair import BRANCHES as READ_BRANCHES, tracked_read_task
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -56,6 +58,7 @@ BRANCHES = {
     "heal.object-size-boundaries": SIZE_BRANCHES,
     "heal.object-lock-retention": LOCK_BRANCHES,
     "heal.metadata-payload-mismatch": ("length-mismatch", "payload-mismatch", "insufficient-authority"),
+    "heal.read-repair-attribution": READ_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -499,6 +502,16 @@ def reenable_and_verify(recorder, fleet, bucket, baseline):
 
 def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
     """Plans are derived from ACK order and decoded physical roles, never disk numbers."""
+    if case_id == "heal.read-repair-attribution":
+        key = "objects/0001.bin" if fixture == "DV" else f"objects/{8 + 9 * READ_BRANCHES.index(branch):04d}.bin"
+        data = [entry for entry in expected if entry["key"] == key and not entry["deleteMarker"]]
+        require(len(data) == (3 if fixture == "DV" else 1), "read target lacks its acknowledged version history")
+        require(branch != "historical-version-read" or not data[0]["isLatest"], "historical read selected a current version")
+        target = choose_target(snapshot, bucket, data[0], "data")
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": False, "expected": [data[0]],
+                "faults": [target], "proofs": [target], "requiredRepairs": {version_identity(target)},
+                "metadataRepairs": set(), "kind": "bitflip" if branch == "range-bitrot" else "missing",
+                "offset": 32 if branch == "range-bitrot" else None}
     if case_id == "heal.metadata-payload-mismatch":
         return mismatch_plan(branch, snapshot, bucket, expected)
     if case_id == "heal.object-lock-retention":
@@ -660,7 +673,8 @@ def run_topology(args, topology, nodes, fixture):
     directory = args.evidence / fixture / topology
     directory.mkdir(parents=True)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory)
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory,
+                  runtime_profile="read-repair" if args.case_id == "heal.read-repair-attribution" else "manual")
     candidate = json.loads(args.candidate.read_text())
     tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id in {
@@ -682,6 +696,7 @@ def run_topology(args, topology, nodes, fixture):
     branches = [branch for branch in BRANCHES[args.case_id]
                 if (args.case_id != "heal.repeat-idempotency" or (branch == "versioned-repeat") == (fixture == "DV"))
                 and (args.case_id != "heal.below-read-quorum" or (branch == "r-minus-1-historical") == (fixture == "DV"))
+                and (args.case_id != "heal.read-repair-attribution" or (branch == "historical-version-read") == (fixture == "DV"))
                 and (args.case_id != "heal.missing-or-corrupt-xlmeta" or (branch == "versioned-xlmeta") == (fixture == "DV"))]
     result = {"topology": topology, "fixture": fixture, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, admissions = [], []
@@ -788,8 +803,11 @@ def run_topology(args, topology, nodes, fixture):
                     validate_unrecoverable_get(denied, contract)
                     require(physical_content(prior) == physical_content(fleet.snapshot("physical-after-negative-get")),
                             "negative read widened damage or silently healed below-quorum fragments")
-                status = run_task(probe, fleet, plan["scope"], 2, active,
-                                  option_overrides={"recursive": plan["recursive"]}, admissions=admissions)
+                if args.case_id == "heal.read-repair-attribution":
+                    status = tracked_read_task(probe, fleet, bucket, branch, plan["expected"][0])
+                else:
+                    status = run_task(probe, fleet, plan["scope"], 2, active,
+                                      option_overrides={"recursive": plan["recursive"]}, admissions=admissions)
                 fleet.stop()
                 repaired = fleet.snapshot("physical-after-" + branch, quiescent=True, metadata_faults=metadata_faults)
                 negative_proof = None
@@ -923,7 +941,7 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes), "four current Heal nodes required")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
-    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss"} else ("DV",)
+    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss", "heal.read-repair-attribution"} else ("DV",)
     if args.case_id == "heal.object-metadata-and-tags":
         fixtures = ("DS",)
     if args.case_id == "heal.special-keys-and-pagination":

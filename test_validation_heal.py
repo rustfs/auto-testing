@@ -33,6 +33,7 @@ from scripts.validation_heal.object_lock import (validate_protection, validate_p
     seed_locked, BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, CLEANUP_SECONDS)
 from scripts.validation_heal.versions import mismatch_plan, seed_mismatch
 from scripts.validation_heal import heal_fault
+from scripts.validation_heal.read_repair import source_tasks, validate_read, tracked_read_task, ADMISSION_MESSAGE, ADMISSION_TARGET
 
 
 def versioned_scene(keys, sizes=(100, 100, 61)):
@@ -984,6 +985,92 @@ class HealNodeOutageTest(unittest.TestCase):
             for changed in ({**good, "acknowledged": True}, {**good, "resultUnknown": True}, {**good, "payload": {}},
                             {**good, "response": {"ResponseMetadata": {"HTTPStatusCode": 403}, "Error": {"Code": "AccessDenied"}}}):
                 with self.subTest(version=version), self.assertRaises(ValueError): validate_deleted_read(changed, version)
+
+
+class HealReadRepairTest(unittest.TestCase):
+    def event(self, **changes):
+        return {"level": "DEBUG", "target": ADMISSION_TARGET, "message": ADMISSION_MESSAGE,
+                "bucket": "rv-heal-read-unit", "object": "target.bin", "part_number": 1,
+                "pool_index": 0, "set_index": 0, "request_id": "automatic-task", "admission": "accepted", **changes}
+
+    def test_source_requires_structured_exact_scope_and_new_task_identity(self):
+        event = self.event()
+        self.assertEqual(source_tasks({"node1": {"journal": "journal-prefix " + json.dumps(event)}}, event["bucket"], event["object"]),
+                         {("node1", "automatic-task")})
+        for changed in ({**event, "target": "unrelated"}, {**event, "bucket": "another-bucket"},
+                        {**event, "object": "other-version-key"}, {**event, "message": "Read-repair heal request not admitted"}):
+            self.assertFalse(source_tasks({"node1": {"journal": json.dumps(changed)}}, event["bucket"], event["object"]))
+        self.assertFalse(source_tasks({"node1": {"journal": str(event)}}, event["bucket"], event["object"]))
+        for name, value in (("admission", "merged"), ("pool_index", 1), ("set_index", True), ("part_number", 2), ("request_id", "")):
+            with self.subTest(field=name), self.assertRaises(ValueError):
+                source_tasks({"node1": {"journal": json.dumps({**event, name: value})}}, event["bucket"], event["object"])
+
+    def test_read_bytes_version_and_server_request_id_are_required(self):
+        entry = {"versionId": "historical", "payload": {"size": 3, "sha256": hashlib.sha256(b"abc").hexdigest()}}
+        good = {"acknowledged": True, "payload": entry["payload"], "response": {"VersionId": "historical",
+                "ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "server-read"}}}
+        self.assertEqual(validate_read(good, entry), "server-read")
+        for invalid in ("version", "bytes", "request-id", "transport", "status"):
+            changed = copy.deepcopy(good)
+            if invalid == "version": changed["response"]["VersionId"] = "latest"
+            elif invalid == "bytes": changed["payload"]["sha256"] = "not-acknowledged"
+            elif invalid == "request-id": changed["response"]["ResponseMetadata"].pop("RequestId")
+            elif invalid == "transport": changed["resultUnknown"] = True
+            else: changed["response"]["ResponseMetadata"]["HTTPStatusCode"] = 206
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError): validate_read(changed, entry)
+        ranged = {**good, "payload": {"size": 2, "sha256": hashlib.sha256(b"bc").hexdigest()},
+                  "response": {**good["response"], "ContentRange": "bytes 1-2/3",
+                               "ResponseMetadata": {"HTTPStatusCode": 206, "RequestId": "server-range"}}}
+        validate_read(ranged, entry, expected_range=(1, 2), body=b"abc")
+        with self.assertRaises(ValueError): validate_read(ranged, entry, expected_range=(0, 1), body=b"abc")
+
+    def execute(self, *, stale_only=False):
+        bucket, key, calls = "rv-heal-read-unit", "target.bin", []
+        entry = {"key": key, "versionId": "historical", "payload": {"size": 3, "sha256": hashlib.sha256(b"abc").hexdigest()}}
+        old = self.event(request_id="old-task")
+        fresh = self.event()
+        logs = [json.dumps(old), json.dumps(old) + ("" if stale_only else "\n" + json.dumps(fresh))]
+        fleet = types.SimpleNamespace(runtime_profile="read-repair", nodes=["host-one"],
+            record=lambda label, value: value, remote=lambda *args: {"journal": logs.pop(0) if logs else json.dumps(old)})
+        def read(operation, params):
+            calls.append((operation, params))
+            return {"acknowledged": True, "payload": entry["payload"], "response": {"VersionId": "historical",
+                    "ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "server-read"}}}
+        def status(path, query, body):
+            calls.append((path, query, body))
+            self.assertEqual(query, [("clientToken", "automatic-task")])
+            self.assertEqual(body, b"")
+            return {"httpStatus": 200, "response": {"summary": "finished", "source-receipt": "validated-by-physical-driver"}}
+        client = types.SimpleNamespace(binding={}, s3=read)
+        observer = types.SimpleNamespace(admin=status)
+        ticks = [0, 1, 181] if stale_only else [0, 1]
+        with patch("scripts.validation_heal.read_repair.Probe", return_value=observer) as factory, \
+             patch("scripts.validation_heal.read_repair.time.monotonic", side_effect=ticks), \
+             patch("scripts.validation_heal.read_repair.time.sleep"):
+            if stale_only:
+                with self.assertRaisesRegex(ValueError, "ATTRIBUTION_NOT_OBSERVED"):
+                    tracked_read_task(client, fleet, bucket, "historical-version-read", entry)
+                factory.assert_not_called()
+            else:
+                self.assertEqual(tracked_read_task(client, fleet, bucket, "historical-version-read", entry)["summary"], "finished")
+                factory.assert_called_once_with({}, "node1")
+        self.assertEqual(sum(call[0] == "get_object" for call in calls), 1)
+        self.assertEqual(calls[0][1], {"Bucket": bucket, "Key": key, "VersionId": "historical"})
+        self.assertTrue(all(len(call) == 2 or call[1] == [("clientToken", "automatic-task")] for call in calls))
+
+    def test_only_one_target_read_and_observation_of_the_fresh_automatic_task(self):
+        self.execute()
+        self.execute(stale_only=True)
+
+    def test_read_profile_keeps_other_repair_sources_disabled(self):
+        profile = runtime_config("read-repair")
+        self.assertEqual(profile.pop("RUSTFS_OBS_LOGGER_LEVEL"), "debug")
+        self.assertEqual(profile, {key: value for key, value in BACKGROUND_CONFIG.items() if key != "RUSTFS_OBS_LOGGER_LEVEL"})
+        snapshot, bucket, expected = versioned_scene(["objects/0001.bin"])
+        plan = branch_plan("heal.read-repair-attribution", "historical-version-read", snapshot, bucket, expected, "DV")
+        self.assertEqual(plan["expected"][0]["versionId"], "v0")
+        self.assertFalse(plan["expected"][0]["isLatest"])
+        self.assertEqual(len(plan["expected"]), 1)
 
 
 class HealPayloadMismatchTest(unittest.TestCase):

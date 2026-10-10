@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 99 currently dispatchable IDs include all 74 non-Heal cases and twenty-five Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
+case evidence. The 100 currently dispatchable IDs include all 74 non-Heal cases and twenty-six Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 59 Heal cases remain
+The other 58 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -431,3 +431,20 @@ before rescue. Restored backups certify cleanup only; a later-generation target
 cannot be overwritten. Positive branches require original shard bytes, full
 version metadata/contents/tags, streaming checksums and repaired receipts.
 This executor has local fault/recovery/authority tests and still needs live proof.
+
+E03 `heal.read-repair-attribution` dispatches GET-missing and Range-bitrot DB
+branches plus an exact historical-version DV read on H1/H2. Its explicit
+profile leaves scanner, automatic rebuild and best-effort MRF ingress off,
+while enabling candidate JSON debug events; the candidate's durable consumer
+stays initialized independently of that ingress switch. Before each single
+GET/Range the exact fault remains physically present. Correct bytes, exact
+version/ContentRange and a server request ID are required. A new structured
+`Read-repair heal request admitted` event must match bucket/key/part/pool/set
+and accepted task ID; stale events, text mentions, merges and ambiguous tasks
+cannot prove attribution. Only status queries observe that automatic task;
+no Admin start/deep verifier repairs the fixture. The task's exact version
+receipt, physical original shard hashes, streaming checksums and full public
+S3/version controls must all agree. Runtime credentials are redacted from
+archived debug journals. Focused tests cover source identity, stale-task
+refusal, single-read/no-mutation dispatch, exact content/range/request identity
+and runtime profile isolation. Full live proof remains pending.

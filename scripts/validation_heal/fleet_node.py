@@ -24,12 +24,14 @@ STATE_ROOT = Path("/var/lib/rustfs-auto-testing/heal")
 RUN_PATTERN = re.compile(r"gh-[1-9][0-9]*-[1-9][0-9]*-(?:h1|h2)")
 BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "true",
                      "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "false", "RUSTFS_HEAL_MRF_ENABLE": "false",
-                     "RUSTFS_SHARD_INTEGRITY_WRITE": "true", "RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED": "true"}
+                     "RUSTFS_SHARD_INTEGRITY_WRITE": "true", "RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED": "true",
+                     "RUSTFS_OBS_LOGGER_LEVEL": "info"}
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay"}, "unsupported Heal runtime profile")
-    return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "offline-replay" else "false"}
+    require(profile in {"manual", "offline-replay", "read-repair"}, "unsupported Heal runtime profile")
+    return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "offline-replay" else "false",
+            "RUSTFS_OBS_LOGGER_LEVEL": "debug" if profile == "read-repair" else "info"}
 
 
 def require(condition, message):
@@ -150,7 +152,7 @@ def reserve(request):
     require(digest(state / "rustfs") == binary_sha, "copied candidate binary differs")
     config = {**background, "RUSTFS_ACCESS_KEY": request["access"], "RUSTFS_SECRET_KEY": request["secret"],
               "RUSTFS_ADDRESS": ":9000", "RUSTFS_CONSOLE_ENABLE": "false",
-              "RUSTFS_HEAL_TASK_TIMEOUT_SECS": "300", "RUSTFS_OBS_LOGGER_LEVEL": "info"}
+              "RUSTFS_HEAL_TASK_TIMEOUT_SECS": "300"}
     env_file = state / "service.env"
     descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as stream:
