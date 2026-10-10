@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 106 currently dispatchable IDs include all 74 non-Heal cases and thirty-two Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 107 currently dispatchable IDs include all 74 non-Heal cases and thirty-three Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 52 Heal cases remain
+The other 51 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -566,3 +566,24 @@ cancelled outcome. Full streaming/physical and all-peer S3 verification happens
 before backup rescue. All four source branches remain explicit. Local
 cancellation/counter/quiet-physical/token/error negatives passed; full live
 proof remains pending.
+
+
+F06 `heal.cancelled-task-restart` extends the same real partial cancellation
+and write-quiescence proof with a graceful restart of every original H1/H2
+unit. A read-only node action accepts only a canonical admitted task UUID and
+three exact candidate journal names under the private run roots; it records
+all four drives on every node, bounds terminal/intent to 64KiB and report to
+8MiB, and rejects links, hardlinks, oversized or changing files. The actual
+cancelled terminal and report need one matching physical owner, exact task and
+prefix scope, no runnable intent anywhere, and the settled partial outcome and
+valid sequence window. It never synthesizes a checkpoint or edits system
+records. After same-root restart, every actual process must be new while its
+unit/candidate/formats/objects remain original, all peers must be idle, old
+status must still be cancelled, and the exact original journal bytes must be
+preserved. A fresh forceStart task remains independent under old STATUS/STOP
+and repairs only the remaining witnessed defects. Full physical/streaming/S3
+proof remains mandatory. A06 also now preserves both its initial cancellation
+and allowed monotonic in-flight report refinement before freezing the report
+after actual drain; later quiet/restart/new-task checks cannot rewrite it.
+Local journal-owner/schema/scope/cursor/read-boundary negatives passed; full
+live evidence remains pending.

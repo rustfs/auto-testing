@@ -17,6 +17,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import uuid
 
 
 MOUNTS = tuple(Path(f"/data/rustfs{index}") for index in range(1, 5))
@@ -486,11 +487,52 @@ def audit_finalize(request):
             "backupRestorationUsed": False, "productRepairClaimed": False}
 
 
+def task_records(request):
+    """Read three exact Admin journal names; never mutate system metadata."""
+    state, roots, owner = owned(request["runId"])
+    token = request.get("taskId")
+    require(isinstance(token, str) and str(uuid.UUID(token)) == token, "noncanonical Admin journal task ID")
+    require(digest(state / "rustfs") == owner["binarySha256"], "journal candidate changed")
+    if request.get("quiescent") is True:
+        stopped(owner)
+    else:
+        pid = int(command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"]).stdout.strip() or "0")
+        require(pid > 0 and Path(f"/proc/{pid}/exe").resolve(strict=True) == state / "rustfs", "journal service is not run-owned")
+    records = []
+    for disk, root in enumerate(roots):
+        data = root / "data"
+        for kind, prefix, limit in (("intent", "root-heal-", 64 * 1024),
+                                    ("terminal", "terminal-root-heal-", 64 * 1024),
+                                    ("report", "heal-terminal-report-", 8 * 1024**2)):
+            relative = ".rustfs.sys/" + prefix + token + ".json"
+            path = checked(data / relative, data)
+            entry = {"disk": disk, "kind": kind, "relativePath": relative, "present": False}
+            try:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                records.append(entry)
+                continue
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= limit,
+                        "Admin journal exceeds its exact regular-file budget")
+                raw = stream.read(limit + 1)
+                after = os.fstat(stream.fileno())
+                require(len(raw) == info.st_size and len(raw) <= limit
+                        and all(getattr(after, name) == getattr(info, name) for name in
+                                ("st_ino", "st_dev", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink")),
+                        "Admin journal changed during its bounded read")
+            entry.update(present=True, size=len(raw), sha256=hashlib.sha256(raw).hexdigest(), value=json.loads(raw))
+            records.append(entry)
+    return {"taskId": token, "binarySha256": owner["binarySha256"], "readOnly": True, "records": records}
+
+
 def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
                "logs": logs, "cleanup": cleanup, "audit-finalize": audit_finalize, "install-inspector": install_inspector,
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part, "verify-parts": verify_parts,
                "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe}
+    actions["task-records"] = task_records
     require(request.get("action") in actions, "unsupported node operation")
     print(json.dumps(actions[request["action"]](request)))

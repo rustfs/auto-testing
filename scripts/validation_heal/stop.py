@@ -44,8 +44,9 @@ def status(probe, fleet, path, token, label):
     return observed["response"]
 
 
-def start(probe, fleet, path, active):
-    observed = fleet.record("trigger", probe.admin(path, [], json.dumps({**BASE_OPTIONS, "recursive": True}).encode()))
+def start(probe, fleet, path, active, *, force=False):
+    observed = fleet.record("trigger", probe.admin(path, [("forceStart", "true")] if force else [],
+        json.dumps({**BASE_OPTIONS, "recursive": True}).encode()))
     require(observed.get("httpStatus") == 200 and isinstance(observed.get("response"), dict), "DX task admission failed")
     token = observed["response"].get("clientToken")
     require(isinstance(token, str) and token, "DX task omitted its admitted token")
@@ -181,7 +182,7 @@ def idle_fleet(fleet, binding):
         time.sleep(0.1)
 
 
-def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, original):
+def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, original, after_cancelled=None, force_new=False):
     path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/objects/"
     fleet.record("frozen-cancel-policy", POLICY)
     old = start(probe, fleet, path, active)
@@ -190,7 +191,16 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     require(stop_ack.get("httpStatus") == 200 and stop_ack.get("response", {}).get("summary") == "stopped",
             "active cancellation did not follow the frozen acknowledgement contract")
     cancelled = status(probe, fleet, path, old, "cancelled-outcome")
+    initial_cancellation = validate_cancelled(cancelled, bucket, expected, targets)
+    idle_fleet(fleet, binding)
+    cancelled = status(probe, fleet, path, old, "cancelled-after-drain")
     cancellation = validate_cancelled(cancelled, bucket, expected, targets)
+    require(cancellation["bucketIncarnationId"] == initial_cancellation["bucketIncarnationId"]
+            and all(cancellation["canonicalCounters"][name] >= initial_cancellation["canonicalCounters"][name]
+                    for name in ("processed", "healed", "unchanged", "skipped")),
+            "in-flight cancellation refinement changed identity or moved counters backwards")
+    fleet.record("cancelled-settlement", {"initial": initial_cancellation, "afterActualDrain": cancellation,
+        "earlierObservationsPreserved": True, "reason": "candidate refines cancelled reports while retiring in-flight workers"})
     # Keep the actual service alive. An ACK or stopping its process would mask
     # writes that escaped task cancellation.
     quiet = []
@@ -216,7 +226,8 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     active.remove((path, old))
     repeated = fleet.record("repeat-stop", probe.admin(path, [("clientToken", old), ("forceStop", "true")], b""))
     repeated_proof = validate_retired_stop(repeated, old)
-    new = start(probe, fleet, path, active)
+    restart_proof = after_cancelled(path, old, cancelled, quiet[-1]) if after_cancelled is not None else None
+    new = start(probe, fleet, path, active, force=force_new)
     require(new != old, "new task reused a cancelled token")
     before = wait_partial(probe, fleet, path, new, remaining, repair_required=False)
     old_status = status(probe, fleet, path, old, "old-status-during-new")
@@ -246,7 +257,7 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
     final_exit = idle_fleet(fleet, binding)
     return {"stop-active": {"verdict": "PASS", "activeWindow": first["outcome"]["counters"],
                 "cancelled": cancellation, "physicalQuietProof": physical, "liveQuietSamples": 3, "betweenSamplesSeconds": QUIET_SECONDS,
-                "sameLiveProcesses": True, "allPeerIdleProofs": exit_proofs},
+                "sameLiveProcesses": True, "allPeerIdleProofs": exit_proofs, "restartProof": restart_proof},
             "repeat-stop": {"verdict": "PASS", **repeated_proof},
             "old-status": {"verdict": "PASS", "oldTaskId": old, "originalPartialOutcomePreserved": True},
             "old-stop-new-task": {"verdict": "PASS", "oldTaskId": old, "newTaskId": new,

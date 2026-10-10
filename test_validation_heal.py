@@ -48,6 +48,8 @@ from scripts.validation_heal.cursor import (Window, OBJECTS as CURSOR_OBJECTS, S
 from scripts.validation_heal.fleet_node import resource_limits, verify_parts as node_verify_parts
 from scripts.validation_heal.stop import (partial_window, validate_retired_stop, validate_cancelled,
     cancelled_physical, idle_fleet as stop_idle_fleet, BRANCHES as STOP_BRANCHES)
+from scripts.validation_heal.cancel_restart import validate_journal, BRANCHES as CANCEL_RESTART_BRANCHES
+from scripts.validation_heal.fleet_node import task_records as node_task_records
 import errno
 import stat
 
@@ -2039,6 +2041,72 @@ class HealStopOracleTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "partial fleet"):
                 stop_idle_fleet(fleet, binding)
         self.assertEqual(client.admin.call_count, 1)
+
+
+class HealCancelledRestartOracleTest(unittest.TestCase):
+    token = "12345678-1234-1234-1234-123456789abc"
+
+    def journal(self):
+        status, _ = HealStopOracleTest().cancelled()
+        terminal = {"schema": 1, "task_id": self.token, "status": "Cancelled",
+            "heal_type": {"type": "prefix", "bucket": HealCursorOracleTest.bucket, "prefix": "objects/"}}
+        report = {"schema": 1, "terminal": terminal, "outcome": status["outcome"], "min_seq": 1, "next_seq": 2,
+            "seqed_items": [[1, {"bucket": HealCursorOracleTest.bucket, "object": "objects/0000.bin"}]]}
+        records = [{"disk": disk, "kind": kind, "present": disk == 0 and kind != "intent",
+            **({"value": terminal if kind == "terminal" else report, "sha256": "original", "size": 100}
+               if disk == 0 and kind != "intent" else {})} for disk in range(4) for kind in ("intent", "terminal", "report")]
+        return {"node1": {"taskId": self.token, "readOnly": True, "records": records}}, status
+
+    def test_actual_cancelled_journal_rejects_runnable_duplicate_or_wrong_epoch_records(self):
+        observed, status = self.journal()
+        self.assertTrue(validate_journal(observed, self.token, HealCursorOracleTest.bucket, status)["runnableIntentAbsentOnEveryDrive"])
+        for kind in ("intent", "duplicate", "scope", "status", "schema", "identity", "outcome", "cursor", "owner", "missing"):
+            changed = copy.deepcopy(observed)
+            records = changed["node1"]["records"]
+            terminal, report = records[1]["value"], records[2]["value"]
+            if kind == "intent": records[0]["present"] = True
+            if kind == "duplicate": records[4].update(present=True, value=terminal)
+            if kind == "scope": terminal["heal_type"]["bucket"] = "unowned"
+            if kind == "status": terminal["status"] = "Completed"
+            if kind == "schema": terminal["schema"] = True
+            if kind == "identity": terminal["task_id"] = "another-task"
+            if kind == "outcome": report["outcome"]["counters"]["healed"] += 1
+            if kind == "cursor": report["seqed_items"][0][0] = report["next_seq"]
+            if kind == "owner": records[2]["disk"] = 1
+            if kind == "missing": records[2]["present"] = False
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                validate_journal(changed, self.token, HealCursorOracleTest.bucket, status)
+
+    def test_node_reader_is_read_only_and_only_accepts_exact_task_filenames(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            state = root / "state"
+            state.mkdir()
+            (state / "rustfs").write_bytes(b"candidate")
+            roots = [root / f"disk{disk}" for disk in range(4)]
+            for disk in roots: (disk / "data/.rustfs.sys").mkdir(parents=True)
+            system = roots[0] / "data/.rustfs.sys"
+            terminal = system / f"terminal-root-heal-{self.token}.json"
+            terminal.write_text('{"task_id":"' + self.token + '"}')
+            unrelated = system / "terminal-root-heal-unrelated.json"
+            unrelated.write_text('{"unrelated":"must not enter evidence"}')
+            owner = {"binarySha256": hashlib.sha256(b"candidate").hexdigest()}
+            with patch("scripts.validation_heal.fleet_node.owned", return_value=(state, roots, owner)), \
+                 patch("scripts.validation_heal.fleet_node.stopped"):
+                observed = node_task_records({"runId": "run", "taskId": self.token, "quiescent": True})
+                self.assertTrue(observed["readOnly"])
+                self.assertEqual(len(observed["records"]), 12)
+                self.assertEqual(sum(entry["present"] for entry in observed["records"]), 1)
+                self.assertNotIn("must not enter evidence", json.dumps(observed))
+                self.assertEqual(terminal.read_text(), '{"task_id":"' + self.token + '"}')
+                for invalid in ("../other", self.token.upper(), "not-a-uuid"):
+                    with self.assertRaises(ValueError): node_task_records({"runId": "run", "taskId": invalid, "quiescent": True})
+                terminal.unlink()
+                terminal.symlink_to(unrelated)
+                with self.assertRaises(ValueError): node_task_records({"runId": "run", "taskId": self.token, "quiescent": True})
+
+    def test_restart_preserves_every_source_branch(self):
+        self.assertEqual(list(CANCEL_RESTART_BRANCHES), select("F06")[0]["variants"])
 
 
 if __name__ == "__main__":
