@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 88 currently dispatchable IDs include all 74 non-Heal cases and fourteen Heal cases. Thirty-seven have live PASS evidence; the other 121 have no live PASS claim.
+case evidence. The 89 currently dispatchable IDs include all 74 non-Heal cases and fifteen Heal cases. Thirty-seven have live PASS evidence; the other 121 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -159,8 +159,14 @@ restarts the same run-owned units for the process branch. The versioned branch
 removes a whole xl.meta with three data versions and a marker; first repair may
 attribute all identities or a mixture of repaired and positive health, while
 repeat permits zero repairs and mode-specific health only. Counters must agree
-with the complete receipt set. These two executors still require live evidence.
-The other 70 Heal cases remain
+with the complete receipt set. D05 `heal.versioning-suspended-null` now uses real
+S3 versioning suspension, consecutive null overwrites and acknowledged null
+marker creation/deletion. It faults a live null data/parity part or an entire
+xl.meta containing the current null marker and historical versions, verifies
+every exact identity, then re-enables versioning and checks a new non-null
+version plus the unchanged original version set. These three executors still
+require live evidence.
+The other 69 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.

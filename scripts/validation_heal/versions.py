@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -36,6 +37,7 @@ BRANCHES = {
     "heal.historical-versions": ("old-version-part", "current-version-part",
                                  "recursive-all-versions", "multiple-version-targets"),
     "heal.repeat-idempotency": ("normal-repeat", "deep-repeat", "repeat-after-restart", "versioned-repeat"),
+    "heal.versioning-suspended-null": ("enabled-to-suspended", "null-overwrite", "null-delete-marker"),
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 
@@ -106,6 +108,65 @@ def metadata_target(snapshot, part_target):
     return {**part_target, "relativePath": relative, "sha256": entry["sha256"], "size": entry["size"]}
 
 
+def suspend_fixture(recorder, bucket, historical):
+    expected = copy.deepcopy(historical)
+    recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Suspended"}})
+    require(recorder.call("get_bucket_versioning", {"Bucket": bucket}).get("Status") == "Suspended",
+            "versioning suspension was not persisted")
+    for key in sorted({entry["key"] for entry in historical}):
+        body = payload(f"{bucket}/{key}/3", VERSION_SIZE)
+        params = {"Bucket": bucket, "Key": key, "ContentType": "application/octet-stream",
+                  "Metadata": {"heal-fixture": "suspended-null"}, "Tagging": "suite=heal&fixture=DV"}
+        for content in (payload(f"{bucket}/{key}/superseded-null", VERSION_SIZE), body):
+            response = recorder.call("put_object", params, content)
+            require(response.get("VersionId", "null") == "null", "suspended PUT created a non-null version")
+        # Create/delete one null marker on every key, then rebuild the live null
+        # value. This witnesses actual suspended overwrite and deletion ACKs;
+        # it does not invent history by editing xl.meta.
+        marker = recorder.call("delete_object", {"Bucket": bucket, "Key": key})
+        require(marker.get("DeleteMarker") is True and marker.get("VersionId", "null") == "null",
+                "suspended delete did not acknowledge a null marker")
+        deleted = recorder.call("delete_object", {"Bucket": bucket, "Key": key, "VersionId": "null"})
+        require(deleted.get("DeleteMarker") is True and deleted.get("VersionId", "null") == "null",
+                "precise null-marker removal was not acknowledged")
+        response = recorder.call("put_object", params, body)
+        require(response.get("VersionId", "null") == "null", "suspended overwrite changed null identity")
+        for entry in expected:
+            if entry["key"] == key:
+                entry["isLatest"] = False
+        null_entry = {"key": key, "versionId": "null", "deleteMarker": False, "isLatest": True,
+                      "payload": {"sha256": hashlib.sha256(body).hexdigest(), "size": len(body)}}
+        if key == "objects/0002.bin":
+            marker = recorder.call("delete_object", {"Bucket": bucket, "Key": key})
+            require(marker.get("DeleteMarker") is True and marker.get("VersionId", "null") == "null",
+                    "final suspended delete lacks the exact null marker")
+            null_entry = {"key": key, "versionId": "null", "deleteMarker": True, "isLatest": True}
+        expected.append(null_entry)
+    return expected
+
+
+def reenable_and_verify(recorder, fleet, bucket, baseline):
+    recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})
+    require(recorder.call("get_bucket_versioning", {"Bucket": bucket}).get("Status") == "Enabled",
+            "versioning was not re-enabled after null repair")
+    key = "objects/re-enabled.bin"
+    body = payload(f"{bucket}/{key}/0", VERSION_SIZE)
+    put = recorder.call("put_object", {"Bucket": bucket, "Key": key}, body)
+    require(put.get("VersionId") not in {None, "null"}, "re-enabled versioning did not create a real new version")
+    current = fleet.record("re-enabled-s3", recorder.probe.inventory(bucket))
+    new_entries = [entry for entry in current["entries"] if entry["key"] == key]
+    require(len(new_entries) == 1 and new_entries[0]["versionId"] == put["VersionId"]
+            and new_entries[0]["payload"] == {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+            and new_entries[0]["isLatest"] is True and not new_entries[0]["deleteMarker"],
+            "re-enabled version identity or independent payload differs")
+    # The inventory's current listing also contains the new key. Compare
+    # original entries directly, and require one exact additional entry.
+    require(len(current["entries"]) == len(baseline["entries"]) + 1
+            and [entry for entry in current["entries"] if entry["key"] != key] == baseline["entries"],
+            "re-enabling versioning changed prior null, historical or marker identities/content")
+    return {"reenabled": True, "newVersionId": put["VersionId"], "allOriginalVersionsStillAddressable": True}
+
+
 def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
     """Plans are derived from ACK order and decoded physical roles, never disk numbers."""
     branch_index = BRANCHES[case_id].index(branch)
@@ -114,6 +175,24 @@ def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
         key = "objects/0000.bin"
     selected = [entry for entry in expected if entry["key"] == key]
     data = [entry for entry in selected if not entry["deleteMarker"]]
+    if case_id == "heal.versioning-suspended-null":
+        historical = [entry for entry in data if entry["versionId"] != "null"]
+        require(len(historical) == 3, "suspended fixture lost enabled-period historical versions")
+        if branch == "null-delete-marker":
+            old = choose_target(snapshot, bucket, historical[0], "data")
+            proofs = [choose_target(snapshot, bucket, entry, "data") for entry in historical]
+            proofs = [{**item, **next(shard for shard in item["cohort"]
+                       if (shard["node"], shard["disk"]) == (old["node"], old["disk"]))} for item in proofs]
+            require(any(entry["versionId"] == "null" and entry["deleteMarker"] and entry["isLatest"]
+                        for entry in selected), "null-marker branch lacks its current marker")
+            faults, required, metadata_keys = [metadata_target(snapshot, old)], set(), {key}
+        else:
+            null = next((entry for entry in data if entry["versionId"] == "null" and entry["isLatest"]), None)
+            require(null is not None, "suspended fixture lost its live null identity")
+            target = choose_target(snapshot, bucket, null, "data" if branch_index == 0 else "parity")
+            faults, proofs, required, metadata_keys = [target], [target], {version_identity(null)}, set()
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": True, "expected": selected,
+                "faults": faults, "proofs": proofs, "requiredRepairs": required, "metadataRepairs": metadata_keys}
     require(len(data) == (3 if fixture == "DV" else 1), "branch is missing its distinct acknowledged payload versions")
     old = choose_target(snapshot, bucket, data[0], "data")
     if case_id == "heal.repeat-idempotency":
@@ -200,8 +279,11 @@ def run_topology(args, topology, nodes, fixture):
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
-        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture,
+        recorder = Recorder(probe, directory / "fixture")
+        expected = seed(recorder, bucket, fixture,
                         4 if fixture == "DV" else 128, [VERSION_SIZE] if fixture == "DV" else SIZES)
+        if args.case_id == "heal.versioning-suspended-null":
+            expected = suspend_fixture(recorder, bucket, expected)
         baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         for branch in branches:
@@ -301,6 +383,8 @@ def run_topology(args, topology, nodes, fixture):
                     raise
         result["verdict"] = "PASS" if len(result["branches"]) == len(branches) and all(
             item["verdict"] == "PASS" for item in result["branches"].values()) else "FAIL"
+        if args.case_id == "heal.versioning-suspended-null" and result["verdict"] == "PASS":
+            result["reenable"] = reenable_and_verify(recorder, fleet, bucket, baseline)
     except (Exception, KeyboardInterrupt) as exc:
         result.update(verdict="FAIL", failure={"type": type(exc).__name__, "message": str(exc)})
     finally:
@@ -332,7 +416,7 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes), "four current Heal nodes required")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
-    fixtures = ("DV",) if args.case_id == "heal.historical-versions" else ("DB", "DV")
+    fixtures = ("DB", "DV") if args.case_id == "heal.repeat-idempotency" else ("DV",)
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):

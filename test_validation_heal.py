@@ -16,7 +16,7 @@ from scripts.validation_heal.inspector import verify as verify_inspector
 from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
 from scripts.validation_heal.shards import validate_conditional_response
-from scripts.validation_heal.versions import BRANCHES as VERSION_BRANCHES, validate_version_receipts, branch_plan
+from scripts.validation_heal.versions import BRANCHES as VERSION_BRANCHES, validate_version_receipts, branch_plan, suspend_fixture
 
 
 class HealContractTest(unittest.TestCase):
@@ -344,6 +344,37 @@ class HealShardOracleTest(unittest.TestCase):
 
 
 class HealVersionOracleTest(unittest.TestCase):
+    def test_suspended_null_fixture_retains_historical_identities_and_requires_real_marker_acks(self):
+        historical = [{"key": f"objects/{index:04d}.bin", "versionId": f"history-{index}-{version}",
+                       "deleteMarker": False, "isLatest": version == 2}
+                      for index in range(3) for version in range(3)]
+        calls = []
+        def invoke(operation, params, body=None):
+            calls.append((operation, copy.deepcopy(params)))
+            if operation == "get_bucket_versioning": return {"Status": "Suspended"}
+            if operation == "put_object": return {"VersionId": "null"}
+            if operation == "delete_object": return {"VersionId": "null", "DeleteMarker": True}
+            return {}
+        recorder = types.SimpleNamespace(call=invoke)
+        expected = suspend_fixture(recorder, "fixture", historical)
+        self.assertEqual(len(expected), 12)
+        self.assertEqual({item["versionId"] for item in expected if item["versionId"] != "null"},
+                         {item["versionId"] for item in historical})
+        self.assertTrue(all(not item["isLatest"] for item in expected if item["versionId"] != "null"))
+        markers = [item for item in expected if item["deleteMarker"]]
+        self.assertEqual(markers, [{"key": "objects/0002.bin", "versionId": "null", "isLatest": True, "deleteMarker": True}])
+        self.assertEqual(sum(operation == "delete_object" and params.get("VersionId") == "null"
+                             for operation, params in calls), 3)
+        for kind in ("fake-version", "missing-marker"):
+            def invalid(operation, params, body=None):
+                result = invoke(operation, params, body)
+                if kind == "fake-version" and operation == "put_object": result["VersionId"] = "unexpected-new-version"
+                elif kind == "missing-marker" and operation == "delete_object": result["DeleteMarker"] = False
+                return result
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                suspend_fixture(types.SimpleNamespace(call=invalid), "fixture", historical)
+        self.assertTrue(all(item["isLatest"] == (index % 3 == 2) for index, item in enumerate(historical)))
+
     def fixture(self):
         expected = [{"key": "object", "versionId": version, "deleteMarker": version == "marker"}
                     for version in ("old", "middle", "current", "marker")]
