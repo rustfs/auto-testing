@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 124 currently dispatchable IDs include all 74 non-Heal cases and fifty Heal cases. Forty-five have live PASS evidence; the other 113 have no live PASS claim.
+case evidence. The 125 currently dispatchable IDs include all 74 non-Heal cases and fifty-one Heal cases. Forty-five have live PASS evidence; the other 113 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 34 Heal cases remain
+The other 33 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -1036,8 +1036,8 @@ four regression verdicts have their own archive and never increment a fleet or
 canonical-case PASS count. Existing tests assert captured lock events internally;
 the collector does not fabricate emitted barrier logs. Missing critical-point
 fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps.
-The current implementation has 253 focused Heal/catalog checks, including the
-Linux-only D11 ownership/mount/recovery checks. Native compilation and execution
+The current implementation has 274 focused Heal/catalog checks, including the
+Linux-only D11, C09 and D08 ownership/mount/recovery checks. Native compilation and execution
 still require the separate hosted job; local parser checks are not native PASS.
 
 
@@ -1139,3 +1139,39 @@ The collector now uses that explicit 8 MiB bound, records complete byte counts
 and still rejects overflow or Content-Length mismatch. A boundary regression
 covers a complete 8 MiB JSON response, one-byte overflow and truncated bodies.
 No F01 canonical PASS is claimed until a fresh complete rerun.
+
+A06 run `38092515125` retained FAIL/cleanup PASS on both H1/H2 because the
+collector represents signed query pairs as Python tuples in memory and as
+JSON arrays on disk. The exact durable-stop validator incorrectly accepted
+only the latter. It now normalizes either pair representation while retaining
+the exact pair count/order/token, signed POST, empty body, response shape and
+old/new responsibility assertions. Tests reject duplicated tokens and mapping
+queries. All six CI lanes passed at `62d0ca9`; fresh complete A06/F06 runs are
+still required. Earlier FAIL results are preserved.
+
+D08 `heal.encrypted-objects` dispatches SSE-S3, SSE-KMS, SSE-C and encrypted
+historical versions on both H1/H2. It configures one fresh AES-256 static KMS
+key across the run-owned stopped services, passes material through SSH stdin
+and retains it only in a private 0600 file inside each run namespace. Every
+snapshot attests the file/configuration identity and the actual process
+settings, including explicit per-key authorization enforcement. Shared KMS
+resources are not modified and secret material is excluded from evidence.
+
+Each branch independently ACKs sixteen external encrypted objects; the
+versioned branch ACKs three distinct generations per key. It removes a data
+shard and corrupts a parity shard, including historical and current versions,
+then requires a manual deep token with complete exact responsibility. Before
+any decrypted target GET, the original same-role ciphertext hashes/lengths and
+streaming integrity must be reconstructed. An encrypted-only mapper preserves
+the distinct plaintext actualSize and ciphertext part size without relaxing
+the ordinary plaintext mapper. Every peer then verifies the entire plaintext
+ACK/version/tag/property inventory and re-freezes the ciphertext scene.
+
+SSE-C missing/wrong keys must produce the reviewed 400/InvalidRequest refusal.
+SSE-KMS principals have the same working S3 GET rights to an independently
+verified plaintext control, but no decrypt grant or only an unrelated key
+grant; the encrypted GET must return 403/AccessDenied before and after repair.
+SSE-S3 records that its service-managed key has no caller decryption-key
+argument. Failed IAM cleanup retains a DIRTY stopped namespace. Nine targeted
+geometry, authority, version, redaction and Linux file-ownership tests pass;
+D08 still requires fresh complete live evidence and has no live PASS claim.

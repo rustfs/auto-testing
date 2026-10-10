@@ -98,6 +98,13 @@ def files(snapshot):
 
 def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None, latest_required=True,
                multi_set=False, set_index=0):
+    return _map_external_target(snapshot, bucket, key, role, part_number, version_id,
+        preferred_nodes=preferred_nodes, latest_required=latest_required, multi_set=multi_set, set_index=set_index)
+
+
+def _map_external_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None,
+                         latest_required=True, multi_set=False, set_index=0, part_policy=None):
+    """Share set/role authority checks while keeping transformed part policy explicit."""
     require(type(multi_set) is bool and type(set_index) is int and 0 <= set_index < (2 if multi_set else 1),
             "invalid explicit object set mapping")
     validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2", expected_sets=2 if multi_set else 1)
@@ -141,8 +148,12 @@ def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, p
             require(logical is None or logical == logical_entry, "baseline versions or part geometry lack one full-set authority")
             logical = logical_entry
             parts = [part for part in version["parts"] if part["number"] == part_number]
-            require(len(parts) == 1 and parts[0]["size"] == parts[0]["actualSize"] > 0,
-                    "unsupported compressed/encrypted or ambiguous fixture part")
+            require(len(parts) == 1, "ambiguous fixture part")
+            if part_policy is None:
+                require(parts[0]["size"] == parts[0]["actualSize"] > 0,
+                        "unsupported compressed/encrypted or ambiguous fixture part")
+            else:
+                part_policy(version, parts[0])
             relative = f"{bucket}/{key}/{data_dir}/part.{part_number}"
             entry = indexed.get((node, disk, relative))
             require(entry and entry["size"] > 32, "external part is missing from the healthy baseline")

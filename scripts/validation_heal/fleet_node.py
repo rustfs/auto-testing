@@ -407,6 +407,12 @@ def fault_module():
     return heal_fault
 
 
+def encryption_module():
+    if "encryption_runtime" in globals(): return globals()["encryption_runtime"]
+    from . import encryption_runtime
+    return encryption_runtime
+
+
 def gate_module():
     if "gate" in globals(): return globals()["gate"]
     from . import drive_gate
@@ -696,6 +702,8 @@ def snapshot(request):
         require(all(environment.get(key) == value for key, value in expected_config.items()),
                 "bound Heal runtime configuration differs")
     files, formats = [], []
+    encryption = encryption_module().attest(state, owner, checked, digest,
+        None if request.get("quiescent") is True else environment)
     limits = resource_limits(owner.get("resourceProfile", "standard"))
     tool = state / "heal-meta-inspect"
     if owner.get("inspectorSha256"):
@@ -733,7 +741,8 @@ def snapshot(request):
             "storageClassEnvironment": None if request.get("quiescent") is True else {
                 key: environment.get(key) for key in ("RUSTFS_STORAGE_CLASS_INLINE_BLOCK", "RUSTFS_STORAGE_CLASS_STANDARD")},
             "resourceLimits": limits,
-            "files": sorted(files, key=lambda value: (value["disk"], value["path"])), "formats": formats}
+            "files": sorted(files, key=lambda value: (value["disk"], value["path"])), "formats": formats,
+            "encryptionConfigAttestation": encryption}
 
 
 def logs(request):
@@ -808,6 +817,12 @@ def format_schema_fault(request):
                 "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()}))
         fault.checked_owner(fd, owner["runId"])
         return globals()["schema_faults"].install(fd, replacement, owner, request, fault)
+
+
+def configure_encryption(request):
+    state, _, owner = owned(request["runId"])
+    stopped(owner)
+    return encryption_module().configure(state, owner, request, fault_module())
 
 
 def cleanup(request):
@@ -918,6 +933,7 @@ def main(request):
     for action in ("quorum-gate", "quorum-gate-probe"):
         actions[action] = quorum_gate_operation
     actions["format-schema-fault"] = format_schema_fault
+    actions["encryption-configure"] = configure_encryption
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
     actions.update({"process": process, "process-metrics": process_metrics, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})

@@ -83,7 +83,7 @@ def redact(value):
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        for name in ("HEAL_ACCESS_KEY", "HEAL_SECRET_KEY", "HEAL_SESSION_TOKEN", "HEAL_SSE_C_KEY"):
+        for name in ("HEAL_ACCESS_KEY", "HEAL_SECRET_KEY", "HEAL_SESSION_TOKEN", "HEAL_SSE_C_KEY", "HEAL_SSE_C_WRONG_KEY"):
             secret = os.environ.get(name)
             if secret:
                 value = value.replace(secret, "[REDACTED]")
@@ -202,8 +202,8 @@ class Probe:
         validate_s3_request(self.binding, operation, params, allow_governance_bypass=allow_governance_bypass)
         outgoing = dict(params)
         for key in ("SSECustomerKey", "CopySourceSSECustomerKey"):
-            if outgoing.get(key) == "$HEAL_SSE_C_KEY":
-                outgoing[key] = os.environ["HEAL_SSE_C_KEY"]
+            if outgoing.get(key) in {"$HEAL_SSE_C_KEY", "$HEAL_SSE_C_WRONG_KEY"}:
+                outgoing[key] = os.environ[outgoing[key][1:]]
         if body is not None:
             require(operation in {"put_object", "upload_part"}, "body not allowed for this operation")
             outgoing["Body"] = body
@@ -331,13 +331,18 @@ class Probe:
         opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
         return opener.open(outgoing, timeout=30)
 
-    def inventory(self, bucket: str, *, unversioned_current_tags: bool = False, page_size: int | None = None) -> dict:
+    def inventory(self, bucket: str, *, unversioned_current_tags: bool = False, page_size: int | None = None,
+                  object_read_options: dict | None = None) -> dict:
         """Enumerate every version/marker, then hash complete version-addressed GETs.
 
         Only call before injection or after attribution/physical proof: a GET can
         itself trigger read repair. Never use this to watch scanner progress.
         """
         bucket_allowed(self.binding, bucket)
+        read_options = {} if object_read_options is None else object_read_options
+        require(isinstance(read_options, dict) and set(read_options) <= {"SSECustomerAlgorithm", "SSECustomerKey"}
+                and (not read_options or read_options == {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": "$HEAL_SSE_C_KEY"}),
+                "inventory decryption options must use the reviewed in-memory customer-key reference")
         require(page_size is None or type(page_size) is int and 1 <= page_size <= 1000,
                 "invalid explicit inventory page size")
         client, entries, count, byte_count = self.s3_client(), [], 0, 0
@@ -361,7 +366,7 @@ class Probe:
                 count += 1
                 require(count <= self.binding["maxInventoryObjects"], "inventory object budget exceeded")
                 params = {"Bucket": bucket, "Key": version["Key"], "VersionId": version["VersionId"]}
-                result = self.s3("get_object", params)
+                result = self.s3("get_object", {**params, **read_options})
                 require(result["acknowledged"], "version GET failed: " + canonical(result))
                 tag_params = dict(params)
                 if unversioned_current_tags:
@@ -379,7 +384,8 @@ class Probe:
                                 "properties": {key: response[key] for key in (
                                     "ETag", "ContentLength", "ContentType", "ContentEncoding",
                                     "ContentDisposition", "CacheControl", "Metadata", "StorageClass",
-                                    "ServerSideEncryption", "ObjectLockMode", "ObjectLockRetainUntilDate",
+                                    "ServerSideEncryption", "SSEKMSKeyId", "SSECustomerAlgorithm", "SSECustomerKeyMD5",
+                                    "ObjectLockMode", "ObjectLockRetainUntilDate",
                                     "ObjectLockLegalHoldStatus") if key in response},
                                 "tags": sorted(tags["response"].get("TagSet", []), key=lambda item: item["Key"])})
             require(count <= self.binding["maxInventoryObjects"], "inventory object budget exceeded")
