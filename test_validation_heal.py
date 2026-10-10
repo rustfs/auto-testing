@@ -22,9 +22,10 @@ from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, vali
     branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract,
     map_inline_target, verify_proof)
 from scripts.validation_heal.versions import seed_semantics, verify_semantics
-from scripts.validation_heal.versions import multi_loss_instances, multi_loss_plan, SPECIAL_KEYS, verify_pagination
+from scripts.validation_heal.versions import multi_loss_instances, multi_loss_plan, SPECIAL_KEYS, verify_pagination, boundary_plan
 from scripts.validation_heal.heal_probe import Probe
-from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract
+from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract, size_contract
+from scripts.validation_heal.boundaries import verify_size_contract, boundary_sizes, verify_boundary_ranges
 
 
 class HealContractTest(unittest.TestCase):
@@ -390,6 +391,94 @@ class HealShardOracleTest(unittest.TestCase):
 
 
 class HealVersionOracleTest(unittest.TestCase):
+    def test_size_contract_derives_distinct_actual_inline_limits_and_rejects_changed_policy(self):
+        source = {
+            "crates/ecstore/src/config/storageclass.rs": '''pub static DEFAULT_INLINE_BLOCK: usize = 128 * 1024;
+                const DEFAULT_INLINE_OBJECT_BUDGET: usize = 2 * DEFAULT_INLINE_BLOCK;
+                pub fn should_inline(&self, shard_size: i64, data_shards: usize, versioned: bool) -> bool {
+                    if shard_size < 0 || data_shards == 0 { return false; }
+                    let shard_size = shard_size as usize; let inline_block = self.effective_inline_block(data_shards);
+                    if versioned { shard_size <= inline_block / 8 } else { shard_size <= inline_block }
+                }
+                pub(crate) fn effective_inline_block(&self, data_shards: usize) -> usize {
+                    if data_shards == 0 { return 0; }
+                    if self.initialized && self.inline_block_explicit { self.inline_block }
+                    else { DEFAULT_INLINE_OBJECT_BUDGET.div_ceil(data_shards).min(DEFAULT_INLINE_BLOCK) }
+                }''',
+            "crates/ecstore/src/set_disk/mod.rs": '''fn inline_admission_shard_size(erasure: &coding::Erasure, stored_size: i64, actual_size: i64) -> i64 {
+                if stored_size >= 0 { return erasure.shard_file_size(stored_size); } actual_size }''',
+            "crates/ecstore/src/set_disk/ops/object.rs": '''let is_inline_buffer = storage_class_config.should_inline(
+                inline_admission_shard_size(&erasure, put_object_size, data.actual_size()), erasure.data_shards, opts.versioned,
+                ) && usize::try_from(inline_admission_size).is_ok_and(|size| size <= erasure.block_size);''',
+            "crates/ecstore/src/erasure/coding/erasure.rs": '''pub fn calc_shard_size(block_size: usize, data_shards: usize) -> usize {
+                block_size.div_ceil(data_shards) }'''}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for path, text in source.items():
+                file = root / path
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(text)
+            contract = size_contract(root, "a" * 40)
+            verify_size_contract({"sizeContract": contract}, {"source_sha": "a" * 40})
+            processes = {"node": {"storageClassEnvironment": {
+                "RUSTFS_STORAGE_CLASS_INLINE_BLOCK": None, "RUSTFS_STORAGE_CLASS_STANDARD": None}}}
+            for data, inline in ((2, 262144), (12, 262152)):
+                target = {"logical": {"usesLegacyChecksum": False, "erasure": {"data_blocks": data, "block_size": 1048576}}}
+                parameters = boundary_sizes(contract, target, processes)
+                self.assertEqual(parameters["actualLogicalInlineLimit"], inline)
+                self.assertEqual(parameters["groups"]["inline-minus-exact-plus"], [inline - 1, inline, inline + 1])
+                self.assertEqual(parameters["groups"]["stripe-minus-exact-plus"], [1048575, 1048576, 1048577])
+                with self.assertRaises(ValueError): boundary_sizes(contract, target, {"node": {"storageClassEnvironment": {}}})
+            for field, value in (("recognized", False), ("extractorSourceSha256", "0" * 64), ("candidateCommit", "b" * 40)):
+                with self.assertRaises(ValueError):
+                    verify_size_contract({"sizeContract": {**contract, field: value}}, {"source_sha": "a" * 40})
+            path = root / "crates/ecstore/src/erasure/coding/erasure.rs"
+            path.write_text(source[str(path.relative_to(root))].replace("div_ceil", "div_floor"))
+            self.assertFalse(size_contract(root, "a" * 40)["recognized"])
+
+    def test_zero_boundary_faults_metadata_and_never_invents_a_part(self):
+        snapshot = HealShardOracleTest().snapshot()
+        observation = snapshot["node1"]
+        observation["files"] = [entry for entry in observation["files"] if "metadata" in entry]
+        for entry in observation["files"]:
+            version = entry["metadata"]["versions"][0]
+            version["size"] = 0
+            version["parts"][0].update(size=0, actualSize=0)
+        expected = [{"key": "objects/0008.bin", "versionId": "null", "deleteMarker": False,
+                     "payload": {"size": 0, "sha256": hashlib.sha256(b"").hexdigest()}}]
+        instance = {"key": expected[0]["key"], "size": 0, "role": "parity", "expectedShape": "zero-metadata", "kind": "bitflip"}
+        plan = boundary_plan(instance, snapshot, "rv-heal-0123456789abcdef", expected)
+        self.assertEqual(plan["kind"], "header")
+        self.assertTrue(plan["proofs"][0]["zeroProof"])
+        self.assertEqual(plan["faults"][0]["role"], "parity")
+        self.assertTrue(plan["faults"][0]["relativePath"].endswith("/xl.meta"))
+        observation["files"].append(next(entry for entry in HealShardOracleTest().snapshot()["node1"]["files"] if "metadata" not in entry))
+        with self.assertRaisesRegex(ValueError, "zero object"):
+            boundary_plan(instance, snapshot, "rv-heal-0123456789abcdef", expected)
+
+    def test_actual_size_ranges_require_206_bytes_and_empty_range_requires_exact_416(self):
+        from scripts.validation_heal.heal_probe import payload
+        bucket, block = "fixture", 4096
+        expected = [{"key": str(size), "payload": {"size": size}} for size in (0, 1, 4097)]
+        calls = []
+        def s3(operation, params):
+            size = int(params["Key"])
+            calls.append(params)
+            if not size:
+                return {"acknowledged": False, "resultUnknown": False, "response": {
+                    "ResponseMetadata": {"HTTPStatusCode": 416}, "Error": {"Code": "InvalidRange"}}}
+            start, end = map(int, params["Range"].removeprefix("bytes=").split("-"))
+            value = payload(f"{bucket}/{params['Key']}/0", size)[start:end + 1]
+            return {"acknowledged": True, "response": {"ResponseMetadata": {"HTTPStatusCode": 206},
+                    "ContentRange": f"bytes {start}-{end}/{size}"},
+                    "payload": {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}}
+        fleet = types.SimpleNamespace(record=lambda label, value: value)
+        verify_boundary_ranges(types.SimpleNamespace(s3=s3), fleet, bucket, expected, block)
+        self.assertTrue(any(params["Range"] == "bytes=4079-4096" for params in calls))
+        for wrong in ({"acknowledged": False, "resultUnknown": True}, {"acknowledged": True, "payload": {"size": 0}}):
+            with self.assertRaises(ValueError):
+                verify_boundary_ranges(types.SimpleNamespace(s3=lambda *args: wrong), fleet, bucket, expected[:1], block)
+
     def test_explicit_small_list_pages_preserve_distinct_special_keys(self):
         bucket = "rv-heal-pages-unit"
         keys = [*SPECIAL_KEYS, *(f"pages/{index:04d}.bin" for index in range(257))]

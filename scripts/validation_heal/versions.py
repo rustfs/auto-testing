@@ -23,6 +23,8 @@ try:
     from .healthy import Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
     from .matrix import select
+    from .boundaries import (BRANCHES as SIZE_BRANCHES, verify_size_contract, boundary_sizes,
+                             seed_boundaries, verify_boundary_ranges)
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -31,6 +33,8 @@ except ImportError:
     from healthy import Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
     from matrix import select
+    from boundaries import (BRANCHES as SIZE_BRANCHES, verify_size_contract, boundary_sizes,
+                            seed_boundaries, verify_boundary_ranges)
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -45,6 +49,7 @@ BRANCHES = {
     "heal.object-metadata-and-tags": ("user-metadata", "content-headers", "versioned-tags"),
     "heal.multiple-shard-loss": ("loss-1-data", "loss-1-parity", "loss-2-through-m-data-parity"),
     "heal.special-keys-and-pagination": ("unicode-space-percent", "encoded-slash", "adjacent-prefixes", "multi-page-list"),
+    "heal.object-size-boundaries": SIZE_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -294,7 +299,7 @@ def multi_loss_plan(instance, snapshot, bucket, expected, fixture):
             "requiredRepairs": {version_identity(data[0])}, "metadataRepairs": set(), "parameters": instance}
 
 
-def map_inline_target(snapshot, bucket, entry):
+def map_inline_target(snapshot, bucket, entry, *, role="data", allow_empty=False):
     validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2")
     indexed, cohort, authority = files(snapshot), [], None
     path = f"{bucket}/{entry['key']}/xl.meta"
@@ -310,30 +315,43 @@ def map_inline_target(snapshot, bucket, entry):
             inline, erasure = version.get("inline") or {}, version["erasure"]
             layout = physical["value"]["xl"]
             slot = layout["sets"][0].index(layout["this"])
-            require(version.get("deleted") is False and version.get("size") == entry["payload"]["size"] > 0
-                    and inline.get("rawOccurrenceCount") == 1 and type(inline.get("rawOffset")) is int
-                    and type(inline.get("length")) is int and inline["length"] > 32
-                    and 0 <= inline["rawOffset"] < inline["rawOffset"] + inline["length"] <= file["size"]
-                    and re.fullmatch(r"[0-9a-f]{64}", inline.get("sha256", ""))
-                    and erasure["index"] == erasure["distribution"][slot], "inline location, digest or physical role is unsupported")
-            role = "data" if erasure["index"] <= erasure["data_blocks"] else "parity"
-            require(version.get("role") == role, "inline erasure index and role differ")
+            empty = allow_empty and entry["payload"]["size"] == 0
+            require(version.get("deleted") is False and version.get("size") == entry["payload"]["size"]
+                    and erasure["index"] == erasure["distribution"][slot], "inline identity or physical role is unsupported")
+            if empty:
+                require(not inline and version["parts"] and all(part["size"] == part["actualSize"] == 0 for part in version["parts"])
+                        and not any(identity[0] == node and identity[1] == physical["disk"]
+                                    and identity[2].startswith(f"{bucket}/{entry['key']}/")
+                                    and identity[2].rsplit("/", 1)[-1].startswith("part.") for identity in indexed),
+                        "zero object unexpectedly has inline bytes or external payload parts")
+            else:
+                require(entry["payload"]["size"] > 0 and inline.get("rawOccurrenceCount") == 1
+                        and type(inline.get("rawOffset")) is int and type(inline.get("length")) is int and inline["length"] > 32
+                        and 0 <= inline["rawOffset"] < inline["rawOffset"] + inline["length"] <= file["size"]
+                        and re.fullmatch(r"[0-9a-f]{64}", inline.get("sha256", "")),
+                        "inline location or digest is unsupported")
+            actual_role = "data" if erasure["index"] <= erasure["data_blocks"] else "parity"
+            require(version.get("role") == actual_role, "inline erasure index and role differ")
             logical = {name: version.get(name) for name in ("versionId", "isLatest", "deleted", "dataDir", "size", "parts", "usesLegacyChecksum")}
             logical["erasure"] = {name: erasure[name] for name in ("data_blocks", "parity_blocks", "block_size", "distribution", "algorithm")}
             require(authority is None or logical == authority, "inline version or part geometry lacks full-set authority")
             authority = logical
             cohort.append({"node": node, "disk": physical["disk"], "relativePath": path,
                 "versionId": entry["versionId"], "partNumber": 1, "dataDir": version.get("dataDir"),
-                "diskUUID": layout["this"], "setSlot": slot, "role": role, "index": erasure["index"],
+                "diskUUID": layout["this"], "setSlot": slot, "role": actual_role, "index": erasure["index"],
                 "sha256": file["sha256"], "size": file["size"], "inlineValue": inline})
     require(len(cohort) == authority["erasure"]["data_blocks"] + authority["erasure"]["parity_blocks"]
             and len({item["index"] for item in cohort}) == len(cohort), "inline set is incomplete or duplicated")
-    target = next(item for item in cohort if item["role"] == "data")
+    target = next(item for item in cohort if item["role"] == role)
     return {**target, "bucket": bucket, "key": entry["key"], "poolIndex": 0, "setIndex": 0,
-            "inlineProof": True, "cohort": cohort, "logical": authority}
+            "inlineProof": not empty, "zeroProof": empty, "cohort": cohort, "logical": authority}
 
 
 def verify_proof(fleet, target, label):
+    if target.get("zeroProof"):
+        return fleet.record(label, {"zeroLengthMetadataAuthorityVerified": True, "payloadBytes": 0,
+            "bitrotBlocksApplicable": False, "physicalPartInvented": False,
+            "proof": "decoded complete same-version metadata; physical no-part baseline; independent post-repair oracle"})
     if not target.get("inlineProof"):
         return verify_cohort(fleet, target, label)
     proofs = []
@@ -345,6 +363,24 @@ def verify_proof(fleet, target, label):
                 "recovered inline shard differs from frozen same-role bytes")
         proofs.append(proof)
     return {"allInlineShardsBitrotVerified": True, "originalInlineSha256Restored": True, "shards": proofs}
+
+
+def boundary_plan(instance, snapshot, bucket, expected):
+    selected = [entry for entry in expected if entry["key"] == instance["key"]]
+    require(len(selected) == 1 and selected[0]["payload"]["size"] == instance["size"], "boundary lost its ACK size")
+    shape, kind = instance["expectedShape"], instance["kind"]
+    target = choose_target(snapshot, bucket, selected[0], instance["role"]) if shape == "external" else map_inline_target(
+        snapshot, bucket, selected[0], role=instance["role"], allow_empty=shape == "zero-metadata")
+    offset = None
+    if shape == "inline" and kind == "bitflip":
+        offset = target["inlineValue"]["rawOffset"] + 32
+    if shape == "zero-metadata" and kind == "bitflip":
+        kind = "header"
+    metadata = shape != "external" and not (shape == "inline" and instance["kind"] == "bitflip")
+    return {"scope": {"bucket": bucket, "key": instance["key"]}, "recursive": False,
+            "expected": selected, "faults": [target], "proofs": [target], "kind": kind, "offset": offset,
+            "requiredRepairs": set() if metadata else {version_identity(selected[0])},
+            "metadataRepairs": {instance["key"]} if metadata else set(), "parameters": instance}
 
 
 def suspend_fixture(recorder, bucket, historical):
@@ -555,11 +591,12 @@ def run_topology(args, topology, nodes, fixture):
     candidate = json.loads(args.candidate.read_text())
     tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id == "heal.below-read-quorum" else None
+    size_rule = verify_size_contract(tool_manifest, candidate) if args.case_id == "heal.object-size-boundaries" else None
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
     binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,
-        "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(), "bucketPrefix": bucket,
+        "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=45 if size_rule else 30)).isoformat(), "bucketPrefix": bucket,
         "endpoints": {f"node{index}": f"http://rustfs-node{index}:9000" for index in range(1, len(nodes) + 1)},
         "defaultEndpoint": "node1", "candidateCommit": candidate["source_sha"], "harnessCommit": args.testing_commit,
         "candidatePackageSha256": candidate["package_sha256"], "candidateBinarySha256": args.binary_sha,
@@ -577,10 +614,19 @@ def run_topology(args, topology, nodes, fixture):
     probe = Probe(binding)
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
-        fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
+        processes = fleet.snapshot("deployed-topology")
+        fleet.record("topology-proof", validate_topology(processes, topology))
         recorder = Recorder(probe, directory / "fixture")
-        public = None
-        if fixture == "DK":
+        public, instances, sizes = None, None, None
+        if size_rule:
+            expected = seed(recorder, bucket, "DB", 1, [VERSION_SIZE])
+            calibration = fleet.snapshot("size-calibration")
+            target = choose_target(calibration, bucket, expected[0], "data")
+            sizes = boundary_sizes(size_rule, target, processes)
+            fleet.record("candidate-size-contract", {"sourceContract": size_rule, "parameters": sizes})
+            extra, instances = seed_boundaries(recorder, bucket, sizes)
+            expected += extra
+        elif fixture == "DK":
             expected = seed_special_keys(recorder, bucket)
         elif fixture == "DS":
             expected, public = seed_semantics(recorder, bucket)
@@ -597,22 +643,27 @@ def run_topology(args, topology, nodes, fixture):
             fleet.record("special-key-pagination-baseline", verify_pagination(baseline))
         if public is not None:
             fleet.record("semantic-baseline", verify_semantics(public, baseline))
-        instances = None
         if args.case_id == "heal.multiple-shard-loss":
             fleet.stop()
             instances = multi_loss_instances(fleet.snapshot("multi-loss-geometry", quiescent=True), bucket, expected, fixture)
             fleet.record("multi-loss-parameter-matrix", {"instances": instances, "allLossCountsAndRoleCompositions": True})
             branches = [entry["name"] for entry in instances]
             fleet.start()
+        if size_rule:
+            branches = [entry["name"] for entry in instances]
+            fleet.record("boundary-parameter-matrix", {"instances": instances, "sourceBranches": list(SIZE_BRANCHES)})
         for branch in branches:
             registrations = []
             metadata_faults = {}
             try:
                 fleet.stop()
                 before = fleet.snapshot("physical-before-" + branch, quiescent=True)
-                plan = multi_loss_plan(next(entry for entry in instances if entry["name"] == branch),
-                                       before, bucket, expected, fixture) if instances else branch_plan(
-                                           args.case_id, branch, before, bucket, expected, fixture)
+                if size_rule:
+                    plan = boundary_plan(next(entry for entry in instances if entry["name"] == branch), before, bucket, expected)
+                elif instances:
+                    plan = multi_loss_plan(next(entry for entry in instances if entry["name"] == branch), before, bucket, expected, fixture)
+                else:
+                    plan = branch_plan(args.case_id, branch, before, bucket, expected, fixture)
                 fleet.record("fault-plan-" + branch, {**plan, "requiredRepairs": sorted(plan["requiredRepairs"]),
                                                      "metadataRepairs": sorted(plan["metadataRepairs"])})
                 for target in plan["proofs"]:
@@ -670,6 +721,8 @@ def run_topology(args, topology, nodes, fixture):
                 bitrot = [verify_proof(fleet, target, "repaired-bitrot-" + branch) for target in plan["proofs"]]
                 fleet.start()
                 s3 = verify_version_s3(probe, fleet, bucket, expected, baseline, "s3-after-" + branch, fixture=fixture)
+                if size_rule:
+                    s3["actualBoundaryRanges"] = verify_boundary_ranges(probe, fleet, bucket, expected, sizes["actualECBlockSize"])
                 # These faults have now been independently repaired and fully
                 # proved. Finalization discards their backups; it never writes
                 # old metadata over a legitimate product re-encoding.
@@ -778,6 +831,8 @@ def main():
         fixtures = ("DS",)
     if args.case_id == "heal.special-keys-and-pagination":
         fixtures = ("DK",)
+    if args.case_id == "heal.object-size-boundaries":
+        fixtures = ("DB",)
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):

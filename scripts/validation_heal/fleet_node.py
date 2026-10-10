@@ -345,6 +345,8 @@ def snapshot(request):
     return {"hostname": owner["hostname"], "unit": owner["unit"], "pid": pid,
             "binarySha256": owner["binarySha256"], "quiescent": request.get("quiescent") is True,
             "backgroundConfig": None if request.get("quiescent") is True else BACKGROUND_CONFIG,
+            "storageClassEnvironment": None if request.get("quiescent") is True else {
+                key: environment.get(key) for key in ("RUSTFS_STORAGE_CLASS_INLINE_BLOCK", "RUSTFS_STORAGE_CLASS_STANDARD")},
             "files": sorted(files, key=lambda value: (value["disk"], value["path"])), "formats": formats}
 
 
