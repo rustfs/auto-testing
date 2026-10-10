@@ -34,7 +34,8 @@ results.
 The executable canonical cases currently include `s3.basic-object-round-trip`,
 `scanner.usage-convergence`, `kms.sse-kms-round-trip`,
 `tiering.transition-and-restore`, `events.delivery`,
-`audit.request-correlation`, and `iam.policy-enforcement`. The S3, KMS, and IAM
+`audit.request-correlation`, `iam.policy-enforcement`, and
+`scanner.status-readiness`. The S3, KMS, and IAM
 cases use single-disk
 deployment. The scanner case uses the storage suite's single-node four-disk
 deployment, waits for a post-upload successful scanner cycle, and requires a

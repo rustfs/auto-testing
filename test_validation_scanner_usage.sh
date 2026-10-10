@@ -105,3 +105,27 @@ grep -q 'RUSTFS_SCANNER_CYCLE=5' "${TEST_TMP}/validation-dry-run.log"
 if grep -q '\[DRY-RUN\] STOR-' "${TEST_TMP}/validation-dry-run.log"; then
   printf 'validation mode scheduled legacy storage cases\n' >&2; exit 1
 fi
+
+"${SCRIPT_DIR}/rustfs-storage-test.sh" --validation-case scanner.status-readiness \
+  --dry-run --yes --package-url https://example.invalid/rustfs.deb \
+  > "${TEST_TMP}/validation-status-dry-run.log"
+grep -q '\[DRY-RUN\] scanner.status-readiness StatusReadiness' "${TEST_TMP}/validation-status-dry-run.log"
+grep -q 'RUSTFS_VOLUMES="http://rustfs-node{1...2}:9000/data/rustfs{1...4}/mnmd"' "${TEST_TMP}/validation-status-dry-run.log"
+[ "$(grep -c 'RUSTFS_SCANNER_CYCLE=5' "${TEST_TMP}/validation-status-dry-run.log")" -eq 2 ]
+
+jq -nc --argjson now "$(date -u +%s)" '{enabled:true,
+  runtime_config:{cycle_interval_seconds:{value:5,source:"env"},start_delay_seconds:{value:0,source:"env"}},
+  metrics:{leader_lock_held_by_this_process:true,leader_lock_state:"acquired",last_cycle_result:"success",last_cycle_end_unix_secs:$now},
+  freshness:{state:"fresh"},cycle_schedule:{execution_role:"leader"}}' > "${TEST_TMP}/ready-leader.json"
+jq -n '{enabled:true,
+  runtime_config:{cycle_interval_seconds:{value:5,source:"env"},start_delay_seconds:{value:0,source:"env"}},
+  metrics:{leader_lock_held_by_this_process:false},freshness:{state:"fresh"},cycle_schedule:{execution_role:"follower"}}' \
+  > "${TEST_TMP}/ready-follower.json"
+validation_scanner_status_ready "${TEST_TMP}/ready-leader.json" "${TEST_TMP}/ready-follower.json" 0
+jq '.runtime_config.cycle_interval_seconds.value = 60' "${TEST_TMP}/ready-follower.json" > "${TEST_TMP}/wrong-config.json"
+if validation_scanner_status_ready "${TEST_TMP}/ready-leader.json" "${TEST_TMP}/wrong-config.json" 0; then
+  printf 'wrong scanner configuration passed\n' >&2; exit 1
+fi
+if validation_scanner_status_ready "${TEST_TMP}/ready-leader.json" "${TEST_TMP}/ready-leader.json" 0; then
+  printf 'two scanner leaders passed\n' >&2; exit 1
+fi

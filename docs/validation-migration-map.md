@@ -29,6 +29,11 @@ cycle after upload plus a newer complete usage snapshot with exact object and
 logical-byte counts. The old STOR-134 threshold remains a separate regression
 test. Its live candidate run passed in RustFS Actions run `38042200106`.
 
+`scanner.status-readiness` has a dedicated executor on two of the existing
+auto-testing nodes, each with four disks. It checks both nodes' accelerated
+scanner runtime settings and requires exactly one leader to finish a new
+successful cycle within 120 seconds. Its live candidate run is pending.
+
 `kms.sse-kms-round-trip` has a dedicated executor using the existing local
 KMS single-disk deployment. It checks the same object's encryption key,
 metadata, and payload, then requires an invalid-key PUT to fail without
@@ -74,8 +79,8 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The seven currently dispatchable IDs are the S3, scanner, KMS,
-tiering, events, audit, and IAM cases above. Five have live PASS evidence; the
+case evidence. The eight currently dispatchable IDs are the S3, two scanner,
+KMS, tiering, events, audit, and IAM cases above. Five have live PASS evidence; the
 other 153 IDs remain unverified.
 
 The eight planned cases have these concrete reuse candidates:

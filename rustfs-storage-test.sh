@@ -73,6 +73,7 @@ RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
 TOPO_SINGLE_SINGLE="single-single"
 TOPO_SINGLE_MULTI="single-multi"
 TOPO_MULTI_MULTI="multi-multi"
+TOPO_ILM_2X4="ilm-2x4"
 
 ENDPOINT_SINGLE_SINGLE="http://rustfs-node1:9000"
 ENDPOINT_SINGLE_MULTI="http://rustfs-node1:9000"
@@ -81,6 +82,7 @@ ENDPOINT_MULTI_MULTI="http://rustfs-node1:9000"
 VOLUMES_SINGLE_SINGLE="/data/rustfs1/mnmd"
 VOLUMES_SINGLE_MULTI="/data/rustfs{1...4}/mnmd"
 VOLUMES_MULTI_MULTI="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_ILM_2X4="http://rustfs-node{1...2}:9000/data/rustfs{1...4}/mnmd"
 
 SERVICE_TIMEOUT=300
 
@@ -190,7 +192,7 @@ RUSTFS_CONSOLE_ENABLE=${RUSTFS_CONSOLE_ENABLE}
 RUSTFS_OBS_LOGGER_LEVEL=${RUSTFS_OBS_LOGGER_LEVEL}
 RUSTFS_OBS_LOG_DIRECTORY="${RUSTFS_OBS_LOG_DIRECTORY}"
 EOF
-  if [ "${VALIDATION_CASE}" = "scanner.usage-convergence" ]; then
+  if [ "${VALIDATION_CASE}" = "scanner.usage-convergence" ] || [ "${VALIDATION_CASE}" = "scanner.status-readiness" ]; then
     printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=5\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
   fi
 }
@@ -278,6 +280,7 @@ resolve_topology() {
     "${TOPO_SINGLE_SINGLE}") ENDPOINT="${ENDPOINT_SINGLE_SINGLE}"; VOLUMES="${VOLUMES_SINGLE_SINGLE}"; return 0 ;;
     "${TOPO_SINGLE_MULTI}")  ENDPOINT="${ENDPOINT_SINGLE_MULTI}";  VOLUMES="${VOLUMES_SINGLE_MULTI}";  return 0 ;;
     "${TOPO_MULTI_MULTI}")   ENDPOINT="${ENDPOINT_MULTI_MULTI}";   VOLUMES="${VOLUMES_MULTI_MULTI}";   return 0 ;;
+    "${TOPO_ILM_2X4}") ENDPOINT="${ENDPOINT_SINGLE_MULTI}"; VOLUMES="${VOLUMES_ILM_2X4}"; return 0 ;;
     *) die "unknown topology: $1 (single-single|single-multi|multi-multi)" ;;
   esac
 }
@@ -285,6 +288,7 @@ resolve_topology() {
 topology_nodes() {
   case "$1" in
     "${TOPO_SINGLE_SINGLE}"|"${TOPO_SINGLE_MULTI}") printf '%s' "${NODES[0]}" ;;
+    "${TOPO_ILM_2X4}") printf '%s %s' "${NODES[0]}" "${NODES[1]}" ;;
     *) printf '%s' "${NODES[*]}" ;;
   esac
 }
@@ -508,15 +512,26 @@ validation_write_evidence() {
   local evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}" item
   mkdir -p "${evidence_dir}"
   cp "${TEST_TMP}/test.out" "${evidence_dir}/test.log"
-  for item in validation-fixture.json validation-list.json validation-baseline-usage.json validation-scanner.json validation-usage.json; do
+  for item in $(validation_evidence_items); do
     if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
   done
 }
 
+validation_evidence_items() {
+  case "${VALIDATION_CASE}" in
+    scanner.usage-convergence)
+      printf '%s\n' validation-fixture.json validation-list.json validation-baseline-usage.json validation-scanner.json validation-usage.json ;;
+    scanner.status-readiness)
+      printf '%s\n' validation-scanner-node1.json validation-scanner-node2.json validation-scanner-contract.json ;;
+  esac
+}
+
 validation_write_result() {
   local verdict="$1" reason="$2" cleanup_status="$3" item
+  local profile=single-4disk
+  [ "${VALIDATION_CASE}" = scanner.status-readiness ] && profile=ilm-2x4
   local args=("${SCRIPT_DIR}/scripts/validation_result.py"
-    --case-id "${VALIDATION_CASE}" --profile single-4disk
+    --case-id "${VALIDATION_CASE}" --profile "${profile}"
     --result-file "${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
     --verdict "${verdict}" --cleanup-status "${cleanup_status}")
   if [ -n "${reason}" ]; then args+=(--reason "${reason}"); fi
@@ -527,7 +542,7 @@ validation_write_result() {
       --evidence "evidence/${VALIDATION_CASE}/test.log")
   fi
   if [ "${verdict}" = PASS ]; then
-    for item in validation-fixture.json validation-list.json validation-baseline-usage.json validation-scanner.json validation-usage.json; do
+    for item in $(validation_evidence_items); do
       args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
     done
   fi
@@ -793,6 +808,52 @@ test_validation_scanner_usage_convergence() {
     echo "validation bucket cleanup failed"
   fi
   [ "${case_rc}" -eq 0 ] && [ "${cleanup_rc}" -eq 0 ]
+}
+
+validation_scanner_status_ready() {
+  local node1="$1" node2="$2" started_at="$3"
+  jq -se --argjson started "${started_at}" '
+      length == 2 and
+      all(.[]; .enabled == true and
+        .runtime_config.cycle_interval_seconds == {value:5,source:"env"} and
+        .runtime_config.start_delay_seconds == {value:0,source:"env"}) and
+      ([.[] | select(.metrics.leader_lock_held_by_this_process == true)] | length) == 1 and
+      any(.[]; .metrics.leader_lock_held_by_this_process == true and
+        .metrics.leader_lock_state == "acquired" and
+        .metrics.last_cycle_result == "success" and
+        .metrics.last_cycle_end_unix_secs >= $started and
+        .freshness.state == "fresh" and
+        .cycle_schedule.execution_role == "leader")' \
+      "${node1}" "${node2}" >/dev/null
+}
+
+test_validation_scanner_status_readiness() {
+  local started_at deadline status_code node endpoint index
+  started_at="$(date -u +%s)"
+  deadline=$((SECONDS + 120))
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    status_code=0
+    for index in 1 2; do
+      node="${NODES[index-1]}"
+      endpoint="http://rustfs-node${index}:9000"
+      (API_ENDPOINT="${endpoint}"; admin_api GET /rustfs/admin/v3/scanner/status "" "" > "${TEST_TMP}/validation-scanner-node${index}.json"
+        [ "$(admin_api_code)" = 200 ]) || status_code=1
+      [ "${status_code}" -eq 0 ] || { echo "scanner status unavailable on ${node}"; break; }
+    done
+    if [ "${status_code}" -eq 0 ] && validation_scanner_status_ready \
+      "${TEST_TMP}/validation-scanner-node1.json" "${TEST_TMP}/validation-scanner-node2.json" "${started_at}"; then
+      jq -n --argjson started "${started_at}" --slurpfile node1 "${TEST_TMP}/validation-scanner-node1.json" \
+        --slurpfile node2 "${TEST_TMP}/validation-scanner-node2.json" \
+        '{started_at_unix:$started,cycle_interval_seconds:5,start_delay_seconds:0,
+          leader:([($node1[0],$node2[0]) | select(.metrics.leader_lock_held_by_this_process == true) |
+            {last_cycle_end_unix_secs:.metrics.last_cycle_end_unix_secs,last_cycle_result:.metrics.last_cycle_result}] | first)}' \
+        > "${TEST_TMP}/validation-scanner-contract.json"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "two-node scanner runtime or successful new leader cycle did not meet the 120-second deadline"
+  return 1
 }
 
 test_stor101() {
@@ -1189,7 +1250,7 @@ Options:
   --ssh-user <user>       SSH user for the test nodes
   --ssh-port <port>       SSH port for the test nodes
   --log-file <path>       append all output to a log file
-  --validation-case ID    run only scanner.usage-convergence (single-multi)
+  --validation-case ID    run a canonical scanner case on its required topology
   --validation-artifacts-dir DIR  write canonical result and evidence
   --candidate-manifest FILE  immutable candidate manifest
   --testing-commit SHA    auto-testing commit used for validation results
@@ -1236,11 +1297,19 @@ main() {
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}" "${TOPO_MULTI_MULTI}")
   fi
   if [ -n "${VALIDATION_CASE}" ]; then
-    [ "${VALIDATION_CASE}" = "scanner.usage-convergence" ] || die "unknown validation case: ${VALIDATION_CASE}"
+    case "${VALIDATION_CASE}" in
+      scanner.usage-convergence|scanner.status-readiness) ;;
+      *) die "unknown validation case: ${VALIDATION_CASE}" ;;
+    esac
     [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
     [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its own topology"
     [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
-    SELECTED_TOPOLOGIES=("${TOPO_SINGLE_MULTI}")
+    if [ "${VALIDATION_CASE}" = scanner.status-readiness ]; then
+      SELECTED_TOPOLOGIES=("${TOPO_ILM_2X4}")
+      [ "${#NODES[@]}" -ge 2 ] || die "scanner.status-readiness needs two test nodes"
+    else
+      SELECTED_TOPOLOGIES=("${TOPO_SINGLE_MULTI}")
+    fi
     if [ "${DRY_RUN}" -eq 0 ]; then
       [ -n "${VALIDATION_ARTIFACTS_DIR}" ] || die "--validation-case requires --validation-artifacts-dir"
       [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "--validation-case requires --candidate-manifest"
@@ -1284,7 +1353,10 @@ main() {
     fi
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
     if [ -n "${VALIDATION_CASE}" ]; then
-      run_test "${VALIDATION_CASE}" "UsageConvergence" test_validation_scanner_usage_convergence
+      case "${VALIDATION_CASE}" in
+        scanner.usage-convergence) run_test "${VALIDATION_CASE}" "UsageConvergence" test_validation_scanner_usage_convergence ;;
+        scanner.status-readiness) run_test "${VALIDATION_CASE}" "StatusReadiness" test_validation_scanner_status_readiness ;;
+      esac
     else
       run_all_tests
     fi

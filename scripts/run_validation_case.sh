@@ -15,7 +15,7 @@ ARTIFACTS_DIR="$4"
 case "${CASE_ID}" in
   s3.basic-object-round-trip)
     SUITE=rustfs-s3-compat-test.sh; EXTRA_ARGS=() ;;
-  scanner.usage-convergence)
+  scanner.usage-convergence|scanner.status-readiness)
     SUITE=rustfs-storage-test.sh; EXTRA_ARGS=() ;;
   kms.sse-kms-round-trip)
     SUITE=rustfs-kms-test.sh; EXTRA_ARGS=() ;;
