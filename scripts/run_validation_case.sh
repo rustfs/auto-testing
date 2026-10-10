@@ -19,7 +19,7 @@ case "${CASE_ID}" in
     SUITE=rustfs-storage-test.sh; EXTRA_ARGS=() ;;
   kms.sse-kms-round-trip)
     SUITE=rustfs-kms-test.sh; EXTRA_ARGS=() ;;
-  tiering.transition-and-restore)
+  tiering.transition-and-restore|events.delivery|audit.request-correlation)
     SUITE=rustfs-tier-test.sh; EXTRA_ARGS=(--topology single-single) ;;
   *)
     printf 'validation executor is not migrated: %s\n' "${CASE_ID}" >&2

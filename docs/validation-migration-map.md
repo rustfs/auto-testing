@@ -19,26 +19,34 @@ live run proves each source assertion on the required topology.
 `s3.basic-object-round-trip` now has a dedicated executor on `single-1disk`.
 Its Bash function combines bucket creation/removal, object PUT/HEAD/GET/LIST/
 DELETE, payload SHA-256, metadata, ETag, and `NoSuchKey` checks on one fixture.
-It has local mock coverage; live evidence against an immutable candidate is
-still required before calling the migration verified.
+It has local mock coverage and live PASS evidence in RustFS Actions run
+`38042083422`.
 
 `scanner.usage-convergence` has a dedicated executor on `single-4disk`. It
 uses the storage suite's deployment and SigV4 Admin client, accelerates the
 scanner cycle, records the 20-object fixture, and checks a successful leader
 cycle after upload plus a newer complete usage snapshot with exact object and
 logical-byte counts. The old STOR-134 threshold remains a separate regression
-test. This case also awaits a live candidate run.
+test. Its live candidate run passed in RustFS Actions run `38042200106`.
 
 `kms.sse-kms-round-trip` has a dedicated executor using the existing local
 KMS single-disk deployment. It checks the same object's encryption key,
 metadata, and payload, then requires an invalid-key PUT to fail without
-exposing plaintext or key material. Its live candidate run is pending.
+exposing plaintext or key material. Its live candidate run passed in RustFS
+Actions run `38042359938`.
 
 `tiering.transition-and-restore` has a dedicated executor using the Tier
 suite's existing `single-single` source and warm-tier nodes. It verifies the
 same object's transition state, readable bytes after transition, restore
 state, and SHA-256 after restore. The case is recorded under the source
-`lifecycle-b` environment profile. Its live candidate run is pending.
+`lifecycle-b` environment profile. Its live candidate run passed in RustFS
+Actions run `38042759074`.
+
+`events.delivery` and `audit.request-correlation` now have dedicated executors
+on the Tier suite's `single-single` topology. Event delivery is counted for a
+unique object after a quiet window; audit checks matching PUT/GET records,
+distinct request IDs, successful status, and absence of known secrets. Both
+still require live candidate evidence before being counted as verified.
 
 "Existing validation environment" means the fleet used by `auto-testing`
 and the RustFS `smoke-testing` workflows, with `RUSTFS_NODES` and
@@ -60,21 +68,22 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The four currently dispatchable IDs are the S3, scanner, KMS,
-and tiering cases above; the other 154 IDs remain unverified.
+case evidence. The six currently dispatchable IDs are the S3, scanner, KMS,
+tiering, events, and audit cases above. Four have live PASS evidence; the other
+154 IDs remain unverified.
 
 The eight planned cases have these concrete reuse candidates:
 
 | Validation ID | Candidate IDs | Specific item to verify |
 | --- | --- | --- |
-| `scanner.usage-convergence` | STOR-134 | Dedicated executor added; live candidate evidence is pending. |
-| `kms.sse-kms-round-trip` | KMS-104, KMS-301, KMS-214 | Dedicated executor added; live candidate evidence is pending. |
-| `tiering.transition-and-restore` | TIER-105, TIER-107 | Dedicated executor added; live candidate evidence is pending. |
-| `events.delivery` | EVT-103, EVT-104 | Freeze and verify the exact delivery count contract. |
-| `audit.request-correlation` | AUD-102, AUD-104, AUD-106 | Verify request correlation and secret redaction in the same event trail. |
+| `scanner.usage-convergence` | STOR-134 | Dedicated executor and live PASS evidence. |
+| `kms.sse-kms-round-trip` | KMS-104, KMS-301, KMS-214 | Dedicated executor and live PASS evidence. |
+| `tiering.transition-and-restore` | TIER-105, TIER-107 | Dedicated executor and live PASS evidence. |
+| `events.delivery` | EVT-103, EVT-104 | Dedicated executor; live evidence pending. |
+| `audit.request-correlation` | AUD-102, AUD-104, AUD-106 | Dedicated executor; live evidence pending. |
 | `iam.policy-enforcement` | IAM-105, IAM-109 | Verify explicit deny and allowed action on the same principal/policy fixture. |
 | `oidc.login-and-session` | OIDC-103 | The live Keycloak path can be skipped by the old suite; validation requires an actual session-boundary result. |
-| `s3.basic-object-round-trip` | S3C-101, 201, 203, 205, 206, 207 | Tie CRUD, payload, metadata, ETag, and error semantics to the same fixture. |
+| `s3.basic-object-round-trip` | S3C-101, 201, 203, 205, 206, 207 | Dedicated executor and live PASS evidence. |
 
 Migration work on an ID is complete only when its result contains the exact
 source assertion text in order, evidence paths for each assertion, the

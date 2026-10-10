@@ -76,3 +76,10 @@ if grep -q '\[DRY-RUN\] TIER-' "${TEST_ROOT}/validation-dry-run.log"; then
   printf 'validation mode scheduled legacy tier cases\n' >&2
   exit 1
 fi
+
+for case_id in events.delivery audit.request-correlation; do
+  TIER_SOURCE_ONLY=0 "${TEST_SCRIPT_DIR}/rustfs-tier-test.sh" --validation-case "${case_id}" \
+    --topology single-single --dry-run --yes --package-url https://example.invalid/rustfs.deb \
+    > "${TEST_ROOT}/${case_id}.log"
+  grep -q "\[DRY-RUN\] ${case_id}" "${TEST_ROOT}/${case_id}.log"
+done

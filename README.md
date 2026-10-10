@@ -32,11 +32,13 @@ report shows migration progress and still rejects malformed or false PASS
 results.
 
 The executable canonical cases currently include `s3.basic-object-round-trip`,
-`scanner.usage-convergence`, and `kms.sse-kms-round-trip`. The S3 and KMS cases use single-disk
+`scanner.usage-convergence`, `kms.sse-kms-round-trip`,
+`tiering.transition-and-restore`, `events.delivery`, and
+`audit.request-correlation`. The S3 and KMS cases use single-disk
 deployment. The scanner case uses the storage suite's single-node four-disk
 deployment, waits for a post-upload successful scanner cycle, and requires a
 complete usage snapshot with exactly 20 objects and 20,690 logical bytes.
-Both require a candidate manifest with `source_sha`, `package_url`, and
+Each requires a candidate manifest with `source_sha`, `package_url`, and
 `package_sha256`. The installed binary
 SHA-256 is measured on the test node and included in result provenance:
 
@@ -70,6 +72,10 @@ python3 scripts/validation_report.py \
 The report's full implemented-case gate is intentionally not enabled by these
 runs. Run it with `--gate-status implemented` only after all 66
 implemented source cases have verified executors and live results.
+
+S3, scanner, KMS, and tiering have live PASS evidence against nightly build
+`37958901959` attempt `1` on the current auto-testing fleet. Events and audit
+have local executor tests but still need live verification.
 
 ## Fault-tolerance suite
 

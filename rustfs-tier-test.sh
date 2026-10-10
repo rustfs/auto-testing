@@ -1528,9 +1528,18 @@ validation_write_evidence() {
   mkdir -p "${evidence_dir}"
   cp "${TEST_TMP}/test.out" "${evidence_dir}/test.log"
   cp "${RESULTS_DIR}/${CURRENT_TOPOLOGY}--${VALIDATION_CASE}.json" "${evidence_dir}/suite-result.json"
-  for item in validation-transition.json validation-head.json validation-restore-head.json validation-object.json; do
+  for item in $(validation_evidence_items); do
     if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
   done
+}
+
+validation_evidence_items() {
+  case "${VALIDATION_CASE}" in
+    tiering.transition-and-restore)
+      printf '%s\n' validation-transition.json validation-head.json validation-restore-head.json validation-object.json ;;
+    events.delivery) printf '%s\n' validation-events.json ;;
+    audit.request-correlation) printf '%s\n' validation-audit.json ;;
+  esac
 }
 
 validation_write_result() {
@@ -1549,7 +1558,7 @@ validation_write_result() {
   fi
   if [ "${verdict}" = PASS ]; then
     local item
-    for item in validation-transition.json validation-head.json validation-restore-head.json validation-object.json; do
+    for item in $(validation_evidence_items); do
       args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
     done
   fi
@@ -2054,6 +2063,41 @@ test_validation_tiering_transition_and_restore() {
     '{bucket:$bucket,key:$key,source_sha256:$source_sha256,transitioned_sha256:$transitioned_sha256,
       restored_sha256:$restored_sha256,tier:$tier,restore_complete:true}' \
     > "${TEST_TMP}/validation-object.json"
+}
+
+test_validation_events_delivery() {
+  local bucket="val-events-${RUN_TOKEN}" key="round-trip.bin" arn
+  new_bucket "${bucket}" || return 1
+  arn="$(get_first_arn)"
+  [ -n "${arn}" ] || { echo "notification target ARN missing"; return 1; }
+  rc_run event add "local/${bucket}" "${arn}" --event s3:ObjectCreated:Put
+  assert_rc_ok || return 1
+  events_reset
+  make_test_file "${TEST_TMP}/validation-event-source.bin" 65536
+  aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${TEST_TMP}/validation-event-source.bin"
+  assert_aws_ok || return 1
+  wait_notify 1 "${bucket}" || return 1
+  sleep 15
+  python3 "${SCRIPT_DIR}/scripts/validation_webhooks.py" events \
+    --input "${NOTIFY_EVENTS}" --bucket "${bucket}" --key "${key}" \
+    --output "${TEST_TMP}/validation-events.json"
+}
+
+test_validation_audit_request_correlation() {
+  local bucket="val-audit-${RUN_TOKEN}" key="round-trip.bin"
+  new_bucket "${bucket}" || return 1
+  events_reset
+  make_test_file "${TEST_TMP}/validation-audit-source.bin" 65536
+  aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${TEST_TMP}/validation-audit-source.bin"
+  assert_aws_ok || return 1
+  aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${TEST_TMP}/validation-audit-read.bin"
+  assert_aws_ok || return 1
+  cmp "${TEST_TMP}/validation-audit-source.bin" "${TEST_TMP}/validation-audit-read.bin" || return 1
+  wait_audit 2 "${bucket}" || return 1
+  VALIDATION_AUDIT_TOKEN="${AUDIT_TOKEN}" VALIDATION_NOTIFY_TOKEN="${NOTIFY_TOKEN}" \
+    python3 "${SCRIPT_DIR}/scripts/validation_webhooks.py" audit \
+      --input "${AUDIT_EVENTS}" --bucket "${bucket}" --key "${key}" \
+      --output "${TEST_TMP}/validation-audit.json"
 }
 
 run_all_tests() {
@@ -2931,7 +2975,10 @@ main() {
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}")
   fi
   if [ -n "${VALIDATION_CASE}" ]; then
-    [ "${VALIDATION_CASE}" = tiering.transition-and-restore ] || die "unknown validation case: ${VALIDATION_CASE}"
+    case "${VALIDATION_CASE}" in
+      tiering.transition-and-restore|events.delivery|audit.request-correlation) ;;
+      *) die "unknown validation case: ${VALIDATION_CASE}" ;;
+    esac
     [ "${all}" -eq 0 ] || die "--validation-case cannot run all topologies"
     [ "${#SELECTED_TOPOLOGIES[@]}" -eq 1 ] || die "--validation-case requires one topology"
     [ "${SELECTED_TOPOLOGIES[0]}" = "${TOPO_SINGLE_SINGLE}" ] || die "validation case requires single-single topology"
@@ -2989,7 +3036,11 @@ main() {
     fi
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
     if [ -n "${VALIDATION_CASE}" ]; then
-      run_test "${VALIDATION_CASE}" "TransitionAndRestore" test_validation_tiering_transition_and_restore
+      case "${VALIDATION_CASE}" in
+        tiering.transition-and-restore) run_test "${VALIDATION_CASE}" "TransitionAndRestore" test_validation_tiering_transition_and_restore ;;
+        events.delivery) run_test "${VALIDATION_CASE}" "ObjectEventDelivery" test_validation_events_delivery ;;
+        audit.request-correlation) run_test "${VALIDATION_CASE}" "AuditRequestCorrelation" test_validation_audit_request_correlation ;;
+      esac
     else
       run_all_tests
     fi
