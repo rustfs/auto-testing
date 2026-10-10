@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 96 currently dispatchable IDs include all 74 non-Heal cases and twenty-two Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
+case evidence. The 97 currently dispatchable IDs include all 74 non-Heal cases and twenty-three Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 62 Heal cases remain
+The other 61 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -361,3 +361,19 @@ owned service, no injection intent, exact archived pre-fault physical scene and
 removed run roots. It records cleanup PASS, `originalVerdictRewritten=false`
 and no canonical/product-repair PASS claim. Serial deployment resumed only
 after inspecting that recovery evidence.
+
+B09 `heal.node-outage-rejoin` now has both source H2 branches with independent
+DB and DV deployments on the existing four nodes. The candidate tool freezes
+the recognized same-set read/write quorum policy; actual metadata maps the
+four lost drives before admitting degraded I/O. Exact unit exit and refused
+endpoint connections witness the outage. PUT/overwrite/marker/historical-delete
+ACKs define the new manifest, while the stopped node's complete physical scene
+stays unchanged. Only the explicit run-owned `offline-replay` profile enables
+MRF; scanner and automatic disk-rebuild remain disabled. After the same node
+and roots rejoin, physical polling precedes any target S3 reads or manual task.
+Every drive must contain the exact acknowledged version/marker set; surviving
+shard bytes, committed streaming checksums and all-node S3 manifests must agree.
+Deleted identities receive exact S3 absence checks. No copied backup contributes
+to repair. Six focused tests cover profile boundaries, source-quorum recognition,
+ACK ambiguity, per-drive omissions/resurrection and deleted-read refusals.
+B09 requires the fresh write-quorum tool artifact and full live evidence.

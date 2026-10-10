@@ -130,9 +130,11 @@ def validate_healthy(status, bucket, key, disposition):
 
 
 class Fleet:
-    def __init__(self, nodes, evidence, run_id, tool_directory=None):
+    def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual"):
+        require(runtime_profile in {"manual", "offline-replay"}, "unsupported Heal runtime profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
+        self.runtime_profile = runtime_profile
         self.sequence = 0
         self.reserved = []
         self.faults = []
@@ -207,7 +209,7 @@ class Fleet:
                 if self.tool_directory else None
             value = self.remote(node, "reserve", hostname=checked[node]["hostname"], mounts=checked[node]["mounts"],
                                 binarySha256=binary_sha, bucket=bucket, volumes=volumes, access=access, secret=secret,
-                                inspectorSha256=inspector_sha)
+                                inspectorSha256=inspector_sha, runtimeProfile=self.runtime_profile)
             self.record("reserved", {"node": node, **value})
             if self.tool_directory:
                 tool = self.tool_directory / "heal-meta-inspect"

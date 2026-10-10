@@ -26,6 +26,8 @@ from scripts.validation_heal.versions import multi_loss_instances, multi_loss_pl
 from scripts.validation_heal.heal_probe import Probe
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract, size_contract
 from scripts.validation_heal.boundaries import verify_size_contract, boundary_sizes, verify_boundary_ranges
+from scripts.validation_heal.node_outage import quorum_plan, put_ack, delete_ack, replica_census, validate_deleted_read
+from scripts.validation_heal.fleet_node import runtime_config, BACKGROUND_CONFIG
 
 
 class HealContractTest(unittest.TestCase):
@@ -834,6 +836,116 @@ class HealVersionOracleTest(unittest.TestCase):
         self.assertEqual(len(plan["faults"]), 3)
         self.assertEqual(len({entry["versionId"] for entry in plan["faults"]}), 1)
         self.assertTrue(all(entry["versionId"] == "00000000-0000-0000-0000-000000000004" for entry in plan["faults"]))
+
+
+class HealNodeOutageTest(unittest.TestCase):
+    def snapshot(self):
+        bucket = "rv-heal-0123456789abcdef"
+        identities = ["00000000-0000-0000-0000-" + f"{index:012d}" for index in range(1, 17)]
+        expected = [{"key": "new.bin", "versionId": "new-version", "deleteMarker": False, "isLatest": False},
+                    {"key": "new.bin", "versionId": "marker-version", "deleteMarker": True, "isLatest": True}]
+        observation = {}
+        data_dir = "00000000-0000-0000-0000-000000000100"
+        for node_index in range(4):
+            node = "node" + str(node_index + 1)
+            value = {"formats": [], "files": []}
+            for disk in range(4):
+                slot = node_index * 4 + disk
+                value["formats"].append({"disk": disk, "value": {"format": "xl", "id": "pool",
+                    "xl": {"sets": [identities], "this": identities[slot]}}})
+                version = {"versionId": "new-version", "deleted": False, "isLatest": False, "inline": None,
+                    "dataDir": data_dir, "size": 1048623, "usesLegacyChecksum": False,
+                    "role": "data" if slot < 8 else "parity", "parts": [{"number": 1, "size": 1048623, "actualSize": 1048623}],
+                    "erasure": {"data_blocks": 8, "parity_blocks": 8, "index": slot + 1,
+                        "distribution": list(range(1, 17)), "block_size": 1048576, "algorithm": "rs-vandermonde"}}
+                marker = {"versionId": "marker-version", "deleted": True, "isLatest": True}
+                value["files"].extend([
+                    {"disk": disk, "path": f"{bucket}/new.bin/xl.meta", "sha256": "meta" + str(slot), "size": 1000,
+                     "metadata": {"bucket": bucket, "key": "new.bin", "versions": [version, marker]}},
+                    {"disk": disk, "path": f"{bucket}/new.bin/{data_dir}/part.1", "sha256": "shard" + str(slot), "size": 131200}])
+            observation[node] = value
+        return bucket, expected, observation
+
+    def test_mrf_profile_is_explicit_and_cannot_enable_unrelated_background_sources(self):
+        self.assertEqual(runtime_config("manual"), BACKGROUND_CONFIG)
+        replay = runtime_config("offline-replay")
+        self.assertEqual(replay.pop("RUSTFS_HEAL_MRF_ENABLE"), "true")
+        self.assertEqual(replay, {key: value for key, value in BACKGROUND_CONFIG.items() if key != "RUSTFS_HEAL_MRF_ENABLE"})
+        with self.assertRaises(ValueError): runtime_config("arbitrary")
+
+    def test_outage_calculates_same_set_quorum_and_rejects_unrecognized_write_policy(self):
+        bucket, expected, snapshot = self.snapshot()
+        target = map_target(snapshot, bucket, "new.bin", "data", 1, "new-version", latest_required=False)
+        contract = {"recognized": True, "writeQuorumRule": "data-plus-one-if-equal-parity"}
+        plan = quorum_plan(target, "node4", contract)
+        self.assertEqual((plan["lostSameSetDrives"], plan["remainingSameSetDrives"], plan["readQuorum"], plan["writeQuorum"]), (4, 12, 8, 9))
+        for changed in ({**contract, "writeQuorumRule": None}, {**contract, "recognized": False}):
+            with self.assertRaises(ValueError): quorum_plan(target, "node4", changed)
+        with self.assertRaises(ValueError): quorum_plan(target, "foreign-node", contract)
+        changed = copy.deepcopy(target)
+        changed["logical"]["erasure"].update(data_blocks=13, parity_blocks=3)
+        with self.assertRaises(ValueError): quorum_plan(changed, "node4", contract)
+
+    def test_ack_manifest_preserves_history_and_rejects_ambiguous_put_delete_receipts(self):
+        old = [{"key": "key", "versionId": "v1", "deleteMarker": False, "isLatest": False},
+               {"key": "key", "versionId": "v2", "deleteMarker": False, "isLatest": True}]
+        updated = put_ack(old, "key", b"new bytes", {"VersionId": "v3"}, "DV")
+        self.assertEqual([entry["versionId"] for entry in updated if entry["isLatest"]], ["v3"])
+        self.assertEqual(old[-1]["isLatest"], True)
+        marked = delete_ack(updated, "key", {"VersionId": "marker", "DeleteMarker": True}, "DV")
+        self.assertEqual([entry["versionId"] for entry in marked if entry["isLatest"]], ["marker"])
+        deleted = delete_ack(marked, "key", {"VersionId": "v1"}, "DV", version="v1")
+        self.assertEqual({entry["versionId"] for entry in deleted}, {"v2", "v3", "marker"})
+        for response in ({}, {"VersionId": "null"}, {"VersionId": "v2"}):
+            with self.subTest(response=response), self.assertRaises(ValueError): put_ack(old, "key", b"x", response, "DV")
+        for response in ({}, {"VersionId": "marker", "DeleteMarker": False}):
+            with self.subTest(response=response), self.assertRaises(ValueError): delete_ack(updated, "key", response, "DV")
+        with self.assertRaises(ValueError): delete_ack(old, "key", {"VersionId": "v2"}, "DV", version="v2")
+        unversioned = [{"key": "key", "versionId": "null", "deleteMarker": False, "isLatest": True}]
+        self.assertEqual(len(put_ack(unversioned, "key", b"x", {}, "DB")), 1)
+        self.assertEqual(delete_ack(unversioned, "key", {}, "DB"), [])
+
+    def test_physical_census_requires_each_drive_and_preserves_surviving_authority(self):
+        bucket, expected, repaired = self.snapshot()
+        offline = copy.deepcopy(repaired)
+        offline["node4"]["files"] = []
+        self.assertEqual(len(replica_census(repaired, bucket, expected, offline)), 1)
+        for poison in ("missing-one-replica", "missing-marker", "resurrected-version", "changed-survivor", "role-mismatch"):
+            changed = copy.deepcopy(repaired)
+            if poison == "missing-one-replica": changed["node4"]["files"].pop(0)
+            elif poison == "missing-marker": changed["node4"]["files"][0]["metadata"]["versions"].pop()
+            elif poison == "resurrected-version": changed["node4"]["files"][0]["metadata"]["versions"].append({"versionId": "deleted-version", "deleted": False, "isLatest": False})
+            elif poison == "changed-survivor": changed["node1"]["files"][1]["sha256"] = "different"
+            else: changed["node4"]["files"][0]["metadata"]["versions"][0]["role"] = "data"
+            with self.subTest(poison=poison), self.assertRaises(ValueError): replica_census(changed, bucket, expected, offline)
+
+    def test_candidate_write_quorum_recognition_is_independent_of_read_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "rustfs/src").mkdir(parents=True)
+            (root / "crates/ecstore/src/set_disk").mkdir(parents=True)
+            (root / "rustfs/src/error.rs").write_text('const SLOW_DOWN_READ_CODE: &str = "SlowDownRead";\n'
+                'StorageError::ErasureReadQuorum | StorageError::InsufficientReadQuorum(_, _) => { S3ErrorCode::Custom(SLOW_DOWN_READ_CODE.into()) }\n'
+                'S3ErrorCode::Custom(custom) if &**custom == SLOW_DOWN_READ_CODE => Some(StatusCode::SERVICE_UNAVAILABLE)')
+            metadata = root / "crates/ecstore/src/set_disk/metadata.rs"
+            source = 'pub(super) fn object_quorum_from_meta() { let data_blocks = parts_metadata.len() as i32 - parity_blocks; let write_quorum = if data_blocks == parity_blocks { data_blocks + 1 } else { data_blocks }; Ok((data_blocks, write_quorum)) }'
+            metadata.write_text(source)
+            self.assertEqual(quorum_contract(root, "a" * 40)["writeQuorumRule"], "data-plus-one-if-equal-parity")
+            metadata.write_text(source.replace("data_blocks + 1", "data_blocks + 2"))
+            changed = quorum_contract(root, "a" * 40)
+            self.assertTrue(changed["recognized"])
+            self.assertIsNone(changed["writeQuorumRule"])
+            metadata.write_text(source.replace("Ok((data_blocks, write_quorum))", "let write_quorum = write_quorum + 1; Ok((data_blocks, write_quorum))"))
+            self.assertIsNone(quorum_contract(root, "a" * 40)["writeQuorumRule"])
+
+    def test_deleted_identity_requires_exact_s3_absence_without_payload_or_transport_ambiguity(self):
+        for version, code in (("null", "NoSuchKey"), ("deleted-version", "NoSuchVersion")):
+            good = {"acknowledged": False, "resultUnknown": False,
+                    "response": {"ResponseMetadata": {"HTTPStatusCode": 404}, "Error": {"Code": code}}}
+            validate_deleted_read(good, version)
+            for changed in ({**good, "acknowledged": True}, {**good, "resultUnknown": True}, {**good, "payload": {}},
+                            {**good, "response": {"ResponseMetadata": {"HTTPStatusCode": 403}, "Error": {"Code": "AccessDenied"}}}):
+                with self.subTest(version=version), self.assertRaises(ValueError): validate_deleted_read(changed, version)
 
 
 if __name__ == "__main__":

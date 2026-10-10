@@ -32,12 +32,15 @@ def quorum_contract(source: Path, commit: str) -> dict:
     errors = compact[paths[0]]
     known_read = ("letdata_blocks=parts_metadata.len()asi32-parity_blocks;" in function
                   and function.endswith("Ok((data_blocks,write_quorum))}"))
+    known_write = known_read and function.endswith("letdata_blocks=parts_metadata.len()asi32-parity_blocks;"
+        "letwrite_quorum=ifdata_blocks==parity_blocks{data_blocks+1}else{data_blocks};Ok((data_blocks,write_quorum))}")
     known_error = ('StorageError::ErasureReadQuorum|StorageError::InsufficientReadQuorum(_,_)=>{'
                    'S3ErrorCode::Custom(SLOW_DOWN_READ_CODE.into())}' in errors
                    and 'S3ErrorCode::Custom(custom)if&**custom==SLOW_DOWN_READ_CODE=>Some(StatusCode::SERVICE_UNAVAILABLE)' in errors)
     code = re.search(r'const\s+SLOW_DOWN_READ_CODE\s*:\s*&str\s*=\s*"([A-Za-z0-9]+)"\s*;', contents[paths[0]])
     return {"candidateCommit": commit, "recognized": bool(known_read and known_error and code),
             "readQuorumRule": "decoded-data-blocks" if known_read else None,
+            "writeQuorumRule": "data-plus-one-if-equal-parity" if known_write else None,
             "unrecoverableGet": {"httpStatus": 503, "code": code[1]} if known_error and code else None,
             "sourceFiles": {path: hashlib.sha256(value.encode()).hexdigest() for path, value in contents.items()},
             "extractorSourceSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}

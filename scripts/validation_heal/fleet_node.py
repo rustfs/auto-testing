@@ -27,6 +27,11 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
                      "RUSTFS_SHARD_INTEGRITY_WRITE": "true", "RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED": "true"}
 
 
+def runtime_config(profile):
+    require(profile in {"manual", "offline-replay"}, "unsupported Heal runtime profile")
+    return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "offline-replay" else "false"}
+
+
 def require(condition, message):
     if not condition:
         raise ValueError(message)
@@ -104,6 +109,8 @@ def preflight(request):
 
 def reserve(request):
     run_id = request["runId"]
+    profile = request.get("runtimeProfile", "manual")
+    background = runtime_config(profile)
     observed = preflight(request)
     require(observed["hostname"] == request["hostname"] and observed["mounts"] == request["mounts"],
             "preflight host or disk identities changed")
@@ -126,7 +133,7 @@ def reserve(request):
     state, roots = paths(run_id)
     owner = {"runId": run_id, "unit": unit(run_id), "hostname": observed["hostname"],
              "mounts": observed["mounts"], "binarySha256": binary_sha,
-             "bucket": request["bucket"], "volumes": volumes}
+             "bucket": request["bucket"], "volumes": volumes, "runtimeProfile": profile}
     if request.get("inspectorSha256"):
         require(bool(re.fullmatch(r"[0-9a-f]{64}", request["inspectorSha256"])), "invalid inspector digest")
         owner["inspectorSha256"] = request["inspectorSha256"]
@@ -141,7 +148,7 @@ def reserve(request):
     shutil.copyfile("/usr/bin/rustfs", state / "rustfs")
     (state / "rustfs").chmod(0o500)
     require(digest(state / "rustfs") == binary_sha, "copied candidate binary differs")
-    config = {**BACKGROUND_CONFIG, "RUSTFS_ACCESS_KEY": request["access"], "RUSTFS_SECRET_KEY": request["secret"],
+    config = {**background, "RUSTFS_ACCESS_KEY": request["access"], "RUSTFS_SECRET_KEY": request["secret"],
               "RUSTFS_ADDRESS": ":9000", "RUSTFS_CONSOLE_ENABLE": "false",
               "RUSTFS_HEAL_TASK_TIMEOUT_SECS": "300", "RUSTFS_OBS_LOGGER_LEVEL": "info"}
     env_file = state / "service.env"
@@ -317,8 +324,9 @@ def snapshot(request):
                 "running binary differs from candidate")
         environment = dict(value.split("=", 1) for value in Path(f"/proc/{pid}/environ").read_bytes().decode().split("\0")
                            if "=" in value)
-        require(all(environment.get(key) == value for key, value in BACKGROUND_CONFIG.items()),
-                "background repair isolation configuration differs")
+        expected_config = runtime_config(owner.get("runtimeProfile", "manual"))
+        require(all(environment.get(key) == value for key, value in expected_config.items()),
+                "bound Heal runtime configuration differs")
     files, formats = [], []
     tool = state / "heal-meta-inspect"
     if owner.get("inspectorSha256"):
@@ -344,7 +352,7 @@ def snapshot(request):
         formats.append({"disk": index, "sha256": digest(path), "value": json.loads(path.read_text())})
     return {"hostname": owner["hostname"], "unit": owner["unit"], "pid": pid,
             "binarySha256": owner["binarySha256"], "quiescent": request.get("quiescent") is True,
-            "backgroundConfig": None if request.get("quiescent") is True else BACKGROUND_CONFIG,
+            "backgroundConfig": None if request.get("quiescent") is True else expected_config,
             "storageClassEnvironment": None if request.get("quiescent") is True else {
                 key: environment.get(key) for key in ("RUSTFS_STORAGE_CLASS_INLINE_BLOCK", "RUSTFS_STORAGE_CLASS_STANDARD")},
             "files": sorted(files, key=lambda value: (value["disk"], value["path"])), "formats": formats}
