@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 95 currently dispatchable IDs include all 74 non-Heal cases and twenty-one Heal cases. Forty have live PASS evidence; the other 118 have no live PASS claim.
+case evidence. The 95 currently dispatchable IDs include all 74 non-Heal cases and twenty-one Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -328,3 +328,10 @@ metadata loss/header faults and never invent a payload part. Exact byte hashes,
 complete responsibility, HEAD/LIST and actual first/tail/stripe Range checks
 are required; zero Range is a strict S3 416/InvalidRange negative. D01 requires a
 fresh tool artifact carrying this size contract and has not yet run live.
+
+Corrected D05 run `38061843290` passed every H1/H2 suspended/null branch and
+clean finalization. Real enabled-period history, null overwrites and markers
+retain precise S3 identities; the typed Admin nil UUID is mapped only to that
+acknowledged null version. The candidate then re-enabled versioning and created
+a distinct non-null version without changing old payloads or version/marker
+identities. The original literal-identity harness failure is still retained.
