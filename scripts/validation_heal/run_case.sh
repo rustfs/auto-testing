@@ -32,6 +32,7 @@ case "${case_id}" in
   heal.admin-scope-isolation) driver=scopes.py ;;
   heal.bucket-metadata-integrity) driver=bucket_metadata.py ;;
   heal.disk-replacement-unformatted) driver=unformatted.py ;;
+  heal.below-write-quorum) driver=write_quorum.py ;;
   heal.read-quorum-boundary) driver=quorum_boundary.py ;;
   heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null|heal.below-read-quorum|heal.missing-or-corrupt-xlmeta|heal.object-metadata-and-tags|heal.multiple-shard-loss|heal.special-keys-and-pagination|heal.object-size-boundaries|heal.object-lock-retention|heal.metadata-payload-mismatch|heal.read-repair-attribution|heal.disk-readonly-and-permission|heal.scanner-cold-object-repair|heal.delete-marker-semantics|heal.stale-version-rejoin|heal.disk-loss-and-repair|heal.disk-replacement-formatted|heal.replacement-auto-rebuild|heal.target-graceful-restart|heal.target-process-crash) driver=versions.py ;;
   heal.admin-token-cross-node-status|heal.admin-dry-run|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.range-head-and-conditions|heal.manual-normal-attribution|heal.manual-deep-attribution)

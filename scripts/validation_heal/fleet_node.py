@@ -235,6 +235,7 @@ def start(request):
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)),
+            *quorum_gate_module().properties(state, roots),
             *replacement_module().start_properties(state, roots), str(state / "rustfs"), *owner["volumes"])
     return {"unit": owner["unit"], "started": True}
 
@@ -412,6 +413,31 @@ def gate_module():
     return drive_gate
 
 
+def quorum_gate_module():
+    if "quorum_gate_backend" in globals(): return globals()["quorum_gate_backend"]
+    from . import quorum_gate
+    return quorum_gate
+
+
+def quorum_gate_operation(request):
+    state, roots, owner = owned(request["runId"])
+    module = quorum_gate_module()
+    if request["action"] == "quorum-gate":
+        stopped(owner)
+        return module.release(state, roots) if request.get("mode") == "clear" else module.apply(state, roots, request["disks"])
+    before = process(request)
+    require(before["pid"] > 1 and digest(state / "rustfs") == owner["binarySha256"], "quorum probe candidate differs")
+    relative = request["relativePath"]
+    require(isinstance(relative, str) and relative.startswith(owner["bucket"] + "/")
+            and relative.endswith("/xl.meta"), "quorum read probe escaped its owned business bucket")
+    for root in roots:
+        checked(root / "data" / relative, root / "data")
+    observed = module.probe(state, roots, before["pid"], relative, request["expectedReads"])
+    after = process(request)
+    require(all(before.get(name) == after.get(name) for name in PROCESS_FIELDS), "quorum probe crossed candidate process identity")
+    return {**observed, "processBefore": before, "processAfter": after}
+
+
 def replacement_module():
     if "replacement" in globals(): return globals()["replacement"]
     from . import replace_drive
@@ -422,6 +448,7 @@ def replace_drive(request):
     state, roots, owner = owned(request["runId"])
     stopped(owner)
     require(gate_module().checked_gate(state, roots) is None, "replacement cannot share an active drive gate")
+    require(quorum_gate_module().checked(state, roots) is None, "replacement cannot share an active quorum gate")
     return replacement_module().begin(state, roots, request.get("disk"), request.get("expectedFormatSha256"))
 
 
@@ -484,6 +511,7 @@ def drive_gate(request):
     state, roots, owner = owned(request["runId"])
     stopped(owner)
     if request.get("mode") == "clear": return gate_module().release_gate(state, roots)
+    require(quorum_gate_module().checked(state, roots) is None, "single drive gate cannot share a quorum gate")
     return gate_module().apply_gate(state, roots, request.get("disk"), request.get("mode"))
 
 
@@ -772,6 +800,7 @@ def cleanup(request):
     pid = command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"], check=False).stdout.strip()
     require(pid in {"", "0"}, "run-owned service remains active")
     gate_module().release_gate(state, roots)
+    quorum_gate_module().release(state, roots)
     replacement_module().attest(state, roots)
     command("systemctl", "reset-failed", owner["unit"], check=False)
     for root in (*roots, state):
@@ -870,6 +899,8 @@ def main(request):
     actions["task-records"] = task_records
     for action in ("bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover"):
         actions[action] = bucket_record_operation
+    for action in ("quorum-gate", "quorum-gate-probe"):
+        actions[action] = quorum_gate_operation
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
     actions.update({"process": process, "process-metrics": process_metrics, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})

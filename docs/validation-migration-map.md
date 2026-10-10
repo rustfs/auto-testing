@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 122 currently dispatchable IDs include all 74 non-Heal cases and forty-eight Heal cases. Forty-five have live PASS evidence; the other 113 have no live PASS claim.
+case evidence. The 123 currently dispatchable IDs include all 74 non-Heal cases and forty-nine Heal cases. Forty-five have live PASS evidence; the other 113 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 36 Heal cases remain
+The other 35 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -1035,7 +1035,7 @@ four regression verdicts have their own archive and never increment a fleet or
 canonical-case PASS count. Existing tests assert captured lock events internally;
 the collector does not fabricate emitted barrier logs. Missing critical-point
 fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps.
-The current implementation has 242 focused Heal/catalog checks, including the
+The current implementation has 252 focused Heal/catalog checks, including the
 Linux-only D11 ownership/mount/recovery checks. Native compilation and execution
 still require the separate hosted job; local parser checks are not native PASS.
 
@@ -1051,3 +1051,36 @@ current auto-testing fleet. The optional native build waits for those queues
 and uses the existing Functional Chain tools-only driver, because the reusable
 workflow is still in a draft PR and cannot be dispatched directly from the
 default branch.
+
+
+B08 now has an automatic current-fleet executor for both source branches.
+The write-negative branch measures every original metadata read and root write
+inside the exact candidate process mount namespace. Precisely N-W+1 private
+roots return EROFS, including the missing payload target; all N metadata
+members and all lock clients remain online. The H2 lock-negative branch
+isolates two exact run-owned peer processes, witnesses their exited MainPIDs
+and refused endpoints, and keeps R metadata/payload sources and shared-lock
+quorum while losing exclusive-lock and object-write quorum. It does not claim
+host network partition or physical disk loss. H1 uses an in-process local
+manager; its distributed peer-loss branch is explicitly NOT_APPLICABLE with
+the reviewed candidate locking policy, while its write-negative branch remains
+mandatory. Both original branch IDs and H1/H2 contracts are retained.
+
+Every negative scene is frozen before removing the fault. A single unique-key
+PUT has no automatic retry; all unknown outcomes and success ACKs are queried
+on every recovered peer. Unresolved outcomes retain the stopped namespace and
+fail cleanup. The negative Heal must preserve complete failed/deferred exact
+responsibility with zero repaired counters and no changed physical control.
+After gate removal/source return, an independent task must reconstruct the
+original missing target before any target GET or backup rescue. Streaming
+verification, all-peer complete S3 manifests and clean finalization remain
+required. Ten boundary, identity, mount, cleanup and unknown-ACK negatives join
+the focused checks. B08 has no live PASS claim yet.
+
+A06 run `38090151509` retained FAIL/cleanup PASS on H1/H2 after its repeat-stop
+assertion. It exposed a harness contract defect: the reviewed manager's
+`root_recovery::cancel_pending` treats a retained terminal record as an
+idempotent stop, so the public response is HTTP 200/stopped, rather than the
+unknown-token HTTP 500 assumed by the harness. The original result remains
+unchanged. Fixing the candidate-bound assertion and repeating the complete
+canonical run are required; the observed acknowledgement alone is not PASS.

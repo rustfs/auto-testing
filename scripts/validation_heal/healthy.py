@@ -149,6 +149,7 @@ class Fleet:
         self.faults = []
         self.bucket_record_faults = []
         self.drive_gates = set()
+        self.quorum_gates = set()
         self.secret_values = set()
         self.frozen_processes = {}
         self.snapshot_buckets = None
@@ -190,6 +191,9 @@ class Fleet:
             source += "\nimport types\nbucket_records = types.ModuleType('bucket_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("bucket_records.py").read_text()) + ", bucket_records.__dict__)\n"
         replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot"}
+        if action in {"start", "cleanup", "audit-finalize", "drive-gate", "replace-drive", "quorum-gate", "quorum-gate-probe"}:
+            source += "\nimport types\nquorum_gate_backend = types.ModuleType('quorum_gate')\nexec(" + repr(
+                NODE_SOURCE.with_name("quorum_gate.py").read_text()) + ", quorum_gate_backend.__dict__)\n"
         if action in {"drive-gate", "drive-gate-probe", "drive-gate-activate", "gate-state", "drive-gate-release-live"} | replacement_actions:
             source += "\nimport types\ngate = types.ModuleType('drive_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("drive_gate.py").read_text()) + ", gate.__dict__)\n"
@@ -296,6 +300,14 @@ class Fleet:
                 for node in tuple(self.drive_gates):
                     self.record("gate-recovery", {"node": node, **self.remote(node, "drive-gate", mode="clear")})
                     self.drive_gates.remove(node)
+            except Exception as exc:
+                failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
+        if self.quorum_gates:
+            try:
+                self.stop()
+                for node in tuple(self.quorum_gates):
+                    self.record("quorum-gate-recovery", {"node": node, **self.remote(node, "quorum-gate", mode="clear")})
+                    self.quorum_gates.remove(node)
             except Exception as exc:
                 failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
         for node in self.reserved:
