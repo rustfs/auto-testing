@@ -30,7 +30,10 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "read-repair", "scanner", "disabled", "overlap"}, "unsupported Heal runtime profile")
+    if profile == "overlap":
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_OVERLAP_POLICY": "merge",
+                "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false"}
     if profile == "disabled":
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_ENABLED": "false"}
     if profile == "scanner":

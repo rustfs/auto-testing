@@ -50,6 +50,7 @@ from scripts.validation_heal.stop import (partial_window, validate_retired_stop,
     cancelled_physical, idle_fleet as stop_idle_fleet, BRANCHES as STOP_BRANCHES)
 from scripts.validation_heal.cancel_restart import validate_journal, BRANCHES as CANCEL_RESTART_BRANCHES
 from scripts.validation_heal.fleet_node import task_records as node_task_records
+from scripts.validation_heal import overlap
 import errno
 import stat
 
@@ -2115,6 +2116,125 @@ class HealCancelledRestartOracleTest(unittest.TestCase):
 
     def test_restart_preserves_every_source_branch(self):
         self.assertEqual(list(CANCEL_RESTART_BRANCHES), select("F06")[0]["variants"])
+
+
+class HealOverlapOracleTest(unittest.TestCase):
+    bucket = "rv-heal-overlap-unit"
+
+    def expected(self):
+        return [{"key": f"objects/a/child/{index:04d}.bin", "versionId": "null", "deleteMarker": False,
+                 "payload": {"size": CURSOR_SIZE}} for index in range(overlap.SCOPE_OBJECTS)]
+
+    def damaged(self):
+        return {(self.expected()[index]["key"], "null") for index in overlap.MISSING}
+
+    def state(self, *, cancelled=False, replacement=False, healed=None):
+        total = 100 if cancelled else overlap.SCOPE_OBJECTS
+        repaired = {0, 64} if cancelled else set(overlap.MISSING)
+        if replacement: repaired -= {0, 64}
+        return {"summary": "stopped" if cancelled else "finished", "outcome": {
+            "execution": {"state": "aborted", "reason": "cancelled"} if cancelled else {"state": "completed"},
+            "coverage": "partial" if cancelled else "complete", "objectsTruncated": total > 128,
+            "objects": [{"identity": {"bucket": self.bucket, "object": self.expected()[index]["key"],
+                         "versionId": None, "poolIndex": 0, "setIndex": 0, "bucketIncarnationId": "incarnation"},
+                         "disposition": {"state": "repaired" if index in repaired else "verified_healthy"}}
+                        for index in range(min(total, 128))],
+            "counters": {"processed": total, "healed": len(repaired) if healed is None else healed,
+                         "unchanged": total - (len(repaired) if healed is None else healed),
+                         "skipped": 0, "failed": 0, "unknown": 0, "attemptFailures": 0, "overflowed": False}}}
+
+    def proof(self, current, **kwargs):
+        return overlap.scope_proof(current, self.bucket, self.expected(), self.damaged(), **kwargs)
+
+    def test_frozen_policy_rejects_arbitrary_http_and_reason(self):
+        good = {"httpStatus": 409, "response": {"Code": "OperationAborted", "Message": overlap.POLICY["parent-child"]["message"]}}
+        self.assertEqual(overlap.overlap_rejection(good)["code"], "OperationAborted")
+        for changed in ({**good, "httpStatus": 200}, {**good, "transportError": "timeout"},
+                        {**good, "response": {"Code": "OperationAborted", "Message": "already_running"}}):
+            with self.assertRaises(ValueError): overlap.overlap_rejection(changed)
+
+    def test_incomplete_or_cross_scope_receipts_and_unknowns_never_pass(self):
+        self.proof(self.state(), healed=5)
+        for kind in ("count", "unknown", "failed", "attempt", "coverage", "diagnostic", "key", "version", "incarnation", "role", "duplicate"):
+            current = self.state()
+            value = current["outcome"]
+            if kind == "count": value["counters"]["healed"] = 4
+            if kind in {"unknown", "failed"}: value["counters"][kind] = 1
+            if kind == "attempt": value["counters"]["attemptFailures"] = 1
+            if kind == "coverage": value["coverage"] = "partial"
+            if kind == "diagnostic": value["objectsTruncated"] = False
+            if kind == "key": value["objects"][0]["identity"]["object"] = "objects/b/0000.bin"
+            if kind == "version": value["objects"][0]["identity"]["versionId"] = "other-version"
+            if kind == "incarnation": value["objects"][0]["identity"]["bucketIncarnationId"] = "old-bucket"
+            if kind == "role": value["objects"][1]["disposition"]["state"] = "repaired"
+            if kind == "duplicate": value["objects"][1] = copy.deepcopy(value["objects"][0])
+            with self.subTest(kind=kind), self.assertRaises(ValueError): self.proof(current, healed=5)
+
+    def test_force_accounting_preserves_partial_truth_and_rejects_double_repair(self):
+        old = self.proof(self.state(cancelled=True), cancelled=True)
+        new = self.proof(self.state(replacement=True), healed=3, replacement=True)
+        self.assertEqual(overlap.force_accounting(old, new, self.damaged())["exactTotalRepairs"], 5)
+        for kind in ("count", "incarnation", "duplicate"):
+            changed = copy.deepcopy(new)
+            if kind == "count": changed["canonicalCounters"]["healed"] = 4
+            if kind == "incarnation": changed["bucketIncarnationId"] = "new-bucket"
+            if kind == "duplicate": changed["diagnosticDispositions"][self.expected()[0]["key"]] = "repaired"
+            with self.subTest(kind=kind), self.assertRaises(ValueError): overlap.force_accounting(old, changed, self.damaged())
+        with self.assertRaises(ValueError): self.proof(self.state(), cancelled=True)
+        with self.assertRaises(ValueError): self.proof(self.state(cancelled=True), healed=2)
+
+    def test_terminal_suffix_checks_every_ack_and_never_infers_a_retention_gap(self):
+        current = self.state()
+        pages = []
+        for left, right in ((0, 100), (100, 257)):
+            pages.append({**copy.deepcopy(current), "nextSeq": 258, "minSeq": 1, "truncated": right < 257,
+                "items": [{"bucket": self.bucket, "object": entry["key"], "versionId": "", "objectSize": CURSOR_SIZE}
+                          for entry in self.expected()[left:right]]})
+        client = types.SimpleNamespace(admin=lambda *args: {"httpStatus": 200, "response": pages.pop(0)})
+        fleet = types.SimpleNamespace(record=lambda label, value: value)
+        with patch.object(overlap, "status", return_value=current):
+            _, proof = overlap.completed_scope(client, fleet, "/scope/", "task", self.bucket, self.expected(), self.damaged(), healed=5)
+        self.assertEqual(proof["completeItemIdentities"], 257)
+        self.assertFalse(proof["retentionGapClaimed"])
+        for kind in ("duplicate", "gap", "empty", "changed-outcome"):
+            page = {**copy.deepcopy(current), "nextSeq": 258, "minSeq": 1, "items": [
+                {"bucket": self.bucket, "object": entry["key"], "versionId": "", "objectSize": CURSOR_SIZE} for entry in self.expected()]}
+            if kind == "duplicate": page["items"][1] = copy.deepcopy(page["items"][0])
+            if kind == "gap": page["minSeq"] = 2
+            if kind == "empty": page["items"] = []
+            if kind == "changed-outcome": page["outcome"]["counters"]["unknown"] = 1
+            client.admin = lambda *args: {"httpStatus": 200, "response": page}
+            with self.subTest(kind=kind), patch.object(overlap, "status", return_value=current), self.assertRaises(ValueError):
+                overlap.completed_scope(client, fleet, "/scope/", "task", self.bucket, self.expected(), self.damaged(), healed=5)
+
+    def test_finished_window_and_same_token_counter_rollback_cannot_pass(self):
+        self.assertFalse(overlap.active_window(self.state()))
+        before = self.state(cancelled=True)
+        after = copy.deepcopy(before)
+        after["outcome"]["counters"].update(processed=99, unchanged=97)
+        with self.assertRaisesRegex(ValueError, "backwards"): overlap.monotonic(before, after)
+        with patch.object(overlap, "status", return_value=self.state()), self.assertRaisesRegex(ValueError, "NOT_OBSERVED"):
+            overlap.wait_window(None, None, "/scope/", "task")
+
+    def test_all_eight_source_instances_and_cleanup_failure_stop_are_real_dispatches(self):
+        with tempfile.TemporaryDirectory() as folder:
+            args = types.SimpleNamespace(evidence=Path(folder))
+            calls = []
+            def topology(params, topology, nodes, **options):
+                calls.append((topology, options["branches"][0], options["missing_indices"]))
+                return {"verdict": "PASS", "cleanup": "PASS"}
+            with patch.object(overlap, "dx_topology", side_effect=topology):
+                for name in ("H1", "H2"):
+                    self.assertEqual(overlap.run_topology(args, name, ["node1"])["verdict"], "PASS")
+            self.assertEqual([(name, branch) for name, branch, _ in calls], [(name, branch) for name in ("H1", "H2") for branch in overlap.BRANCHES])
+            self.assertTrue(all(len(indices) == (10 if branch == "disjoint" else 5) for _, branch, indices in calls))
+            with patch.object(overlap, "dx_topology", return_value={"verdict": "FAIL", "cleanup": "FAIL"}) as operation:
+                self.assertEqual(overlap.run_topology(args, "H1", ["node1"])["cleanup"], "FAIL")
+                self.assertEqual(operation.call_count, 1)
+        self.assertEqual(list(overlap.BRANCHES), select("A05")[0]["variants"])
+        self.assertEqual(runtime_config("overlap")["RUSTFS_HEAL_OVERLAP_POLICY"], "merge")
+        # Parameterizing A05 physical fixtures must not weaken J03 retention.
+        with self.assertRaises(ValueError): Window(self.bucket, self.expected(), "task", "node1", "epoch")
 
 
 if __name__ == "__main__":

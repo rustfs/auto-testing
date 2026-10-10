@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 107 currently dispatchable IDs include all 74 non-Heal cases and thirty-three Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
+case evidence. The 108 currently dispatchable IDs include all 74 non-Heal cases and thirty-four Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 51 Heal cases remain
+The other 50 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -587,3 +587,23 @@ and allowed monotonic in-flight report refinement before freezing the report
 after actual drain; later quiet/restart/new-task checks cannot rewrite it.
 Local journal-owner/schema/scope/cursor/read-boundary negatives passed; full
 live evidence remains pending.
+
+A05 `heal.admin-overlap-and-force-start` now dispatches all four source
+branches on both H1 and H2, with an independent deployment/ACK ledger/fault
+set for each instance. Two real prefix scopes contain 257 external objects
+each; five missing shards per selected scope retain positive authority.
+The actual process environment freezes `merge`: equivalent starts must return
+the same token, parent/child requests must return exact 409/OperationAborted
+with `overlapping_paths`, and disjoint requests must receive independent
+tokens. Every control request needs a nonzero running bracket; a missed
+window remains NOT_OBSERVED. forceStart must cancel the old task with partial
+coverage, admit an independent replacement token, and resist old-token STOP.
+Initial and settled cancellation reports are retained; exact old/new repair
+counters, incarnations and diagnostic identities cannot leak or duplicate
+responsibility. All 257 terminal item identities are read, including any
+cropped HTTP suffix; this does not claim a 1024-item retention gap. Three
+live physical samples after actual all-peer drain must remain unchanged,
+with the same processes. Complete same-role shard bytes, streaming checksums
+and all-peer full S3 manifests remain mandatory before PASS. Local
+scope/error/window/duplicate-repair/item-omission/cleanup-stop negatives
+passed. Full live evidence remains pending.

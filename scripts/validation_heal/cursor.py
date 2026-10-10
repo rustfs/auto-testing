@@ -50,11 +50,12 @@ LIMIT_REFERENCE = {"candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926"
     "differentCandidates": "the measured terminal window must still actually exceed retention; no inferred gap"}
 
 
-def wanted_pairs(expected):
+def wanted_pairs(expected, *, count=OBJECTS):
     wanted = {(entry["key"], public_version_id(entry["versionId"])): entry for entry in expected}
-    require(len(wanted) == len(expected) == OBJECTS and all(not entry["deleteMarker"]
+    require(type(count) is int and 129 <= count <= OBJECTS
+            and len(wanted) == len(expected) == count and all(not entry["deleteMarker"]
             and pair[1] == "null" and entry["payload"]["size"] == SIZE for pair, entry in wanted.items()),
-            "cursor fixture must contain the pre-registered 1025 distinct external-size ACKs")
+            "DX fixture must contain every pre-registered distinct external-size ACK")
     return wanted
 
 
@@ -161,9 +162,9 @@ def terminal_proof(status, bucket, expected, repaired, window):
             "retainedWindow": {name: value for name, value in retained.items() if name != "pairs"}}
 
 
-def map_cohorts(snapshot, bucket, expected):
+def map_cohorts(snapshot, bucket, expected, *, count=OBJECTS):
     """Index once, then use the existing complete-set oracle on each object."""
-    wanted_pairs(expected)
+    wanted_pairs(expected, count=count)
     by_key = {entry["key"]: {node: {"formats": value["formats"], "files": []}
                              for node, value in snapshot.items()} for entry in expected}
     for node, observation in snapshot.items():
@@ -177,7 +178,15 @@ def map_cohorts(snapshot, bucket, expected):
             for index, entry in enumerate(expected)]
 
 
-def verify_all_parts(fleet, cohorts, label):
+def verify_all_parts(fleet, cohorts, label, *, count=OBJECTS):
+    require(type(count) is int and 129 <= count <= OBJECTS and len(cohorts) == count,
+            "complete physical verification differs from its frozen object count")
+    width = 4 if len(fleet.nodes) == 1 else 16
+    identities = [(entry["node"], entry["disk"], entry["relativePath"], entry["versionId"], entry["partNumber"])
+                  for target in cohorts for entry in target["cohort"]]
+    require(all(len(target["cohort"]) == width for target in cohorts)
+            and len(identities) == len(set(identities)) == count * width
+            and all(entry[0] in fleet.nodes for entry in identities), "complete part manifest duplicated or omitted a frozen shard")
     total = 0
     for node in fleet.nodes:
         entries = [shard for target in cohorts for shard in target["cohort"] if shard["node"] == node]
@@ -192,8 +201,8 @@ def verify_all_parts(fleet, cohorts, label):
                         and all(proof.get(name) == entry[name] for name in ("disk", "relativePath", "versionId", "partNumber", "sha256"))
                         and proof.get("physicalSize") == entry["size"], "external part differs from its frozen streaming/hash oracle")
             total += len(batch)
-    require(total == OBJECTS * (4 if len(fleet.nodes) == 1 else 16), "full external-part verifier missed a disk/object")
-    return {"allExternalObjects": OBJECTS, "allPartsStreamingVerified": total,
+    require(total == count * width, "full external-part verifier missed a disk/object")
+    return {"allExternalObjects": count, "allPartsStreamingVerified": total,
             "sameRoleOriginalShardBytesRestored": True}
 
 
@@ -274,11 +283,17 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
                 "completeManifestEvidenceRequired": True}}
 
 
-def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANCHES):
+def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANCHES,
+                 count=OBJECTS, fixture_builder=None, missing_indices=None,
+                 source_branches=None, runtime_profile="manual", policy_reference=LIMIT_REFERENCE):
     directory = args.evidence / topology
     directory.mkdir()
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory, resource_profile="cursor")
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory, resource_profile="cursor", runtime_profile=runtime_profile)
+    require(type(count) is int and 129 <= count <= OBJECTS, "invalid pre-registered DX size")
+    missing_indices = list(range(0, count, 64)) if missing_indices is None else list(missing_indices)
+    require(len(missing_indices) > 1 and len(set(missing_indices)) == len(missing_indices)
+            and all(type(index) is int and 0 <= index < count for index in missing_indices), "invalid DX fault indices")
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
@@ -290,29 +305,31 @@ def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANC
         "defaultEndpoint": "node1", "candidateCommit": candidate["source_sha"], "harnessCommit": args.testing_commit,
         "candidatePackageSha256": candidate["package_sha256"], "candidateBinarySha256": args.binary_sha,
         "rcBinarySha256": hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(),
-        "maxInventoryObjects": OBJECTS, "maxInventoryBytes": OBJECTS * SIZE}
+        "maxInventoryObjects": count, "maxInventoryBytes": count * SIZE}
     fleet.record("binding", binding)
-    fleet.record("pre-registered-budget", {"fixture": "DX", "objects": OBJECTS, "objectBytes": SIZE,
-        "logicalBytes": OBJECTS * SIZE, "taskSeconds": TASK_SECONDS, "sourceLimitReference": LIMIT_REFERENCE,
+    fleet.record("pre-registered-budget", {"fixture": "DX", "objects": count, "objectBytes": SIZE,
+        "logicalBytes": count * SIZE, "taskSeconds": TASK_SECONDS, "sourceLimitReference": policy_reference,
         "maxSnapshotFilesPerNode": 12288, "snapshotSecondsPerNode": 600, "verificationBatchItems": 128,
-        "missingIndices": list(range(0, OBJECTS, 64)), "taskScope": "objects/ prefix; one result per ACK",
+        "missingIndices": missing_indices, "taskScope": "frozen prefix scopes; one result per ACK",
         "faultLeaseMinutes": 30, "serviceRuntimeSeconds": 2700, "topologyLeaseMinutes": 45})
     recipe = select(args.case_id)[0]
-    require(recipe["variants"] == list(branches), "DX executor omitted a source branch")
+    require(recipe["variants"] == list(source_branches or branches) and set(branches) <= set(recipe["variants"]),
+            "DX executor omitted or invented a source branch")
     result = {"topology": topology, "fixture": "DX", "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, probe = [], Probe(binding)
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
-        expected = seed(Recorder(probe, directory / "fixture"), bucket, "DX", OBJECTS, [SIZE])
-        wanted_pairs(expected)
+        recorder = Recorder(probe, directory / "fixture")
+        expected = fixture_builder(recorder, bucket) if fixture_builder else seed(recorder, bucket, "DX", count, [SIZE])
+        wanted_pairs(expected, count=count)
         baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=True, page_size=127))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         fleet.stop()
         original = fleet.snapshot("physical-baseline", quiescent=True)
-        cohorts = map_cohorts(original, bucket, expected)
-        fleet.record("all-external-baseline", verify_all_parts(fleet, cohorts, "baseline-part-batch"))
-        targets = [cohorts[index] for index in range(0, OBJECTS, 64)]
+        cohorts = map_cohorts(original, bucket, expected, count=count)
+        fleet.record("all-external-baseline", verify_all_parts(fleet, cohorts, "baseline-part-batch", count=count))
+        targets = [cohorts[index] for index in missing_indices]
         receipts = []
         for index, target in enumerate(targets):
             params = {"disk": target["disk"], "relativePath": target["relativePath"], "kind": "missing",
@@ -322,12 +339,14 @@ def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANC
         faulted = fleet.snapshot("physical-fault", quiescent=True)
         fleet.record("fault-proof", validate_missing_batch(original, faulted, targets, receipts))
         fleet.start()
+        require(physical_content(faulted) == physical_content(fleet.snapshot("physical-before-trigger")),
+                "ATTRIBUTION_NOT_OBSERVED: DX fault changed before the admitted manual task")
         result["branches"] = observer(probe, fleet, binding, bucket, expected, targets, active, original=original)
         require(set(result["branches"]) == set(branches), "DX observer omitted or invented a source branch")
         fleet.stop()
         repaired = fleet.snapshot("physical-repaired-before-get", quiescent=True)
         fleet.record("physical-repair-proof", validate_repaired_physical(original, repaired, targets[0], repair_targets=targets))
-        fleet.record("all-external-repair-proof", verify_all_parts(fleet, cohorts, "repaired-part-batch"))
+        fleet.record("all-external-repair-proof", verify_all_parts(fleet, cohorts, "repaired-part-batch", count=count))
         fleet.start()
         for endpoint in binding["endpoints"]:
             inventory = fleet.record("s3-complete-after", {"endpoint": endpoint, **Probe(binding, endpoint).inventory(
@@ -360,7 +379,7 @@ def run_topology(args, topology, nodes, *, observer=observe_task, branches=BRANC
     return result
 
 
-def main(*, case_id=CASE_ID, observer=observe_task, branches=BRANCHES):
+def main(*, case_id=CASE_ID, observer=observe_task, branches=BRANCHES, runner=run_topology):
     def interrupted(signum, frame):
         raise KeyboardInterrupt(f"Heal workflow interrupted by signal {signum}")
     signal.signal(signal.SIGTERM, interrupted)
@@ -381,7 +400,7 @@ def main(*, case_id=CASE_ID, observer=observe_task, branches=BRANCHES):
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
-            results.append(run_topology(args, topology, selected, observer=observer, branches=branches))
+            results.append(runner(args, topology, selected, observer=observer, branches=branches))
             if results[-1]["cleanup"] != "PASS":
                 break
     finally:
