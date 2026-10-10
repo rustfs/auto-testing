@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 100 currently dispatchable IDs include all 74 non-Heal cases and twenty-six Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
+case evidence. The 100 currently dispatchable IDs include all 74 non-Heal cases and twenty-six Heal cases. Forty-two have live PASS evidence; the other 116 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -448,3 +448,11 @@ S3/version controls must all agree. Runtime credentials are redacted from
 archived debug journals. Focused tests cover source identity, stale-task
 refusal, single-read/no-mutation dispatch, exact content/range/request identity
 and runtime profile isolation. Full live proof remains pending.
+
+Corrected D01 run `38067139720` passed all 96 H1/H2 parameters (48 per
+topology), with canonical PASS, complete summary and cleanup PASS. Its exact
+candidate/package/binary/harness identities and each parameter's evidence were
+downloaded and independently checked by the canonical report gate. It covers
+zero/one/4KiB, actual inline and EC-block boundaries, multi-block payloads,
+both roles, missing/bitflip faults and exact Range outcomes. The three prior
+D01 failures and independent recovery record remain unchanged.
