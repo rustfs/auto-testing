@@ -181,6 +181,15 @@ class ResultWriterTest(unittest.TestCase):
             ]
             subprocess.run(command + ["--verdict", "RUNNING"], check=True, capture_output=True)
             self.assertEqual("RUNNING", json.loads((results / "s3.basic-object-round-trip.json").read_text())["verdict"])
+            identity = ["--candidate-manifest", str(candidate), "--rc-bin", str(rc), "--testing-commit", "d" * 40]
+            subprocess.run(command + identity + ["--verdict", "INFRA_ERROR", "--cleanup-status", "PASS",
+                                                "--reason", "candidate install failed"], check=True, capture_output=True)
+            bootstrap = json.loads((results / "s3.basic-object-round-trip.json").read_text())
+            self.assertEqual(bootstrap["verdict"], "INFRA_ERROR")
+            self.assertIsNone(bootstrap["provenance"]["binary_sha256"])
+            invalid_pass = subprocess.run(command + identity + ["--verdict", "PASS", "--cleanup-status", "PASS",
+                                                                "--evidence", "evidence.json"], capture_output=True)
+            self.assertNotEqual(invalid_pass.returncode, 0)
             subprocess.run(command + [
                 "--verdict", "PASS", "--cleanup-status", "PASS",
                 "--candidate-manifest", str(candidate),

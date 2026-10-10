@@ -40,7 +40,9 @@ python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profi
 
 bootstrap() {
   local node
-  service_action_all stop
+  for node in "${NODES[@]}"; do
+    stop_existing "${node}"
+  done
   step1_download
   for node in "${NODES[@]}"; do
     {
@@ -52,11 +54,24 @@ bootstrap() {
   done
 }
 
+stop_existing() {
+  local node="$1"
+  run_remote "${node}" <<'REMOTE'
+set -euo pipefail
+load_state="$(systemctl show rustfs -p LoadState --value)"
+if [ "${load_state}" != not-found ]; then
+  sudo -n systemctl stop rustfs
+fi
+! systemctl is-active --quiet rustfs
+REMOTE
+}
+
 finalize_package() {
   local node failed=0
   for node in "${NODES[@]}"; do
+    (stop_existing "${node}") || failed=1
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-      'sudo -n systemctl stop rustfs && sudo -n dpkg -P rustfs' || failed=1
+      'if dpkg-query -W -f="${Status}" rustfs 2>/dev/null | grep -q "install ok installed"; then sudo -n dpkg -P rustfs; fi' || failed=1
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
       '! systemctl is-active --quiet rustfs' || failed=1
   done
@@ -96,7 +111,14 @@ fi
 (finalize_package) > "${evidence}/cleanup.log" 2>&1 || cleanup_status=FAIL
 package_active=0
 cat "${evidence}/cleanup.log"
-[ -n "${binary_sha}" ] || die "candidate was not installed; retain RUNNING result and setup evidence"
+[ -n "${binary_sha}" ] || {
+  python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+    --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status "${cleanup_status}" \
+    --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "$(command -v rc)" \
+    --evidence "evidence/${case_id}/setup.log" --evidence "evidence/${case_id}/cleanup.log" \
+    --reason "Heal candidate bootstrap failed before a verified binary was installed"
+  exit 1
+}
 verdict=FAIL reason="Heal source assertions did not pass on every required H1/H2 branch"
 if [ "${case_rc}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
   verdict=PASS; reason=""

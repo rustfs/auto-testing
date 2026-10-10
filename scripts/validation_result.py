@@ -63,9 +63,10 @@ def main() -> int:
             parser.error("terminal results require candidate manifest, rc binary, and testing commit")
         candidate = json.loads(args.candidate_manifest.read_text(encoding="utf-8"))
         binary_sha256 = args.binary_sha256 or candidate.get("binary_sha256")
-        if not isinstance(binary_sha256, str) or len(binary_sha256) != 64 or any(
+        bootstrap_error = args.verdict == "INFRA_ERROR" and binary_sha256 is None
+        if not bootstrap_error and (not isinstance(binary_sha256, str) or len(binary_sha256) != 64 or any(
             character not in "0123456789abcdef" for character in binary_sha256
-        ):
+        )):
             parser.error("terminal results require a valid installed binary SHA-256")
         if candidate.get("binary_sha256") and candidate["binary_sha256"] != binary_sha256:
             parser.error("installed binary SHA-256 differs from candidate manifest")
