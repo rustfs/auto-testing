@@ -116,7 +116,9 @@ def authorization_requests(probe, fleet, bucket, before, baseline, active, optio
             users.append(user)  # Preserve ownership even if admission loses its reply.
             iam_exchange(probe, fleet, "add-user", user, secret=secret)
         policy_created = True
-        document = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["admin:Heal"], "Resource": ["*"]}]}
+        # The candidate admits unscoped Admin actions without an S3 Resource;
+        # its resource parser correctly rejects a bare '*' as an invalid ARN.
+        document = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["admin:Heal"]}]}
         iam_exchange(probe, fleet, "add-policy", allowed_user, policy=policy, document=document)
         attached = True
         iam_exchange(probe, fleet, "attach", allowed_user, policy=policy)

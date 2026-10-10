@@ -139,6 +139,8 @@ class PrincipalLifecycleTest(unittest.TestCase):
                 return {}
         def exchange(probe, recorded, operation, user, **kwargs):
             iam_calls.append((operation, user))
+            if operation == "add-policy":
+                self.assertEqual(kwargs["document"], {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["admin:Heal"]}]})
             if operation == "add-user": users.add(user)
             if operation == failed_operation: raise ValueError("injected IAM failure: " + operation)
             if operation == "remove-user": users.discard(user)
