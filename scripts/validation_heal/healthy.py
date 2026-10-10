@@ -143,6 +143,7 @@ class Fleet:
         self.drive_gates = set()
         self.secret_values = set()
         self.frozen_processes = {}
+        self.snapshot_buckets = None
 
     def record(self, label, value):
         self.sequence += 1
@@ -165,6 +166,9 @@ class Fleet:
                 os.environ.get("RUSTFS_SSH_USER", "azureuser") + "@" + node]
 
     def remote(self, node, action, **params):
+        if action == "snapshot" and self.snapshot_buckets is not None:
+            require("buckets" not in params, "physical bucket scope must use the frozen fleet binding")
+            params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline"}:

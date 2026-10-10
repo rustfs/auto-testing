@@ -471,10 +471,11 @@ def verify_part_owned(request, roots, owner, tool):
     data = root / "data"
     part = checked(data / relative, data)
     metadata = checked(part.parent.parent / "xl.meta", data)
-    key = metadata.parent.relative_to(data / owner["bucket"]).as_posix()
-    result = json.loads(command(str(tool), "--verify-part", str(metadata), owner["bucket"], key,
+    bucket = parts[0]
+    key = metadata.parent.relative_to(data / bucket).as_posix()
+    result = json.loads(command(str(tool), "--verify-part", str(metadata), bucket, key,
                                 str(part), request["versionId"], str(request["partNumber"])).stdout)
-    require(result.get("physicalBitrotVerified") is True and result.get("key") == key
+    require(result.get("physicalBitrotVerified") is True and result.get("bucket") == bucket and result.get("key") == key
             and result.get("versionId") == request["versionId"]
             and result.get("partNumber") == request["partNumber"], "bitrot proof identity differs")
     return {**result, "sha256": digest(part), "relativePath": relative, "disk": request["disk"]}
@@ -505,8 +506,8 @@ def verify_inline(request):
     key = "/".join(parts[1:-1])
     tool = checked(state / "heal-meta-inspect", state)
     require(digest(tool) == owner.get("inspectorSha256"), "inline verifier changed")
-    result = json.loads(command(str(tool), "--verify-inline", str(path), owner["bucket"], key, request["versionId"]).stdout)
-    require(result.get("physicalBitrotVerified") is True and result.get("key") == key
+    result = json.loads(command(str(tool), "--verify-inline", str(path), parts[0], key, request["versionId"]).stdout)
+    require(result.get("physicalBitrotVerified") is True and result.get("bucket") == parts[0] and result.get("key") == key
             and result.get("versionId") == request["versionId"], "inline proof identity differs")
     return {**result, "relativePath": request["relativePath"], "disk": request["disk"]}
 
@@ -534,6 +535,17 @@ def inspect_metadata(tool, path, bucket, key, entry, metadata_faults):
     return {"metadata": decoded}
 
 
+def snapshot_buckets(owner, request):
+    buckets = request.get("buckets", [owner["bucket"]])
+    require(isinstance(buckets, list) and 1 <= len(buckets) <= 8
+            and all(isinstance(bucket, str) and 3 <= len(bucket) <= 63
+                    and re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", bucket)
+                    and (bucket == owner["bucket"] or bucket.startswith(owner["bucket"] + "-")) for bucket in buckets)
+            and len(set(buckets)) == len(buckets) and owner["bucket"] in buckets,
+            "physical bucket scope escaped the original run-owned prefix or omitted its primary bucket")
+    return buckets
+
+
 def snapshot(request):
     state, roots, owner = owned(request["runId"])
     pid = int(command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"], check=False).stdout.strip() or "0")
@@ -557,21 +569,22 @@ def snapshot(request):
         require(digest(checked(tool, state)) == owner["inspectorSha256"], "metadata inspector changed")
     for index, root in enumerate(roots):
         data = root / "data"
-        folder = checked(data / owner["bucket"], data)
-        if folder.exists():
-            for directory, children, names in os.walk(folder, followlinks=False):
-                for name in (*children, *names):
-                    checked(Path(directory) / name, data)
-                for name in sorted(names):
-                    path = Path(directory) / name
-                    require(len(files) < limits["maxSnapshotFiles"] and path.stat().st_size <= 64 * 1024**2,
-                            "fixture exceeds physical evidence budget")
-                    entry = {"disk": index, "path": str(path.relative_to(data)),
-                             "size": path.stat().st_size, "sha256": digest(path)}
-                    if path.name == "xl.meta" and owner.get("inspectorSha256"):
-                        key = path.parent.relative_to(folder).as_posix()
-                        entry.update(inspect_metadata(tool, path, owner["bucket"], key, entry, request.get("metadataFaults", {})))
-                    files.append(entry)
+        for bucket in snapshot_buckets(owner, request):
+            folder = checked(data / bucket, data)
+            if folder.exists():
+                for directory, children, names in os.walk(folder, followlinks=False):
+                    for name in (*children, *names):
+                        checked(Path(directory) / name, data)
+                    for name in sorted(names):
+                        path = Path(directory) / name
+                        require(len(files) < limits["maxSnapshotFiles"] and path.stat().st_size <= 64 * 1024**2,
+                                "fixture exceeds physical evidence budget")
+                        entry = {"disk": index, "path": str(path.relative_to(data)),
+                                 "size": path.stat().st_size, "sha256": digest(path)}
+                        if path.name == "xl.meta" and owner.get("inspectorSha256"):
+                            key = path.parent.relative_to(folder).as_posix()
+                            entry.update(inspect_metadata(tool, path, bucket, key, entry, request.get("metadataFaults", {})))
+                        files.append(entry)
         path = checked(data / ".rustfs.sys/format.json", data)
         require(path.stat().st_size < 65536, "disk format exceeds budget")
         formats.append({"disk": index, "sha256": digest(path), "value": json.loads(path.read_text())})
@@ -590,7 +603,7 @@ def logs(request):
         cursor = request.get("afterCursor")
         require(cursor is None or isinstance(cursor, str) and re.fullmatch(r"[A-Za-z0-9=;_-]{1,512}", cursor),
                 "invalid journal cursor")
-        args = ["journalctl", "-u", owner["unit"], "--no-pager", "-o", "json",
+        args = ["journalctl", "-u", owner["unit"], "--quiet", "--no-pager", "-o", "json",
                 "--output-fields=__CURSOR,MESSAGE"]
         # +N selects the FIRST N entries after the cursor. A plain -n N
         # selects the tail and could silently drop the beginning of a window.

@@ -1,6 +1,7 @@
 """B03: full private-drive replacement with original same-slot shard oracles."""
 
 import copy
+import time
 
 try:
     from .heal_probe import Probe, canonical, compare_inventories, require
@@ -15,6 +16,24 @@ except ImportError:
 
 
 BRANCHES = ("new-disk-data", "new-disk-versioned")
+FORMAT_SECONDS = 90
+
+
+def wait_format(fleet, node, disk):
+    deadline = time.monotonic() + FORMAT_SECONDS
+    while True:
+        observed = fleet.record("replacement-format-initialization-window", fleet.remote(node, "replacement-state"))
+        require(observed.get("readOnly") is True and observed.get("originalArchiveUnchanged") is True,
+                "replacement initialization lost its read-only original-archive witness")
+        formats = observed.get("formats")
+        require(isinstance(formats, list) and len(formats) == 4
+                and {item.get("disk") for item in formats} == set(range(4)), "replacement format probe omitted a member")
+        target = next(item for item in formats if item["disk"] == disk)
+        require(type(target.get("present")) is bool, "replacement format presence is unknown")
+        if target["present"]: return observed
+        require(time.monotonic() < deadline,
+                "candidate did not initialize the replacement format within its registered 90-second budget")
+        time.sleep(2)
 
 
 def format_identity(before, after, member):
@@ -104,6 +123,7 @@ def run_branch(recorder, fleet, bucket, branch, expected, baseline, active, admi
     denied = fleet.record("replacement-backup-service-refusal", fleet.remote(node, "replacement-probe"))
     require(denied.get("serviceReadDenied") is True and denied.get("sameOriginalServiceProcess") is True,
             "replacement candidate can access its old physical backup")
+    wait_format(fleet, node, disk)
     initialized = fleet.snapshot("replacement-candidate-initialization")
     fleet.record("replacement-new-format-proof", format_identity(before, initialized, member))
     require(not any(item["disk"] == disk for item in initialized[node]["files"]),

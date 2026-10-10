@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 113 currently dispatchable IDs include all 74 non-Heal cases and thirty-nine Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
+case evidence. The 114 currently dispatchable IDs include all 74 non-Heal cases and forty Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 45 Heal cases remain
+The other 44 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -765,3 +765,30 @@ are retained in the scanner's in-memory index. The healthy checkpoint starts
 after seed, baseline and the initial physical snapshot, so a fresh complete
 scanner cycle must actually occur in the registered observation window. Earlier
 log-budget failures remain FAIL; this harness change has no live PASS claim.
+
+F05 `heal.full-cluster-restart` now has an H2 executor for all three source
+branches. It seeds DB, historical DV/markers, completed multipart objects,
+exact pending UploadIds/parts and a 1,025-object DX observation fixture on the
+current four Heal peers. A root task must have physically repaired some but not
+all injected shards before the original coordinator is paused. Every original
+peer then exits with witnessed SIGTERM/normal code zero in a registered order.
+The same task ID, physical intent owner, non-timeout options and remaining
+budget must survive all units being stopped. Recovery uses no new root start.
+Complete canonical counters, bounded exact diagnostics, durable terminal/report,
+full same-role physical manifests, streaming shard checks and all-peer S3
+inventories must agree. All four processes restart again after completion;
+terminal records and user files must remain unchanged. Pending MPU listings
+remain exact across both restarts and their original parts are then completed
+and checked by full payload hash on every peer. Multi-bucket snapshots and
+streaming verification bind each run-owned bucket explicitly. F05 has no live
+PASS claim until that complete sequence succeeds.
+
+C06 run `38083035055` retained FAIL and cleanup PASS: all three H1 branches
+passed with the same live service rejoin, but H2 failed the older 10,000-line
+journal bound. The paginated journal implementation must be validated in a fresh
+run. B03 run `38083328049` retained FAIL and cleanup PASS on all H1/H2 DB/DV
+instances: the candidate had no replacement `format.json` at the first physical
+snapshot. The executor now observes a registered 90-second, read-only format
+initialization window before requiring distinct new UUID/set-slot evidence;
+service health still cannot certify replacement acceptance. Neither result
+increases the complete live PASS count.

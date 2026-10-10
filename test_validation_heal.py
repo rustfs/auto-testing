@@ -3023,6 +3023,20 @@ class HealWholeDriveReplacementTest(unittest.TestCase):
                 self.assertFalse((root / "quarantine/old-disk").exists())
                 self.assertEqual((root / "data/ack-part").read_bytes(), b"original-ack-shard")
 
+    def test_replacement_format_wait_never_substitutes_service_ready_for_member_readiness(self):
+        absent = {"readOnly": True, "originalArchiveUnchanged": True,
+                  "formats": [{"disk": index, "present": index != 3} for index in range(4)]}
+        present = copy.deepcopy(absent); present["formats"][3]["present"] = True
+        fleet = types.SimpleNamespace(record=lambda label, value: value, remote=lambda *args: absent)
+        with patch("scripts.validation_heal.replacement.time.monotonic", side_effect=[0, 91]), self.assertRaisesRegex(ValueError, "90-second"):
+            replacement.wait_format(fleet, "node1", 3)
+        rows = [absent, present]
+        fleet.remote = lambda *args: rows.pop(0)
+        with patch("scripts.validation_heal.replacement.time.sleep"), patch("scripts.validation_heal.replacement.time.monotonic", return_value=0):
+            self.assertTrue(replacement.wait_format(fleet, "node1", 3)["formats"][3]["present"])
+        fleet.remote = lambda *args: {**present, "originalArchiveUnchanged": False}
+        with self.assertRaisesRegex(ValueError, "archive witness"): replacement.wait_format(fleet, "node1", 3)
+
     def test_remote_replacement_module_initializes_and_all_source_branches_remain(self):
         import sys
         self.assertEqual(list(replacement.BRANCHES), select("B03")[0]["variants"])
