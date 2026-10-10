@@ -22,6 +22,7 @@ from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, vali
     branch_plan, suspend_fixture, validate_failed_version, validate_unrecoverable_get, verify_quorum_contract,
     map_inline_target, verify_proof)
 from scripts.validation_heal.versions import seed_semantics, verify_semantics
+from scripts.validation_heal.versions import multi_loss_instances, multi_loss_plan
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract
 
 
@@ -388,6 +389,31 @@ class HealShardOracleTest(unittest.TestCase):
 
 
 class HealVersionOracleTest(unittest.TestCase):
+    def test_multi_loss_covers_every_actual_loss_count_and_role_composition(self):
+        cohort = {"logical": {"erasure": {"data_blocks": 12, "parity_blocks": 4}}, "cohort": list(range(16))}
+        expected = [{"key": "object", "versionId": "old", "deleteMarker": False}]
+        with patch("scripts.validation_heal.versions.choose_target", return_value=cohort):
+            instances = multi_loss_instances({}, "fixture", expected, "DV")
+        self.assertEqual(len(instances), 14)
+        self.assertEqual({(item["loss"], item["dataLoss"], item["parityLoss"]) for item in instances},
+                         {(loss, data, loss - data) for loss in range(1, 5) for data in range(loss + 1)})
+        self.assertEqual(len({item["key"] for item in instances}), 14)
+        self.assertEqual({item["sourceBranch"] for item in instances}, set(VERSION_BRANCHES["heal.multiple-shard-loss"]))
+        for item in instances:
+            self.assertGreaterEqual(item["remainingSameVersionShards"], item["readQuorum"])
+        before = HealShardOracleTest().snapshot()
+        entry = {"key": "objects/0008.bin", "versionId": "null", "deleteMarker": False}
+        instance = {**instances[2], "key": entry["key"], "dataLoss": 1, "parityLoss": 1,
+                    "loss": 2, "readQuorum": 2}
+        plan = multi_loss_plan(instance, before, "rv-heal-0123456789abcdef", [entry], "DB")
+        self.assertEqual({item["role"] for item in plan["faults"]}, {"data", "parity"})
+        self.assertEqual(len({item["disk"] for item in plan["faults"]}), 2)
+        self.assertEqual(plan["requiredRepairs"], {(entry["key"], "null")})
+        self.assertTrue(all(item["versionId"] == "null" for item in plan["faults"]))
+        with self.assertRaisesRegex(ValueError, "quorum"):
+            multi_loss_plan({**instance, "dataLoss": 3, "loss": 4}, before,
+                            "rv-heal-0123456789abcdef", [entry], "DB")
+
     def test_metadata_fixture_has_real_encoded_content_and_exact_distinct_version_tags(self):
         uploaded = []
         def call(operation, params, body=None):

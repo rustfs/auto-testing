@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 92 currently dispatchable IDs include all 74 non-Heal cases and eighteen Heal cases. Thirty-nine have live PASS evidence; the other 119 have no live PASS claim.
+case evidence. The 93 currently dispatchable IDs include all 74 non-Heal cases and nineteen Heal cases. Thirty-nine have live PASS evidence; the other 119 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 66 Heal cases remain
+The other 65 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -282,3 +282,18 @@ the S3 `null` spelling literally. The candidate source defines these as the same
 null identity. The oracle now normalizes only those representations and still
 rejects every other version mismatch. The original FAIL remains; a fresh full
 run is required. Auto-testing CI passed all six lanes at commit `f9c153f`.
+
+B05 `heal.multiple-shard-loss` now expands 1..M losses from the actual decoded
+EC geometry, including every possible data/parity role count. Each parameter
+instance uses a distinct acknowledged object; DB and DV both run on H1/H2.
+All drives remain online for the write/lock condition while selected same-version
+parts are isolated. Exact full original shard hashes, streaming checksums,
+complete version/marker responsibility and S3 controls must all pass. B05 has
+not yet been validated live.
+
+B07 run `38060686737` retained FAIL with cleanup PASS. At R-1 shards H1
+returned HTTP 500/InternalError instead of the recognized candidate read-quorum
+refusal. H2 returned 503/SlowDownRead, but Heal recorded a grace-window deferred
+receipt and completed execution rather than the source's required failed
+responsibility. Good-shard preservation and the raw task outcome remain
+archived; neither branch is promoted to PASS.

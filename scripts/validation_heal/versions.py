@@ -43,6 +43,7 @@ BRANCHES = {
     "heal.below-read-quorum": ("r-minus-1-unversioned", "r-minus-1-historical"),
     "heal.missing-or-corrupt-xlmeta": ("missing-xlmeta", "truncated-xlmeta", "corrupt-xlmeta", "inline-payload", "versioned-xlmeta"),
     "heal.object-metadata-and-tags": ("user-metadata", "content-headers", "versioned-tags"),
+    "heal.multiple-shard-loss": ("loss-1-data", "loss-1-parity", "loss-2-through-m-data-parity"),
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -218,6 +219,46 @@ def metadata_target(snapshot, part_target):
     relative = f"{part_target['bucket']}/{part_target['key']}/xl.meta"
     entry = files(snapshot)[part_target["node"], part_target["disk"], relative]
     return {**part_target, "relativePath": relative, "sha256": entry["sha256"], "size": entry["size"]}
+
+
+def multi_loss_instances(snapshot, bucket, expected, fixture):
+    sample = next(entry for entry in expected if not entry["deleteMarker"])
+    target = choose_target(snapshot, bucket, sample, "data")
+    geometry = target["logical"]["erasure"]
+    data, parity = geometry["data_blocks"], geometry["parity_blocks"]
+    require(data > 0 and parity > 0 and data + parity == len(target["cohort"]),
+            "multi-loss matrix needs a complete same-version EC authority")
+    instances = []
+    for loss in range(1, parity + 1):
+        for data_loss in range(max(0, loss - parity), min(loss, data) + 1):
+            source_branch = ("loss-1-data" if data_loss else "loss-1-parity") if loss == 1 else "loss-2-through-m-data-parity"
+            instances.append({"name": f"{source_branch}-n{loss}-d{data_loss}-p{loss - data_loss}",
+                "sourceBranch": source_branch, "loss": loss, "dataLoss": data_loss, "parityLoss": loss - data_loss,
+                "key": f"objects/{len(instances):04d}.bin", "fixture": fixture,
+                "readQuorum": data, "remainingSameVersionShards": data + parity - loss,
+                "writeCommitCondition": "all physical members online; only selected part files isolated"})
+    require({entry["sourceBranch"] for entry in instances} == set(BRANCHES["heal.multiple-shard-loss"]),
+            "actual EC geometry cannot cover every required multi-loss branch")
+    require(len({entry["key"] for entry in instances}) == len(instances)
+            and all(entry["remainingSameVersionShards"] >= data for entry in instances),
+            "multi-loss matrix reused a fixture or crossed below its read quorum")
+    return instances
+
+
+def multi_loss_plan(instance, snapshot, bucket, expected, fixture):
+    selected = [entry for entry in expected if entry["key"] == instance["key"]]
+    data = [entry for entry in selected if not entry["deleteMarker"]]
+    require(len(data) == (3 if fixture == "DV" else 1), "multi-loss instance lacks its fresh ACK cohort")
+    target = choose_target(snapshot, bucket, data[0], "data")
+    cohort = sorted(target["cohort"], key=lambda shard: shard["index"])
+    missing = [shard for shard in cohort if shard["role"] == "data"][:instance["dataLoss"]]
+    missing += [shard for shard in cohort if shard["role"] == "parity"][:instance["parityLoss"]]
+    require(len(missing) == instance["loss"] and len(cohort) - len(missing) >= instance["readQuorum"],
+            "actual multi-loss target roles or quorum differ from the frozen parameter matrix")
+    faults = [{**target, **shard} for shard in missing]
+    return {"scope": {"bucket": bucket, "key": instance["key"]}, "recursive": fixture == "DV",
+            "expected": selected, "faults": faults, "proofs": faults,
+            "requiredRepairs": {version_identity(data[0])}, "metadataRepairs": set(), "parameters": instance}
 
 
 def map_inline_target(snapshot, bucket, entry):
@@ -497,20 +538,30 @@ def run_topology(args, topology, nodes, fixture):
             expected, public = seed_semantics(recorder, bucket)
         else:
             expected = seed(recorder, bucket, fixture,
-                            4 if fixture == "DV" else 128, [VERSION_SIZE] if fixture == "DV" else SIZES)
+                            16 if args.case_id == "heal.multiple-shard-loss" else 4 if fixture == "DV" else 128,
+                            [VERSION_SIZE] if args.case_id == "heal.multiple-shard-loss" or fixture == "DV" else SIZES)
         if args.case_id == "heal.versioning-suspended-null":
             expected = suspend_fixture(recorder, bucket, expected)
         baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         if public is not None:
             fleet.record("semantic-baseline", verify_semantics(public, baseline))
+        instances = None
+        if args.case_id == "heal.multiple-shard-loss":
+            fleet.stop()
+            instances = multi_loss_instances(fleet.snapshot("multi-loss-geometry", quiescent=True), bucket, expected, fixture)
+            fleet.record("multi-loss-parameter-matrix", {"instances": instances, "allLossCountsAndRoleCompositions": True})
+            branches = [entry["name"] for entry in instances]
+            fleet.start()
         for branch in branches:
             registrations = []
             metadata_faults = {}
             try:
                 fleet.stop()
                 before = fleet.snapshot("physical-before-" + branch, quiescent=True)
-                plan = branch_plan(args.case_id, branch, before, bucket, expected, fixture)
+                plan = multi_loss_plan(next(entry for entry in instances if entry["name"] == branch),
+                                       before, bucket, expected, fixture) if instances else branch_plan(
+                                           args.case_id, branch, before, bucket, expected, fixture)
                 fleet.record("fault-plan-" + branch, {**plan, "requiredRepairs": sorted(plan["requiredRepairs"]),
                                                      "metadataRepairs": sorted(plan["metadataRepairs"])})
                 for target in plan["proofs"]:
@@ -616,6 +667,8 @@ def run_topology(args, topology, nodes, fixture):
                         repeats.append(proof)
                 result["branches"][branch] = {"verdict": "PASS", "physical": physical, "bitrot": bitrot,
                     "s3": s3, "responsibility": responsibility, "repeats": repeats}
+                if instances:
+                    result["branches"][branch]["parameters"] = plan["parameters"]
                 if negative_proof is not None:
                     result["branches"][branch]["negative"] = negative_proof
                     result["branches"][branch]["physical"]["backupUsedAfterFailureProof"] = True
@@ -669,7 +722,7 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes), "four current Heal nodes required")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)), "invalid candidate binary digest")
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
-    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta"} else ("DV",)
+    fixtures = ("DB", "DV") if args.case_id in {"heal.repeat-idempotency", "heal.below-read-quorum", "heal.missing-or-corrupt-xlmeta", "heal.multiple-shard-loss"} else ("DV",)
     if args.case_id == "heal.object-metadata-and-tags":
         fixtures = ("DS",)
     results = []
