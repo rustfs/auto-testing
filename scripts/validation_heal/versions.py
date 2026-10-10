@@ -26,6 +26,7 @@ try:
     from .heal_fault import bounded_fault_id
     from .boundaries import (BRANCHES as SIZE_BRANCHES, verify_size_contract, boundary_sizes,
                              seed_boundaries, verify_boundary_ranges)
+    from .object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -37,6 +38,7 @@ except ImportError:
     from heal_fault import bounded_fault_id
     from boundaries import (BRANCHES as SIZE_BRANCHES, verify_size_contract, boundary_sizes,
                             seed_boundaries, verify_boundary_ranges)
+    from object_lock import BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, seed_locked, prove_locked, cleanup_locked_fleet
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -52,6 +54,7 @@ BRANCHES = {
     "heal.multiple-shard-loss": ("loss-1-data", "loss-1-parity", "loss-2-through-m-data-parity"),
     "heal.special-keys-and-pagination": ("unicode-space-percent", "encoded-slash", "adjacent-prefixes", "multi-page-list"),
     "heal.object-size-boundaries": SIZE_BRANCHES,
+    "heal.object-lock-retention": LOCK_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -446,6 +449,22 @@ def reenable_and_verify(recorder, fleet, bucket, baseline):
 
 def branch_plan(case_id, branch, snapshot, bucket, expected, fixture):
     """Plans are derived from ACK order and decoded physical roles, never disk numbers."""
+    if case_id == "heal.object-lock-retention":
+        index = LOCK_BRANCHES.index(branch)
+        key = LOCK_KEYS[index]
+        selected = [entry for entry in expected if entry["key"] == key]
+        require(len(selected) == 3 and all(not entry["deleteMarker"] for entry in selected), "protected fixture lost its three distinct versions")
+        target = choose_target(snapshot, bucket, selected[0 if index == 3 else -1], "parity" if index == 1 else "data")
+        metadata = index >= 2
+        proofs = [target]
+        if metadata:
+            proofs = [choose_target(snapshot, bucket, entry, "data") for entry in selected]
+            proofs = [{**item, **next(shard for shard in item["cohort"]
+                       if (shard["node"], shard["disk"]) == (target["node"], target["disk"]))} for item in proofs]
+        return {"scope": {"bucket": bucket, "key": key}, "recursive": True, "expected": selected,
+                "faults": [metadata_target(snapshot, target)] if metadata else [target], "proofs": proofs,
+                "requiredRepairs": set() if metadata else {version_identity(target)},
+                "metadataRepairs": {key} if metadata else set()}
     branch_index = BRANCHES[case_id].index(branch)
     key = f"objects/{branch_index:04d}.bin" if fixture == "DV" else f"objects/{8 + 9 * branch_index:04d}.bin"
     if branch == "versioned-repeat":
@@ -614,6 +633,7 @@ def run_topology(args, topology, nodes, fixture):
     result = {"topology": topology, "fixture": fixture, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active, admissions = [], []
     probe = Probe(binding)
+    lock_context = {} if args.case_id == "heal.object-lock-retention" else None
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         processes = fleet.snapshot("deployed-topology")
@@ -628,6 +648,8 @@ def run_topology(args, topology, nodes, fixture):
             fleet.record("candidate-size-contract", {"sourceContract": size_rule, "parameters": sizes})
             extra, instances = seed_boundaries(recorder, bucket, sizes)
             expected += extra
+        elif lock_context is not None:
+            expected = seed_locked(recorder, fleet, bucket, lock_context)
         elif fixture == "DK":
             expected = seed_special_keys(recorder, bucket)
         elif fixture == "DS":
@@ -641,6 +663,8 @@ def run_topology(args, topology, nodes, fixture):
         baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture in {"DB", "DK"},
                                                               page_size=17 if fixture == "DK" else None))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
+        if lock_context is not None:
+            fleet.record("lock-baseline-proof", prove_locked(probe, fleet, bucket, lock_context, label="lock-baseline"))
         if fixture == "DK":
             fleet.record("special-key-pagination-baseline", verify_pagination(baseline))
         if public is not None:
@@ -658,6 +682,9 @@ def run_topology(args, topology, nodes, fixture):
             registrations = []
             metadata_faults = {}
             try:
+                if lock_context is not None:
+                    fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
+                        key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-before-" + branch))
                 fleet.stop()
                 before = fleet.snapshot("physical-before-" + branch, quiescent=True)
                 if size_rule:
@@ -723,6 +750,9 @@ def run_topology(args, topology, nodes, fixture):
                 bitrot = [verify_proof(fleet, target, "repaired-bitrot-" + branch) for target in plan["proofs"]]
                 fleet.start()
                 s3 = verify_version_s3(probe, fleet, bucket, expected, baseline, "s3-after-" + branch, fixture=fixture)
+                if lock_context is not None:
+                    s3["protection"] = prove_locked(probe, fleet, bucket, lock_context,
+                        key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-after-" + branch)
                 if size_rule:
                     s3["actualBoundaryRanges"] = verify_boundary_ranges(probe, fleet, bucket, expected, sizes["actualECBlockSize"])
                 # These faults have now been independently repaired and fully
@@ -805,7 +835,8 @@ def run_topology(args, topology, nodes, fixture):
                 fleet.record("stop-unresolved", probe.admin(path, [("clientToken", token), ("forceStop", "true")], b""))
             except Exception as exc:
                 fleet.record("stop-error", {"error": str(exc)})
-        result["cleanup"] = "PASS" if fleet.cleanup() else "FAIL"
+        cleaned = fleet.cleanup() if lock_context is None else cleanup_locked_fleet(probe, fleet, bucket, lock_context)
+        result["cleanup"] = "PASS" if cleaned else "FAIL"
         fleet.record("topology-result", result)
     return result
 
@@ -835,6 +866,8 @@ def main():
         fixtures = ("DK",)
     if args.case_id == "heal.object-size-boundaries":
         fixtures = ("DB",)
+    if args.case_id == "heal.object-lock-retention":
+        fixtures = ("DO",)
     results = []
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):

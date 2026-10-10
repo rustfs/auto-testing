@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import copy
 import gzip
+from datetime import UTC, datetime, timedelta
 import types
 from unittest.mock import patch
 
@@ -28,6 +29,8 @@ from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract,
 from scripts.validation_heal.boundaries import verify_size_contract, boundary_sizes, verify_boundary_ranges
 from scripts.validation_heal.node_outage import quorum_plan, put_ack, delete_ack, replica_census, validate_deleted_read
 from scripts.validation_heal.fleet_node import runtime_config, BACKGROUND_CONFIG
+from scripts.validation_heal.object_lock import (validate_protection, validate_protected_delete, cleanup_locked_fleet,
+    seed_locked, BRANCHES as LOCK_BRANCHES, KEYS as LOCK_KEYS, CLEANUP_SECONDS)
 
 
 class HealContractTest(unittest.TestCase):
@@ -946,6 +949,165 @@ class HealNodeOutageTest(unittest.TestCase):
             for changed in ({**good, "acknowledged": True}, {**good, "resultUnknown": True}, {**good, "payload": {}},
                             {**good, "response": {"ResponseMetadata": {"HTTPStatusCode": 403}, "Error": {"Code": "AccessDenied"}}}):
                 with self.subTest(version=version), self.assertRaises(ValueError): validate_deleted_read(changed, version)
+
+
+class HealObjectLockTest(unittest.TestCase):
+    def seed(self, *, fail_after=None):
+        calls, context = [], {}
+        fleet = types.SimpleNamespace(secret_values=set(), record=lambda label, value: value)
+        principal = types.SimpleNamespace(binding={"runId": "gh-12345-lock"}, credentials=lambda: ("owner", "secret"))
+        def invoke(operation, params, body=None):
+            calls.append((operation, copy.deepcopy(params)))
+            if fail_after is not None and operation == "put_object" and len([x for x in calls if x[0] == operation]) > fail_after:
+                raise ValueError("partial protected fixture")
+            if operation == "get_bucket_versioning": return {"Status": "Enabled"}
+            if operation == "get_object_lock_configuration":
+                return {"ObjectLockConfiguration": {"ObjectLockEnabled": "Enabled"},
+                        "ResponseMetadata": {"HTTPHeaders": {"date": "Sat, 10 Oct 2026 12:00:00 GMT"}}}
+            if operation == "put_object": return {"VersionId": "version-" + str(len(calls))}
+            return {}
+        recorder = types.SimpleNamespace(probe=principal, call=invoke)
+        with patch("scripts.validation_heal.object_lock.Probe", return_value=principal), \
+             patch("scripts.validation_heal.object_lock.payload", return_value=b"protected"), \
+             patch("scripts.validation_heal.object_lock.iam_exchange") as iam:
+            if fail_after is None:
+                expected = seed_locked(recorder, fleet, "rv-heal-lock", context)
+            else:
+                with self.assertRaisesRegex(ValueError, "partial protected fixture"):
+                    seed_locked(recorder, fleet, "rv-heal-lock", context)
+                expected = None
+        return expected, context, calls, iam.call_args_list
+
+    def test_protected_seed_uses_real_server_time_and_keeps_partial_ownership(self):
+        expected, context, calls, iam = self.seed()
+        self.assertEqual(len(expected), 12)
+        self.assertEqual(len({(entry["key"], entry["versionId"]) for entry in expected}), 12)
+        self.assertEqual(context["retainUntil"], datetime(2026, 10, 10, 12, 10, tzinfo=UTC))
+        self.assertEqual(sum(entry["isLatest"] for entry in expected), 4)
+        statements = next(call.kwargs["document"]["Statement"] for call in iam if "document" in call.kwargs)
+        self.assertEqual(statements[-1]["Action"], ["s3:BypassGovernanceRetention"])
+        self.assertEqual(statements[-1]["Effect"], "Deny")
+        for fail_after in (0, 1, 10):
+            _, partial, _, _ = self.seed(fail_after=fail_after)
+            self.assertTrue(partial["bucketAttempted"] and partial["policyCreated"] and partial["attached"])
+            self.assertTrue(partial["user"].startswith("rvheal"))
+
+    def test_protected_plan_freezes_all_versions_on_the_lost_metadata_drive(self):
+        base = HealShardOracleTest().snapshot()
+        bucket = "rv-heal-0123456789abcdef"
+        expected = []
+        snapshot = {"node1": {"formats": base["node1"]["formats"], "files": []}}
+        for key in LOCK_KEYS:
+            for entry in base["node1"]["files"]:
+                if "/control/" in entry["path"]: continue
+                cloned = copy.deepcopy(entry)
+                cloned["path"] = cloned["path"].replace("objects/0008.bin", key)
+                if "metadata" in cloned:
+                    cloned["metadata"]["key"] = key
+                    versions = []
+                    for nonce in range(3):
+                        version = copy.deepcopy(cloned["metadata"]["versions"][0])
+                        version.update(versionId=f"v{nonce}", isLatest=nonce == 2,
+                                       dataDir=f"12345678-1234-1234-1234-{nonce:012d}")
+                        versions.append(version)
+                    cloned["metadata"]["versions"] = versions
+                    snapshot["node1"]["files"].append(cloned)
+                else:
+                    for nonce in range(3):
+                        part = copy.deepcopy(cloned)
+                        part["path"] = part["path"].replace("12345678-1234-1234-1234-123456789abc", f"12345678-1234-1234-1234-{nonce:012d}")
+                        part["sha256"] += f"v{nonce}"
+                        snapshot["node1"]["files"].append(part)
+            expected.extend({"key": key, "versionId": f"v{nonce}", "deleteMarker": False, "isLatest": nonce == 2,
+                             "payload": {"size": 100}} for nonce in range(3))
+        for index, branch in enumerate(LOCK_BRANCHES):
+            plan = branch_plan("heal.object-lock-retention", branch, snapshot, bucket, expected, "DO")
+            self.assertEqual({item["key"] for item in plan["expected"]}, {LOCK_KEYS[index]})
+            self.assertEqual(plan["faults"][0]["versionId"], "v0" if index == 3 else "v2")
+            if index < 2:
+                self.assertEqual(plan["faults"][0]["role"], "parity" if index == 1 else "data")
+            else:
+                self.assertEqual(len(plan["proofs"]), 3)
+                self.assertEqual({item["versionId"] for item in plan["proofs"]}, {"v0", "v1", "v2"})
+                self.assertEqual(len({(item["node"], item["disk"]) for item in plan["proofs"]}), 1)
+                self.assertEqual(len({item["sha256"] for item in plan["proofs"]}), 3)
+                self.assertTrue(plan["faults"][0]["relativePath"].endswith("/xl.meta"))
+
+    def test_retention_proof_needs_exact_mode_expiry_and_active_server_time(self):
+        expiry = datetime(2026, 10, 10, 12, 5, tzinfo=UTC)
+        spec = {"ObjectLockMode": "COMPLIANCE", "ObjectLockRetainUntilDate": expiry}
+        good = {"acknowledged": True, "response": {"Retention": {"Mode": "COMPLIANCE", "RetainUntilDate": expiry},
+                "ResponseMetadata": {"HTTPHeaders": {"date": "Sat, 10 Oct 2026 12:00:00 GMT"}}}}
+        validate_protection(good, spec)
+        for invalid in ("mode", "expiry", "expired", "missing-server-time", "failed"):
+            changed = copy.deepcopy(good)
+            if invalid == "mode": changed["response"]["Retention"]["Mode"] = "GOVERNANCE"
+            elif invalid == "expiry": changed["response"]["Retention"]["RetainUntilDate"] -= timedelta(seconds=1)
+            elif invalid == "expired": changed["response"]["ResponseMetadata"]["HTTPHeaders"]["date"] = "Sat, 10 Oct 2026 12:05:00 GMT"
+            elif invalid == "missing-server-time": changed["response"].pop("ResponseMetadata")
+            else: changed["acknowledged"] = False
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError): validate_protection(changed, spec)
+        validate_protection({"acknowledged": True, "response": {"LegalHold": {"Status": "ON"}}}, {"ObjectLockLegalHoldStatus": "ON"})
+        with self.assertRaises(ValueError):
+            validate_protection({"acknowledged": True, "response": {"LegalHold": {"Status": "OFF"}}}, {"ObjectLockLegalHoldStatus": "ON"})
+
+    def test_protected_delete_cannot_pass_as_a_success_or_generic_transport_failure(self):
+        good = {"acknowledged": False, "resultUnknown": False,
+                "response": {"ResponseMetadata": {"HTTPStatusCode": 403}, "Error": {"Code": "AccessDenied"}}}
+        validate_protected_delete(good)
+        for changed in ({**good, "acknowledged": True}, {**good, "payload": {}}, {**good, "resultUnknown": True},
+                        {**good, "response": {"ResponseMetadata": {"HTTPStatusCode": 404}, "Error": {"Code": "NoSuchVersion"}}}):
+            with self.assertRaises(ValueError): validate_protected_delete(changed)
+
+    def cleanup(self, *, permanent_denial=False, transport_unknown=False, iam_failure=False):
+        clock, calls, evidence, removed = [0], [], {}, [False]
+        fleet = types.SimpleNamespace(reserved=["node1"], faults=[], stop=lambda: None, start=lambda: None,
+            remote=lambda *args, **kwargs: {}, snapshot=lambda *args, **kwargs: {}, cleanup=unittest.mock.Mock(return_value=True))
+        def record(label, value): evidence.setdefault(label, []).append(value); return value
+        fleet.record = record
+        def invoke(operation, params):
+            calls.append((operation, copy.deepcopy(params)))
+            if operation == "list_object_versions":
+                return {"acknowledged": True, "response": {} if removed[0] else {"Versions": [{"Key": LOCK_KEYS[1], "VersionId": "protected-version"}]}}
+            if operation == "get_object_legal_hold": return {"acknowledged": True, "response": {"LegalHold": {"Status": "OFF"}}}
+            if operation == "get_object_retention": return {"acknowledged": True, "response": {"Retention": {"Mode": "COMPLIANCE"}}}
+            if operation == "delete_object":
+                self.assertNotIn("BypassGovernanceRetention", params)
+                if permanent_denial or transport_unknown or clock[0] < 4:
+                    return {"acknowledged": False, "resultUnknown": transport_unknown,
+                            "response": {"ResponseMetadata": {"HTTPStatusCode": 403}, "Error": {"Code": "AccessDenied"}}}
+                removed[0] = True
+                return {"acknowledged": True, "response": {"ResponseMetadata": {"HTTPStatusCode": 204}}}
+            if operation == "delete_bucket": return {"acknowledged": True, "response": {}}
+            if operation == "head_bucket": return {"acknowledged": False, "resultUnknown": False,
+                                                    "response": {"ResponseMetadata": {"HTTPStatusCode": 404}}}
+            self.fail("unexpected cleanup API: " + operation)
+        def sleep(seconds): clock[0] += CLEANUP_SECONDS + 1 if permanent_denial else seconds
+        context = {"bucketAttempted": True}
+        if iam_failure: context.update(user="rvhealowned", policy="rvhealpolicy", policyCreated=True, attached=True)
+        with patch("scripts.validation_heal.object_lock.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("scripts.validation_heal.object_lock.time.sleep", side_effect=sleep), \
+             patch("scripts.validation_heal.object_lock.iam_exchange", side_effect=ValueError("IAM cleanup failure") if iam_failure else None):
+            result = cleanup_locked_fleet(types.SimpleNamespace(s3=invoke), fleet, "rv-heal-0123456789abcdef", context)
+        return result, fleet, calls, evidence, clock
+
+    def test_physical_cleanup_waits_for_server_ack_after_real_compliance_expiry(self):
+        result, fleet, calls, evidence, clock = self.cleanup()
+        self.assertTrue(result)
+        fleet.cleanup.assert_called_once()
+        self.assertEqual(clock[0], 4)
+        self.assertEqual(len(evidence["locked-final-delete"]), 3)
+        self.assertTrue(evidence["locked-finalization"][0]["namespaceDeletionAllowed"])
+        self.assertFalse(any(operation == "put_object_retention" for operation, params in calls))
+
+    def test_retained_or_unknown_protection_forbids_namespace_deletion(self):
+        for options in ({"permanent_denial": True}, {"transport_unknown": True}, {"iam_failure": True}):
+            with self.subTest(options=options):
+                result, fleet, calls, evidence, clock = self.cleanup(**options)
+                self.assertFalse(result)
+                fleet.cleanup.assert_not_called()
+                self.assertEqual(evidence["locked-finalization"][0]["state"], "RETAINED")
+                self.assertFalse(evidence["locked-finalization"][0]["namespaceDeletionAllowed"])
 
 
 if __name__ == "__main__":

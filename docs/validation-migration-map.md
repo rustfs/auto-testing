@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 97 currently dispatchable IDs include all 74 non-Heal cases and twenty-three Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
+case evidence. The 98 currently dispatchable IDs include all 74 non-Heal cases and twenty-four Heal cases. Forty-one have live PASS evidence; the other 117 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 61 Heal cases remain
+The other 60 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -377,3 +377,40 @@ Deleted identities receive exact S3 absence checks. No copied backup contributes
 to repair. Six focused tests cover profile boundaries, source-quorum recognition,
 ACK ambiguity, per-drive omissions/resurrection and deleted-read refusals.
 B09 requires the fresh write-quorum tool artifact and full live evidence.
+
+D01 run `38064187494` completed all 96 H1/H2 parameters: 76 passed and 20
+failed the then-strict existing-backup oracle; cleanup passed. Independent
+forensic comparison of all 20 scenes found only target `xl.meta.bkp` updates
+to the exact pre-repair authoritative metadata. The corrected oracle now
+bounds both new and existing backup updates to that drive/key/dataDir and
+exact size/hash. The original FAIL is retained; a fresh full run is required.
+
+A08 runs `38066188001` and `38066437827` failed policy creation because bare
+`Resource:["*"]` is not an ARN. The fixed candidate accepts `admin:Heal`
+without Resource. Corrected run `38066970195` reached every branch: bad and
+expired signatures, denied user and least-privilege user passed on H1/H2.
+Anonymous traffic returned 403/AccessDenied from S3Router::check_access before
+the handler, exposing an incorrect 400/InvalidRequest harness expectation.
+The route-level expectation is now exact; all original FAILs retain cleanup
+PASS and none is promoted without a fresh complete run.
+
+Tool build `38065628505` succeeded against the same fixed candidate and carries
+the recognized `data-plus-one-if-equal-parity` write-quorum policy. Its helper,
+extractor, candidate and binary digests were verified locally; it is used by
+the serial live queue for D01/B07/B09. Ordinary runs still need no RustFS checkout.
+
+D09 `heal.object-lock-retention` now dispatches all four H1/H2 source branches
+on real Object Lock/versioning buckets. Three versions per key retain exact
+Governance/Compliance metadata or ON legal hold; the ten-minute UTC window is
+anchored to the server HTTP Date. A run-owned principal can read but explicitly
+cannot bypass Governance. Baseline and pre/post-fault DELETE must return exact
+403/AccessDenied while retention is active. Data/parity faults and whole xl.meta
+loss cover current/historical versions; all affected version shards, public
+properties, tags and responsibility receipts remain independently checked.
+Finalization releases hold and Governance only through normal APIs, waits up to
+twelve minutes for real Compliance expiry and deletion ACK, proves the bucket
+empty/absent, and removes IAM resources. Only then may physical roots be removed.
+Incomplete finalization retains a stopped namespace with cleanup FAIL. Partial
+seed ownership, real server time, same-drive multi-version proof selection and
+protected cleanup failure boundaries have focused tests. Full live evidence
+is still required.
