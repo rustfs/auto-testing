@@ -667,7 +667,7 @@ class HealVersionOracleTest(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(ValueError): verify_semantics(public, changed)
 
     def test_decoder_failure_is_evidence_only_for_the_exact_witnessed_corruption(self):
-        entry = {"path": "fixture/key/xl.meta", "sha256": "changed-sha", "size": 9}
+        entry = {"disk": 0, "path": "fixture/key/xl.meta", "sha256": "changed-sha", "size": 9}
         fault = {entry["path"]: {"sha256": "changed-sha", "size": 9}}
         rejected = types.SimpleNamespace(returncode=1, stderr="invalid captured metadata", stdout="")
         with patch("scripts.validation_heal.fleet_node.command", return_value=rejected):

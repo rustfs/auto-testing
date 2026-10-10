@@ -187,6 +187,13 @@ def map_cohorts(snapshot, bucket, expected, *, count=OBJECTS):
 def verify_all_parts(fleet, cohorts, label, *, count=OBJECTS):
     require(type(count) is int and 129 <= count <= OBJECTS and len(cohorts) == count,
             "complete physical verification differs from its frozen object count")
+    return verify_part_manifest(fleet, cohorts, label, count=count)
+
+
+def verify_part_manifest(fleet, cohorts, label, *, count):
+    """Stream every member of an explicitly counted external-object manifest."""
+    require(type(count) is int and 1 <= count <= OBJECTS and len(cohorts) == count,
+            "complete external-object manifest differs from its frozen count")
     width = 4 if len(fleet.nodes) == 1 else 16
     identities = [(entry["node"], entry["disk"], entry["relativePath"], entry["versionId"], entry["partNumber"])
                   for target in cohorts for entry in target["cohort"]]

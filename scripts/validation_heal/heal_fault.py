@@ -21,7 +21,7 @@ import sys
 
 LIMIT = 64 * 1024**2
 ROOT_PATTERN = re.compile(r"/data/rustfs[1-9][0-9]*/heal-validation/((?:gh|manual)-[a-z0-9-]{5,60})")
-FAULTS = ("missing", "bitflip", "truncate", "zero", "header", "replace-part")
+FAULTS = ("missing", "bitflip", "truncate", "zero", "header", "replace-part", "future-xl-schema")
 
 
 def bounded_fault_id(code: str, branch: str, index: int) -> str:
@@ -122,6 +122,10 @@ def mutation(value: bytes, kind: str, offset: int | None = None) -> bytes | None
     require(kind != "replace-part", "replacement requires a verified owned donor")
     if kind == "missing":
         return None
+    if kind == "future-xl-schema":
+        require(offset is None and len(value) >= 8 and value[:4] == b"XL2 "
+                and int.from_bytes(value[4:6], "little") == 1, "future envelope requires exact reviewed XL2 major 1")
+        return value[:4] + (2).to_bytes(2, "little") + value[6:]
     require(bool(value), "empty file cannot witness this fault")
     if kind == "truncate":
         length = len(value) // 2 if offset is None else offset
@@ -154,6 +158,7 @@ def apply_fault(root_fd: int, owner: dict, relative: str, fault_id: str, kind: s
                 expected_sha: str, offset: int | None = None, *, donor_relative: str | None = None,
                 donor_sha: str | None = None) -> dict:
     parts = target_parts(relative, owner["bucketPrefix"])
+    require(kind != "future-xl-schema" or parts[-1] == "xl.meta", "future schema fault requires exact object metadata")
     require(bool(re.fullmatch(r"[A-J][0-9]{2}-[a-z0-9-]{1,48}", fault_id)), "invalid fault ID")
     require(bool(re.fullmatch(r"[0-9a-f]{64}", expected_sha)), "baseline SHA-256 required")
     with parent(root_fd, ["data", *parts[:-1]]) as target_fd, parent(root_fd, ["quarantine"]) as backup_fd:

@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -184,13 +184,16 @@ class Fleet:
             source += "\nimport types\nmrf = types.ModuleType('mrf_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("mrf_records.py").read_text()) + ", mrf.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
-                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover"}:
+                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault"}:
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
         if action.startswith("bucket-record-"):
             source += "\nimport types\nbucket_records = types.ModuleType('bucket_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("bucket_records.py").read_text()) + ", bucket_records.__dict__)\n"
-        replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot"}
+        if action == "format-schema-fault":
+            source += "\nimport types\nschema_faults = types.ModuleType('schema_faults')\nexec(" + repr(
+                NODE_SOURCE.with_name("schema_faults.py").read_text()) + ", schema_faults.__dict__)\n"
+        replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot", "format-schema-fault"}
         if action in {"start", "cleanup", "audit-finalize", "drive-gate", "replace-drive", "quorum-gate", "quorum-gate-probe"}:
             source += "\nimport types\nquorum_gate_backend = types.ModuleType('quorum_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("quorum_gate.py").read_text()) + ", quorum_gate_backend.__dict__)\n"

@@ -33,12 +33,12 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "offline-replay", "durable-mrf", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
     if profile == "scope-isolation":
         return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "8"}
     if profile == "durable-mrf":
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
-    if profile in {"replacement", "replacement-target"}:
+    if profile in {"replacement", "replacement-target", "schema-refusal"}:
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "true" if profile == "replacement" else "false", "RUSTFS_HEAL_INTERVAL_SECS": "10",
                 "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
     if profile == "stale-rejoin":
@@ -231,7 +231,7 @@ def start(request):
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
-            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "replacement", "replacement-target"} else []),
+            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "replacement", "replacement-target", "schema-refusal"} else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)),
@@ -656,7 +656,7 @@ def install_inspector(request):
 def inspect_metadata(tool, path, bucket, key, entry, metadata_faults):
     observed = command(str(tool), str(path), bucket, key, check=False)
     if observed.returncode:
-        expected_fault = metadata_faults.get(entry["path"])
+        expected_fault = metadata_faults.get(f"{entry['disk']}:{entry['path']}", metadata_faults.get(entry["path"]))
         require(expected_fault == {name: entry[name] for name in ("sha256", "size")},
                 "metadata decoder failed outside an exact witnessed file fault")
         return {"metadataError": {"code": observed.returncode, "message": observed.stderr[-500:],
@@ -794,6 +794,22 @@ def bucket_record_operation(request):
         return module.recover(fd, binding, fault, request)
 
 
+def format_schema_fault(request):
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    replacement = replacement_module().attest(state, roots)
+    root, _ = fault_root(request)
+    fault = fault_module()
+    with fault.directory(root) as fd:
+        marker = root / "fault-owner.json"
+        if not marker.exists():
+            fault.new_file(fd, marker.name, fault.encode({"schemaVersion": 1, "runId": owner["runId"],
+                "bucketPrefix": owner["bucket"], "mountId": fault.mount_id(fd), "device": os.fstat(fd).st_dev,
+                "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()}))
+        fault.checked_owner(fd, owner["runId"])
+        return globals()["schema_faults"].install(fd, replacement, owner, request, fault)
+
+
 def cleanup(request):
     state, roots, owner = owned(request["runId"])
     command("systemctl", "stop", owner["unit"], check=False)
@@ -901,6 +917,7 @@ def main(request):
         actions[action] = bucket_record_operation
     for action in ("quorum-gate", "quorum-gate-probe"):
         actions[action] = quorum_gate_operation
+    actions["format-schema-fault"] = format_schema_fault
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
     actions.update({"process": process, "process-metrics": process_metrics, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})

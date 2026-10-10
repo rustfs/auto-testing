@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 123 currently dispatchable IDs include all 74 non-Heal cases and forty-nine Heal cases. Forty-five have live PASS evidence; the other 113 have no live PASS claim.
+case evidence. The 124 currently dispatchable IDs include all 74 non-Heal cases and fifty Heal cases. Forty-five have live PASS evidence; the other 113 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 35 Heal cases remain
+The other 34 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -1098,3 +1098,33 @@ the stale request. Unknown-token queries and forceStart-retired tokens without
 a retained durable terminal keep their independent exact 500/InternalError
 checks. Both archived A06 acknowledgement samples satisfy the corrected shape;
 that replay is not fresh live acceptance. Complete A06/F06 reruns remain required.
+
+
+C09 `heal.foreign-format-and-unknown-schema` dispatches all four canonical
+branches on H1/H2. An isolated second released-process deployment exports a
+real foreign format. The disk branch replaces only `xl.this` with its witnessed
+donor UUID; the set branch copies the exact donor bytes, including its real
+four-member set when the target has sixteen members. This topology difference
+is retained explicitly. The future-format branch changes only the top-level
+V1 semantic version to `999`. Only one empty, owned replacement root is
+modified, while its complete original root is quarantined and inaccessible to
+the candidate. Shared formats and IAM are outside the mutation scope.
+
+A registered 90-second window requires exact Admin slot/endpoint refusal and
+stable original peer identities, followed by deep Heal and target GET. Startup
+failure alone cannot earn PASS. Manual Heal may verify the surviving object or
+report its complete failure, but must never claim reconstruction of the refused
+member. All surviving files/formats and the injected bytes stay frozen.
+
+The object branch changes only the reviewed XL2 envelope's little-endian major
+from 1 to 2 on every member of one ACKed target. It does not fabricate a future
+inner msgpack schema. Per-disk metadata hashes bind each actual decoder refusal;
+all peer GETs must return a structured server refusal, and deep Heal must retain
+complete failed responsibility without a missing/healthy/repaired claim. All
+payloads, control objects and formats remain exact. Only after the negative
+proof may original bytes/identity be rescued. All 128 ACKs, every external shard
+with streaming checksums, and full S3 inventories through every peer are checked
+again. Backup rescue never earns product-repair credit; failed recovery retains
+the namespace and stops subsequent fleet use. C09 still requires fresh live
+evidence. Eleven targeted oracle/guard tests are added; its actual Linux
+FD/mount guard test runs in CI, not as a simulated macOS syscall claim.
