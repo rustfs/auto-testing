@@ -577,6 +577,19 @@ class HealVersionOracleTest(unittest.TestCase):
         status["outcome"]["counters"].update(healed=1, unchanged=3)
         with self.assertRaises(ValueError): validate_version_receipts(status, "fixture", expected, 1)
 
+    def test_admin_nil_uuid_maps_only_to_the_acknowledged_s3_null_version(self):
+        status, expected = self.fixture()
+        expected[0]["versionId"] = "null"
+        status["outcome"]["objects"][0]["identity"]["versionId"] = "00000000-0000-0000-0000-000000000000"
+        validate_version_receipts(status, "fixture", expected, 2)
+        wrong = copy.deepcopy(status)
+        wrong["outcome"]["objects"][0]["identity"]["versionId"] = "00000000-0000-0000-0000-000000000001"
+        with self.assertRaises(ValueError):
+            validate_version_receipts(wrong, "fixture", expected, 2)
+        expected[0]["versionId"] = "old"
+        with self.assertRaises(ValueError):
+            validate_version_receipts(status, "fixture", expected, 2)
+
     def test_metadata_repair_may_repair_all_receipts_but_marker_cannot_claim_deep_payload(self):
         status, expected = self.fixture()
         with self.assertRaisesRegex(ValueError, "never attributed"):

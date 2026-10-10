@@ -86,7 +86,14 @@ def verify_semantics(public, baseline):
 
 
 def version_identity(entry):
-    return entry["key"], entry.get("versionId") or "null"
+    return entry["key"], public_version_id(entry.get("versionId"))
+
+
+def public_version_id(value):
+    # The candidate's typed Admin identity serializes Uuid::nil(), whereas
+    # the S3 identity and ACK ledger expose that same null version as "null".
+    # Normalize only those representations; every non-null UUID stays exact.
+    return "null" if value in {None, "", "null", "00000000-0000-0000-0000-000000000000"} else value
 
 
 def validate_version_receipts(status, bucket, expected, mode, *, required_repairs=(), metadata_repairs=()):
@@ -106,7 +113,7 @@ def validate_version_receipts(status, bucket, expected, mode, *, required_repair
             "repair plan escapes the selected responsibility set")
     for receipt in objects:
         identity = receipt.get("identity", {})
-        pair = identity.get("object"), identity.get("versionId") or "null"
+        pair = identity.get("object"), public_version_id(identity.get("versionId"))
         require(pair in wanted and pair not in actual and identity.get("bucket") == bucket
                 and type(identity.get("poolIndex")) is int and identity["poolIndex"] == 0
                 and type(identity.get("setIndex")) is int and identity["setIndex"] == 0
@@ -173,7 +180,7 @@ def validate_failed_version(status, bucket, expected, target):
     actual = set()
     for receipt in objects:
         identity = receipt.get("identity", {})
-        pair = identity.get("object"), identity.get("versionId") or "null"
+        pair = identity.get("object"), public_version_id(identity.get("versionId"))
         require(pair in wanted and pair not in actual and identity.get("bucket") == bucket
                 and type(identity.get("poolIndex")) is int and identity["poolIndex"] == 0
                 and type(identity.get("setIndex")) is int and identity["setIndex"] == 0,

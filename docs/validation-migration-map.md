@@ -275,3 +275,10 @@ finalization. The earlier same-candidate H2 unknown-marker failure in run
 claim a product fix. Tool build `38060217084` successfully built the extended
 inline verifier and checked the 24 healthy/12 corrupt external shards plus the
 one healthy/three corrupt released-process inline samples.
+
+D05 run `38060400818` exercised all H1/H2 suspended/null branches and cleaned
+up successfully, but its receipt oracle compared the Admin typed nil UUID with
+the S3 `null` spelling literally. The candidate source defines these as the same
+null identity. The oracle now normalizes only those representations and still
+rejects every other version mismatch. The original FAIL remains; a fresh full
+run is required. Auto-testing CI passed all six lanes at commit `f9c153f`.
