@@ -13,6 +13,8 @@ TESTING_COMMIT="$3"
 ARTIFACTS_DIR="$4"
 
 case "${CASE_ID}" in
+  pool.*)
+    SUITE=scripts/validation_pool/run_case.sh; EXTRA_ARGS=() ;;
   s3.basic-object-round-trip)
     SUITE=rustfs-s3-compat-test.sh; EXTRA_ARGS=() ;;
   scanner.usage-convergence|scanner.status-readiness|ilm.configuration-roundtrip|ilm.invalid-configuration|ilm.current-expiration|ilm.tag-filter-expiration|ilm.disabled-rule|ilm.rule-removal|ilm.versioned-current-expiration|ilm.noncurrent-expiration|ilm.newer-noncurrent-retention|ilm.delete-all-versions|ilm.delete-marker-expiration|ilm.multipart-expiration|ilm.restart-persistence|ilm.transition-and-restore)
@@ -27,6 +29,14 @@ case "${CASE_ID}" in
     printf 'validation executor is not migrated: %s\n' "${CASE_ID}" >&2
     exit 2 ;;
 esac
+
+if [[ "${CASE_ID}" == pool.* ]]; then
+  python3 -B -c 'import json,sys; catalog=json.load(open(sys.argv[1])); valid={case["id"] for module in catalog["modules"] if module["id"] == "pool-lifecycle" for case in module["cases"]}; sys.exit(0 if sys.argv[2] in valid else 2)' \
+    "${SCRIPT_DIR}/validation-cases.json" "${CASE_ID}" || {
+      printf 'unknown canonical pool case: %s\n' "${CASE_ID}" >&2
+      exit 2
+    }
+fi
 
 [ -f "${CANDIDATE_MANIFEST}" ] || { printf 'candidate manifest missing\n' >&2; exit 2; }
 [[ "${TESTING_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || { printf 'invalid testing commit\n' >&2; exit 2; }
