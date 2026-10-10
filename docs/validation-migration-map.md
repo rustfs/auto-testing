@@ -79,12 +79,12 @@ Actions run `38042759074`.
 `events.delivery` and `audit.request-correlation` now have dedicated executors
 on the Tier suite's `single-single` topology. Event delivery is counted for a
 unique object after a quiet window; audit checks matching PUT/GET records,
-distinct request IDs, successful status, and absence of known secrets. The
-first two event attempts stopped before case execution because the candidate
-could not converge local notification runtime while both notification and
-audit modules were enabled. The validation setup now enables only the required
-webhook channel and retains its full setup log. Both cases still require live
-candidate evidence before being counted as verified.
+distinct request IDs, successful status, and absence of known secrets.
+`events.delivery` passed live in RustFS Actions run `38046470999`. The audit
+attempt in run `38046574073` failed its secret check because the environment
+used the same value for the public access key and secret key. The audit case
+now generates a distinct secret key before deployment; it still requires a
+live rerun before it can be counted as verified.
 
 `iam.policy-enforcement` has a dedicated executor on the Security suite's
 `single-single` deployment. It uses one principal with a policy that allows
@@ -114,7 +114,7 @@ executor before touching the fleet and runs the result report with
 workflow. Each run uploads its candidate identity, canonical result, and
 case evidence. The 73 currently dispatchable IDs are the S3, two scanner,
 KMS, tiering, events, audit, IAM, 14 additional ILM, 13 Pool, and 38
-replication cases above. Twelve have live PASS evidence; the other 146 IDs
+replication cases above. Thirteen have live PASS evidence; the other 145 IDs
 remain unverified.
 
 The eight planned cases have these concrete reuse candidates:
@@ -124,7 +124,7 @@ The eight planned cases have these concrete reuse candidates:
 | `scanner.usage-convergence` | STOR-134 | Dedicated executor and live PASS evidence. |
 | `kms.sse-kms-round-trip` | KMS-104, KMS-301, KMS-214 | Dedicated executor and live PASS evidence. |
 | `tiering.transition-and-restore` | TIER-105, TIER-107 | Dedicated executor and live PASS evidence. |
-| `events.delivery` | EVT-103, EVT-104 | Dedicated executor; live evidence pending. |
+| `events.delivery` | EVT-103, EVT-104 | Dedicated executor and live PASS evidence. |
 | `audit.request-correlation` | AUD-102, AUD-104, AUD-106 | Dedicated executor; live evidence pending. |
 | `iam.policy-enforcement` | IAM-105, IAM-109 | Dedicated executor and live PASS evidence. |
 | `oidc.login-and-session` | OIDC-103 | The live Keycloak path can be skipped by the old suite; validation requires an actual session-boundary result. |

@@ -3020,8 +3020,14 @@ main() {
   need_cmd python3 "Python 3 (path canonicalization and receiver)"
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4)"
-  need_cmd mosquitto_sub "mosquitto clients"
+  if [ "${VALIDATION_CASE}" != events.delivery ] && [ "${VALIDATION_CASE}" != audit.request-correlation ]; then
+    need_cmd mosquitto_sub "mosquitto clients"
+  fi
   need_cmd timeout "GNU timeout (bounded CLI/network operations)"
+  if [ "${VALIDATION_CASE}" = audit.request-correlation ] && [ "${DRY_RUN}" -eq 0 ]; then
+    SECRET_KEY="$(openssl rand -hex 32)" || die "cannot generate distinct audit validation secret"
+    export RUSTFS_SECRET_KEY="${SECRET_KEY}"
+  fi
   init_artifacts
   resolve_rc_binary
   write_provenance

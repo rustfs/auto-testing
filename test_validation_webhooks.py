@@ -34,6 +34,11 @@ class ValidationWebhooksTest(unittest.TestCase):
         with patch.dict(os.environ, {"RUSTFS_SECRET_KEY": "private-value"}):
             with self.assertRaisesRegex(ValueError, "exposes RUSTFS_SECRET_KEY"):
                 audit_summary([put, {**get, "requestHeader": {"x-secret": "private-value"}}], "bucket", "key")
+            public_identity = {**put, "accessKey": "public-access-key"}
+            self.assertEqual(
+                audit_summary([public_identity, get], "bucket", "key")["secret_check"],
+                "PASS",
+            )
 
     def test_records_rejects_non_object_jsonl(self):
         with tempfile.TemporaryDirectory() as directory:
