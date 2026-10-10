@@ -72,11 +72,13 @@ def validate_journal(observed, token, bucket, cancelled):
 
 def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, original):
     fleet.record("journal-source-contract", REFERENCE)
+    archived = {}
     def restart(path, old, cancelled, quiet):
         fleet.stop()
         before = fleet.record("cancelled-journal-before-restart", {node: fleet.remote(node, "task-records", taskId=old,
             quiescent=True) for node in fleet.nodes})
         journal = validate_journal(before, old, bucket, cancelled)
+        archived.update(records=before, cancelled=cancelled, path=path, old=old)
         stopped = fleet.snapshot("cancelled-before-restart", quiescent=True)
         require(physical_content(stopped) == physical_content(quiet), "graceful stop changed cancelled object files/formats")
         fleet.start()
@@ -97,9 +99,15 @@ def observe_task(probe, fleet, binding, bucket, expected, targets, active, *, or
                 "oldCancelledOutcomePreserved": True, "oldJournalBytesPreserved": True, "allPeerIdle": idle}
     proof = stop_task(probe, fleet, binding, bucket, expected, targets, active, original=original,
                       after_cancelled=restart, force_new=True)
+    final_old = status(probe, fleet, archived["path"], archived["old"], "old-status-after-new-completion")
+    final_journal = fleet.record("old-journal-after-new-completion", {node: fleet.remote(node, "task-records", taskId=archived["old"])
+        for node in fleet.nodes})
+    validate_journal(final_journal, archived["old"], bucket, final_old)
+    require(canonical(final_journal) == canonical(archived["records"]),
+            "new forceStart task rewrote or removed the original cancelled task's journal")
     return {"cancel-restart": {"verdict": "PASS", "cancellation": proof["stop-active"]},
             "old-token-after-restart": {"verdict": "PASS", "oldStatus": proof["old-status"],
-                "retiredStop": proof["old-stop-new-task"]["staleStop"]},
+                "retiredStop": proof["old-stop-new-task"]["staleStop"], "oldJournalPreservedThroughNewCompletion": True},
             "force-new-after-cancel": {"verdict": "PASS", "forceStart": True, **proof["old-stop-new-task"]}}
 
 
