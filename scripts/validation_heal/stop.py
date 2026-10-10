@@ -88,7 +88,10 @@ def wait_partial(probe, fleet, path, token, targets, *, repair_required):
 def validate_retired_stop(observed, token):
     require(observed.get("httpStatus") == 200 and not observed.get("transportError"),
             "retired token stop did not follow the frozen HTTP contract")
-    require(observed.get("query") == [["clientToken", token], ["forceStop", "true"]]
+    query = observed.get("query")
+    require(isinstance(query, list) and len(query) == 2
+            and all(isinstance(pair, (list, tuple)) and len(pair) == 2 for pair in query)
+            and [tuple(pair) for pair in query] == [("clientToken", token), ("forceStop", "true")]
             and observed.get("method") == "POST" and observed.get("auth") == "signed"
             and observed.get("requestBody") == "" and isinstance(observed.get("path"), str)
             and observed["path"].startswith("/rustfs/admin/v3/heal/"), "retired stop did not target the exact original token")

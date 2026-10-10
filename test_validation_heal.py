@@ -2076,8 +2076,12 @@ class HealStopOracleTest(unittest.TestCase):
                          "settings": {**BASE_OPTIONS, "scanMode": 1, "pool": None, "set": None}}}
         self.assertEqual(validate_retired_stop(response, "old-token")["exactRetiredTaskId"], "old-token")
         self.assertFalse(validate_retired_stop(response, "old-token")["responseEchoesTaskIdentity"])
+        in_memory = {**response, "query": [("clientToken", "old-token"), ("forceStop", "true")]}
+        self.assertEqual(validate_retired_stop(in_memory, "old-token"), validate_retired_stop(json.loads(json.dumps(in_memory)), "old-token"))
         for changed in ({**response, "httpStatus": 500}, {**response, "transportError": "timeout"},
                         {**response, "query": [["clientToken", "new-token"], ["forceStop", "true"]]},
+                        {**response, "query": [["clientToken", "old-token"], ["forceStop", "true"], ["clientToken", "other"]]},
+                        {**response, "query": {"clientToken": "old-token", "forceStop": "true"}},
                         {**response, "response": {**response["response"], "summary": "finished"}},
                         {**response, "response": {**response["response"], "outcome": {"execution": {"state": "completed"}}}},
                         {**response, "response": {**response["response"], "settings": BASE_OPTIONS}},
