@@ -163,7 +163,8 @@ def probe_gate(state, roots, pid):
         require(result.returncode == 0, "service-namespace read probe did not complete")
         read = json.loads(result.stdout)
         validate_probe(read, value["mode"], identity)
-    return {**validate_probe(observed, value["mode"], identity), "disk": value["disk"], "readProbe": read,
+    return {**validate_probe(observed, value["mode"], identity), "disk": value["disk"],
+            "dataPath": value["dataPath"], "readProbe": read,
             "privateMountNamespace": True, "hostMountRemounted": False, "observed": observed}
 
 

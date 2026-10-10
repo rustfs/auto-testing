@@ -229,7 +229,7 @@ class Probe:
                     stream.close()
                 evidence["payload"] = {"size": count, "sha256": digest.hexdigest()}
                 require(response.get("ContentLength") == count, "GET length differs from response ContentLength")
-            evidence.update(response=response, acknowledged=True)
+            evidence.update(response=response, acknowledged=True, resultUnknown=False)
         except Exception as exc:
             response = getattr(exc, "response", None)
             evidence.update(response=response, acknowledged=False,
@@ -255,8 +255,11 @@ class Probe:
         with observation_phase(observation, 'requestPreparation'):
             validate_binding(self.binding)
             require(path.startswith("/rustfs/admin/v3/heal/") or path in {
-                "/rustfs/admin/v3/background-heal/status", "/rustfs/admin/v4/heal/replacement-recovery"},
-                "only Heal Admin routes are allowed")
+                "/rustfs/admin/v3/background-heal/status", "/rustfs/admin/v4/heal/replacement-recovery",
+                "/rustfs/admin/v3/info"}, "only bounded Heal evidence routes are allowed")
+            if path == "/rustfs/admin/v3/info":
+                require(method == "GET" and not query and body == b"" and auth == "signed",
+                        "server-info evidence requires an exact signed read-only GET")
             require("?" not in path and "#" not in path and len(body) <= 2 * 1024**2,
                     "invalid Admin path or body budget")
             require(not any(part in {".", ".."} for part in unquote(path).split("/")),

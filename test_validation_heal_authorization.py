@@ -34,6 +34,34 @@ class Response(io.BytesIO):
 
 
 class AuthorizationBoundaryTest(unittest.TestCase):
+    def test_s3_complete_get_sets_known_result_and_partial_body_cannot_pass(self):
+        from unittest.mock import Mock
+        from scripts.validation_heal.quorum_boundary import read_observation
+        probe, client = Probe(binding(), credential_pair=("test-access", "test-secret")), Mock()
+        body = b"complete-acknowledged-plaintext"
+        expected = {"payload": {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}}
+        def response(length):
+            return {"Body": io.BytesIO(body), "ContentLength": length,
+                    "ResponseMetadata": {"HTTPStatusCode": 200}}
+        client.get_object.side_effect = [response(len(body)), response(len(body) + 1)]
+        with patch.object(probe, "s3_client", return_value=client):
+            observed = probe.s3("get_object", {"Bucket": binding()["bucketPrefix"], "Key": "unique.bin"})
+            self.assertIs(observed["resultUnknown"], False)
+            read_observation(observed, expected)
+            partial = probe.s3("get_object", {"Bucket": binding()["bucketPrefix"], "Key": "unique.bin"})
+        self.assertIs(partial["acknowledged"], False)
+        with self.assertRaises(ValueError): read_observation(partial, expected)
+
+    def test_server_info_is_exact_read_only_evidence_route(self):
+        probe = Probe(binding(), credential_pair=("test-access", "test-secret"))
+        with patch.object(probe, "_open_admin", return_value=Response(b'{"info":{"servers":[]}}')) as opened:
+            self.assertEqual(probe.admin("/rustfs/admin/v3/info", [], b"", method="GET")["httpStatus"], 200)
+        self.assertEqual(opened.call_args.args[0].get_method(), "GET")
+        for method, query, body, auth in (("POST", [], b"", "signed"), ("GET", [("x", "y")], b"", "signed"),
+                ("GET", [], b"{}", "signed"), ("GET", [], b"", "anonymous")):
+            with self.subTest(method=method, query=query, body=body, auth=auth), self.assertRaises(ValueError):
+                probe.admin("/rustfs/admin/v3/info", query, body, method=method, auth=auth)
+
     def test_old_timestamp_recomputes_valid_signature_and_credential_scope(self):
         timestamp, access, secret = "20000102T030405Z", "isolated-access", "isolated-secret"
         body = b'{"dryRun":true}'

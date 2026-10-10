@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 111 currently dispatchable IDs include all 74 non-Heal cases and thirty-seven Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
+case evidence. The 112 currently dispatchable IDs include all 74 non-Heal cases and thirty-eight Heal cases. Forty-three have live PASS evidence; the other 115 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 49 Heal cases remain
+The other 46 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -650,7 +650,7 @@ A08 `heal.admin-authorization` passed live in RustFS Actions run
 `38069648003`, harness `0789743d439fd91b967c2d6fba85c06e29f844c5`. All five
 source branches passed independently on H1 and H2; the canonical gate,
 complete summary, cleanup and workflow all passed with the fixed candidate.
-The prior A08 failures remain recorded. Forty-seven Heal executors remain
+The prior A08 failures remain recorded. Forty-six Heal executors remain
 to be migrated; automatic dispatch and local tests do not claim live PASS.
 
 
@@ -683,3 +683,36 @@ Permission gates now retain an armed recovery marker during initial startup
 and inject chmod only into the same live candidate with DAC bypass already
 removed. This fixes the injection window without certifying the old run or
 relaxing physical/refusal/responsibility assertions. A fresh run is required.
+
+
+B01 `heal.disk-loss-and-repair` now dispatches both source branches on H1/H2
+with the full 128-object DB manifest, including zero/inline/external objects.
+The same-service permission gate must deny reads and writes on one exact
+original disk, and signed read-only Admin info must independently identify
+that exact formatted UUID/set slot/endpoint as offline while all other
+members remain online. The double witness brackets every unique-key PUT ACK
+and degraded GET. Original member files, controls and formats remain exact
+through the offline window; all N-1 online new-key metadata replicas and
+payload shards must form one protected ACK authority. Original-drive-return
+admits one new key and offline-ack-repair admits six independent new keys.
+The same disk returns without restoring backups; each ACK needs its own
+manual task, complete repaired receipt, actual new target metadata/part,
+unchanged donor shards, protected streaming checks and full all-peer S3
+manifests. Ready/GET alone never prove repair. Live evidence is pending.
+
+B06 run `38081025407` retained FAIL and cleanup PASS. Its exact-R GETs on
+both H1/H2 returned correct full payloads, but the collector omitted
+`resultUnknown=false` on successful responses and the boundary check rejected
+them. Successful complete S3 responses now explicitly expose known results;
+partial bodies still fail. Both exact-R manual branches and H2 restored-W
+passed within that failed run. H1's R-1 read returned HTTP 500/InternalError
+instead of the frozen 503/SlowDownRead contract; that failure remains visible.
+No failed run is promoted to PASS.
+
+C06 run `38081269532` retained FAIL and cleanup PASS before injection. Its
+original ACK nonce was incorrectly compared as if it were an S3 property.
+Inventory checks now validate the nonce as private collector state while
+retaining exact version/marker/currentness/length/digest comparisons. A
+regression check exercises nonce-bearing ACKs against real public inventory
+shape, including wrong content and version negatives. Fresh live evidence
+is required for both corrected collectors.

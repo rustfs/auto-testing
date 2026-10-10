@@ -33,6 +33,7 @@ try:
     from .markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
                           marker_plan, prepare_stale, verify_markers, reveal_current)
     from .stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
+    from .disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
@@ -51,6 +52,7 @@ except ImportError:
     from markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
                          marker_plan, prepare_stale, verify_markers, reveal_current)
     from stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
+    from disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
@@ -73,6 +75,7 @@ BRANCHES = {
     "heal.scanner-cold-object-repair": SCANNER_BRANCHES,
     "heal.delete-marker-semantics": MARKER_BRANCHES,
     "heal.stale-version-rejoin": STALE_BRANCHES,
+    "heal.disk-loss-and-repair": DISK_LOSS_BRANCHES,
 }
 VERSION_SIZE = 5 * 1024**2 + 123
 SEMANTIC_KEYS = ("中文/文件/metadata.bin", "space key/headers.bin", "literal%2Fslash/versioned.bin")
@@ -712,7 +715,8 @@ def run_topology(args, topology, nodes, fixture):
     candidate = json.loads(args.candidate.read_text())
     tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     contract = verify_quorum_contract(tool_manifest, candidate) if args.case_id in {
-        "heal.below-read-quorum", "heal.metadata-payload-mismatch", "heal.stale-version-rejoin"} else None
+        "heal.below-read-quorum", "heal.metadata-payload-mismatch", "heal.stale-version-rejoin",
+        "heal.disk-loss-and-repair"} else None
     size_rule = verify_size_contract(tool_manifest, candidate) if args.case_id == "heal.object-size-boundaries" else None
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
@@ -818,6 +822,12 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
                         key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-before-" + branch))
                 fleet.stop()
+                if args.case_id == "heal.disk-loss-and-repair":
+                    stale_marker_started = True  # ACKs may create a new authority; never restore an older fixture.
+                    expected, baseline, proof = disk_loss_branch(recorder, fleet, bucket, branch, expected, active, admissions, contract)
+                    result["branches"][branch] = proof
+                    stale_marker_started = False
+                    continue
                 if args.case_id == "heal.stale-version-rejoin":
                     stale_marker_started = True
                     expected, baseline, proof = stale_branch(recorder, fleet, bucket, branch, expected, active, admissions, contract)
@@ -1063,7 +1073,7 @@ def main():
         fixtures = ("DB",)
     if args.case_id == "heal.object-lock-retention":
         fixtures = ("DO",)
-    if args.case_id in {"heal.disk-readonly-and-permission", "heal.scanner-cold-object-repair"}:
+    if args.case_id in {"heal.disk-readonly-and-permission", "heal.scanner-cold-object-repair", "heal.disk-loss-and-repair"}:
         fixtures = ("DB",)
     results = []
     try:

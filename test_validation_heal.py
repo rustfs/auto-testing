@@ -54,6 +54,7 @@ from scripts.validation_heal import overlap
 from scripts.validation_heal import root_restart, fleet_node
 from scripts.validation_heal import quorum_boundary
 from scripts.validation_heal import stale_rejoin
+from scripts.validation_heal import disk_loss
 import errno
 import stat
 
@@ -2729,6 +2730,135 @@ class HealStaleRejoinTest(unittest.TestCase):
         self.assertEqual([call.args[0] for call in generator.call_args_list], [f"{bucket}/{key}/1", f"{bucket}/{key}/2"])
         self.assertEqual([call.kwargs["expected_body"] for call in ranges.call_args_list],
                          [f"{bucket}/{key}/1".encode(), f"{bucket}/{key}/2".encode()])
+
+    def test_nonce_bound_ack_reaches_inventory_checks_without_weakening_public_manifest(self):
+        from scripts.validation_heal.heal_workload import verify_seed, FixtureStateMismatch
+        entry = {"key": "objects/0001.bin", "versionId": "v1", "deleteMarker": False, "isLatest": True,
+                 "payload": {"size": 100, "sha256": "original-ack"}}
+        expected, inventory = [{**entry, "payloadNonce": 1}], {"entries": [entry]}
+        self.assertTrue(verify_seed(expected, inventory)["seedAckAndFullGetAgree"])
+        for field, value in (("payload", {"size": 100, "sha256": "wrong"}), ("versionId", "v2"),
+                             ("deleteMarker", True), ("isLatest", False)):
+            with self.subTest(field=field), self.assertRaises(FixtureStateMismatch):
+                verify_seed(expected, {"entries": [{**entry, field: value}]})
+        for nonce in (-1, True, "1"):
+            with self.subTest(nonce=nonce), self.assertRaises(ValueError):
+                verify_seed([{**entry, "payloadNonce": nonce}], inventory)
+
+
+class HealDiskLossTest(unittest.TestCase):
+    def scene(self, total=4, data=2):
+        original, old = HealReadQuorumBoundaryTest().scene(total=total, data=data)
+        bucket, old_key, new_key = HealReadQuorumBoundaryTest.bucket, old[0]["key"], "disk-loss/offline-ack-repair/new-00.bin"
+        repaired = copy.deepcopy(original)
+        for node, value in repaired.items():
+            additions = []
+            for entry in value["files"]:
+                item = copy.deepcopy(entry)
+                item["path"] = item["path"].replace(old_key, new_key)
+                if item.get("metadata"):
+                    item["metadata"]["key"] = new_key
+                    item["metadata"]["versions"][0]["usesLegacyChecksum"] = False
+                item["sha256"] += "-new-ack"
+                additions.append(item)
+            value["files"] += additions
+        new = [{**old[0], "key": new_key}]
+        target = map_target(original, bucket, old_key, "data", 1)
+        target = {**target, **target["cohort"][-1]}
+        member = target["node"], target["disk"]
+        authority = copy.deepcopy(repaired)
+        authority[member[0]]["files"] = [entry for entry in authority[member[0]]["files"]
+            if entry["disk"] != member[1] or not entry["path"].startswith(f"{bucket}/{new_key}/")]
+        witness = disk_loss.authority_witness(original, authority, bucket, target, new)
+        return original, authority, repaired, bucket, target, new, witness
+
+    def admin_info(self, target):
+        return {"httpStatus": 200, "response": {"info": {"servers": [{"drives": [
+            {"pool_index": 0, "set_index": 0, "disk_index": shard["setSlot"], "uuid": shard["diskUUID"],
+             "endpoint": f"http://{shard['node']}:9000/data/{shard['disk']}", "state": "ok", "runtimeState": "online"}
+            for shard in target["cohort"]]}]}}}
+
+    def test_actual_single_member_quorum_and_repair_preserve_all_original_bytes(self):
+        for total, data in ((4, 2), (16, 12), (16, 8)):
+            original, authority, repaired, bucket, target, new, witness = self.scene(total, data)
+            plan = disk_loss.quorum_plan(target, HealReadQuorumBoundaryTest.contract)
+            self.assertEqual(plan["onlineSameSetDrives"], total - 1)
+            self.assertEqual(plan["writeQuorum"], data + int(data == total - data))
+            cohorts, proof = disk_loss.repaired_physical(authority, repaired, bucket, target, new, witness)
+            self.assertEqual(len(cohorts), 1)
+            self.assertTrue(proof["allDegradedACKTargetPartsCreated"])
+            self.assertFalse(proof["backupRestorationUsed"])
+
+    def test_offline_ack_authority_rejects_target_writes_loss_of_controls_and_donor_versions(self):
+        original, authority, repaired, bucket, target, new, witness = self.scene()
+        for kind in ("offline-write", "control", "donor-version", "format", "outside"):
+            changed = copy.deepcopy(authority)
+            if kind == "offline-write": changed = copy.deepcopy(repaired)
+            elif kind == "control": changed["node1"]["files"][0]["sha256"] = "changed-original"
+            elif kind == "donor-version":
+                next(entry for entry in changed["node1"]["files"] if entry.get("metadata", {}).get("key") == new[0]["key"])["metadata"]["versions"][0]["versionId"] = "foreign"
+            elif kind == "format": changed["node1"]["formats"][0]["value"]["xl"]["this"] = "new-disk"
+            else: changed["node1"]["files"].append({"disk": 0, "path": "other/key/part.1", "size": 82, "sha256": "outside"})
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                disk_loss.authority_witness(original, changed, bucket, target, new)
+
+    def test_ready_or_get_only_and_changed_surviving_shards_cannot_prove_repair(self):
+        original, authority, repaired, bucket, target, new, witness = self.scene()
+        for kind in ("no-repair", "donor", "missing-part", "foreign-generation", "extra"):
+            changed = copy.deepcopy(repaired)
+            if kind == "no-repair": changed = copy.deepcopy(authority)
+            elif kind == "donor":
+                next(entry for entry in changed["node1"]["files"] if entry["disk"] != target["disk"]
+                     and entry["path"].startswith(f"{bucket}/{new[0]['key']}/") and entry["path"].endswith("part.1"))["sha256"] = "changed"
+            elif kind == "missing-part": changed["node1"]["files"] = [entry for entry in changed["node1"]["files"]
+                if not (entry["disk"] == target["disk"] and entry["path"].startswith(f"{bucket}/{new[0]['key']}/") and entry["path"].endswith("part.1"))]
+            elif kind == "foreign-generation":
+                next(entry for entry in changed["node1"]["files"] if entry["disk"] == target["disk"]
+                     and entry.get("metadata", {}).get("key") == new[0]["key"])["metadata"]["versions"][0]["dataDir"] = "foreign"
+            else: changed["node1"]["files"].append({"disk": target["disk"], "path": f"{bucket}/{new[0]['key']}/orphan", "size": 82, "sha256": "extra"})
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                disk_loss.repaired_physical(authority, changed, bucket, target, new, witness)
+
+    def test_offline_admin_requires_exact_slot_endpoint_uuid_and_complete_healthy_peers(self):
+        _, _, _, _, target, _, _ = self.scene()
+        online = self.admin_info(target)
+        baseline = disk_loss.member_state(online, target, 4)
+        offline = copy.deepcopy(online)
+        selected = offline["response"]["info"]["servers"][0]["drives"][target["setSlot"]]
+        selected.update(state="disk access denied", runtimeState="offline")
+        self.assertTrue(disk_loss.member_state(offline, target, 4, baseline)["exactOriginalMemberOffline"])
+        for kind in ("wrong-slot", "unknown", "new-uuid", "new-endpoint", "peer-offline", "omitted", "duplicate"):
+            changed = copy.deepcopy(offline)
+            drives = changed["response"]["info"]["servers"][0]["drives"]
+            if kind == "wrong-slot": drives[target["setSlot"]]["disk_index"] = 0
+            elif kind == "unknown": drives[target["setSlot"]].update(state="unknown", runtimeState="unknown")
+            elif kind == "new-uuid": drives[target["setSlot"]]["uuid"] = "another-disk"
+            elif kind == "new-endpoint": drives[target["setSlot"]]["endpoint"] = "http://another-node:9000/data"
+            elif kind == "peer-offline": drives[0].update(state="offline", runtimeState="offline")
+            elif kind == "omitted": drives.pop()
+            else: drives.append(copy.deepcopy(drives[0]))
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                disk_loss.member_state(changed, target, 4, baseline)
+
+    def test_degraded_unique_puts_keep_each_ack_and_branches_match_source(self):
+        self.assertEqual(list(disk_loss.BRANCHES), select("B01")[0]["variants"])
+        bucket = HealReadQuorumBoundaryTest.bucket
+        observed = []
+        def invoke(operation, params, body):
+            observed.append((params["Key"], body))
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+        def get(operation, params):
+            body = next(body for key, body in observed if key == params["Key"])
+            return {"acknowledged": True, "payload": {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}}
+        recorder = types.SimpleNamespace(call=invoke, probe=types.SimpleNamespace(s3=get))
+        fleet = types.SimpleNamespace(record=lambda label, value: value)
+        expected = []
+        for branch, count in zip(disk_loss.BRANCHES, (1, 6)):
+            expected, new = disk_loss.offline_ack(recorder, fleet, bucket, branch, expected)
+            self.assertEqual(len(new), count)
+        self.assertEqual(len(expected), 7)
+        with self.assertRaisesRegex(ValueError, "already has"):
+            disk_loss.offline_ack(recorder, fleet, bucket, disk_loss.BRANCHES[0], expected)
 
 
 if __name__ == "__main__":

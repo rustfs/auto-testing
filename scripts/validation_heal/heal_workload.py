@@ -185,7 +185,13 @@ def verify_seed(expected: list[dict], inventory: dict) -> dict:
     if len(actual) != len(inventory["entries"]) or set(wanted) != set(actual):
         raise FixtureStateMismatch("fixture version/marker set differs from ACKs")
     for identity, entry in wanted.items():
-        if not all(actual[identity].get(key) == value for key, value in entry.items()):
+        # payloadNonce binds a deterministic Range oracle to the original ACK.
+        # It is collector state, not an S3 response property; payload length,
+        # digest and every public identity/assertion remain exact comparisons.
+        if "payloadNonce" in entry:
+            require(type(entry["payloadNonce"]) is int and entry["payloadNonce"] >= 0,
+                    "invalid acknowledged payload nonce")
+        if not all(actual[identity].get(key) == value for key, value in entry.items() if key != "payloadNonce"):
             raise FixtureStateMismatch("baseline content/version/marker differs from deterministic fixture ACK")
     return {"expectedEntries": len(expected), "seedAckAndFullGetAgree": True, "casePassClaimed": False}
 
