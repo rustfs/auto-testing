@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 84 currently dispatchable IDs include all 74 non-Heal cases and ten Heal cases. Thirty-five have live PASS evidence; the other 123 have no live PASS claim.
+case evidence. The 85 currently dispatchable IDs include all 74 non-Heal cases and eleven Heal cases. Thirty-five have live PASS evidence; the other 123 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -146,7 +146,8 @@ receipts, repeated status, physical hashes and complete S3 inventories. It
 failed live in run `38052673980`: the candidate returned an `unknown` receipt for a fresh zero-byte object with no bucket-incarnation identity, violating the source healthy-object contract. Cleanup passed; the oracle remains strict.
 `heal.admin-invalid-request` passed all six branches on both H1 and H2 in run `38052868969`, with complete peer coverage and unchanged physical/S3 fixtures.
 The external-shard executor also dispatches C01–C04, D02, E01 and E02 with all 24 source branches on H1/H2. It freezes exact version/dataDir/part, actual erasure role/set slot/disk UUID and full original shard hashes, stops all run-owned services before fault injection, witnesses the same fault immediately before the manual token, and checks complete physical repair plus streaming HighwayHash before any target GET. Full S3 inventories, cross-part Range, HEAD and pending MPU controls retain source semantics. Backups are used only for failed-case rescue or finalization; an unexpected new generation keeps the namespace DIRTY. These seven executors still require live evidence. A03 also has both H2 branches: a non-coordinator shard fault, exact token queries through coordinator/peer/fixed current-fleet entry, a 30-second convergence budget for task start and full terminal outcome, physical proof and S3 inventories through all four entries.
-The other 74 Heal cases remain
+A04 dispatches all six dry-run branches with separate DB/DV fixtures on H1/H2. It freezes version and marker identities, requires complete dry_run_observed receipts and zero repaired counters, proves byte-for-byte no mutation, then rescues the injected fault before full S3 verification. It does not require a dry-run incarnation or claim backup restoration as product repair. The first C01/C02 runs (`38055041726`, `38055254447`) stopped before injection because the remote script had an invalid future-import placement; their FAIL records and clean finalization are retained. The script compiler regression is fixed, and fresh runs use the corrected executor.
+The other 73 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.

@@ -13,7 +13,7 @@ from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, c
 from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection, Fleet
 from scripts.validation_heal.fleet_node import paths, stopped
 from scripts.validation_heal.inspector import verify as verify_inspector
-from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal
+from scripts.validation_heal.shards import BRANCHES, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
 from scripts.validation_heal.heal_fault import mutation
 
 
@@ -282,6 +282,24 @@ class HealShardOracleTest(unittest.TestCase):
             else: changed["outcome"]["objects"][0]["identity"].pop("bucketIncarnationId")
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 validate_repaired_status(changed, target)
+
+    def test_dry_run_requires_all_version_marker_receipts_and_never_claims_repair(self):
+        target = self.target(self.snapshot())
+        expected = [{"key": target["key"], "versionId": version} for version in ("old", "new", "marker")]
+        receipt = HealHealthyOracleTest().receipt("dry_run_observed")
+        receipt["outcome"]["counters"].update(processed=3, unchanged=0, skipped=3)
+        original = receipt["outcome"]["objects"][0]
+        original["identity"].update(bucket=target["bucket"], object=target["key"], bucketIncarnationId=None)
+        receipt["outcome"]["objects"] = [copy.deepcopy(original) for _ in expected]
+        for entry, version in zip(receipt["outcome"]["objects"], expected): entry["identity"]["versionId"] = version["versionId"]
+        validate_dry_run_status(receipt, target, expected)
+        for invalid in ("missing-marker", "repaired", "unknown", "healed-counter"):
+            value = copy.deepcopy(receipt)
+            if invalid == "missing-marker": value["outcome"]["objects"].pop()
+            elif invalid == "healed-counter": value["outcome"]["counters"]["healed"] = 1
+            else: value["outcome"]["objects"][0]["disposition"]["state"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_dry_run_status(value, target, expected)
 
     def test_fault_requires_actual_service_quiescence_and_exact_truncate_length(self):
         for value in ("MainPID=99\nActiveState=inactive\nControlGroup=\n", "MainPID=0\nActiveState=active\n", ""):

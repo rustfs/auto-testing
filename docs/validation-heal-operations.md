@@ -2,7 +2,7 @@
 
 此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 301 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
 
-公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 支持 A01、A03、A07、C01–C04、D02、E01、E02，使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
+公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 支持 A01、A03、A04、A07、C01–C04、D02、E01、E02，使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
 
 ## 1. 使用入口与交付物
 
@@ -27,7 +27,7 @@ python scripts/validation_heal/matrix.py plan --selection A01,A04,C01,C02,C04,J0
 | `heal_workload.py` | DB/DV/DM/DS/DX 真实夹具；有界并发、同key前台修改串行、请求前及ACK后持久落盘 | 不替用户推导竞态后的最终版本；超时写必须单独解析 |
 | `heal_fault.py` | Linux 描述符相对寻址、mount ID 保护、单文件 missing/bitflip/truncate/zero/header、快照和恢复 | 文件故障不是物理掉盘；不修改系统 metadata；不盲目恢复新代次 |
 | `prepare_heal_meta_inspector.py` | 为精确候选源码准备只读 Rust metadata 解析器工程 | 需在批准的构建机编译；解析 metadata 不是验证 bitrot/EC |
-| `shards.py` | C01–C04、D02、E01、E02 全 24 分支以及 A03 的两个 H2 跨节点状态分支；静默故障、真实角色、同角色原片与 HighwayHash、先物理后 GET/Range、MPU control | 有自动入口不等于候选通过；任务 unknown、目标只恢复 metadata 或救援备份均不能记 PASS |
+| `shards.py` | C01–C04、D02、E01、E02 全 24 分支以及 A03 的两个 H2 跨节点状态分支、A04 的六个 DB/DV dry-run 分支；静默故障、真实角色、同角色原片与 HighwayHash、先物理后 GET/Range、MPU control | 有自动入口不等于候选通过；任务 unknown、目标只恢复 metadata 或救援备份均不能记 PASS |
 | `check_bitrot_tool.py` | 在固定 MinIO/历史 RustFS 产物上检查 24 个健康片和 12 个坏片负例 | 工具验证不等于 live 用例通过；不调用被测 RustFS 服务 |
 
 ## 2. 先绑定环境，禁止直接猜节点

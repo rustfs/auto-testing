@@ -34,6 +34,13 @@ except ImportError:
 # Every branch uses a distinct object. Positions refer to physical bytes,
 # including the checksum header; multipart numbers come from decoded metadata.
 BRANCHES = {
+    "heal.admin-dry-run": [
+        ("missing-remove0-recreate0", "objects/0008.bin", "data", 1, "missing", None, 2),
+        ("missing-remove1-recreate0", "objects/0017.bin", "data", 1, "missing", None, 2),
+        ("bitflip-remove0-recreate1", "objects/0026.bin", "data", 1, "bitflip", "middle", 2),
+        ("bitflip-remove1-recreate1", "objects/0035.bin", "data", 1, "bitflip", "middle", 2),
+        ("versioned-missing", "objects/0000.bin", "data", 1, "missing", None, 2),
+        ("versioned-bitflip", "objects/0001.bin", "data", 1, "bitflip", "middle", 2)],
     "heal.admin-token-cross-node-status": [
         ("coordinator-to-peer", "objects/0008.bin", "data", 1, "missing", None, 2),
         ("coordinator-to-stable-endpoint", "objects/0017.bin", "data", 1, "missing", None, 2)],
@@ -81,7 +88,7 @@ def files(snapshot):
     return entries
 
 
-def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None):
+def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None, latest_required=True):
     validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2")
     indexed = files(snapshot)
     cohort, logical = [], None
@@ -92,11 +99,11 @@ def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, p
             metadata = indexed.get(identity, {}).get("metadata", {})
             require(metadata.get("bucket") == bucket and metadata.get("key") == key,
                     "missing authoritative metadata identity on a baseline drive")
-            versions = metadata.get("versions", [])
-            require(len(versions) == 1 and (versions[0].get("versionId") or "null") == version_id,
+            versions = [version for version in metadata.get("versions", []) if (version.get("versionId") or "null") == version_id]
+            require(len(versions) == 1,
                     "baseline metadata version differs from acknowledged fixture")
             version = versions[0]
-            require(version.get("isLatest") is True and version.get("deleted") is False
+            require((not latest_required or version.get("isLatest") is True) and version.get("deleted") is False
                     and version.get("inline") is None and version.get("dataDir"), "expected live external object")
             data_dir = version["dataDir"]
             require(str(uuid.UUID(data_dir)) == data_dir, "noncanonical data directory")
@@ -221,6 +228,31 @@ def validate_repaired_status(status, target):
             "task finish or unknown receipt does not prove repair")
 
 
+def validate_dry_run_status(status, target, expected):
+    outcome = status.get("outcome") or {}
+    identities = {(entry["key"], entry["versionId"]) for entry in expected if entry["key"] == target["key"]}
+    require(status.get("summary") == "finished" and status.get("truncated", False) is False
+            and outcome.get("execution", {}).get("state") == "completed" and outcome.get("coverage") == "complete"
+            and outcome.get("objectsTruncated") is False and identities, "dry-run did not prove complete terminal coverage")
+    objects = outcome.get("objects", [])
+    require(len(objects) == len(identities), "dry-run omitted versions or markers")
+    actual = set()
+    for entry in objects:
+        identity = entry.get("identity", {})
+        actual.add((identity.get("object"), identity.get("versionId") or "null"))
+        require(identity.get("bucket") == target["bucket"]
+                and type(identity.get("poolIndex")) is int and identity["poolIndex"] == 0
+                and type(identity.get("setIndex")) is int and identity["setIndex"] == 0
+                and entry.get("disposition", {}).get("state") == "dry_run_observed",
+                "dry-run admitted a different responsibility or claimed repair")
+    require(actual == identities, "dry-run responsibility versions differ from acknowledged fixture")
+    wanted = {"processed": len(identities), "healed": 0, "unchanged": 0, "skipped": len(identities),
+              "failed": 0, "unknown": 0, "attemptFailures": 0, "overflowed": False}
+    counters = outcome.get("counters", {})
+    require(all(type(counters.get(name)) is type(value) and counters[name] == value for name, value in wanted.items()),
+            "dry-run counters do not match the complete dry_run_observed responsibility set")
+
+
 def peer_status_equal(coordinator, peer):
     return (coordinator.get("summary") == "finished" and peer.get("summary") == "finished"
             and coordinator.get("startTime") is not None and peer.get("startTime") == coordinator["startTime"]
@@ -229,9 +261,10 @@ def peer_status_equal(coordinator, peer):
             and peer.get("truncated", False) is False)
 
 
-def run_task(probe, fleet, target, mode, active, *, status_endpoints=()):
+def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_overrides=None):
     path = "/rustfs/admin/v3/heal/" + quote(target["bucket"], safe="") + "/" + quote(target["key"], safe="/")
-    started = fleet.record("trigger", probe.admin(path, [], json.dumps({**BASE_OPTIONS, "scanMode": mode}).encode()))
+    started = fleet.record("trigger", probe.admin(path, [], json.dumps(
+        {**BASE_OPTIONS, "scanMode": mode, **(option_overrides or {})}).encode()))
     require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict), "repair admission failed")
     token = started["response"].get("clientToken")
     require(isinstance(token, str) and token, "repair admission omitted token")
@@ -285,18 +318,19 @@ def pending_inventory(probe, bucket):
     return sorted(entries, key=lambda entry: entry["key"])
 
 
-def verify_ranges(probe, fleet, bucket, key):
+def verify_ranges(probe, fleet, bucket, key, *, version_id="null", expected_body=None):
     if key.startswith("multipart/"):
         body = b"".join(payload(f"{bucket}/{key}/{number}", size) for number, size in enumerate(MULTIPART_SIZES, 1))
         boundaries = (MULTIPART_SIZES[0], sum(MULTIPART_SIZES[:2]))
     else:
-        body = payload(f"{bucket}/{key}/0", SIZES[int(key.rsplit("/", 1)[1].split(".")[0]) % len(SIZES)])
+        body = expected_body if expected_body is not None else payload(
+            f"{bucket}/{key}/0", SIZES[int(key.rsplit("/", 1)[1].split(".")[0]) % len(SIZES)])
         boundaries = (1024**2, len(body) // 2)
     proofs = []
     for start, end in [(point - 17, point + 29) for point in boundaries] + [(len(body) - 47, len(body) - 1)]:
         require(0 <= start <= end < len(body), "invalid fixture range")
         observed = fleet.record("s3-range", probe.s3("get_object", {"Bucket": bucket, "Key": key,
-            "VersionId": "null", "Range": f"bytes={start}-{end}"}))
+            "VersionId": version_id, "Range": f"bytes={start}-{end}"}))
         wanted = body[start:end + 1]
         require(observed["acknowledged"] and observed["response"]["ResponseMetadata"]["HTTPStatusCode"] == 206
                 and observed["response"].get("ContentRange") == f"bytes {start}-{end}/{len(body)}"
@@ -306,7 +340,7 @@ def verify_ranges(probe, fleet, bucket, key):
     return proofs
 
 
-def run_topology(args, topology, nodes):
+def run_topology(args, topology, nodes, *, fixture="DB"):
     directory = args.evidence / topology
     directory.mkdir()
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
@@ -326,21 +360,24 @@ def run_topology(args, topology, nodes):
     fleet.record("binding", binding)
     recipe = select(args.case_id)[0]
     require([branch[0] for branch in BRANCHES[args.case_id]] == recipe["variants"], "executor omitted a source branch")
-    result = {"topology": topology, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
+    result = {"topology": topology, "fixture": fixture, "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     active = []
     probe = Probe(binding)
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         recorder = Recorder(probe, directory / "fixture")
-        expected = seed(recorder, bucket, "DB", 128, SIZES)
+        expected = seed(recorder, bucket, fixture, 128 if fixture == "DB" else 4,
+                        SIZES if fixture == "DB" else [5 * 1024**2 + 123])
         needs_multipart = "DM" in recipe["contract"]["probes"]["fixture"].split(",")
         if needs_multipart:
             expected += seed(recorder, bucket, "DM", 4, SIZES, existing_bucket=True)
-        baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=True))
+        baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         pending = fleet.record("mpu-baseline", pending_inventory(probe, bucket)) if needs_multipart else None
         for entry in baseline["entries"]:
+            if entry["deleteMarker"]:
+                continue
             head = recorder.call("head_object", {"Bucket": bucket, "Key": entry["key"], "VersionId": entry["versionId"]})
             require(all(head.get(name) == value for name, value in entry["properties"].items()), "HEAD differs from GET baseline")
         fleet.stop()
@@ -350,9 +387,14 @@ def run_topology(args, topology, nodes):
             fleet.record("cross-node-binding", {"coordinator": "node1", "peer": "node2", "stableEndpoint": "node3",
                 "endpoints": binding["endpoints"], "stableEndpointKind": "fixed current auto-testing node address",
                 "faultTargetExcludesCoordinator": True})
-        targets = [(branch, map_target(original, bucket, branch[1], branch[2], branch[3],
-                   preferred_nodes=nodes[1:] if cross_node else None))
-                   for branch in BRANCHES[args.case_id]]
+        dry_run = args.case_id == "heal.admin-dry-run"
+        selected_branches = [branch for branch in BRANCHES[args.case_id]
+                            if not dry_run or branch[0].startswith("versioned-") == (fixture == "DV")]
+        targets = []
+        for branch in selected_branches:
+            version = next(entry for entry in expected if entry["key"] == branch[1] and not entry["deleteMarker"])
+            targets.append((branch, map_target(original, bucket, branch[1], branch[2], branch[3], version["versionId"],
+                preferred_nodes=nodes[1:] if cross_node else None, latest_required=fixture != "DV")))
         fleet.record("fault-plan", {"caseId": args.case_id, "topology": topology,
             "branches": [{"variant": branch[0], "faultBackend": "logical-file-fault", "target": target,
                           "kind": branch[4], "position": branch[5], "scanMode": branch[6]} for branch, target in targets]})
@@ -377,21 +419,43 @@ def run_topology(args, topology, nodes):
                 require(physical_content(after_fault) == physical_content(witness),
                         "ATTRIBUTION_NOT_OBSERVED: fault changed before the manual task")
                 status = run_task(probe, fleet, target, mode, active,
-                                  status_endpoints=("node2", "node3") if cross_node else ())
+                    status_endpoints=("node2", "node3") if cross_node else (),
+                    option_overrides={"dryRun": True, "remove": "remove1" in name, "recreate": "recreate1" in name}
+                    if dry_run else None)
+                listing = fleet.record("dry-run-version-list", probe.s3("list_object_versions", {"Bucket": bucket})) if dry_run else None
                 fleet.stop()
                 repaired = fleet.snapshot("physical-after-" + name, quiescent=True)
-                physical = validate_repaired_physical(before, repaired, target)
-                bitrot = verify_cohort(fleet, target, "repaired-bitrot-" + name)
-                validate_repaired_status(status, target)
+                if dry_run:
+                    require(physical_content(after_fault) == physical_content(repaired),
+                            "dry-run changed object shards, metadata or delete markers")
+                    validate_dry_run_status(status, target, expected)
+                    require(listing["acknowledged"] and not listing["response"].get("IsTruncated"), "dry-run version listing incomplete")
+                    observed_versions = {(entry["Key"], entry["VersionId"], entry["IsLatest"], deleted)
+                        for field, deleted in (("Versions", False), ("DeleteMarkers", True))
+                        for entry in listing["response"].get(field, [])}
+                    require(observed_versions == {(entry["key"], entry["versionId"], entry["isLatest"], entry["deleteMarker"])
+                        for entry in expected}, "dry-run changed version or delete-marker manifest")
+                    fleet.record("dry-run-rescue", fleet.remote(target["node"], "recover-fault", **recovery))
+                    fleet.faults.remove((target["node"], recovery))
+                    registered = False
+                    recovered = fleet.snapshot("physical-recovered-" + name, quiescent=True)
+                    require(physical_content(before) == physical_content(recovered), "dry-run fault recovery differs from baseline")
+                    physical = {"dryRunPhysicalUnchanged": True, "repairedAck": False, "backupUsedOnlyAfterNoMutationProof": True}
+                else:
+                    physical = validate_repaired_physical(before, repaired, target)
+                bitrot = verify_cohort(fleet, target, ("recovered-bitrot-" if dry_run else "repaired-bitrot-") + name)
+                if not dry_run:
+                    validate_repaired_status(status, target)
                 fleet.start()
-                current = fleet.record("s3-after-" + name, probe.inventory(bucket, unversioned_current_tags=True))
+                current = fleet.record("s3-after-" + name, probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
                 comparison = compare_inventories(baseline, current)
                 if cross_node:
                     for endpoint in binding["endpoints"]:
                         peer_s3 = fleet.record("s3-entry-" + endpoint, Probe(binding, endpoint).inventory(
                             bucket, unversioned_current_tags=True))
                         compare_inventories(baseline, peer_s3)
-                ranges = verify_ranges(probe, fleet, bucket, key)
+                ranges = verify_ranges(probe, fleet, bucket, key, version_id=target["versionId"],
+                    expected_body=payload(f"{bucket}/{key}/0", 5 * 1024**2 + 123) if fixture == "DV" else None)
                 if pending is not None:
                     require(fleet.record("mpu-after-" + name, pending_inventory(probe, bucket)) == pending,
                             "repair changed pending MPU identities or parts")
@@ -445,15 +509,23 @@ def main():
     require(bool(re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", ""))), "workflow fleet identity required")
     results = []
     topologies = set(select(args.case_id)[0]["contract"]["probes"]["topology"].split(","))
+    fixtures = ("DB", "DV") if args.case_id == "heal.admin-dry-run" else ("DB",)
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
             if topology not in topologies:
                 continue
-            results.append(run_topology(args, topology, selected))
+            for fixture in fixtures:
+                scoped_args = argparse.Namespace(**vars(args))
+                if len(fixtures) > 1:
+                    scoped_args.evidence = args.evidence / fixture
+                    scoped_args.evidence.mkdir(exist_ok=True)
+                results.append(run_topology(scoped_args, topology, selected, fixture=fixture))
+                if results[-1]["cleanup"] != "PASS":
+                    break
             if results[-1]["cleanup"] != "PASS":
                 break
     finally:
-        complete = len(results) == len(topologies) and all(value["verdict"] == "PASS" and value["cleanup"] == "PASS" for value in results)
+        complete = len(results) == len(topologies) * len(fixtures) and all(value["verdict"] == "PASS" and value["cleanup"] == "PASS" for value in results)
         save(args.evidence / "healthy-summary.json", {"caseId": args.case_id, "results": results,
              "cleanup": "PASS" if results and all(value["cleanup"] == "PASS" for value in results) else "FAIL", "complete": complete})
     require(complete, "Heal case requires every source H1/H2 branch; inspect topology-result evidence")
