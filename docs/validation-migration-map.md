@@ -32,7 +32,18 @@ test. Its live candidate run passed in RustFS Actions run `38042200106`.
 `scanner.status-readiness` has a dedicated executor on two of the existing
 auto-testing nodes, each with four disks. It checks both nodes' accelerated
 scanner runtime settings and requires exactly one leader to finish a new
-successful cycle within 120 seconds. Its live candidate run is pending.
+successful cycle within 120 seconds. Its live candidate run passed in RustFS
+Actions run `38044125099`.
+
+The 14 remaining ILM IDs now dispatch to the source ILM black-box behavior
+checks under `scripts/validation_ilm`. The Storage suite deploys the same
+two-node/four-disk source topology on current auto-testing nodes with the
+source's accelerated scanner/ILM timing, and supplies a cluster restart hook
+for `ilm.restart-persistence`. `ilm.transition-and-restore` uses the third
+auto-testing node as an independent warm-tier target. Each selected case must
+pass its own harness result, evidence, and bucket-cleanup verification before
+the canonical result can become PASS. These executors have local contract and
+dry-run checks, but no live PASS evidence yet.
 
 `kms.sse-kms-round-trip` has a dedicated executor using the existing local
 KMS single-disk deployment. It checks the same object's encryption key,
@@ -79,9 +90,9 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The eight currently dispatchable IDs are the S3, two scanner,
-KMS, tiering, events, audit, and IAM cases above. Five have live PASS evidence; the
-other 153 IDs remain unverified.
+case evidence. The 22 currently dispatchable IDs are the S3, two scanner,
+KMS, tiering, events, audit, IAM, and 14 additional ILM cases above. Six have
+live PASS evidence; the other 152 IDs remain unverified.
 
 The eight planned cases have these concrete reuse candidates:
 

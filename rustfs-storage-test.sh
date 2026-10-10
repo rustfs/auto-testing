@@ -83,6 +83,7 @@ VOLUMES_SINGLE_SINGLE="/data/rustfs1/mnmd"
 VOLUMES_SINGLE_MULTI="/data/rustfs{1...4}/mnmd"
 VOLUMES_MULTI_MULTI="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_ILM_2X4="http://rustfs-node{1...2}:9000/data/rustfs{1...4}/mnmd"
+ILM_TIER_ENDPOINT="http://rustfs-node3:9000"
 
 SERVICE_TIMEOUT=300
 
@@ -194,6 +195,11 @@ RUSTFS_OBS_LOG_DIRECTORY="${RUSTFS_OBS_LOG_DIRECTORY}"
 EOF
   if [ "${VALIDATION_CASE}" = "scanner.usage-convergence" ] || [ "${VALIDATION_CASE}" = "scanner.status-readiness" ]; then
     printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=5\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
+  elif [[ "${VALIDATION_CASE}" == ilm.* ]]; then
+    printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=2\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
+    printf 'RUSTFS_DATA_USAGE_UPDATE_DIR_CYCLES=1\nRUSTFS_ILM_DEBUG_DAY_SECS=10\nRUSTFS_ILM_PROCESS_TIME=1\n'
+    printf 'RUSTFS_API_STALE_UPLOADS_CLEANUP_INTERVAL=2s\n'
+    printf 'HTTP_PROXY=\nHTTPS_PROXY=\nALL_PROXY=\nhttp_proxy=\nhttps_proxy=\nall_proxy=\n'
   fi
 }
 
@@ -288,7 +294,12 @@ resolve_topology() {
 topology_nodes() {
   case "$1" in
     "${TOPO_SINGLE_SINGLE}"|"${TOPO_SINGLE_MULTI}") printf '%s' "${NODES[0]}" ;;
-    "${TOPO_ILM_2X4}") printf '%s %s' "${NODES[0]}" "${NODES[1]}" ;;
+    "${TOPO_ILM_2X4}")
+      if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+        printf '%s %s %s' "${NODES[0]}" "${NODES[1]}" "${NODES[2]}"
+      else
+        printf '%s %s' "${NODES[0]}" "${NODES[1]}"
+      fi ;;
     *) printf '%s' "${NODES[*]}" ;;
   esac
 }
@@ -328,8 +339,13 @@ EOF
   for node in "${nodes[@]}"; do printf '%s\n' "${script}" | run_remote "${node}"; done
 
   for node in "${nodes[@]}"; do
-    write_rustfs_config "${node}" "${VOLUMES}"
-    ensure_volume_dirs "${node}" "${VOLUMES}"
+    if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ] && [ "${node}" = "${NODES[2]}" ]; then
+      VALIDATION_CASE="" write_rustfs_config "${node}" "${VOLUMES_SINGLE_SINGLE}"
+      ensure_volume_dirs "${node}" "${VOLUMES_SINGLE_SINGLE}"
+    else
+      write_rustfs_config "${node}" "${VOLUMES}"
+      ensure_volume_dirs "${node}" "${VOLUMES}"
+    fi
   done
 
   start_and_wait_nodes "${nodes[@]}"
@@ -343,6 +359,16 @@ EOF
       sleep 5; waited=$((waited+5))
     done
     [ "${waited}" -lt "${SERVICE_TIMEOUT}" ] || die "S3 endpoint ${ENDPOINT} not ready"
+    if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+      waited=0
+      while [ "${waited}" -lt "${SERVICE_TIMEOUT}" ]; do
+        if curl --noproxy '*' -fsS --max-time 5 "${ILM_TIER_ENDPOINT}/minio/health/live" >/dev/null 2>&1; then
+          log "ILM warm tier ready: ${ILM_TIER_ENDPOINT}"; break
+        fi
+        sleep 5; waited=$((waited+5))
+      done
+      [ "${waited}" -lt "${SERVICE_TIMEOUT}" ] || die "ILM warm tier ${ILM_TIER_ENDPOINT} not ready"
+    fi
 
     rc alias set local "${ENDPOINT}" "${ACCESS_KEY}" "${SECRET_KEY}" >/dev/null 2>&1 \
       || die "rc alias set failed for ${ENDPOINT}"
@@ -515,6 +541,9 @@ validation_write_evidence() {
   for item in $(validation_evidence_items); do
     if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
   done
+  if [[ "${VALIDATION_CASE}" == ilm.* ]] && [ -d "${TEST_TMP}/ilm-evidence" ]; then
+    cp -R "${TEST_TMP}/ilm-evidence" "${evidence_dir}/ilm"
+  fi
 }
 
 validation_evidence_items() {
@@ -529,7 +558,9 @@ validation_evidence_items() {
 validation_write_result() {
   local verdict="$1" reason="$2" cleanup_status="$3" item
   local profile=single-4disk
-  [ "${VALIDATION_CASE}" = scanner.status-readiness ] && profile=ilm-2x4
+  if [ "${VALIDATION_CASE}" = scanner.status-readiness ] || [[ "${VALIDATION_CASE}" == ilm.* ]]; then
+    profile=ilm-2x4
+  fi
   local args=("${SCRIPT_DIR}/scripts/validation_result.py"
     --case-id "${VALIDATION_CASE}" --profile "${profile}"
     --result-file "${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
@@ -545,8 +576,42 @@ validation_write_result() {
     for item in $(validation_evidence_items); do
       args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
     done
+    if [[ "${VALIDATION_CASE}" == ilm.* ]]; then
+      local evidence_root="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}"
+      local evidence_file
+      while IFS= read -r -d '' evidence_file; do
+        args+=(--evidence "${evidence_file#"${VALIDATION_ARTIFACTS_DIR}/"}")
+      done < <(find "${evidence_root}/ilm" -type f -print0 | sort -z)
+    fi
   fi
   python3 "${args[@]}"
+}
+
+test_validation_ilm_case() {
+  local harness_dir="${TEST_TMP}/ilm-evidence" harness_rc=0
+  local -a ilm_args=()
+  if [ "${VALIDATION_CASE}" = ilm.restart-persistence ]; then
+    ilm_args+=(--restart-hook "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
+      bash "${SCRIPT_DIR}/scripts/validation_ilm/restart_cluster.sh" "${NODES[0]}" "${NODES[1]}")")
+  fi
+  if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+    ilm_args+=(--tier-endpoint "${ILM_TIER_ENDPOINT}"
+      --tier-access-key "${ACCESS_KEY}" --tier-secret-key "${SECRET_KEY}")
+  fi
+  python3 -B "${SCRIPT_DIR}/scripts/validation_ilm/ilm_behavior.py" \
+    --case "${VALIDATION_CASE}" \
+    --endpoint "${ENDPOINT}" \
+    --scanner-endpoint "http://rustfs-node1:9000" \
+    --scanner-endpoint "http://rustfs-node2:9000" \
+    --access-key "${ACCESS_KEY}" --secret-key "${SECRET_KEY}" \
+    --run-id "${VALIDATION_CASE}-$(date +%s)-$$" \
+    --evidence-dir "${harness_dir}" \
+    --rc-bin "$(command -v rc)" \
+    "${ilm_args[@]}" \
+    --cleanup-on-failure || harness_rc=$?
+  python3 -B "${SCRIPT_DIR}/scripts/validation_ilm/verify_result.py" \
+    "${VALIDATION_CASE}" "${harness_dir}" || return 1
+  [ "${harness_rc}" -eq 0 ]
 }
 
 rc_run() {
@@ -1299,14 +1364,18 @@ main() {
   if [ -n "${VALIDATION_CASE}" ]; then
     case "${VALIDATION_CASE}" in
       scanner.usage-convergence|scanner.status-readiness) ;;
+      ilm.configuration-roundtrip|ilm.invalid-configuration|ilm.current-expiration|ilm.tag-filter-expiration|ilm.disabled-rule|ilm.rule-removal|ilm.versioned-current-expiration|ilm.noncurrent-expiration|ilm.newer-noncurrent-retention|ilm.delete-all-versions|ilm.delete-marker-expiration|ilm.multipart-expiration|ilm.restart-persistence|ilm.transition-and-restore) ;;
       *) die "unknown validation case: ${VALIDATION_CASE}" ;;
     esac
     [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
     [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its own topology"
     [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
-    if [ "${VALIDATION_CASE}" = scanner.status-readiness ]; then
+    if [ "${VALIDATION_CASE}" = scanner.status-readiness ] || [[ "${VALIDATION_CASE}" == ilm.* ]]; then
       SELECTED_TOPOLOGIES=("${TOPO_ILM_2X4}")
       [ "${#NODES[@]}" -ge 2 ] || die "scanner.status-readiness needs two test nodes"
+      if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+        [ "${#NODES[@]}" -ge 3 ] || die "ilm.transition-and-restore needs three test nodes"
+      fi
     else
       SELECTED_TOPOLOGIES=("${TOPO_SINGLE_MULTI}")
     fi
@@ -1338,6 +1407,9 @@ main() {
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4 signing)"
   if [ -n "${VALIDATION_CASE}" ]; then need_cmd python3 "validation result writer"; fi
+  if [[ "${VALIDATION_CASE}" == ilm.* ]] && [ "${DRY_RUN}" -eq 0 ]; then
+    python3 -c 'import boto3, botocore' || die "ILM validation requires boto3 and botocore"
+  fi
   log "nodes: ${NODES[*]}  package: $(resolve_package_url)"
   local overall_fail=0 topo
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
@@ -1356,6 +1428,7 @@ main() {
       case "${VALIDATION_CASE}" in
         scanner.usage-convergence) run_test "${VALIDATION_CASE}" "UsageConvergence" test_validation_scanner_usage_convergence ;;
         scanner.status-readiness) run_test "${VALIDATION_CASE}" "StatusReadiness" test_validation_scanner_status_readiness ;;
+        ilm.*) run_test "${VALIDATION_CASE}" "ILMBehavior" test_validation_ilm_case ;;
       esac
     else
       run_all_tests
@@ -1373,6 +1446,9 @@ main() {
         validation_write_result PASS "" PASS
       elif [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ]; then
         validation_write_result INFRA_ERROR "environment teardown failed" FAIL
+      elif [[ "${VALIDATION_CASE}" == ilm.* ]] && [ -f "${TEST_TMP}/ilm-evidence/result.json" ] && \
+           jq -e '.status.state == "infra_error"' "${TEST_TMP}/ilm-evidence/result.json" >/dev/null; then
+        validation_write_result INFRA_ERROR "ILM harness preflight or execution infrastructure failed; inspect evidence" "${cleanup_status}"
       else
         validation_write_result FAIL "case failed or unsupported; inspect evidence" "${cleanup_status}"
       fi
