@@ -272,9 +272,13 @@ def release(state, owner, *, expired=False):
     expired = expired or (state / EXPIRY).exists()
     if expired:
         for suffix in ('.timer', '.service'):
-            require(command('systemctl', 'show', value['timer'] + suffix, '-p', 'LoadState', '--value').strip()
-                    in {'not-found', 'loaded'}, 'expired network unit identity is unknown')
-            require(command('systemctl', 'show', value['timer'] + suffix, '-p', 'ActiveState', '--value').strip()
+            unit_name = value['timer'] + suffix
+            load_state = command('systemctl', 'show', unit_name, '-p', 'LoadState', '--value').strip()
+            require(load_state in {'not-found', 'loaded'}, 'expired network unit identity is unknown')
+            active_state = command('systemctl', 'show', unit_name, '-p', 'ActiveState', '--value').strip()
+            if load_state != 'not-found' and active_state not in {'inactive', 'failed', 'unknown'}:
+                command('systemctl', 'stop', unit_name)
+            require(command('systemctl', 'show', unit_name, '-p', 'ActiveState', '--value').strip()
                     in {'inactive', 'failed', 'unknown'}, 'expired network unit remains active')
     # Stop the expiry worker before inspecting/deleting, avoiding a concurrent
     # deletion. A TTL worker does not stop its own unit.
