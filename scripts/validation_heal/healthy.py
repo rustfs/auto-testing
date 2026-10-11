@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -180,6 +180,9 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
+        if self.runtime_profile == "bounded-capacity":
+            source += "\nimport types\nbounded_volume_backend = types.ModuleType('bounded_volume')\nexec(" + repr(
+                NODE_SOURCE.with_name("bounded_volume.py").read_text()) + ", bounded_volume_backend.__dict__)\n"
         if action == "mrf-records":
             source += "\nimport types\nmrf = types.ModuleType('mrf_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("mrf_records.py").read_text()) + ", mrf.__dict__)\n"
@@ -211,6 +214,8 @@ class Fleet:
                 NODE_SOURCE.with_name("replace_drive.py").read_text()) + ", replacement.__dict__)\n"
         source += "\nmain(" + repr(value) + ")\n"
         timeout = 600 if self.resource_profile in {"cursor", "full-restart"} and action == "snapshot" else 180
+        if action in {"bounded-volumes-create", "bounded-volumes-fill"}:
+            timeout = 600
         result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
                                 input=source, capture_output=True, text=True, timeout=timeout)
         require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")
@@ -327,6 +332,10 @@ class Fleet:
         if (self.faults or self.bucket_record_faults) and not failures:
             try:
                 self.stop()
+                if self.runtime_profile == "bounded-capacity":
+                    for node in self.reserved:
+                        self.record("bounded-filler-recovery", {"node": node, **self.remote(
+                            node, "bounded-volumes-release", quiescent=True)})
                 for node, params in self.faults:
                     self.record("fault-recovery", {"node": node, **self.remote(node, "recover-fault", **params)})
                 for node, params in self.bucket_record_faults:

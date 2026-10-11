@@ -258,12 +258,26 @@ class Probe:
             from heal_signing import sign_admin_request
         with observation_phase(observation, 'requestPreparation'):
             validate_binding(self.binding)
-            require(path.startswith("/rustfs/admin/v3/heal/") or path in {
+            quota_path = path.startswith("/rustfs/admin/v3/quota/")
+            require(path.startswith("/rustfs/admin/v3/heal/") or quota_path or path in {
                 "/rustfs/admin/v3/background-heal/status", "/rustfs/admin/v4/heal/replacement-recovery",
                 "/rustfs/admin/v3/info"}, "only bounded Heal evidence routes are allowed")
             if path == "/rustfs/admin/v3/info":
                 require(method == "GET" and not query and body == b"" and auth == "signed",
                         "server-info evidence requires an exact signed read-only GET")
+            if quota_path:
+                bucket = path.removeprefix("/rustfs/admin/v3/quota/")
+                bucket_allowed(self.binding, bucket)
+                require(method in {"GET", "PUT"} and not query and auth == "signed",
+                        "owned quota evidence requires an exact signed GET/PUT")
+                if method == "GET":
+                    require(body == b"", "quota GET cannot carry a mutation body")
+                else:
+                    quota = json.loads(body)
+                    require(isinstance(quota, dict) and set(quota) == {"quota", "quota_type"}
+                            and quota["quota_type"] == "HARD" and type(quota["quota"]) is int
+                            and quota["quota"] in {1024**2, 256 * 1024**2},
+                            "quota mutation is outside the two registered I02 limits")
             require("?" not in path and "#" not in path and len(body) <= 2 * 1024**2,
                     "invalid Admin path or body budget")
             require(not any(part in {".", ".."} for part in unquote(path).split("/")),

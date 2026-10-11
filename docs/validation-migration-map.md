@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 127 currently dispatchable IDs include all 74 non-Heal cases and fifty-three Heal cases. Forty-six have live PASS evidence; the other 112 have no live PASS claim.
+case evidence. The 128 currently dispatchable IDs include all 74 non-Heal cases and fifty-four Heal cases. Forty-six have live PASS evidence; the other 112 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -1282,3 +1282,60 @@ only Heal manager/task/MRF debug over an info baseline, attest both
 pages while selecting the required attribution targets in memory. The
 60,000-event/page budgets and exact durable responsibility assertions stay
 in force. All three E05 branches still require a fresh complete live run.
+
+
+I02 `heal.enospc-inodes-and-quota` now executes all three source branches
+separately on H1 and H2. The two capacity branches allocate exactly one
+128 MiB ext4 image with at most 1,024 inodes on each original independent
+backing drive. Images, filesystem UUIDs, mounts and undo paths are registered
+before allocation; only these bounded regular files are formatted. Each
+owned service binds the allocated data roots in a private mount namespace.
+The bounded volumes do not add physical drives to the H1/H2 topology.
+
+Block or inode exhaustion fills only the dedicated padding directory and
+must produce actual ENOSPC in both the filler and a probe with the original
+candidate process birth, mount namespace and effective UID/GID. The original
+shared drives must retain at least 1 GiB of free space. Missing DB and completed
+MPU parts remain unresolved during the exhausted interval; all other business
+parts and metadata remain frozen. Removing only this run's filler permits
+independent manual repair, exact responsibility reconciliation, same-role
+streaming bitrot verification and complete all-peer S3/MPU ACK checks.
+
+The hard-quota branch uses only the owned bucket and the candidate's reviewed
+1 MiB and 256 MiB limits. It requires the exact InvalidRequest quota refusal
+for a single new logical PUT, preserves existing object/MPU ACKs and verifies
+existing-object shard repair under the quota. Quota is logical object
+admission, so a successful repair of an existing shard is not a new logical
+PUT. Both capacity modes also require a distinct, acknowledged PUT after
+release. Every uncertain negative or released-capacity PUT is resolved across
+all peers without retries; unresolved receipts or recovery drift retain a
+DIRTY namespace. File-backup rescue never earns product repair credit.
+
+The prior B10 commit omitted its top-level dispatcher arm even though the
+Heal sub-dispatcher was present. The arm is corrected together with I02. A
+catalog-wide automatic-dispatch contract now checks that all 54 registered
+Heal IDs reach candidate preflight through the top-level entry. The B10 live
+queue has not started and must use the corrected immutable harness revision.
+This change leaves 30 Heal executors to implement and makes no new canonical
+live PASS claim. The focused suite has 310 tests with five platform skips;
+the catalog still preserves all 158 exact source IDs and hashes, and the
+84/301/532 source matrix is unchanged.
+
+F05 `38095216675` and J06 `38095795125` retain FAIL/cleanup PASS at the old
+harness revision because Admin evidence exceeded its previous response
+budget. J06 completed only the first no-heal phase, which cannot certify an
+ABBA group. The queued fresh F05/J06 runs use the reviewed 8 MiB response
+contract. D11 `38096389824` also retains FAIL/cleanup PASS for all eight
+H1/H2 instances: versioning/lock configuration byte restoration did not match
+the frozen original; policy/tag record decoding failed outside its witnessed
+mutation; unknown-record startup did not become ready. No D11 PASS or
+successful unknown-record refusal is claimed.
+
+Native tools-only run `38096433036` binds driver
+`ae9b5cbabfeaff440d9b8ee0b2fe805f17aff5b3` and auto-testing
+`acdd69218406b0596d79b6aab15481f8271e35c6`. Its candidate resolver and tool/native
+jobs use hosted ubuntu-latest with independent tools-only concurrency and
+empty fleet credentials. The metadata inspector build passed; the native
+candidate test executable remains in compilation. This exact audited hosted
+run is excluded from the local fleet-busy classifier. Unknown active runs
+still block dispatch, and native results cannot count as canonical fleet PASS.

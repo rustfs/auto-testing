@@ -33,7 +33,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    if profile == "bounded-capacity":
+        return {**BACKGROUND_CONFIG, "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true"}
     if profile == "lock-quorum":
         return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:8"}
     if profile == "scope-isolation":
@@ -247,6 +249,7 @@ def start(request):
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)),
             *quorum_gate_module().properties(state, roots),
+            *(volume_module().properties(state, roots, owner) if owner.get("runtimeProfile") == "bounded-capacity" else []),
             *replacement_module().start_properties(state, roots), str(state / "rustfs"), *owner["volumes"])
     return {"unit": owner["unit"], "started": True}
 
@@ -436,6 +439,53 @@ def quorum_gate_module():
     return quorum_gate
 
 
+def volume_module():
+    if "bounded_volume_backend" in globals(): return globals()["bounded_volume_backend"]
+    from . import bounded_volume
+    return bounded_volume
+
+
+def volume_views(state, roots, owner):
+    return volume_module().views(state, roots, owner) if owner.get("runtimeProfile") == "bounded-capacity" else roots
+
+
+def volume_operation(request):
+    state, roots, owner = owned(request["runId"])
+    require(owner.get("runtimeProfile") == "bounded-capacity", "bounded operation requires its exact dedicated runtime")
+    module = volume_module()
+    if request["action"] == "bounded-volumes-create":
+        require(set(request) == {"runId", "action", "branch"}, "bounded allocation accepts no supplied path or limits")
+        stopped(owner)
+        return module.create(state, roots, owner, request["branch"])
+    if request["action"] == "bounded-volumes-release" and request.get("quiescent") is True:
+        require(set(request) == {"runId", "action", "quiescent"}, "bounded recovery accepts no supplied path")
+        stopped(owner)
+        changed = [module.release_filler(view) for view in module.views(state, roots, owner)]
+        return {"changes": changed, "ownedFillerReleased": True, "productRepairClaimed": False,
+                "quiescent": True, "privateMountRemovedByStoppedService": True}
+    require(set(request) == {"runId", "action", "expected"}, "bounded operation lacks exact process binding")
+    before = process(request)
+    require(before["pid"] > 1 and isinstance(request["expected"], dict)
+            and all(before.get(name) == request["expected"].get(name) for name in PROCESS_FIELDS),
+            "bounded operation crossed its expected original process birth")
+    views = module.views(state, roots, owner)
+    if request["action"] == "bounded-volumes-fill":
+        branch = module.read(state, roots, owner)["branch"]
+        changed = [module.fill(view, branch) for view in views]
+        observed = module.witness(state, roots, owner, before["pid"], exhausted=True)
+    elif request["action"] == "bounded-volumes-release":
+        changed = [module.release_filler(view) for view in views]
+        observed = module.witness(state, roots, owner, before["pid"], exhausted=False)
+    else:
+        require(request["action"] == "bounded-volumes-witness", "unsupported bounded operation")
+        changed = []
+        observed = module.witness(state, roots, owner, before["pid"], exhausted=True)
+    after = process(request)
+    require(all(before.get(name) == after.get(name) for name in PROCESS_FIELDS),
+            "bounded operation crossed a candidate process identity")
+    return {**observed, "changes": changed, "processBefore": before, "processAfter": after, "sameOriginalProcess": True}
+
+
 def quorum_gate_operation(request):
     state, roots, owner = owned(request["runId"])
     module = quorum_gate_module()
@@ -590,8 +640,9 @@ def drive_gate_release_live(request):
 
 
 def fault_root(request):
-    _, roots, owner = owned(request["runId"])
+    state, roots, owner = owned(request["runId"])
     stopped(owner)
+    roots = volume_views(state, roots, owner)
     index = request.get("disk")
     require(type(index) is int and 0 <= index < len(roots), "invalid physical disk index")
     return roots[index], owner
@@ -622,6 +673,7 @@ def recover_fault(request):
 def verify_part(request):
     state, roots, owner = owned(request["runId"])
     stopped(owner)
+    roots = volume_views(state, roots, owner)
     require(owner.get("inspectorSha256"), "candidate-bound bitrot verifier is required")
     tool = checked(state / "heal-meta-inspect", state)
     require(digest(tool) == owner["inspectorSha256"], "bitrot verifier changed")
@@ -652,6 +704,7 @@ def verify_part_owned(request, roots, owner, tool):
 def verify_parts(request):
     state, roots, owner = owned(request["runId"])
     stopped(owner)
+    roots = volume_views(state, roots, owner)
     entries = request.get("parts")
     require(isinstance(entries, list) and 1 <= len(entries) <= 128
             and all(isinstance(entry, dict) and set(entry) == {"disk", "relativePath", "versionId", "partNumber"}
@@ -716,6 +769,7 @@ def snapshot_buckets(owner, request):
 
 def snapshot(request):
     state, roots, owner = owned(request["runId"])
+    roots = volume_views(state, roots, owner)
     pid = int(command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"], check=False).stdout.strip() or "0")
     if request.get("quiescent") is True:
         stopped(owner)
@@ -771,7 +825,10 @@ def snapshot(request):
                 key: environment.get(key) for key in ("RUSTFS_STORAGE_CLASS_INLINE_BLOCK", "RUSTFS_STORAGE_CLASS_STANDARD")},
             "resourceLimits": limits,
             "files": sorted(files, key=lambda value: (value["disk"], value["path"])), "formats": formats,
-            "encryptionConfigAttestation": encryption}
+            "encryptionConfigAttestation": encryption,
+            "boundedVolumeViews": None if owner.get("runtimeProfile") != "bounded-capacity" else {
+                "actualBackingRoots": [str(root) for root in roots],
+                "privateServiceBindingsRequired": True, "originalPhysicalDriveCountIncreased": False}}
 
 
 def logs(request):
@@ -859,9 +916,12 @@ def cleanup(request):
     command("systemctl", "stop", owner["unit"], check=False)
     pid = command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"], check=False).stdout.strip()
     require(pid in {"", "0"}, "run-owned service remains active")
+    stopped(owner)
     gate_module().release_gate(state, roots)
     quorum_gate_module().release(state, roots)
     replacement_module().attest(state, roots)
+    if owner.get("runtimeProfile") == "bounded-capacity":
+        volume_module().dispose(state, roots, owner)
     command("systemctl", "reset-failed", owner["unit"], check=False)
     for root in (*roots, state):
         for directory, children, names in os.walk(root, followlinks=False):
@@ -972,6 +1032,8 @@ def main(request):
         actions[action] = bucket_record_operation
     for action in ("quorum-gate", "quorum-gate-probe"):
         actions[action] = quorum_gate_operation
+    for action in ("bounded-volumes-create", "bounded-volumes-fill", "bounded-volumes-release", "bounded-volumes-witness"):
+        actions[action] = volume_operation
     actions["format-schema-fault"] = format_schema_fault
     actions["encryption-configure"] = configure_encryption
     actions["replacement-records"] = replacement_records
