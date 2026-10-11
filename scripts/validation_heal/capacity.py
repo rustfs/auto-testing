@@ -75,19 +75,39 @@ def refusal(observed, *, quota):
     return {"state": "REFUSED", "code": error["Code"], "retryAllowed": False}
 
 
-def quota_config(probe, fleet, bucket, limit):
+def quota_set_ack(probe, fleet, bucket, limit):
     path = "/rustfs/admin/v3/quota/" + bucket
     body = json.dumps({"quota": limit, "quota_type": "HARD"}).encode()
     configured = fleet.record("owned-bucket-quota-PUT", probe.admin(path, [], body, method="PUT"))
     require(configured.get("httpStatus") == 200 and configured.get("response", {}).get("bucket") == bucket
             and configured["response"].get("quota") == limit and configured["response"].get("quota_type") == "HARD",
             "hard quota was not acknowledged on the exact owned bucket")
+    return path
+
+
+def quota_config(probe, fleet, bucket, limit):
+    path = quota_set_ack(probe, fleet, bucket, limit)
     for endpoint in probe.binding["endpoints"]:
         observed = fleet.record("all-peer-owned-quota-GET", Probe(probe.binding, endpoint).admin(path, [], b"", method="GET"))
         require(observed.get("httpStatus") == 200 and observed.get("response", {}).get("bucket") == bucket
                 and observed["response"].get("quota") == limit and observed["response"].get("quota_type") == "HARD",
                 "peer did not observe the exact acknowledged quota limit")
     return {"bucket": bucket, "limitBytes": limit, "allPeersVerified": True, "sharedFilesystemQuotaChanged": False}
+
+
+def release_quota(probe, fleet, bucket, limit):
+    # The failure scene is already archived before rescue. Config-only GET
+    # proves the restored limit without claiming an authoritative usage value.
+    if any(fleet.remote(node, "process")["pid"] == 0 for node in fleet.nodes):
+        fleet.start()
+    quota_set_ack(probe, fleet, bucket, limit)
+    for endpoint in probe.binding["endpoints"]:
+        observed = fleet.record("recovery-config-only-quota", Probe(probe.binding, endpoint).admin(
+            "/rustfs/admin/v3/get-bucket-quota", [("bucket", bucket)], b"", method="GET"))
+        value = observed.get("response") or {}
+        require(observed.get("httpStatus") == 200 and value.get("quota") == value.get("size") == limit
+                and value.get("quotatype") == "hard", "quota recovery did not restore the exact owned config")
+    return {"ownedQuotaConfigRestored": True, "authoritativeUsageClaimed": False, "productRepairClaimed": False}
 
 
 def verify_s3(fleet, binding, bucket, expected, baseline, pending):
@@ -153,7 +173,7 @@ def run_branch(args, topology, nodes, branch):
                     fleet.record("release-only-owned-filler", {"node": node, **fleet.remote(
                         node, "bounded-volumes-release", quiescent=True)})
         elif quota_set:
-            quota_config(probe, fleet, bucket, CONTRACT["quota"]["releasedLimitBytes"])
+            fleet.record("quota-recovery-config-proof", release_quota(probe, fleet, bucket, CONTRACT["quota"]["releasedLimitBytes"]))
             quota_set = False
 
     try:

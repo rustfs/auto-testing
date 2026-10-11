@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit a failed run's rejected overlength fault against its archived physical scene."""
+"""Audit and finalize only explicitly supported, exactly archived failures."""
 
 import argparse
 import hashlib
@@ -16,8 +16,82 @@ except ImportError:
     from heal_probe import require, save
 
 
+def quota_recovery_plan(artifact, failed_run, candidate):
+    """A private H1 quota failure before workload/Heal admits no unknown writes."""
+    case = "heal.enospc-inodes-and-quota"
+    results = list(artifact.glob(f"*/run/{case}/cases/{case}.json"))
+    require(len(results) == 1, "quota recovery requires one exact I02 result")
+    result = json.loads(results[0].read_text())
+    provenance = result.get("provenance") or {}
+    require(result.get("case_id") == case and result.get("verdict") == "FAIL" and result.get("cleanup_status") == "FAIL"
+            and provenance.get("source_commit") == candidate["source_sha"]
+            and provenance.get("candidate_sha256") == candidate["package_sha256"], "quota failed-result candidate or cleanup differs")
+    evidence = results[0].parents[1] / f"evidence/{case}"
+    summary = json.loads((evidence / "healthy-summary.json").read_text())
+    retained = [row for row in summary["results"] if row.get("cleanup") != "PASS"]
+    require(summary.get("cleanup") == "FAIL" and len(retained) == 1, "quota recovery cannot omit another retained instance")
+    row = retained[0]
+    require(row.get("topology") == "H1" and row.get("branch") == "bucket-quota" and row.get("verdict") == "FAIL"
+            and row.get("failure", {}).get("message") == "peer did not observe the exact acknowledged quota limit"
+            and set(row) <= {"topology", "branch", "verdict", "cleanup", "failure", "recoveryError"},
+            "quota recovery only supports failure before any negative PUT or Heal task")
+    folder = evidence / "H1/bucket-quota"
+    def one(suffix):
+        matches = list(folder.glob("*-" + suffix + ".json"))
+        require(len(matches) == 1, "quota recovery lacks one exact " + suffix)
+        return json.loads(matches[0].read_text())
+    binding, before, failure = one("binding"), one("original-complete-physical"), one("physical-original-failure-before-any-rescue")
+    require(re.fullmatch(rf"gh-{failed_run}-[1-9][0-9]*-h1", binding["runId"]) is not None
+            and binding["candidateBinarySha256"] == provenance["binary_sha256"]
+            and binding["harnessCommit"] == provenance["testing_commit"] and len(before) == 1
+            and set(before) == set(failure), "quota archived run/candidate/host differs")
+    node = next(iter(before))
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) is not None, "quota archived node is invalid")
+    live = one("manual-source-isolation-before-fault")
+    require(all(value.get("quiescent") is True for scene in (before, failure) for value in scene.values())
+            and set(live) == {node} and (live[node].get("backgroundConfig") or {}).get("RUSTFS_SCANNER_ENABLED") == "false"
+            and live[node].get("binarySha256") == provenance["binary_sha256"],
+            "quota archive has no stopped fixture and actual isolated candidate runtime")
+    quota = one("owned-bucket-quota-PUT")
+    read = one("all-peer-owned-quota-GET")
+    require(quota.get("path") == read.get("path") == "/rustfs/admin/v3/quota/" + binding["bucketPrefix"]
+            and quota.get("method") == "PUT" and quota.get("httpStatus") == 200
+            and quota.get("response", {}).get("quota") == 1024**2 and quota["response"].get("quota_type") == "HARD"
+            and read.get("method") == "GET" and read.get("httpStatus") == 503
+            and "authoritative bucket usage is not available yet" in str(read.get("response")),
+            "quota recovery lacks its exact acknowledged limit and usage-unavailable failure")
+    require(not (folder / "negative-PUT").exists() and not (folder / "capacity-released-PUT").exists(),
+            "quota recovery cannot finalize an invoked or uncertain workload")
+    receipts = [json.loads(path.read_text()) for path in folder.glob("*-exact-missing-part.json")]
+    require(len(receipts) == 2 and len({item.get("faultId") for item in receipts}) == 2,
+            "quota rescue requires both original fault receipts")
+    left = {(item["disk"], item["path"]): item for item in before[node]["files"]}
+    right = {(item["disk"], item["path"]): item for item in failure[node]["files"]}
+    require(before[node]["formats"] == failure[node]["formats"] and len(left) == len(before[node]["files"])
+            and len(right) == len(failure[node]["files"]), "quota archived disk identity or file census differs")
+    faults, removed = [], set()
+    for receipt in receipts:
+        matches = [key for key, entry in left.items() if entry["path"] == receipt.get("relativePath")
+                   and key not in right and receipt.get("before") == {"sha256": entry["sha256"], "size": entry["size"]}]
+        require(receipt.get("runId") == binding["runId"] and receipt.get("kind") == "missing"
+                and re.fullmatch(r"I02-[a-z0-9-]{1,48}", receipt.get("faultId", "")) is not None and len(matches) == 1
+                and matches[0] not in removed, "quota fault receipt has a wrong/duplicate run, shard or backup identity")
+        removed.add(matches[0])
+        faults.append({"disk": matches[0][0], "faultId": receipt["faultId"]})
+    require({key: value for key, value in left.items() if key not in removed} == right,
+            "quota archived failure changed other content or versions; preserve namespace")
+    return [{"kind": "owned-quota", "runId": binding["runId"], "nodes": [node], "node": node,
+             "bucket": binding["bucketPrefix"], "binarySha256": provenance["binary_sha256"],
+             "before": before, "failure": failure, "faults": faults,
+             "expectedSceneSha256": hashlib.sha256(json.dumps(physical_content(before)[node], sort_keys=True,
+                                                               separators=(",", ":")).encode()).hexdigest()}]
+
+
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
+    if list(artifact.glob("*/run/heal.enospc-inodes-and-quota/cases/heal.enospc-inodes-and-quota.json")):
+        require(not list(artifact.glob("*/run/heal.object-size-boundaries/cases/*.json")), "mixed failed case recovery artifact")
+        return quota_recovery_plan(artifact, failed_run, candidate)
     results = list(artifact.glob("*/run/heal.object-size-boundaries/cases/heal.object-size-boundaries.json"))
     require(len(results) == 1, "failed artifact must have one exact D01 canonical result")
     result = json.loads(results[0].read_text())
@@ -77,10 +151,19 @@ def main():
         fleet = Fleet(plan["nodes"], args.evidence, plan["runId"])
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
         current = fleet.snapshot("audited-physical-scene", quiescent=True)
-        require(physical_content(current) == physical_content(plan["before"]), "retained fleet drifted from archived pre-fault scene; no cleanup performed")
+        require(physical_content(current) == physical_content(plan.get("failure", plan["before"])),
+                "retained fleet drifted from its exact archived scene; no recovery performed")
         fleet.record("retained-service-logs", fleet.remote(plan["node"], "logs"))
-        proof = fleet.record("audited-finalization", fleet.remote(plan["node"], "audit-finalize", **{
-            key: plan[key] for key in ("disk", "rejectedFaultId", "binarySha256", "expectedSceneSha256")}))
+        if plan.get("kind") == "owned-quota":
+            for fault in plan["faults"]:
+                fleet.record("quota-original-shard-rescue", fleet.remote(plan["node"], "recover-fault", **fault))
+            require(physical_content(fleet.snapshot("complete-pre-fault-rescue", quiescent=True)) == physical_content(plan["before"]),
+                    "quota rescue did not restore every original file; preserve namespace")
+            proof = fleet.record("audited-finalization", fleet.remote(plan["node"], "quota-audit-finalize", **{
+                key: plan[key] for key in ("bucket", "binarySha256", "expectedSceneSha256")}))
+        else:
+            proof = fleet.record("audited-finalization", fleet.remote(plan["node"], "audit-finalize", **{
+                key: plan[key] for key in ("disk", "rejectedFaultId", "binarySha256", "expectedSceneSha256")}))
         for node in plan["nodes"]:
             if node != plan["node"]:
                 fleet.record("unchanged-peer-finalization", fleet.remote(node, "cleanup"))

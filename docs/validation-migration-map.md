@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 133 currently dispatchable IDs include all 74 non-Heal cases and fifty-nine Heal cases. Forty-nine have complete canonical live PASS evidence; the other 109 have no live PASS claim.
+case evidence. The 134 currently dispatchable IDs include all 74 non-Heal cases and sixty Heal cases. Forty-nine have complete canonical live PASS evidence; the other 109 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -1694,3 +1694,42 @@ and harness identities are unchanged. This moves only future outputs because
 the system disk has about one GiB free. The currently active flapping/MRF plan
 and every existing artifact remain at their original locations. The local
 `pending-output-locations.json` records each prior/new destination.
+
+
+I04 `heal.queue-pressure-and-admission` now has all four source branches on
+H1/H2. Its existing private Heal services freeze a two-slot queue and one
+worker. The 769/129/129/129-object independent buckets have full ACK and
+physical manifests; Merged returns the same token, Dropped carries its exact
+structured overlap reason, and Full requires HTTP 503 SlowDown with
+`admission=full, reason=none`. A live private drive refusal creates three
+exact degraded-write ACKs. Actual Normal-priority MRF Full events must occur
+while all three original committed responsibilities remain active. Recovery
+keeps the original process, and retirement requires each successful exact
+source task followed by all-member physical checks and every peer's complete
+S3 manifest. Queue/source/priority counts, request latency, RSS, FD and thread
+curves remain bounded by frozen budgets. Twelve negative oracle tests reject
+false admission, wrong identities, premature retirement and resource drift.
+No I04 canonical live PASS is claimed. There are now 134 automatic executors
+(74 non-Heal, 60 Heal) and 24 remaining Heal executors.
+
+Read-only current-fleet inspection `38106333882` at helper
+`b75f4a7602dca463c5aa532133ddc022f132051f` found 16 independent eligible
+endpoints: four on each of the existing four Heal nodes. H1/H2/H3 resource
+shapes are available; H4's required 24 endpoints are unavailable. This does
+not prove actual EC layout or an H07 PASS. H6 restart authority and a
+compatible immutable release pair remain unverified. Original Linux contract
+run `38106020097` executed all 424 tests without skips.
+
+F04 `38105011828` remains FAIL with cleanup PASS: root canonical counters,
+MRF partial replay admission and replacement disk identity failed their
+independent gates. I02 `38106408335` remains FAIL with cleanup FAIL: bounded
+block exhaustion was not witnessed, inode repair admission failed, and the
+quota GET returned usage-unavailable before workload/Heal admission. Failure
+recovery incorrectly called the stopped service. Quota rescue now restarts
+only its owned service and independently checks config without claiming
+usage or product repair. The narrowly supported archived H1 quota failure
+can also restore both original missing parts against an unchanged complete
+scene and remove its private bucket/quota namespace without starting a
+service. Invoked/uncertain PUTs, changed candidate/run/versions, missing fault
+receipts or another dirty instance reject finalization. Original failure
+results remain immutable; any subsequent recovery has separate evidence.

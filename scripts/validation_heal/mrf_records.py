@@ -50,7 +50,7 @@ def verify_reference(candidate):
 
 def read_records(state, roots, owner, checked):
     """Exact allowlist, no directory enumeration, no write descriptor."""
-    require(owner.get("runtimeProfile") in {"durable-mrf", "mrf-crash", "flapping"}, "MRF records require the dedicated run-owned runtime")
+    require(owner.get("runtimeProfile") in {"durable-mrf", "mrf-crash", "flapping", "queue-pressure"}, "MRF records require the dedicated run-owned runtime")
     require(hashlib.sha256((state / "rustfs").read_bytes()).hexdigest() == owner["binarySha256"], "MRF candidate changed")
 
     def collect():

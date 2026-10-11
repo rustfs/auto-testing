@@ -31,6 +31,7 @@ case "${case_id}" in
   heal.performance-abba) driver=performance.py ;;
   heal.admin-scope-isolation) driver=scopes.py ;;
   heal.admin-option-contract) driver=options.py ;;
+  heal.queue-pressure-and-admission) driver=queue_pressure.py ;;
   heal.bucket-metadata-integrity) driver=bucket_metadata.py ;;
   heal.disk-replacement-unformatted) driver=unformatted.py ;;
   heal.below-write-quorum) driver=write_quorum.py ;;

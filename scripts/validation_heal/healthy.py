@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -183,7 +183,7 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
-        if action.startswith("network-") or action == "cleanup":
+        if action.startswith("network-") or action in {"cleanup", "quota-audit-finalize"}:
             network_source = NODE_SOURCE.with_name("network_gate.py").read_text()
             source += "\nimport types\nnetwork_gate_backend = types.ModuleType('network_gate')\nexec(" + repr(
                 network_source) + ", network_gate_backend.__dict__)\nNETWORK_GATE_SOURCE = " + repr(network_source) + "\n"
@@ -215,8 +215,8 @@ class Fleet:
         if action in {"encryption-configure", "snapshot"}:
             source += "\nimport types\nencryption_runtime = types.ModuleType('encryption_runtime')\nexec(" + repr(
                 NODE_SOURCE.with_name("encryption_runtime.py").read_text()) + ", encryption_runtime.__dict__)\n"
-        replacement_actions = {"start", "cleanup", "audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot", "format-schema-fault"}
-        if action in {"start", "cleanup", "audit-finalize", "drive-gate", "drive-gate-arm-live", "replace-drive", "quorum-gate", "quorum-gate-probe"}:
+        replacement_actions = {"start", "cleanup", "audit-finalize", "quota-audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot", "format-schema-fault"}
+        if action in {"start", "cleanup", "audit-finalize", "quota-audit-finalize", "drive-gate", "drive-gate-arm-live", "replace-drive", "quorum-gate", "quorum-gate-probe"}:
             source += "\nimport types\nquorum_gate_backend = types.ModuleType('quorum_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("quorum_gate.py").read_text()) + ", quorum_gate_backend.__dict__)\n"
         if action in {"drive-gate", "drive-gate-arm-live", "drive-gate-probe", "drive-gate-activate", "gate-state", "drive-gate-release-live"} | replacement_actions:

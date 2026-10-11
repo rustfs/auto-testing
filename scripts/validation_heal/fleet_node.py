@@ -33,7 +33,15 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    if profile == "queue-pressure":
+        logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true",
+                "RUSTFS_OBS_LOGGER_LEVEL": logging_filter, "RUST_LOG": logging_filter,
+                "RUSTFS_HEAL_QUEUE_SIZE": "2", "RUSTFS_HEAL_MAX_CONCURRENT_HEALS": "1",
+                "RUSTFS_HEAL_MAX_CONCURRENT_PER_SET": "1", "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false",
+                "RUSTFS_HEAL_OVERLAP_POLICY": "merge", "RUSTFS_HEAL_LOW_PRIORITY_MERGE_ENABLE": "true",
+                "RUSTFS_HEAL_LOW_PRIORITY_DROP_WHEN_FULL": "true", "RUSTFS_HEAL_MRF_REPLAY_BATCH": "1"}
     if profile in {"orphan-preserve", "orphan-before", "orphan-after"}:
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_DANGLING_DELETE_GRACE_SECS":
                 {"orphan-preserve": "0", "orphan-before": "300", "orphan-after": "30"}[profile]}
@@ -296,7 +304,7 @@ def start(request):
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
             *(["--property=PrivateMounts=true", "--property=CapabilityBoundingSet=~CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"]
-              if owner.get("runtimeProfile") == "flapping" else []),
+              if owner.get("runtimeProfile") in {"flapping", "queue-pressure"} else []),
             *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "durable-mrf", "mrf-crash", "replacement", "replacement-target", "schema-refusal"} else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
@@ -663,7 +671,7 @@ def drive_gate_arm_live(request):
     """Re-arm one owned root without changing the running service's birth."""
     require(set(request) == {"runId", "action", "disk", "expected"}, "live arm requires an exact owned process binding")
     state, roots, owner = owned(request["runId"])
-    require(owner.get("runtimeProfile") == "flapping", "live arm requires the preconfigured flapping service")
+    require(owner.get("runtimeProfile") in {"flapping", "queue-pressure"}, "live arm requires a preconfigured private service")
     before = process(request)
     require(before["pid"] > 1 and isinstance(request["expected"], dict)
             and all(before.get(name) == request["expected"].get(name) for name in PROCESS_FIELDS),
@@ -1044,6 +1052,29 @@ def audit_finalize(request):
             "backupRestorationUsed": False, "productRepairClaimed": False}
 
 
+def quota_audit_finalize(request):
+    """Remove the private quota fixture only after exact pre-fault rescue."""
+    require(set(request) == {"runId", "action", "bucket", "binarySha256", "expectedSceneSha256"},
+            "quota finalization accepts only the exact archived namespace and scene")
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    require(request["runId"].endswith("-h1") and owner.get("runtimeProfile") == "manual"
+            and owner.get("bucket") == request["bucket"] and request["binarySha256"] == owner["binarySha256"]
+            and digest(state / "rustfs") == owner["binarySha256"], "quota rescue candidate, bucket or private runtime differs")
+    require(owner.get("volumes") == [str(root / "data") for root in roots]
+            and all(not (state / name).exists() for name in ("network-gate.json", "drive-gate.json", "quorum-gate.json", "bounded-volumes.json")),
+            "quota rescue cannot remove a shared/foreign volume or another active fault backend")
+    observed = snapshot({"runId": request["runId"], "action": "snapshot", "quiescent": True})
+    content = {key: observed[key] for key in ("files", "formats")}
+    scene_sha = hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    require(re.fullmatch(r"[0-9a-f]{64}", request.get("expectedSceneSha256", "")) is not None
+            and scene_sha == request["expectedSceneSha256"], "quota rescue did not restore the complete original fixture")
+    result = cleanup(request)
+    return {**result, "privateBucketQuotaNamespaceRemoved": True, "archivedPreFaultSceneEqual": True,
+            "sceneSha256": scene_sha, "serviceStartedDuringRecovery": False,
+            "backupRestorationUsed": True, "productRepairClaimed": False}
+
+
 def task_records(request):
     """Read three exact Admin journal names; never mutate system metadata."""
     state, roots, owner = owned(request["runId"])
@@ -1170,6 +1201,7 @@ def main(request):
                "drive-gate-release-live": drive_gate_release_live, "drive-gate-arm-live": drive_gate_arm_live}
     actions["task-records"] = task_records
     actions["environment-capabilities"] = environment_capabilities
+    actions["quota-audit-finalize"] = quota_audit_finalize
     for action in ('generation-capture', 'generation-install', 'generation-recover'):
         actions[action] = generation_operation
     for action in ('orphan-install-tool', 'orphan-observe', 'orphan-multipart', 'orphan-convert',
