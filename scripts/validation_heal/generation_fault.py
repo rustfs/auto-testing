@@ -37,10 +37,21 @@ def tree(fd, fault):
         require(str(uuid.UUID(name)) == name and uuid.UUID(name).int != 0, 'generation contains an unreviewed object child')
         with fault.parent(fd, [name]) as part_fd:
             parts = sorted(os.listdir(part_fd))
-            require(parts and len(parts) <= 16 and all(re.fullmatch(r'part\.[1-9][0-9]*', part) for part in parts),
-                    'generation contains unreviewed multipart leaves')
+            require(parts and len(parts) <= 32, 'generation exceeds its part/commitment file budget')
+            payloads, commitments = set(), set()
             for part in parts:
+                match = re.fullmatch(r'part\.([1-9][0-9]*)(?:\.integrity\.([0-9a-f-]{36}))?', part)
+                require(match is not None, 'generation contains unreviewed multipart leaves')
+                number, nonce = match.groups()
+                if nonce is None:
+                    payloads.add(number)
+                else:
+                    require(str(uuid.UUID(nonce)) == nonce and uuid.UUID(nonce).int != 0 and number not in commitments,
+                            'generation has ambiguous or noncanonical shard commitment identity')
+                    commitments.add(number)
                 values[name + '/' + part] = fault.read_file(part_fd, part)
+            require(0 < len(payloads) <= 16 and commitments <= payloads,
+                    'generation commitment has no exact corresponding original part')
     require(sum(map(len, values.values())) <= 32 * 1024**2, 'generation exceeds its per-drive byte budget')
     manifest = [{'path': name, 'size': len(raw), 'sha256': fault.digest(raw)} for name, raw in sorted(values.items())]
     return values, manifest

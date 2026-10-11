@@ -1529,3 +1529,13 @@ real original mount-descriptor recovery and nested bind-mount refusal. The
 C07 pending serial plan uses this successful native tools attempt; the active
 queue resumed F06 in run `38102031029` after the hosted build completed. Shared
 fleet locks, cleanup guards and the active plan are retained.
+
+C07's complete generation archive includes the fixed candidate's actual
+`part.N.integrity.<uuid>` commitments, independently observed in the retained
+A06 physical evidence. Only canonical non-nil commitment UUIDs, one commitment
+per existing part and the bounded part/commitment budget are accepted. Every
+commitment's exact bytes and name follow its chosen archived generation;
+payload-less, repeated or ambiguous commitments are rejected. Two additional
+regressions verify complete A/B commitment preservation and invalid-leaf
+refusal. The updated local suite runs 377 tests with seven macOS skips; the
+real Linux generation test also includes a commitment file.

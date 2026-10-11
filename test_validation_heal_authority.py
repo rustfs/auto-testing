@@ -390,6 +390,35 @@ class GenerationFaultTests(unittest.TestCase):
         self.capture('a')
         with self.assertRaises(FileExistsError): self.capture('a')
 
+    def test_full_protected_generation_preserves_exact_candidate_integrity_sidecar(self):
+        name = 'part.1.integrity.' + str(uuid.UUID(int=77))
+        sidecar = self.object / self.data_dir / name
+        sidecar.write_bytes(b'candidate-shard-integrity-a')
+        a = self.capture('a')
+        self.seed('b'); sidecar.unlink()
+        newest_sidecar = self.object / self.data_dir / ('part.1.integrity.' + str(uuid.UUID(int=78)))
+        newest_sidecar.write_bytes(b'candidate-shard-integrity-b')
+        b = self.capture('b')
+        self.assertTrue(any(row['path'].endswith(name) for row in a['files']))
+        self.install(b)
+        self.assertEqual(sidecar.read_bytes(), b'candidate-shard-integrity-a')
+        self.assertFalse(newest_sidecar.exists())
+        self.recover()
+        self.assertEqual(newest_sidecar.read_bytes(), b'candidate-shard-integrity-b')
+        self.assertFalse(sidecar.exists())
+
+    def test_commitment_without_payload_duplicate_nonce_and_nil_nonce_are_rejected(self):
+        for name in ('part.2.integrity.' + str(uuid.UUID(int=77)), 'part.1.integrity.' + str(uuid.UUID(int=0)),
+                     'part.1.integrity.' + str(uuid.UUID(int=78))):
+            with self.subTest(name=name):
+                target = self.object / self.data_dir / name
+                target.write_bytes(b'commitment')
+                first = self.object / self.data_dir / ('part.1.integrity.' + str(uuid.UUID(int=77)))
+                if name.endswith(str(uuid.UUID(int=78))): first.write_bytes(b'original-commitment')
+                with self.assertRaises(ValueError): self.capture('a')
+                target.unlink()
+                if first.exists(): first.unlink()
+
     def test_bucket_key_profile_and_device_drift_cannot_restore_an_unrelated_generation(self):
         _, b = self.pair()
         self.install(b)
@@ -433,6 +462,7 @@ with tempfile.TemporaryDirectory() as folder:
     for label in ('a','b'):
         (obj/'xl.meta').write_bytes(('XL2 '+label).encode())
         (obj/data_dir/'part.1').write_bytes(label.encode()*512)
+        (obj/data_dir/('part.1.integrity.'+str(uuid.UUID(int=77)))).write_bytes(label.encode()*32)
         with fault.directory(root) as fd,fault.parent(fd,['data',bucket,'conflict.bin']) as child:
             manifest=generation.tree(child,fault)[1]
             captured[label]=generation.capture(fd,owner,{**request,'generation':label,'expectedFiles':manifest},fault)
