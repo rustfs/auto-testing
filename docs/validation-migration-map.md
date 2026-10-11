@@ -1036,9 +1036,10 @@ four regression verdicts have their own archive and never increment a fleet or
 canonical-case PASS count. Existing tests assert captured lock events internally;
 the collector does not fabricate emitted barrier logs. Missing critical-point
 fixtures, Admin nolock semantics and required fleet overlap remain explicit gaps.
-The current implementation has 287 focused Heal/catalog checks, including the
-Linux-only D11, C09 and D08 ownership/mount/recovery checks. Native compilation and execution
-still require the separate hosted job; local parser checks are not native PASS.
+The current implementation has 310 focused Heal/catalog checks, including the
+Linux-only ownership/mount/recovery checks. Hosted native compilation and all
+four exact regressions completed in run `38096433036`; their independently
+verified identities and limits are recorded below.
 
 
 J03 corrected-budget run `38089238767` passed every applicable within-window,
@@ -1048,8 +1049,8 @@ physical/streaming integrity, all-peer S3 evidence, cleanup PASS and the
 independent canonical selected-case gate. This increases complete live PASS
 to 45/158; branch-only successes and native regressions remain outside that
 count. A06/F06/F01 and A02/E05/F05/J06/D11 queues continue serially on the
-current auto-testing fleet. The optional native build waits for those queues
-and uses the existing Functional Chain tools-only driver, because the reusable
+current auto-testing fleet. The optional native build uses the existing
+Functional Chain tools-only driver on hosted Linux, because the reusable
 workflow is still in a draft PR and cannot be dispatched directly from the
 default branch.
 
@@ -1335,7 +1336,19 @@ Native tools-only run `38096433036` binds driver
 `ae9b5cbabfeaff440d9b8ee0b2fe805f17aff5b3` and auto-testing
 `acdd69218406b0596d79b6aab15481f8271e35c6`. Its candidate resolver and tool/native
 jobs use hosted ubuntu-latest with independent tools-only concurrency and
-empty fleet credentials. The metadata inspector build passed; the native
-candidate test executable remains in compilation. This exact audited hosted
-run is excluded from the local fleet-busy classifier. Unknown active runs
-still block dispatch, and native results cannot count as canonical fleet PASS.
+empty fleet credentials. The workflow, metadata inspector build, optimized
+native compilation and all four exact-name regression processes completed
+successfully. Independent verification matched the downloaded executable
+SHA-256 `0c9e005ae877f741a62100f0d70af6c2256d1078d546ac97e963d6979aa05bc1`,
+candidate source tree `8071fb0a9e5353eb7d3fa58c8a58c8622473f2bd`, Cargo.lock
+SHA-256 `d8f7bc416ba67d19873d34e9389e5aa823b22d7d7552706a5a810cee26f6eda2`
+and collector SHA-256
+`b095d4e1cdb26be9d16cc82f589e29137ec84666e4675a9acc7dfbed761a0f28`.
+Each original listing and result log proves exactly one non-ignored selected
+test ran and passed. The final-rename and lock-owner tests contain actual
+deterministic candidate assertions; overwrite and version-delete use
+uncontrolled concurrency and do not prove deterministic commit fences.
+Admin nolock, PUT cleanup-tail, other critical points and fleet overlap remain
+unproven. These four native results do not increase the 46/158 complete
+canonical live PASS count. This exact audited hosted run is excluded from
+the local fleet-busy classifier; unknown active runs still block dispatch.
