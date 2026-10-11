@@ -1447,3 +1447,29 @@ branches passed on both topologies, but SSE-C ACK/GET classification failed
 on both. Neither run increases the 47/158 complete canonical live PASS count.
 The RustFS aggregate Test and Lint check also failed because its three
 runner-shutdown lanes failed; its final summary preserves those exact failures.
+
+
+H06 read-only pool observations now have an explicit Probe allowlist: signed
+GET only, four-node H5 binding, exact pool list or numeric pool 0/1 by-id
+selectors, empty body and no duplicate/extra queries. All six CI checks passed
+at `f63f3ece5f78670b6880a30390802dd658ebfb6d`. The pending H06 serial live plan
+now binds that corrected immutable revision; the active plan was unchanged.
+
+A06 run `38099706345` passed all four stop/stale-token branches on H1/H2 using
+the source's DX window fixture, at exact harness
+`f248cb63d032cfc1658d32c508bce745f96b885f`. Independently inspected source branch
+sets, topology coverage, nonzero interrupted progress, cancellation/physical
+quietness, fresh task ownership and old-token behavior, complete recovered
+physical/S3 manifests and cleanup all passed. The independent canonical gate
+passed again. Complete canonical live PASS is now 48/158. Original A06 failures
+remain archived and are not overwritten by this fresh successful run.
+
+The native collector additionally selects the candidate's two exact C07
+conflicting-authority/preservation regressions, with reviewed original source
+assertions. These are controlled guard decisions, not emitted concurrent
+runtime-pause fences or fleet PASS. The corrected hosted tools-only run
+`38100407691` binds collector `6f4901573967c53b88239af361c1ab543f44fd4d` and is
+still building native evidence. Earlier dispatch `38100369019` used an
+incorrect complete collector revision and was cancelled; it is not a success
+or native evidence source. C07 fleet migration is still in progress and does
+not change the 130 automatic executors / 28 remaining Heal executor count.
