@@ -101,6 +101,22 @@ class MultiPoolTests(unittest.TestCase):
                                          [('bucket', self.buckets[index // 4])], b''))
             self.assertEqual(call.kwargs, {'method': 'GET'})
 
+    def test_quota_config_retries_only_same_bucket_metadata_convergence(self):
+        probe, fleet = Mock(), Mock()
+        fleet.record.side_effect = lambda label, value: value
+        not_ready = {'httpStatus': 404, 'response':
+                     '<?xml version="1.0"?><Error><Code>NoSuchBucket</Code><Message>bucket not found: '
+                     + self.buckets[0] + '</Message></Error>'}
+        ready = {'httpStatus': 200, 'response': {'quota': 0, 'size': 0, 'rate': 0, 'requests': 0}}
+        probe.admin.side_effect = [not_ready, ready]
+        with patch.object(runner.time, 'sleep') as sleep:
+            self.assertEqual(runner.quota_config(probe, fleet, self.buckets[0], 'quota'), ready['response'])
+        sleep.assert_called_once_with(1)
+        with self.assertRaises(ValueError):
+            runner.quota_config(Mock(admin=Mock(return_value={'httpStatus': 404, 'response':
+                '<?xml version="1.0"?><Error><Code>NoSuchBucket</Code><Message>bucket not found: foreign</Message></Error>'}),
+                binding={}), fleet, self.buckets[0], 'quota')
+
     def test_quota_config_rejects_changed_limits_bool_and_peer_refusal(self):
         probe, fleet = Mock(), Mock()
         probe.binding = {'endpoints': {'node1': 'a', 'node2': 'b'}}

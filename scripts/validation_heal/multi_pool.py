@@ -11,6 +11,7 @@ import re
 import secrets
 import signal
 import sys
+import time
 
 try:
     from .heal_probe import Probe, compare_inventories, payload, require, save
@@ -305,6 +306,27 @@ def pool_status(probe, fleet, endpoint_expressions, label):
     return [{name: row[name] for name in ('id', 'cmdline', 'status', 'totalSize')} for row in values]
 
 
+def quota_config(probe, fleet, bucket, label):
+    deadline = time.monotonic() + 30
+    attempts = 0
+    while True:
+        attempts += 1
+        value = fleet.record(f'{label}-attempt-{attempts}', probe.admin(
+            REFERENCE['quotaConfig']['route'], [('bucket', bucket)], b'', method='GET'))
+        response = value.get('response')
+        if value.get('httpStatus') == 200:
+            require(isinstance(response, dict) and set(response) == {'quota', 'size', 'rate', 'requests'}
+                    and all(type(response[name]) is int and response[name] == 0 for name in response),
+                    'H06 changed the owned bucket quota or queried a different logical bucket')
+            return dict(response)
+        same_bucket_not_ready = (value.get('httpStatus') == 404 and isinstance(response, str)
+                                 and '<Code>NoSuchBucket</Code>' in response
+                                 and f'<Message>bucket not found: {bucket}</Message>' in response)
+        require(same_bucket_not_ready, 'H06 changed the owned bucket quota or queried a different logical bucket')
+        require(time.monotonic() < deadline, 'H06 owned bucket metadata did not converge on every peer within 30 seconds')
+        time.sleep(1)
+
+
 def quota_status(probe, fleet, buckets, label):
     # Scanner stays disabled to preserve unselected defects. The reviewed
     # config-only route checks bucket existence and reads persisted policy
@@ -312,14 +334,7 @@ def quota_status(probe, fleet, buckets, label):
     result = {}
     for bucket in buckets:
         for endpoint in probe.binding['endpoints']:
-            value = fleet.record(label, Probe(probe.binding, endpoint).admin(
-                REFERENCE['quotaConfig']['route'], [('bucket', bucket)], b'', method='GET'))
-            response = value.get('response')
-            require(value.get('httpStatus') == 200 and isinstance(response, dict)
-                    and set(response) == {'quota', 'size', 'rate', 'requests'}
-                    and all(type(response[name]) is int and response[name] == 0 for name in response),
-                    'H06 changed the owned bucket quota or queried a different logical bucket')
-            result[bucket] = dict(response)
+            result[bucket] = quota_config(Probe(probe.binding, endpoint), fleet, bucket, label)
     return result
 
 
