@@ -47,6 +47,48 @@ class RaceTests(unittest.TestCase):
         self.assertEqual(race.target_key("copy-source"), race.G06_TARGET_KEY)
         self.assertEqual(race.reference_key("copy-source"), race.G06_REFERENCE_KEY)
 
+    def test_g05_binds_multipart_operations_to_acknowledged_upload(self):
+        expected = [{"key": race.G05_TARGET_KEY, "versionId": "null", "isLatest": True}]
+        continued = race.operation_plan("rv-heal-0123456789abcdef", "upload-continue", expected)
+        completed = race.operation_plan("rv-heal-0123456789abcdef", "complete", expected)
+        aborted = race.operation_plan("rv-heal-0123456789abcdef", "abort", expected)
+        self.assertEqual([step["operation"] for step in continued], ["create_multipart_upload", "upload_part"])
+        self.assertEqual([step["operation"] for step in completed],
+                         ["create_multipart_upload", "upload_part", "upload_part", "upload_part",
+                          "complete_multipart_upload"])
+        self.assertEqual([step["operation"] for step in aborted],
+                         ["create_multipart_upload", "upload_part", "abort_multipart_upload"])
+        self.assertEqual([step["size"] for step in completed[1:4]], list(race.G05_PART_SIZES))
+        self.assertEqual(completed[-1]["params"]["MultipartUpload"]["Parts"], [])
+        self.assertEqual(race.target_key("complete"), race.G05_TARGET_KEY)
+
+    def test_g05_foreground_resolves_upload_id_and_part_etags_from_ack(self):
+        class FakeRecorder:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, operation, params, body=None):
+                self.calls.append((operation, params, body))
+                if operation == "create_multipart_upload":
+                    return {"UploadId": "upload-ack"}
+                if operation == "upload_part":
+                    return {"ETag": f"etag-{params['PartNumber']}"}
+                return {"ETag": "complete-etag", "VersionId": "null"}
+
+        recorder = FakeRecorder()
+        plan = race.operation_plan("rv-heal-0123456789abcdef", "complete", [])
+        responses, runtime = race.foreground(recorder, plan)
+        self.assertEqual(runtime["uploadIds"]["complete"], "upload-ack")
+        self.assertEqual(recorder.calls[1][1]["UploadId"], "upload-ack")
+        self.assertEqual(recorder.calls[-1][1]["UploadId"], "upload-ack")
+        self.assertEqual(recorder.calls[-1][1]["MultipartUpload"], {
+            "Parts": [{"PartNumber": 1, "ETag": "etag-1"},
+                      {"PartNumber": 2, "ETag": "etag-2"},
+                      {"PartNumber": 3, "ETag": "etag-3"}]})
+        self.assertEqual([len(call[2]) if call[2] is not None else None for call in recorder.calls],
+                         [None, *race.G05_PART_SIZES, None])
+        self.assertEqual(len(responses), 5)
+
     def test_native_branch_remains_in_denominator_for_each_case(self):
         for case_id, branches in race.CASE_BRANCHES.items():
             native = race.native_blocked({"source_sha": race.REFERENCE["candidateCommit"]}, "H1", case_id)
@@ -59,7 +101,8 @@ class RaceTests(unittest.TestCase):
         dispatch = Path("scripts/validation_heal/run_case.sh").read_text()
         top_dispatch = Path("scripts/run_validation_case.sh").read_text()
         for case_id, code in (("heal.race-unversioned-overwrite", "G01"), ("heal.race-versioned-put", "G02"),
-                              ("heal.race-version-delete", "G03"), ("heal.race-copy-and-metadata-update", "G06")):
+                              ("heal.race-version-delete", "G03"), ("heal.race-multipart-complete-abort", "G05"),
+                              ("heal.race-copy-and-metadata-update", "G06")):
             self.assertIn(case_id, dispatch)
             self.assertIn(case_id, top_dispatch)
             catalog = json.loads(Path("validation-cases.json").read_text())
