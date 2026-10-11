@@ -97,17 +97,24 @@ def files(snapshot):
 
 
 def map_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None, latest_required=True,
-               multi_set=False, set_index=0):
+               multi_set=False, set_index=0, pool_index=None):
     return _map_external_target(snapshot, bucket, key, role, part_number, version_id,
-        preferred_nodes=preferred_nodes, latest_required=latest_required, multi_set=multi_set, set_index=set_index)
+        preferred_nodes=preferred_nodes, latest_required=latest_required, multi_set=multi_set, set_index=set_index, pool_index=pool_index)
 
 
 def _map_external_target(snapshot, bucket, key, role, part_number, version_id="null", *, preferred_nodes=None,
-                         latest_required=True, multi_set=False, set_index=0, part_policy=None):
+                         latest_required=True, multi_set=False, set_index=0, part_policy=None, pool_index=None):
     """Share set/role authority checks while keeping transformed part policy explicit."""
-    require(type(multi_set) is bool and type(set_index) is int and 0 <= set_index < (2 if multi_set else 1),
+    require(pool_index is None or type(pool_index) is int and 0 <= pool_index < 2 and multi_set is False,
+            "invalid explicit pool mapping")
+    require(type(multi_set) is bool and type(set_index) is int and 0 <= set_index < (2 if multi_set or pool_index is not None else 1),
             "invalid explicit object set mapping")
-    validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2", expected_sets=2 if multi_set else 1)
+    if pool_index is None:
+        validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2", expected_sets=2 if multi_set else 1)
+    else:
+        try: from .multi_pool_layout import validate as validate_pools
+        except ImportError: from multi_pool_layout import validate as validate_pools
+        validate_pools(snapshot)
     indexed = files(snapshot)
     cohort, logical = [], None
     for node, observation in snapshot.items():
@@ -115,6 +122,11 @@ def _map_external_target(snapshot, bucket, key, role, part_number, version_id="n
             disk = format_entry["disk"]
             identity = (node, disk, f"{bucket}/{key}/xl.meta")
             layout = format_entry["value"]["xl"]
+            if pool_index is not None and disk // 2 != pool_index:
+                other_versions = indexed.get(identity, {}).get("metadata", {}).get("versions", [])
+                require(not any((version.get("versionId") or "null") == version_id for version in other_versions),
+                        "ACK version has an additional authority in an unselected pool")
+                continue
             if layout["this"] not in layout["sets"][set_index]:
                 require(not any(owner == node and drive == disk and path.startswith(f"{bucket}/{key}/")
                                 for owner, drive, path in indexed), "object files span the selected and unselected erasure sets")
@@ -169,7 +181,7 @@ def _map_external_target(snapshot, bucket, key, role, part_number, version_id="n
     target = next((entry for entry in cohort if entry["role"] == role
                    and (preferred_nodes is None or entry["node"] in preferred_nodes)), None)
     require(target is not None, "requested shard role is not present")
-    return {**target, "bucket": bucket, "key": key, "poolIndex": 0, "setIndex": set_index,
+    return {**target, "bucket": bucket, "key": key, "poolIndex": 0 if pool_index is None else pool_index, "setIndex": set_index,
             "cohort": cohort, "logical": logical}
 
 

@@ -25,7 +25,7 @@ import uuid
 
 MOUNTS = tuple(Path(f"/data/rustfs{index}") for index in range(1, 5))
 STATE_ROOT = Path("/var/lib/rustfs-auto-testing/heal")
-RUN_PATTERN = re.compile(r"gh-[1-9][0-9]*-[1-9][0-9]*-(?:h1|h2)")
+RUN_PATTERN = re.compile(r"gh-[1-9][0-9]*-[1-9][0-9]*-(?:h1|h2|h5)")
 BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "true",
                      "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "false", "RUSTFS_HEAL_MRF_ENABLE": "false",
                      "RUSTFS_SHARD_INTEGRITY_WRITE": "true", "RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED": "true",
@@ -33,7 +33,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    if profile == "multi-pool":
+        return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "4", "RUSTFS_STORAGE_CLASS_STANDARD": "EC:2"}
     if profile == "bounded-capacity":
         return {**BACKGROUND_CONFIG, "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true"}
     if profile == "lock-quorum":
@@ -177,16 +179,22 @@ def reserve(request):
     for name in ("access", "secret"):
         require(bool(re.fullmatch(r"[A-Za-z0-9]{16,80}", request[name])), "invalid runtime credential")
     volumes = request["volumes"]
-    require(isinstance(volumes, list) and len(volumes) in {4, 16}, "unsupported automatic Heal topology")
+    require(isinstance(volumes, list) and len(volumes) in {2, 4, 16}, "unsupported automatic Heal topology")
     local_paths = [str(root / "data") for root in paths(run_id)[1]]
     h1 = run_id.endswith("-h1")
     require(profile != "lock-quorum" or not h1, "eight-parity lock boundary requires actual sixteen-drive H2")
     expected = local_paths if h1 else [f"http://rustfs-node{node}:9000{path}"
                                       for node in range(1, 5) for path in local_paths]
+    if profile == "multi-pool":
+        require(run_id.endswith("-h5"), "multi-pool service requires its explicit H5 namespace")
+        expected = [f"http://rustfs-node{{1...4}}:9000/data/rustfs{{{first}...{first + 1}}}/heal-validation/{run_id}/data"
+                    for first in (1, 3)]
+    else:
+        require(not run_id.endswith("-h5"), "H5 cannot use an H1/H2 runtime")
     if profile == "scope-isolation":
         require(not h1, "two-set runtime requires the four-node topology")
         expected = [f"http://rustfs-node{node}:9000{path}" for path in local_paths for node in range(1, 5)]
-    require(volumes == expected, "endpoint sequence differs from H1/H2 deployment contract")
+    require(volumes == expected, "endpoint sequence differs from the explicit Heal deployment contract")
     state, roots = paths(run_id)
     owner = {"runId": run_id, "unit": unit(run_id), "hostname": observed["hostname"],
              "mounts": observed["mounts"], "binarySha256": binary_sha,

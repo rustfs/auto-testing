@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -254,6 +254,11 @@ class Fleet:
         paths = checked[self.nodes[0]]["dataRoots"]
         volumes = paths if len(self.nodes) == 1 else [f"http://rustfs-node{index}:9000{path}"
                     for index in range(1, 5) for path in paths]
+        if self.runtime_profile == "multi-pool":
+            require(len(self.nodes) == 4, "H5 requires all four current Heal nodes")
+            try: from .multi_pool_layout import volumes as pool_volumes
+            except ImportError: from multi_pool_layout import volumes as pool_volumes
+            volumes = pool_volumes(self.run_id)
         if self.runtime_profile == "scope-isolation":
             require(len(self.nodes) == 4, "two-set isolation requires the four-node topology")
             volumes = [f"http://rustfs-node{index}:9000{path}" for path in paths for index in range(1, 5)]

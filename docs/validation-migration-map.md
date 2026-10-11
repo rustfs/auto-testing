@@ -1399,3 +1399,51 @@ shutdown failures in Workspace Test and Lint, Connect Short Credential Boundary
 and S3 Implemented Tests; their original job logs show shutdown/cancellation,
 not a completed passing check. The two optional workflow files remain the only
 RustFS changes.
+
+
+H06 `heal.multi-pool-target-isolation` now dispatches all three original H5
+branches: selected pool, selected set and unselected control fault. It reuses
+the four current Heal nodes and sixteen original independent mounts. Two
+separate endpoint-expansion arguments create two actual pools with two
+four-peer sets each; the candidate layout/parser source binds the argument
+order and exact public pool cmdlines. The runtime explicitly uses set width
+four and EC:2. Full format/UUID/set mappings and decoded object geometry must
+prove actual cross-node EC 2+2 before any fault.
+
+Bounded DB and two-version DV fixtures must populate all four observed
+pool/set combinations. Every acknowledged version is mapped without an
+assumed placement hash or internal PUT selector. A measured stop of one owned
+peer must leave three physical slots per set and redeem every original
+version from all three survivors; this is process loss, not platform power
+loss. Every selected and control scope contains a distinct DB fault and a
+historical DV fault. The control branch also gates one exact unselected root
+read-only inside the candidate service namespace, witnessing EROFS before
+and after selected Heal without remounting the host's shared drive.
+
+Exact selected version responsibility, counters, settings, pool/set/disk
+identities, public pool capacity and logical quota policy are checked.
+Unselected missing parts must remain missing before any target GET or rescue.
+Only after that physical proof may independent control tasks repair them.
+Complete physical, same-role streaming and all-peer version/metadata/tag
+manifests are required. Uncertain seed requests are registered before calls,
+retain durable request/ACK files, stop further mutation and require exact
+all-peer resolution; unresolved bucket mutations or ACK/version drift retain
+DIRTY namespaces and block later branches. No H06 live PASS is claimed.
+
+The current implementation has 130 automatic executors (74 non-Heal, 56 Heal);
+28 Heal executors remain. The complete local validation suite ran 352 tests
+successfully with six Linux-only skips on macOS. Catalog source IDs/hashes,
+84/301/532 Heal matrix, Python syntax, Bash syntax, ShellCheck error checks,
+scoped actionlint and whitespace checks passed. The pre-H06 documentation
+HEAD `9b93e7570db7b4af39608ba4876e0852952261d9` has all six CI checks passing;
+H06 still needs its own CI and serial live run.
+
+C09 run `38098069878` completed FAIL with cleanup PASS. All eight H1/H2
+branches retain failures: some injected foreign/future formats prevented
+readiness or repair admission, while other negative tasks did not satisfy
+failed-execution/incomplete-responsibility evidence. D08 run `38099278528`
+completed FAIL with cleanup PASS: SSE-S3, SSE-KMS and encrypted-versioned
+branches passed on both topologies, but SSE-C ACK/GET classification failed
+on both. Neither run increases the 47/158 complete canonical live PASS count.
+The RustFS aggregate Test and Lint check also failed because its three
+runner-shutdown lanes failed; its final summary preserves those exact failures.
