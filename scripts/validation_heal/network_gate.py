@@ -149,7 +149,8 @@ def validate_table(value, table, blocked):
                 else:
                     expressions.append(expression)
             normalized['expr'] = expressions
-            require(normalized == wanted[name], 'network rule changed its addresses, TCP port or drop expression')
+            require(normalized == wanted[name], 'network rule changed its addresses, TCP port or drop expression: '
+                    + json.dumps({'observed': normalized, 'expected': wanted[name]}, sort_keys=True))
             seen_rules.add(name)
     require(tables == 1 and seen_chains == set(chains) and seen_rules == set(wanted)
             and len(counters) == len(wanted), 'network table omits a registered rule or chain')
