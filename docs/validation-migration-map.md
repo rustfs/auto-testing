@@ -1352,3 +1352,38 @@ Admin nolock, PUT cleanup-tail, other critical points and fleet overlap remain
 unproven. These four native results do not increase the 46/158 complete
 canonical live PASS count. This exact audited hosted run is excluded from
 the local fleet-busy classifier; unknown active runs still block dispatch.
+
+F01 `38096950043` passed both original-root graceful-interruption and same-record
+disk-resume branches on H1/H2 at immutable harness
+`21b4ff9656710867dbcbaced08e1804110c6bdf7`. Independent artifact inspection and
+the canonical selected-case gate verified every branch, cleanup PASS, actual
+partial physical repair, original task/record ownership, non-refunded timeout,
+unchanged peer processes and complete physical/streaming/all-peer S3 evidence.
+Complete canonical live PASS is now 47/158. The older F01 response-budget FAIL
+remains in its original archive.
+
+I03 `heal.network-partition-and-lock-quorum` now has all five H2 source branches:
+minority partition, read boundary, write boundary, lock boundary and rejoin.
+Each uses a fresh run-owned four-node/sixteen-member EC:8 service and an exact
+versioned ACK fixture. The actual R=8/W=9 geometry and shared/exclusive lock
+quorums are frozen independently. A two/two split proves the exact readable
+boundary and unavailable exclusive lock quorum; a three/one split retains
+three lock clients while private read-only gates leave precisely eight writable
+roots. Historical and damaged versions use their own available-shard counts.
+
+All four independent 20-minute expiry timers and root-owned recovery intents
+precede the first atomic nftables transaction. Each table matches only the
+registered peer IPv4 addresses and TCP source/destination port 9000; no shared
+table is flushed. Every peer direction is probed with actual drop-counter
+increments, and management TCP 22 remains reachable. Each group independently
+executes exact-version GET, one unique PUT without retries, Heal and partial
+background-coverage checks. Every original version/control must remain intact;
+unknown writes require all-peer resolution after network recovery. Owned rules
+must be removed before independent repair, exact version responsibility,
+same-role streaming checks and complete S3 manifests. A distinct recovered PUT
+must redeem its actual VersionId, bytes, metadata and tags on every peer.
+Foreign rules, lost expiry guards, unknown ACKs or failed recovery retain DIRTY
+evidence. No I03 live PASS is claimed. The implementation now has 129 automatic
+executors (74 non-Heal, 55 Heal); 29 Heal executors remain. The focused suite
+contains 332 tests, including the real Linux private-network nftables gate;
+six platform-specific tests are skipped locally on macOS.

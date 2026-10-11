@@ -150,6 +150,7 @@ class Fleet:
         self.bucket_record_faults = []
         self.drive_gates = set()
         self.quorum_gates = set()
+        self.network_gates = set()
         self.secret_values = set()
         self.frozen_processes = {}
         self.snapshot_buckets = None
@@ -180,6 +181,10 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
+        if action.startswith("network-") or action == "cleanup":
+            network_source = NODE_SOURCE.with_name("network_gate.py").read_text()
+            source += "\nimport types\nnetwork_gate_backend = types.ModuleType('network_gate')\nexec(" + repr(
+                network_source) + ", network_gate_backend.__dict__)\nNETWORK_GATE_SOURCE = " + repr(network_source) + "\n"
         if self.runtime_profile == "bounded-capacity":
             source += "\nimport types\nbounded_volume_backend = types.ModuleType('bounded_volume')\nexec(" + repr(
                 NODE_SOURCE.with_name("bounded_volume.py").read_text()) + ", bounded_volume_backend.__dict__)\n"
@@ -299,6 +304,14 @@ class Fleet:
 
     def cleanup(self):
         failures = []
+        if self.network_gates:
+            try:
+                self.stop()
+                for node in tuple(self.network_gates):
+                    self.record("network-gate-recovery", {"node": node, **self.remote(node, "network-release")})
+                    self.network_gates.remove(node)
+            except Exception as exc:
+                failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
         for node, identity in tuple(self.frozen_processes.items()):
             try:
                 current = self.remote(node, "process")

@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""I03: actual bidirectional partitions, independent quorum witnesses and ACK reconciliation."""
+
+import argparse
+import copy
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import signal
+import sys
+import time
+from urllib.parse import quote
+
+try:
+    from .heal_probe import Probe, canonical, compare_inventories, payload, require, save
+    from .heal_workload import Recorder, RecordedCallError, verify_seed
+    from .healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
+    from .inspector import verify as verify_inspector
+    from .matrix import select
+    from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
+    from .versions import public_version_id, validate_version_receipts, verify_quorum_contract, validate_unrecoverable_get
+    from .write_quorum import expected_reads, resolve_put, negative_put, LOCK_REFERENCE, STORAGE_REFERENCE
+    from .stop import idle_fleet
+    from .network_gate import TTL_SECONDS
+except ImportError:
+    from heal_probe import Probe, canonical, compare_inventories, payload, require, save
+    from heal_workload import Recorder, RecordedCallError, verify_seed
+    from healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
+    from inspector import verify as verify_inspector
+    from matrix import select
+    from shards import files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
+    from versions import public_version_id, validate_version_receipts, verify_quorum_contract, validate_unrecoverable_get
+    from write_quorum import expected_reads, resolve_put, negative_put, LOCK_REFERENCE, STORAGE_REFERENCE
+    from stop import idle_fleet
+    from network_gate import TTL_SECONDS
+
+
+CASE_ID = 'heal.network-partition-and-lock-quorum'
+BRANCHES = ('minority-partition', 'read-boundary', 'write-boundary', 'lock-boundary', 'rejoin')
+SIZE = 5 * 1024**2 + 97
+REFERENCE = {'candidateCommit': LOCK_REFERENCE['candidateCommit'], 'lock': LOCK_REFERENCE,
+    'storage': STORAGE_REFERENCE, 'topology': 'four original nodes, sixteen original members, explicit EC:8',
+    'network': {'servicePort': 9000, 'managementPort': 22, 'ttlSeconds': TTL_SECONDS,
+        'rules': 'one owned nft table per host; exact peer IPv4 and TCP source/destination port',
+        'mutation': 'all expiry timers armed before the first atomic table transaction'},
+    'load': {'fixtureObjects': 4, 'versionsPerObject': 2, 'partitionPUTs': 2, 'recoveredPUTs': 1,
+        'automaticRetries': 0, 'negativeTaskDeadlineSeconds': 330},
+    'writePolicy': 'three-peer groups retain R but use independent private gates to measure W-1; two-peer groups lose W and exclusive lock quorum'}
+
+
+def plan_for(snapshot, target, branch):
+    nodes = list(snapshot)
+    geometry = target['logical']['erasure']
+    cohort = target['cohort']
+    require(branch in BRANCHES and len(nodes) == 4 and geometry['data_blocks'] == geometry['parity_blocks'] == 8
+            and len(cohort) == len({(row['node'], row['disk']) for row in cohort}) == 16
+            and all({row['disk'] for row in cohort if row['node'] == node} == set(range(4)) for node in nodes),
+            'I03 requires the observed balanced sixteen-member cross-node set')
+    groups = [[0, 1], [2, 3]] if branch in {'read-boundary', 'lock-boundary'} else [[0, 1, 2], [3]]
+    require(target['node'] == nodes[3], 'partition defect must be on the isolated fourth original member')
+    gates = {nodes[0]: [0, 1, 2, 3]} if len(groups[0]) == 3 else {}
+    sides = []
+    for group in groups:
+        slots = [row for row in cohort if nodes.index(row['node']) in group]
+        sources = len(slots) - int(3 in group)
+        writable = len(slots) - sum(len(gates.get(nodes[index], [])) for index in group)
+        require(writable < 9 and len(group) < 3 or writable == 8 and len(group) == 3,
+                'partition side still has safe write admission')
+        sides.append({'members': group, 'endpoint': f'node{group[0] + 1}', 'readableSources': sources,
+            'metadataAuthorities': len(slots), 'writableDrives': writable, 'lockClients': len(group),
+            'GETAllowed': sources >= 8, 'PUTAllowed': False, 'exclusiveLockQuorumPresent': len(group) >= 3})
+    require(sides[0]['readableSources'] >= 8 and (len(groups[0]) != 2 or sides[0]['readableSources'] == 8),
+            'read boundary does not preserve the exact actual R sources')
+    return {'groups': groups, 'sides': sides, 'readQuorum': 8, 'writeQuorum': 9,
+        'sharedLockQuorum': 2, 'exclusiveLockQuorum': 3, 'gates': gates,
+        'blocked': {nodes[index]: [other for other in range(4) if not any(index in group and other in group for group in groups)]
+                    for index in range(4)}}
+
+
+def validate_witness(observed, plan, nodes):
+    require(set(observed) == set(nodes), 'network witness omitted an original node')
+    for index, node in enumerate(nodes):
+        value = observed[node]
+        require(value.get('state') == 'ACTIVE' and value.get('localIndex') == index
+                and value.get('expiryArmed') is True and value.get('process', {}).get('pid', 0) > 1,
+                'network witness has no actual original service or active expiry')
+        rows = value.get('probes', [])
+        require(len(rows) == 3 and {row['peerIndex'] for row in rows} == set(range(4)) - {index},
+                'network probes omitted or duplicated a peer direction')
+        require(all(row['service']['connected'] is (row['peerIndex'] not in plan['blocked'][node])
+                    and row['management']['connected'] is True for row in rows),
+                'partition matrix or management-channel preservation differs')
+        require(sum(row['packets'] for row in value['countersAfter']) > sum(row['packets'] for row in value['countersBefore']),
+                'network probe has no packet-counter evidence')
+    return {'allTwelvePeerDirectionsVerified': True, 'actualPacketCounters': True,
+            'allManagementDirectionsReachable': True, 'servicesNotStoppedToSimulatePartition': True}
+
+
+def validate_partial(value, peers):
+    coverage = value.get('coverage') or {}
+    require(value.get('clusterStatusComplete') is False and value.get('state') in {'degraded', 'active'}
+            and all(type(coverage.get(name)) is int for name in ('expected', 'responded', 'unknown'))
+            and coverage['expected'] == 4 and coverage['responded'] == peers and coverage['unknown'] == 4 - peers
+            and isinstance(coverage.get('reasons'), list) and coverage['reasons'],
+            'partitioned endpoint falsely reports complete/global health or hides actual peer coverage')
+    return {'responded': peers, 'unknown': 4 - peers, 'globalCompleteClaimed': False}
+
+
+def validate_negative_task(current, bucket, expected, target):
+    outcome = current.get('outcome') or {}
+    execution = outcome.get('execution', {})
+    require(current.get('summary') in {'finished', 'stopped'} and execution.get('state') in {
+        'completed', 'completed_with_errors', 'aborted'} and outcome.get('coverage') in {'partial', 'complete', 'unknown'}
+        and current.get('truncated', False) is False and outcome.get('objectsTruncated') is False,
+        'partition task has no bounded explicit unresolved terminal result')
+    wanted = {(row['key'], row['versionId']) for row in expected}
+    target_pair = target['key'], target['versionId']
+    counters = outcome.get('counters', {})
+    for name in ('processed', 'healed', 'unchanged', 'skipped', 'failed', 'unknown', 'attemptFailures'):
+        require(type(counters.get(name)) is int and counters[name] >= 0, 'partition task omits typed error counters')
+    require(counters.get('overflowed') is False and counters['healed'] == 0
+            and counters['processed'] == sum(counters[name] for name in ('healed', 'unchanged', 'skipped', 'failed'))
+            and counters['unknown'] <= counters['skipped'] and counters['processed'] <= len(wanted),
+            'partition task hides unresolved work or claims an unsafe repair')
+    seen, unresolved, states = set(), set(), []
+    for row in outcome.get('objects', []):
+        identity = row.get('identity', {})
+        pair = identity.get('object'), public_version_id(identity.get('versionId'))
+        require(identity.get('bucket') == bucket and pair in wanted and pair not in seen,
+                'partition task reports foreign or duplicate responsibility')
+        state = row.get('disposition', {}).get('state')
+        require(state in {'verified_healthy', 'failed', 'deferred', 'unknown', 'cancelled'},
+                'partition task reports repaired/absent or an unrelated disposition')
+        if state == 'verified_healthy':
+            require(pair != target_pair and identity.get('bucketIncarnationId')
+                    and type(identity.get('poolIndex')) is int and identity['poolIndex'] == 0
+                    and type(identity.get('setIndex')) is int and identity['setIndex'] == 0,
+                    'missing target was reported healthy, or a healthy receipt lacks authority')
+        else:
+            unresolved.add(pair)
+        seen.add(pair)
+        states.append(state)
+    require(counters['processed'] == len(seen), 'bounded partition counters differ from exact version receipts')
+    require(counters['unchanged'] == states.count('verified_healthy') and counters['failed'] == states.count('failed')
+            and counters['skipped'] == sum(states.count(state) for state in ('deferred', 'unknown', 'cancelled'))
+            and counters['unknown'] == states.count('unknown') and counters['attemptFailures'] >= counters['failed'],
+            'partition counters conceal the actual unresolved receipt dispositions or failed attempts')
+    require(target_pair in unresolved or execution == {'state': 'aborted', 'reason': 'untraversable'}
+            and outcome['coverage'] != 'complete' and counters['processed'] == 0,
+            'partition task lost the damaged version obligation or silently completed it')
+    require(not counters['failed'] or execution['state'] == 'completed_with_errors',
+            'partition task erases its failed execution status')
+    return {'missingVersionUnresolved': True, 'unsafeRepairClaimed': False,
+            'execution': execution, 'coverage': outcome['coverage'], 'counters': counters}
+
+
+def negative_heal(probe, fleet, bucket, expected, target, active):
+    path = '/rustfs/admin/v3/heal/' + quote(bucket, safe='') + '/' + quote(target['key'], safe='/')
+    admission = fleet.record('partition-Heal-admission', probe.admin(path, [], json.dumps(BASE_OPTIONS).encode()))
+    if admission.get('httpStatus') != 200:
+        # No retry: require an actual structured storage/lock refusal. An
+        # absent token or transport exception alone cannot prove safe refusal.
+        body = admission.get('response')
+        if isinstance(body, str):
+            import xml.etree.ElementTree as ET
+            body = {item.tag.rsplit('}', 1)[-1]: item.text for item in ET.fromstring(body).iter()}
+        require(admission.get('httpStatus') in {500, 503} and isinstance(body, dict)
+                and (body.get('Code') or body.get('code')) in {'InternalError', 'XMinioWriteQuorum', 'XMinioLockTimeout', 'ServiceUnavailable'}
+                and not body.get('clientToken'), 'partition Heal admission did not return a structured safe refusal')
+        return {'admissionRefused': True, 'repairClaimed': False, 'requestRetried': False}
+    token = admission.get('response', {}).get('clientToken')
+    require(isinstance(token, str) and token, 'partition Heal admitted without an actual token')
+    active.append((probe.endpoint_name, path, token))
+    deadline = time.monotonic() + 330
+    while True:
+        response = fleet.record('partition-Heal-status', probe.admin(path, [('clientToken', token)], b''))
+        require(response.get('httpStatus') == 200 and isinstance(response.get('response'), dict),
+                'partition task status disappeared or has an unknown response')
+        current = response['response']
+        if current.get('summary') != 'running':
+            break
+        require(time.monotonic() < deadline, 'partition task exceeded its frozen unresolved-task deadline')
+        time.sleep(0.2)
+    proof = validate_negative_task(current, bucket, expected, target)
+    repeated = fleet.record('partition-terminal-repeat', probe.admin(path, [('clientToken', token)], b''))
+    require(repeated.get('httpStatus') == 200 and canonical(repeated.get('response', {}).get('outcome')) == canonical(current['outcome']),
+            'negative partition responsibility changed at its original token')
+    active.remove((probe.endpoint_name, path, token))
+    return {**proof, 'taskId': token, 'requestRetried': False}
+
+
+def project(snapshot, bucket, keys):
+    result = copy.deepcopy(snapshot)
+    prefixes = tuple(bucket + '/' + key + '/' for key in keys)
+    for value in result.values():
+        value['files'] = [row for row in value['files'] if not row['path'].startswith(prefixes)]
+    return result
+
+
+def unique_put(probe, directory, bucket, key, rows):
+    body = payload(f'{bucket}/{key}/0', SIZE)
+    entry = {'endpoint': probe.endpoint_name, 'key': key, 'payload': {'size': SIZE, 'sha256': hashlib.sha256(body).hexdigest()}}
+    rows.append(entry)  # Register before invocation, including collector failures.
+    recorder = Recorder(probe, directory / key.replace('/', '-'))
+    try:
+        response = recorder.call('put_object', {'Bucket': bucket, 'Key': key,
+            'ContentType': 'application/octet-stream', 'Metadata': {'heal-fixture': 'I03', 'nonce': key},
+            'Tagging': 'suite=heal&fixture=I03'}, body)
+    except RecordedCallError as exc:
+        entry['observed'] = exc.observation
+    else:
+        entry['observed'] = {'acknowledged': True, 'resultUnknown': False, 'clientCallInvoked': True,
+                             'response': response, 'payload': entry['payload']}
+    return entry
+
+
+def resolve_writes(fleet, binding, bucket, rows):
+    for row in rows:
+        reads = [fleet.record('all-peer-unique-write-resolution', Probe(binding, endpoint).s3('get_object', {
+            'Bucket': bucket, 'Key': row['key']})) for endpoint in binding['endpoints']]
+        observed = row.get('observed', {'acknowledged': False, 'resultUnknown': True})
+        resolution = resolve_put(observed, reads, row['payload'])
+        if resolution['state'] == 'COMMITTED':
+            versions = {read.get('response', {}).get('VersionId') for read in reads}
+            require(len(versions) == 1 and next(iter(versions)) not in {None, 'null'},
+                    'peers disagree on the unique committed version identity')
+            row['versionId'] = next(iter(versions))
+            require(not observed.get('acknowledged') or observed['response'].get('VersionId') == row['versionId'],
+                    'unique PUT ACK was replaced by a different committed version')
+        row['resolution'] = resolution
+    return {'allOriginalRequestsResolved': True, 'automaticRetries': 0}
+
+
+def release_network(fleet):
+    for node in tuple(fleet.network_gates):
+        value = fleet.record('release-owned-network-table', {'node': node, **fleet.remote(node, 'network-release')})
+        require(value['state'] == 'CLEAR' and value.get('rulesRemaining') == 0,
+                'network recovery did not remove every owned rule')
+        fleet.network_gates.remove(node)
+        require(value.get('expiryTriggered') is False, 'partition expired before its complete evidence window')
+
+
+def run_branch(args, nodes, branch):
+    directory = args.evidence / 'H2' / branch
+    directory.mkdir(parents=True)
+    run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-h2"
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile='lock-quorum')
+    candidate = json.loads(args.candidate.read_text())
+    require(candidate['source_sha'] == REFERENCE['candidateCommit'], 'network lock policy is not reviewed for this candidate')
+    bucket = 'rv-heal-' + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+    access, secret = secrets.token_hex(16), secrets.token_hex(24)
+    os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
+    binding = {'schemaVersion': 1, 'runId': run_id, 'jumpHostOnly': True, 'exclusiveHealService': True,
+        'leaseExpiresAt': (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(), 'bucketPrefix': bucket,
+        'endpoints': {f'node{index}': f'http://rustfs-node{index}:9000' for index in range(1, 5)}, 'defaultEndpoint': 'node1',
+        'candidateCommit': candidate['source_sha'], 'harnessCommit': args.testing_commit,
+        'candidatePackageSha256': candidate['package_sha256'], 'candidateBinarySha256': args.binary_sha,
+        'rcBinarySha256': hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(), 'maxInventoryObjects': 128,
+        'maxInventoryBytes': 512 * 1024**2}
+    fleet.record('binding', binding)
+    fleet.record('network-source-contract', REFERENCE)
+    contract = verify_quorum_contract(fleet.record('inspector-build', verify_inspector(args.tool_directory, candidate)), candidate)
+    result = {'topology': 'H2', 'branch': branch, 'verdict': 'RUNNING', 'cleanup': 'PENDING'}
+    probe, active, recovery_active, rows = Probe(binding), [], [], []
+    try:
+        fleet.deploy(args.binary_sha, bucket, access, secret)
+        recorder = Recorder(probe, directory / 'fixture')
+        recorder.call('create_bucket', {'Bucket': bucket})
+        recorder.call('put_bucket_versioning', {'Bucket': bucket, 'VersioningConfiguration': {'Status': 'Enabled'}})
+        expected = []
+        for index in range(4):
+            key = f'objects/{index:04d}.bin'
+            for version in range(2):
+                body = payload(f'{bucket}/{key}/{version}', SIZE)
+                ack = recorder.call('put_object', {'Bucket': bucket, 'Key': key,
+                    'ContentType': 'application/octet-stream', 'Metadata': {'heal-fixture': 'DV', 'nonce': f'{index}-{version}'},
+                    'Tagging': 'suite=heal&fixture=DV'}, body)
+                require(ack.get('VersionId') not in {None, 'null'}, 'versioned network fixture has no exact ACK version')
+                expected.append({'key': key, 'versionId': ack['VersionId'], 'isLatest': version == 1, 'deleteMarker': False,
+                    'payload': {'size': SIZE, 'sha256': hashlib.sha256(body).hexdigest()}})
+        baseline = fleet.record('all-version-S3-baseline', probe.inventory(bucket))
+        fleet.record('exact-ACK-manifest', {'expected': expected, **verify_seed(expected, baseline)})
+        fleet.stop()
+        original = fleet.snapshot('physical-baseline', quiescent=True)
+        validate_topology(original, 'H2')
+        selected = expected[1]
+        target = map_target(original, bucket, selected['key'], 'data', 1, selected['versionId'])
+        target = {**target, **next(row for row in target['cohort'] if row['node'] == nodes[3])}
+        cohorts = [map_target(original, bucket, entry['key'], 'data', 1, entry['versionId'], latest_required=False) for entry in expected]
+        plan = fleet.record('actual-partition-quorum-plan', plan_for(original, target, branch))
+        params = {'disk': target['disk'], 'faultId': 'I03-missing-target'}
+        registration = target['node'], params
+        fleet.faults.append(registration)
+        receipt = fleet.record('exact-missing-target', fleet.remote(target['node'], 'apply-fault', **params,
+            relativePath=target['relativePath'], kind='missing', expectedSha256=target['sha256']))
+        faulted = fleet.snapshot('physical-exact-fault', quiescent=True)
+        validate_fault(original, faulted, target, receipt)
+        for node, disks in plan['gates'].items():
+            fleet.quorum_gates.add(node)
+            fleet.record('independent-W-minus-one-gate', {'node': node, **fleet.remote(node, 'quorum-gate', disks=disks)})
+        fleet.start()
+        preflight = fleet.record('network-actual-address-process-attestation', {node: fleet.remote(node, 'network-preflight') for node in nodes})
+        addresses = preflight[nodes[0]]['addresses']
+        require(all(value['addresses'] == addresses and value['localIndex'] == index
+                    and value['exclusiveServicePort'] == 9000 for index, value in enumerate(preflight.values())),
+                'actual host address, service ownership or peer alias order differs')
+        # Every independent expiry is ready before the first rule is installed.
+        for index, node in enumerate(nodes):
+            fleet.network_gates.add(node)
+            fleet.record('network-expiry-and-rule-intent', {'node': node, **fleet.remote(node, 'network-prepare',
+                addresses=addresses, localIndex=index, blockedIndices=plan['blocked'][node])})
+        for node in nodes:
+            fleet.record('atomic-owned-table-activation', {'node': node, **fleet.remote(node, 'network-activate')})
+        def witness(label):
+            raw = fleet.record(label, {node: fleet.remote(node, 'network-observe') for node in nodes})
+            return validate_witness(raw, plan, nodes)
+        result['networkBefore'] = witness('all-directed-peer-probes-before')
+        gates = fleet.record('actual-service-readable-writable-roots', {node: fleet.remote(node, 'quorum-gate-probe',
+            relativePath=f"{bucket}/{selected['key']}/xl.meta", expectedReads=expected_reads(original, node, f"{bucket}/{selected['key']}/xl.meta")) for node in nodes})
+        for side in plan['sides']:
+            require(sum(row['writable'] for index in side['members'] for row in gates[nodes[index]]['disks']) == side['writableDrives']
+                    and all(row['readableMetadata'] and row['sameServiceUidAndMountNamespace'] for index in side['members']
+                            for row in gates[nodes[index]]['disks']), 'actual independent R/W witnesses differ from partition plan')
+        for side in plan['sides']:
+            endpoint = side['endpoint']
+            local_probe = Probe(binding, endpoint)
+            for version in expected[:2]:
+                read = fleet.record('partition-explicit-version-GET', local_probe.s3('get_object', {
+                    'Bucket': bucket, 'Key': version['key'], 'VersionId': version['versionId']}))
+                available = side['metadataAuthorities'] - int(3 in side['members'] and version['versionId'] == selected['versionId'])
+                if available >= plan['readQuorum']:
+                    require(read.get('acknowledged') is True and read.get('resultUnknown') is False
+                            and read.get('payload') == version['payload'], 'R-capable partition cannot redeem its exact original ACK')
+                else:
+                    validate_unrecoverable_get(read, contract)
+            row = unique_put(local_probe, directory, bucket, 'partition/' + endpoint + '.bin', rows)
+            row['negativeProof'] = negative_put(row['observed'])
+            result.setdefault('partitionTasks', {})[endpoint] = negative_heal(local_probe, fleet, bucket, expected[:2], target, active)
+            status = fleet.record('partition-raw-background', local_probe.admin('/rustfs/admin/v3/background-heal/status', [], b''))
+            require(status.get('httpStatus') == 200 and isinstance(status.get('response'), dict), 'partition background status unavailable')
+            result.setdefault('coverage', {})[endpoint] = validate_partial(status['response'], len(side['members']))
+        result['networkAfter'] = witness('all-directed-peer-probes-after')
+        fleet.record('partition-process-resource-observations', {node: fleet.remote(node, 'process-metrics') for node in nodes})
+        fleet.stop()
+        scene = fleet.snapshot('negative-scene-before-release', quiescent=True)
+        require(physical_content(faulted) == physical_content(project(scene, bucket, [row['key'] for row in rows])),
+                'partition writes/Heal changed an original version, control or damaged target')
+        for node in nodes:
+            fleet.record('partition-peer-logs', {'node': node, **fleet.remote(node, 'logs')})
+        release_network(fleet)
+        for node in tuple(fleet.quorum_gates):
+            fleet.record('release-owned-W-gate', fleet.remote(node, 'quorum-gate', mode='clear'))
+            fleet.quorum_gates.remove(node)
+        fleet.start()
+        require(physical_content(scene) == physical_content(fleet.snapshot('all-peer-return-before-independent-repair')),
+                'network recovery repaired a target before the independent product task')
+        repaired = run_task(probe, fleet, {'bucket': bucket, 'key': selected['key']}, 2, recovery_active,
+                            status_endpoints=tuple(binding['endpoints'])[1:])
+        result['recoveryResponsibility'] = validate_version_receipts(repaired, bucket, expected[:2], 2,
+            required_repairs={(selected['key'], selected['versionId'])})
+        idle_fleet(fleet, binding)
+        fleet.stop()
+        after = fleet.snapshot('physical-rebuilt-before-any-recovered-GET', quiescent=True)
+        result['physical'] = validate_repaired_physical(original, project(after, bucket, [row['key'] for row in rows]), target)
+        result['streaming'] = [verify_cohort(fleet, cohort, 'every-original-version-streaming') for cohort in cohorts]
+        fleet.faults.remove(registration)
+        fleet.start()
+        result['writeResolution'] = resolve_writes(fleet, binding, bucket, rows)
+        require(all(row['resolution']['state'] == 'ABSENT' for row in rows), 'a W/lock-negative partition nevertheless committed a new version')
+        released = unique_put(probe, directory, bucket, 'recovered/unique.bin', rows)
+        require(released['observed']['acknowledged'] is True and released['observed']['response'].get('VersionId') not in {None, 'null'},
+                'fully recovered cluster cannot acknowledge a distinct safe PUT')
+        resolve_writes(fleet, binding, bucket, [released])
+        augmented = expected + [{'key': released['key'], 'versionId': released['versionId'], 'isLatest': True,
+                                'deleteMarker': False, 'payload': released['payload']}]
+        inventories = []
+        for endpoint in binding['endpoints']:
+            inventory = fleet.record('all-peer-complete-final-S3', Probe(binding, endpoint).inventory(bucket))
+            verify_seed(augmented, inventory)
+            subset = {**inventory, 'entries': [row for row in inventory['entries'] if row['key'] != released['key']]}
+            compare_inventories(baseline, subset)
+            inventories.append(inventory)
+        for inventory in inventories[1:]:
+            compare_inventories(inventories[0], inventory)
+        require(all(row['properties'].get('Metadata') == {'heal-fixture': 'I03', 'nonce': released['key']}
+                    and row['tags'] == [{'Key': 'fixture', 'Value': 'I03'}, {'Key': 'suite', 'Value': 'heal'}]
+                    for inventory in inventories for row in inventory['entries'] if row['key'] == released['key']),
+                'recovered PUT lost its public metadata or tags')
+        result.update(verdict='PASS', everyOriginalVersionPreserved=True, noForkOrStaleOverwrite=True)
+    except (Exception, KeyboardInterrupt) as exc:
+        result.update(verdict='FAIL', failure={'type': type(exc).__name__, 'message': str(exc)})
+    finally:
+        dirty = False
+        active.extend(('node1', path, token) for path, token in recovery_active)
+        for endpoint, path, token in active:
+            try:
+                fleet.record('stop-original-partition-task', Probe(binding, endpoint).admin(path, [('clientToken', token), ('forceStop', 'true')], b''))
+            except Exception as exc:
+                fleet.record('stop-partition-task-error', {'error': str(exc)})
+        try:
+            if fleet.network_gates or fleet.quorum_gates:
+                fleet.stop()
+                release_network(fleet)
+                for node in tuple(fleet.quorum_gates):
+                    fleet.record('failed-branch-W-release', fleet.remote(node, 'quorum-gate', mode='clear'))
+                    fleet.quorum_gates.remove(node)
+                fleet.start()
+            pending = [row for row in rows if 'resolution' not in row]
+            if pending:
+                fleet.stop()
+                fleet.start()
+                resolve_writes(fleet, binding, bucket, pending)
+        except Exception as exc:
+            dirty = True
+            result['recoveryError'] = str(exc)
+        if dirty:
+            fleet.stop()
+            fleet.record('retain-unresolved-network-or-write', {'state': 'DIRTY', 'namespacesRetained': True, 'writes': rows})
+            clean = False
+        else:
+            clean = fleet.cleanup()
+        result.update(cleanup='PASS' if clean else 'FAIL', writes=rows)
+        fleet.record('branch-result', result)
+    return result
+
+
+def main():
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(f'I03 interrupted by signal {signum}')
+    signal.signal(signal.SIGTERM, interrupted)
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ('candidate', 'rc-bin', 'evidence', 'tool-directory'):
+        parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--case-id', choices=[CASE_ID], required=True)
+    parser.add_argument('--testing-commit', required=True)
+    parser.add_argument('--binary-sha', required=True)
+    args = parser.parse_args()
+    require(re.fullmatch(r'[0-9a-f]{64}', args.binary_sha) and re.fullmatch(r'[1-9][0-9]*', os.environ.get('GITHUB_RUN_ID', '')),
+            'immutable workflow candidate identity required')
+    require(select(CASE_ID)[0]['variants'] == list(BRANCHES), 'I03 source branch omitted')
+    nodes = os.environ.get('RUSTFS_NODES', 'vm000 vm001 vm002 vm003').split()
+    require(len(nodes) >= 4 and len(nodes) == len(set(nodes)) and all(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', node) for node in nodes),
+            'four distinct current Heal nodes required')
+    results = []
+    try:
+        for branch in BRANCHES:
+            results.append(run_branch(args, nodes[:4], branch))
+            if results[-1]['cleanup'] != 'PASS':
+                break
+    finally:
+        complete = len(results) == len(BRANCHES) and all(row['verdict'] == row['cleanup'] == 'PASS' for row in results)
+        save(args.evidence / 'healthy-summary.json', {'caseId': CASE_ID, 'results': results, 'complete': complete,
+            'cleanup': 'PASS' if results and all(row['cleanup'] == 'PASS' for row in results) else 'FAIL'})
+    require(complete, 'I03 requires all five real partition/quorum/recovery branches and complete ACK resolution')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print(f'I03 network validation failed: {exc}', file=sys.stderr)
+        sys.exit(1)

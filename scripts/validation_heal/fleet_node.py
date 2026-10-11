@@ -911,12 +911,49 @@ def configure_encryption(request):
     return encryption_module().configure(state, owner, request, fault_module())
 
 
+def network_operation(request):
+    state, _, owner = owned(request["runId"])
+    module = globals()["network_gate_backend"]
+    module.identities(owner)
+    action = request["action"]
+    require(set(request) <= {"runId", "action", "addresses", "localIndex", "blockedIndices"},
+            "network adapter accepts no external paths, ports, rules or commands")
+    if action == "network-release":
+        return module.release(state, owner)
+    identity = process(request)
+    require(identity["pid"] > 1 and identity["executable"] == str(state / "rustfs"),
+            "network fault requires an actual owned candidate process")
+    listeners = command("ss", "-H", "-lntp", "sport = :9000").stdout
+    pids = {int(value) for value in re.findall(r"pid=([0-9]+)", listeners)}
+    require(pids == {identity["pid"]} and listeners.strip(),
+            "TCP 9000 is not exclusively owned by this run's candidate")
+    if action == "network-preflight":
+        values = module.resolve()
+        local = []
+        for index, address in enumerate(values):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+                try: client.bind((address, 0))
+                except OSError: continue
+                local.append(index)
+        require(len(local) == 1, "fleet aliases do not bind exactly one actual local address")
+        return {"addresses": values, "localIndex": local[0], "process": identity,
+                "exclusiveServicePort": 9000, "nftVersion": command("nft", "--version").stdout.strip()}
+    if action == "network-prepare":
+        return module.prepare(state, owner, request, globals()["NETWORK_GATE_SOURCE"])
+    if action == "network-activate":
+        return module.activate(state, owner)
+    require(action == "network-observe", "unsupported network fault operation")
+    return {**module.observe(state, owner), "process": identity}
+
+
 def cleanup(request):
     state, roots, owner = owned(request["runId"])
     command("systemctl", "stop", owner["unit"], check=False)
     pid = command("systemctl", "show", "-p", "MainPID", "--value", owner["unit"], check=False).stdout.strip()
     require(pid in {"", "0"}, "run-owned service remains active")
     stopped(owner)
+    if (state / "network-gate.json").exists():
+        globals()["network_gate_backend"].release(state, owner)
     gate_module().release_gate(state, roots)
     quorum_gate_module().release(state, roots)
     replacement_module().attest(state, roots)
@@ -1036,6 +1073,8 @@ def main(request):
         actions[action] = volume_operation
     actions["format-schema-fault"] = format_schema_fault
     actions["encryption-configure"] = configure_encryption
+    for action in ("network-preflight", "network-prepare", "network-activate", "network-observe", "network-release"):
+        actions[action] = network_operation
     actions["replacement-records"] = replacement_records
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
