@@ -36,6 +36,15 @@ class RaceTests(unittest.TestCase):
         self.assertEqual({step["readVersionId"] for step in plan}, {"v0"})
         self.assertEqual([step["params"]["Metadata"]["nonce"] for step in plan], ["0", "1", "2"])
 
+    def test_g06_keeps_copy_metadata_and_tag_operations_distinct(self):
+        expected = [{"key": race.TARGET_KEY, "versionId": "null", "isLatest": True},
+                    {"key": race.REFERENCE_KEY, "versionId": "null", "isLatest": True}]
+        self.assertEqual(race.operation_plan("rv-heal-0123456789abcdef", "copy-source", expected)[0]["operation"], "copy_object")
+        self.assertEqual(race.operation_plan("rv-heal-0123456789abcdef", "replace-metadata", expected)[0]["operation"], "copy_object")
+        tags = race.operation_plan("rv-heal-0123456789abcdef", "update-tags", expected)
+        self.assertEqual(len(tags), 16)
+        self.assertEqual(tags[-1]["operation"], "put_object_tagging")
+
     def test_native_branch_remains_in_denominator_for_each_case(self):
         for case_id, branches in race.CASE_BRANCHES.items():
             native = race.native_blocked({"source_sha": race.REFERENCE["candidateCommit"]}, "H1", case_id)
@@ -48,7 +57,7 @@ class RaceTests(unittest.TestCase):
         dispatch = Path("scripts/validation_heal/run_case.sh").read_text()
         top_dispatch = Path("scripts/run_validation_case.sh").read_text()
         for case_id, code in (("heal.race-unversioned-overwrite", "G01"), ("heal.race-versioned-put", "G02"),
-                              ("heal.race-version-delete", "G03")):
+                              ("heal.race-version-delete", "G03"), ("heal.race-copy-and-metadata-update", "G06")):
             self.assertIn(case_id, dispatch)
             self.assertIn(case_id, top_dispatch)
             catalog = json.loads(Path("validation-cases.json").read_text())
