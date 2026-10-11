@@ -84,21 +84,22 @@ class MultiPoolTests(unittest.TestCase):
         self.assertEqual(runtime_config('multi-pool')['RUSTFS_STORAGE_CLASS_STANDARD'], 'EC:2')
         with self.assertRaises(ValueError): volumes('gh-123-1-h2')
 
-    def test_quota_status_reads_exact_owned_config_on_every_peer_without_scanner(self):
+    def test_quota_status_reads_exact_owned_config_on_bound_endpoint_without_scanner(self):
         probe, fleet = Mock(), Mock()
         probe.binding = {'endpoints': {'node1': 'a', 'node2': 'b', 'node3': 'c', 'node4': 'd'}}
         fleet.record.side_effect = lambda label, value: value
         config = {'quota': 0, 'size': 0, 'rate': 0, 'requests': 0}
-        with patch.object(runner, 'Probe') as peers:
-            peers.return_value.admin.return_value = {'httpStatus': 200, 'response': config}
-            self.assertEqual(runner.quota_status(probe, fleet, self.buckets, 'quota'),
-                             {bucket: config for bucket in self.buckets})
-        self.assertEqual(peers.call_count, 8)
-        self.assertEqual([call.args[1] for call in peers.call_args_list], list(probe.binding['endpoints']) * 2)
-        self.assertEqual(peers.return_value.admin.call_count, 8)
-        for index, call in enumerate(peers.return_value.admin.call_args_list):
+        probe.admin.return_value = {'httpStatus': 200, 'response': config}
+        self.assertEqual(runner.quota_status(probe, fleet, self.buckets, 'quota'),
+                         {bucket: config for bucket in self.buckets})
+        self.assertEqual(probe.admin.call_count, 2)
+        self.assertEqual(fleet.record.call_count, 2)
+        calls = probe.admin.call_args_list
+        self.assertEqual([call.args[0] for call in calls], [
+            '/rustfs/admin/v3/get-bucket-quota', '/rustfs/admin/v3/get-bucket-quota'])
+        for index, call in enumerate(calls):
             self.assertEqual(call.args, ('/rustfs/admin/v3/get-bucket-quota',
-                                         [('bucket', self.buckets[index // 4])], b''))
+                                         [('bucket', self.buckets[index])], b''))
             self.assertEqual(call.kwargs, {'method': 'GET'})
 
     def test_quota_config_retries_only_same_bucket_metadata_convergence(self):

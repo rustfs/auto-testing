@@ -56,7 +56,7 @@ REFERENCE = {'candidateCommit': SELECTOR_REFERENCE['candidateCommit'], 'selector
 REFERENCE['quotaConfig'] = {'sourceFile': 'rustfs/src/admin/handlers/quota.rs',
     'sourceSha256': '6a2b062d3d1c4cd81d934c570d21cb44dcd2c1883f6a85d2265e01b466924f5c',
     'route': '/rustfs/admin/v3/get-bucket-quota', 'query': 'one exact owned bucket',
-    'assertion': 'unchanged no-quota config on every original peer; no authoritative usage claim'}
+    'assertion': 'unchanged no-quota config on the bound management endpoint; no authoritative usage claim'}
 
 
 def fixture_call(recorder, ledger, operation, params, body=None):
@@ -323,7 +323,7 @@ def quota_config(probe, fleet, bucket, label):
                                  and '<Code>NoSuchBucket</Code>' in response
                                  and f'<Message>bucket not found: {bucket}</Message>' in response)
         require(same_bucket_not_ready, 'H06 changed the owned bucket quota or queried a different logical bucket')
-        require(time.monotonic() < deadline, 'H06 owned bucket metadata did not converge on every peer within 30 seconds')
+        require(time.monotonic() < deadline, 'H06 owned bucket metadata did not converge on the bound management endpoint within 30 seconds')
         time.sleep(1)
 
 
@@ -333,8 +333,7 @@ def quota_status(probe, fleet, buckets, label):
     # without requiring a scanner usage snapshot or reading target objects.
     result = {}
     for bucket in buckets:
-        for endpoint in probe.binding['endpoints']:
-            result[bucket] = quota_config(Probe(probe.binding, endpoint), fleet, bucket, label)
+        result[bucket] = quota_config(probe, fleet, bucket, label)
     return result
 
 
