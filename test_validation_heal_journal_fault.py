@@ -462,9 +462,25 @@ class DurableRecordFaultTests(unittest.TestCase):
                 result = fleet_node.journal_operation(request)
                 self.assertEqual(base64.b64decode(next(row for row in result['records'] if row['present'])['rawBase64']), raw)
                 views.assert_called_once()
-                for family in ('root', 'mrf'):
-                    with self.subTest(family=family), self.assertRaises(ValueError):
-                        fleet_node.journal_operation({**request, 'family': family})
+                for family, action in (('mrf', 'journal-census'), ('root', 'journal-apply'), ('root', 'journal-capture')):
+                    with self.subTest(family=family, action=action), self.assertRaises(ValueError):
+                        fleet_node.journal_operation({**request, 'family': family, 'action': action})
+
+    def test_bounded_root_admission_reads_the_actual_service_view_without_mutating_it(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(fault, 'mount_id', return_value=1):
+            root = Path(temp).resolve(); owner, request, _, _ = self.fixture(root)
+            owner['runtimeProfile'] = 'journal-bounded'
+            raw = json.dumps({'schema': 3, 'task_id': self.token, 'heal_type': {'type': 'erasure_set'}}).encode()
+            path = root / 'data/.rustfs.sys' / ('root-heal-' + self.token + '.json'); path.write_bytes(raw)
+            request = {'runId': owner['runId'], 'taskId': self.token, 'quiescent': True}
+            with patch.object(fleet_node, 'owned', return_value=(root, ['/original/unbound'], owner)), \
+                 patch.object(fleet_node, 'volume_views', return_value=[root]), \
+                 patch.object(fleet_node, 'digest', return_value=owner['binarySha256']), patch.object(fleet_node, 'stopped'):
+                observed = fleet_node.task_records(request)
+            present = [row for row in observed['records'] if row['present']]
+            self.assertEqual(len(present), 1)
+            self.assertEqual(present[0]['sha256'], journal.entry(raw)['sha256'])
+            self.assertEqual(path.read_bytes(), raw)
 
     def test_bounded_journal_cleanup_releases_filler_before_rescue_and_preserves_failed_release(self):
         for failed in (False, True):

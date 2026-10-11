@@ -23,6 +23,7 @@ REFERENCE = {"candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926", "sou
     "crates/heal/src/heal/channel.rs": "7f669ca43b9559db9b97fba6b419a6c76a94d76acd8526db132d74b7c534d6b0",
     "crates/heal/src/heal/resume.rs": "ed55baa03fafa79bf662393eafcf53b4f7752ca8b2f77824cc6deff085a0cf1d",
     "crates/heal/src/heal/resume/checkpoint.rs": "fe067b39ee406e16517bd665f7f49457daffa05d5d7bc298bd965e927b1381c1",
+    "crates/heal/src/heal/manager/root_recovery.rs": "ba6beba9d9d14985e4c5448d85727036388d3d72f28879ac5c67fc5f760048ba",
     "crates/heal/src/heal/erasure_healer/admin.rs": "776c03e4dfbd27f51da506d8f637de3a3973d86d22dc83a7cda24f2e0d642ee5"},
     "route": "empty bucket/object plus explicit pool=0,set=0 selects Admin ErasureSet",
     "checkpointSchema": 8, "resumeSchema": 7, "durableOwnerRequired": True,
@@ -91,10 +92,54 @@ def owned_checkpoint(observed, token, bucket, *, require_progress=True):
             "resume": resume, "value": value, "resumeValue": state, "originalDurableResponsibility": True}
 
 
-def records(fleet, token, label, *, quiescent=False):
+def owned_root_admission(observed, token):
+    journal.task_id(token)
+    names = journal.names("root", token)
+    require(isinstance(observed, dict) and len(observed) in {1, 4}, "root admission omitted bound nodes")
+    present = []
+    for node, census in observed.items():
+        rows = census.get("records")
+        require(census.get("readOnly") is True and census.get("family") == "root" and census.get("taskId") == token
+                and census.get("directoryEnumerationUsed") is False
+                and (census.get("quiescent") is True or census.get("stable") is True
+                     and census.get("processBound") is True and census.get("independentReads") == 2)
+                and isinstance(rows, list) and len(rows) == 12,
+                "root admission lacks a stopped or stable process-bound exact-path census")
+        seen = set()
+        for row in rows:
+            pair = row.get("disk"), row.get("relativePath")
+            require(type(pair[0]) is int and 0 <= pair[0] < 4 and pair[1] in names
+                    and pair not in seen and type(row.get("present")) is bool,
+                    "root admission census duplicated or escaped its task/disk paths")
+            seen.add(pair)
+            if row["present"]: present.append({"node": node, **row})
+    require(len(present) == 1 and present[0]["relativePath"] == names[0],
+            "NOT_OBSERVED: runnable root admission is absent, duplicated or already terminal")
+    owner = present[0]
+    value = journal.decode_json(bytes_of(owner))
+    require(type(value.get("schema")) is int and value["schema"] == 3 and value.get("task_id") == token
+            and journal.same_json(value.get("heal_type"),
+                {"type": "erasure_set", "buckets": [], "set_disk_id": "pool_0_set_0", "all_buckets": True})
+            and value.get("bucket_incarnation_id") is None and value.get("priority") == "High"
+            and type(value.get("retry_attempts")) is int and value["retry_attempts"] == 0,
+            "root admission does not bind the original explicit Admin erasure-set task")
+    required = {"scan_mode": 2, "remove_corrupted": False, "recreate_missing": False, "update_parity": False,
+                "recursive": True, "dry_run": False, "no_lock": False, "pool_index": 0, "set_index": 0}
+    options = value.get("options")
+    require(isinstance(options, dict) and all(name in options and journal.same_json(options[name], expected)
+            for name, expected in required.items()), "root admission changed the original Admin options/selectors")
+    created = value.get("created_at")
+    require(isinstance(created, dict) and set(created) == {"secs_since_epoch", "nanos_since_epoch"}
+            and type(created["secs_since_epoch"]) is int and 0 <= created["secs_since_epoch"] < 2**64
+            and type(created["nanos_since_epoch"]) is int and 0 <= created["nanos_since_epoch"] < 1_000_000_000,
+            "root admission lost its original admitted time")
+    return {**owner, "value": value, "originalDurableResponsibility": True}
+
+
+def records(fleet, token, label, *, quiescent=False, family="checkpoint"):
     result = {}
     for node in fleet.nodes:
-        params = {"family": "checkpoint", "taskId": token}
+        params = {"family": family, "taskId": token}
         if not quiescent:
             params["expected"] = fleet.record(label + "-process", {"node": node, **fleet.remote(node, "process")})
         result[node] = fleet.remote(node, "journal-census" if quiescent else "journal-observe", **params)
@@ -156,6 +201,7 @@ def freeze(fleet, token, bucket, *, timeout=60, earlier=None):
         try:
             owner = owned_checkpoint(records(fleet, token, "Admin-checkpoint-live"), token, bucket)
             if earlier is not None: after_generation(owner, earlier)
+            root = owned_root_admission(records(fleet, token, "Admin-root-live", family="root"), token)
             break
         except ValueError as exc:
             if not str(exc).startswith("NOT_OBSERVED:"): raise
@@ -173,7 +219,10 @@ def freeze(fleet, token, bucket, *, timeout=60, earlier=None):
     require((current["node"], current["disk"], current["bucketIncarnationId"]) ==
             (owner["node"], owner["disk"], owner["bucketIncarnationId"]), "checkpoint owner changed during freeze")
     if earlier is not None: after_generation(current, earlier)
-    return current, identity
+    frozen_root = owned_root_admission(records(fleet, token, "Admin-root-frozen", family="root"), token)
+    require(all(frozen_root[name] == root[name] for name in ("node", "disk", "relativePath", "size", "sha256")),
+            "original durable root admission changed during its checkpoint freeze")
+    return {**current, "rootAdmission": frozen_root}, identity
 
 
 def stop_for_fault(fleet, token, bucket, frozen, identity):
@@ -188,4 +237,18 @@ def stop_for_fault(fleet, token, bucket, frozen, identity):
     current = owned_checkpoint(records(fleet, token, "Admin-checkpoint-stopped", quiescent=True), token, bucket)
     require(current["checkpoint"] == frozen["checkpoint"] and current["resume"] == frozen["resume"],
             "Admin durable responsibility changed between freeze and stopped fault boundary")
-    return current
+    root = owned_root_admission(records(fleet, token, "Admin-root-stopped", quiescent=True, family="root"), token)
+    try:
+        from .root_restart import same_owner
+    except ImportError:
+        from root_restart import same_owner
+    # A different root coordinator may shut down gracefully when all peers
+    # stop. Preserve every non-timeout field and forbid a refunded budget.
+    previous = frozen["rootAdmission"]
+    if all(root[name] == previous[name] for name in ("node", "disk", "relativePath", "size", "sha256")):
+        continuity = {"samePhysicalOwner": True, "nonTimeoutIntentUnchanged": True,
+                      "budgetNotRefunded": True, "gracefulTimeoutCheckpointClaimed": False}
+    else:
+        continuity = same_owner(previous, root)
+    fleet.record("Admin-root-stop-continuity", continuity)
+    return {**current, "rootAdmission": root, "rootContinuity": continuity}

@@ -151,5 +151,87 @@ class AdminCheckpointTests(unittest.TestCase):
         changed["checkpoint"].update(encoded(changed["value"], signed=True))
         with self.assertRaises(ValueError): reader.after_generation(changed, earlier)
 
+    def root_fixture(self):
+        value = {'schema': 3, 'task_id': TOKEN, 'priority': 'High', 'retry_attempts': 0,
+            'created_at': {'secs_since_epoch': 100, 'nanos_since_epoch': 0},
+            'heal_type': {'type': 'erasure_set', 'buckets': [], 'set_disk_id': 'pool_0_set_0', 'all_buckets': True},
+            'options': {'scan_mode': 2, 'remove_corrupted': False, 'recreate_missing': False, 'update_parity': False,
+                        'recursive': True, 'dry_run': False, 'no_lock': False, 'pool_index': 0, 'set_index': 0}}
+        rows = [{'disk': disk, 'relativePath': name, 'present': False}
+                for disk in range(4) for name in journal.names('root', TOKEN)]
+        rows[3].update(encoded(value))
+        census = {'node': {'family': 'root', 'taskId': TOKEN, 'quiescent': True, 'readOnly': True,
+                          'directoryEnumerationUsed': False, 'records': rows}}
+        return census, value
+
+    def test_root_admission_is_original_erasure_set_responsibility_with_one_exact_owner(self):
+        census, _ = self.root_fixture()
+        owner = reader.owned_root_admission(census, TOKEN)
+        self.assertEqual((owner['node'], owner['disk']), ('node', 1))
+        self.assertTrue(owner['originalDurableResponsibility'])
+        for change in ('missing', 'terminal', 'duplicate', 'second-owner', 'hash', 'omitted-disk', 'unstable'):
+            census, value = self.root_fixture(); rows = census['node']['records']
+            if change == 'missing': rows[3]['present'] = False
+            elif change == 'terminal': rows[4].update(encoded(value))
+            elif change == 'duplicate': rows[0] = copy.deepcopy(rows[3])
+            elif change == 'second-owner': census['peer'] = copy.deepcopy(census['node'])
+            elif change == 'hash': rows[3]['sha256'] = 'a' * 64
+            elif change == 'omitted-disk': rows.pop()
+            else: census['node'].update(quiescent=False, stable=False, processBound=True, independentReads=2)
+            with self.subTest(change=change), self.assertRaises(ValueError): reader.owned_root_admission(census, TOKEN)
+
+    def test_root_erasure_admission_rejects_foreign_task_scope_options_time_and_terminal_shape(self):
+        for change in ('task', 'schema', 'scope', 'scope-type', 'pool-type', 'lock', 'retry', 'priority', 'time', 'bucket-incarnation'):
+            census, value = self.root_fixture()
+            if change == 'task': value['task_id'] = INCARNATION
+            elif change == 'schema': value['schema'] = 2
+            elif change == 'scope': value['heal_type'] = {'type': 'cluster'}
+            elif change == 'scope-type': value['heal_type']['all_buckets'] = 1
+            elif change == 'pool-type': value['options']['pool_index'] = False
+            elif change == 'lock': value['options']['no_lock'] = True
+            elif change == 'retry': value['retry_attempts'] = 1
+            elif change == 'priority': value['priority'] = 'Normal'
+            elif change == 'time': value['created_at']['nanos_since_epoch'] = 1_000_000_000
+            else: value['bucket_incarnation_id'] = INCARNATION
+            census['node']['records'][3].update(encoded(value))
+            with self.subTest(change=change), self.assertRaises(ValueError): reader.owned_root_admission(census, TOKEN)
+
+    def test_freeze_and_crash_preserve_checkpoint_resume_and_the_actual_root_admission(self):
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        observed, _, _ = self.fixture(); roots, _ = self.root_fixture()
+        root = reader.owned_root_admission(roots, TOKEN)
+        identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50, state='S')
+        actions = []
+        fleet = SimpleNamespace(frozen_processes={}, record=lambda label, value: value, stop=lambda: actions.append('stop'))
+        def remote(node, action, **params):
+            actions.append(action)
+            if action == 'process': return {**identity, 'state': 'T' if 'process-signal' in actions else 'S'}
+            if action == 'process-crash': return {'actualSignal': 9, 'pidfdBound': True, 'graceful': False, 'platformEventIssued': False}
+            return {}
+        fleet.remote = remote
+        def records(fleet, token, label, **params): return roots if params.get('family') == 'root' else observed
+        with patch.object(reader, 'records', side_effect=records):
+            frozen, process = reader.freeze(fleet, TOKEN, BUCKET)
+            self.assertEqual(frozen['rootAdmission'], root)
+            stopped = reader.stop_for_fault(fleet, TOKEN, BUCKET, frozen, process)
+            self.assertEqual(stopped['checkpoint'], frozen['checkpoint'])
+            self.assertTrue(stopped['rootContinuity']['nonTimeoutIntentUnchanged'])
+            self.assertTrue(stopped['rootContinuity']['budgetNotRefunded'])
+        self.assertEqual(fleet.frozen_processes, {})
+
+    def test_root_drift_after_freeze_retains_the_original_paused_process_for_cleanup(self):
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        observed, _, _ = self.fixture(); roots, value = self.root_fixture()
+        identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50, state='T')
+        fleet = SimpleNamespace(frozen_processes={}, record=lambda label, value: value, remote=lambda *args, **kwargs: identity)
+        def records(fleet, token, label, **params):
+            if label == 'Admin-root-frozen':
+                changed = copy.deepcopy(roots); altered = copy.deepcopy(value); altered['created_at']['secs_since_epoch'] += 1
+                changed['node']['records'][3].update(encoded(altered)); return changed
+            return roots if params.get('family') == 'root' else observed
+        with patch.object(reader, 'records', side_effect=records), self.assertRaisesRegex(ValueError, 'root admission changed'):
+            reader.freeze(fleet, TOKEN, BUCKET)
+        self.assertEqual(fleet.frozen_processes, {'node': identity})
+
 
 if __name__ == "__main__": unittest.main()

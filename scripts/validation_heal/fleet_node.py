@@ -981,7 +981,9 @@ def journal_operation(request):
     require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected", "captureId"},
             "durable-record adapter accepts no arbitrary system paths or commands")
     if owner.get("runtimeProfile") == "journal-bounded":
-        require(request.get("family") == "checkpoint", "bounded journal runtime observes only the owned Admin checkpoint family")
+        require(request.get("family") == "checkpoint" or request.get("family") == "root"
+                and request.get("action") in {"journal-census", "journal-observe"},
+                "bounded journal runtime mutates only the owned Admin checkpoint family")
         roots = volume_views(state, roots, owner)
     module, fault = globals()["journal_fault_backend"], fault_module()
     if request["action"] in {"journal-observe", "journal-capture"}:
@@ -1138,6 +1140,7 @@ def quota_audit_finalize(request):
 def task_records(request):
     """Read three exact Admin journal names; never mutate system metadata."""
     state, roots, owner = owned(request["runId"])
+    roots = volume_views(state, roots, owner)
     token = request.get("taskId")
     require(isinstance(token, str) and str(uuid.UUID(token)) == token, "noncanonical Admin journal task ID")
     require(digest(state / "rustfs") == owner["binarySha256"], "journal candidate changed")
