@@ -89,6 +89,18 @@ class RaceTests(unittest.TestCase):
                          [None, *race.G05_PART_SIZES, None])
         self.assertEqual(len(responses), 5)
 
+    def test_g04_preserves_marker_and_batch_delete_semantics(self):
+        expected = [{"key": race.TARGET_KEY, "versionId": value, "isLatest": value == "v2",
+                     "deleteMarker": False} for value in ("v0", "v1", "v2")]
+        with_marker = [*expected, {"key": race.TARGET_KEY, "versionId": "marker", "isLatest": True, "deleteMarker": True}]
+        self.assertEqual(race.operation_plan("rv-heal-0123456789abcdef", "create-marker", expected)[0]["operation"],
+                         "delete_object")
+        self.assertEqual(race.operation_plan("rv-heal-0123456789abcdef", "delete-marker", with_marker)[0]["params"]["VersionId"],
+                         "marker")
+        batch = race.operation_plan("rv-heal-0123456789abcdef", "batch-version-delete", expected)[0]
+        self.assertEqual(batch["operation"], "delete_objects")
+        self.assertEqual(len(batch["params"]["Delete"]["Objects"]), 2)
+
     def test_native_branch_remains_in_denominator_for_each_case(self):
         for case_id, branches in race.CASE_BRANCHES.items():
             native = race.native_blocked({"source_sha": race.REFERENCE["candidateCommit"]}, "H1", case_id)
@@ -101,7 +113,8 @@ class RaceTests(unittest.TestCase):
         dispatch = Path("scripts/validation_heal/run_case.sh").read_text()
         top_dispatch = Path("scripts/run_validation_case.sh").read_text()
         for case_id, code in (("heal.race-unversioned-overwrite", "G01"), ("heal.race-versioned-put", "G02"),
-                              ("heal.race-version-delete", "G03"), ("heal.race-multipart-complete-abort", "G05"),
+                              ("heal.race-version-delete", "G03"), ("heal.race-markers-and-batch-delete", "G04"),
+                              ("heal.race-multipart-complete-abort", "G05"),
                               ("heal.race-copy-and-metadata-update", "G06")):
             self.assertIn(case_id, dispatch)
             self.assertIn(case_id, top_dispatch)
