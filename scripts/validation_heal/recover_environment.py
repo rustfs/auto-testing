@@ -92,6 +92,9 @@ def recovery_plan(artifact, failed_run, candidate):
     if list(artifact.glob("*/run/heal.enospc-inodes-and-quota/cases/heal.enospc-inodes-and-quota.json")):
         require(not list(artifact.glob("*/run/heal.object-size-boundaries/cases/*.json")), "mixed failed case recovery artifact")
         return quota_recovery_plan(artifact, failed_run, candidate)
+    performance = list(artifact.glob("*/run/heal.performance-abba/cases/heal.performance-abba.json"))
+    if performance:
+        return performance_recovery_plan(artifact, failed_run, candidate)
     results = list(artifact.glob("*/run/heal.object-size-boundaries/cases/heal.object-size-boundaries.json"))
     require(len(results) == 1, "failed artifact must have one exact D01 canonical result")
     result = json.loads(results[0].read_text())
@@ -132,6 +135,71 @@ def recovery_plan(artifact, failed_run, candidate):
                 sort_keys=True, separators=(",", ":")).encode()).hexdigest()})
     require(plans, "failed artifact has no supported retained environment")
     return plans
+
+
+def performance_recovery_plan(artifact, failed_run, candidate):
+    """Finalize a performance run that expired before its next fault was applied.
+
+    The performance executor registers a fault before invoking the node-side
+    mutation.  If the lease expires at that boundary, cleanup still sees the
+    registration and tries to recover an intent that was never created.  This
+    path is deliberately narrower than a general fault rescue: it accepts only
+    the archived phase boundary with no fault or fault-proof record and an
+    unchanged physical scene, then asks the node to perform its ordinary
+    run-owned cleanup.
+    """
+    case = "heal.performance-abba"
+    results = list(artifact.glob(f"*/run/{case}/cases/{case}.json"))
+    require(len(results) == 1, "performance recovery requires one exact J06 result")
+    result = json.loads(results[0].read_text())
+    provenance = result.get("provenance") or {}
+    require(result.get("case_id") == case and result.get("verdict") == "FAIL"
+            and result.get("cleanup_status") == "FAIL"
+            and provenance.get("source_commit") == candidate["source_sha"]
+            and provenance.get("candidate_sha256") == candidate["package_sha256"],
+            "performance failed-result candidate or cleanup differs")
+    evidence = results[0].parents[1] / f"evidence/{case}"
+    summary = json.loads((evidence / "healthy-summary.json").read_text())
+    require(summary.get("cleanup") == "FAIL" and len(summary.get("results", [])) == 1,
+            "performance recovery cannot omit or combine a retained instance")
+    row = summary["results"][0]
+    failure = row.get("failure", {})
+    require(row.get("topology") == "H2" and row.get("verdict") == "FAIL"
+            and row.get("cleanup") == "FAIL"
+            and failure.get("type") == "ValueError"
+            and "apply-fault failed" in failure.get("message", "")
+            and "lease expired" in failure.get("message", ""),
+            "performance recovery only supports a fault lease boundary failure")
+    folder = evidence / "H2"
+    binding_files = list(folder.glob("*-binding.json"))
+    failure_files = list(folder.glob("*-physical-failure.json"))
+    boundary_files = list(folder.glob("*-physical-phase-baseline-g3-p3-B.json"))
+    protocol_files = list(folder.glob("*-phase-protocol-g3-p3-B.json"))
+    require(len(binding_files) == len(failure_files) == len(boundary_files) == len(protocol_files) == 1,
+            "performance recovery lacks one exact retained boundary")
+    binding = json.loads(binding_files[0].read_text())
+    before = json.loads(boundary_files[0].read_text())
+    failure_scene = json.loads(failure_files[0].read_text())
+    protocol = json.loads(protocol_files[0].read_text())
+    require(re.fullmatch(rf"gh-{failed_run}-[1-9][0-9]*-h2", binding.get("runId", ""))
+            and binding.get("candidateBinarySha256") == provenance.get("binary_sha256")
+            and binding.get("harnessCommit") == provenance.get("testing_commit")
+            and protocol.get("group") == 3 and protocol.get("phase") == 3 and protocol.get("mode") == "B"
+            and physical_content(before) == physical_content(failure_scene),
+            "performance retained scene or run identity changed")
+    # A failed remote apply has no durable fault evidence.  A fault record or
+    # proof at this boundary would require the normal registered-fault rescue.
+    require(not list(folder.glob("*-fault-g3-p3-B.json"))
+            and not list(folder.glob("*-fault-proof-g3-p3-B.json")),
+            "performance boundary contains an applied fault; refuse shortcut cleanup")
+    nodes = sorted(failure_scene)
+    require(nodes and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes),
+            "performance archived node identity is invalid")
+    return [{"kind": "performance-no-fault-applied", "runId": binding["runId"], "nodes": nodes,
+             "node": nodes[0],
+             "before": failure_scene, "expectedSceneSha256": hashlib.sha256(json.dumps(
+                 physical_content(failure_scene)[nodes[0]], sort_keys=True, separators=(",", ":")
+             ).encode()).hexdigest(), "binarySha256": provenance["binary_sha256"]}]
 
 
 def recovery_scene_matches(current, plan):
@@ -178,7 +246,14 @@ def main():
         require(recovery_scene_matches(current, plan),
                 "retained fleet drifted from its exact archived scene; no recovery performed")
         fleet.record("retained-service-logs", fleet.remote(plan["node"], "logs"))
-        if plan.get("kind") == "owned-quota":
+        if plan.get("kind") == "performance-no-fault-applied":
+            for node in plan["nodes"]:
+                proof = fleet.record("audited-finalization", {"node": node,
+                    **fleet.remote(node, "cleanup")})
+                require(proof.get("cleanup") == "PASS" and proof.get("unitStopped") is True
+                        and proof.get("rootsRemoved") is True,
+                        "performance retained environment finalization failed")
+        elif plan.get("kind") == "owned-quota":
             for fault in plan["faults"]:
                 fleet.record("quota-original-shard-rescue", fleet.remote(plan["node"], "recover-fault", **fault))
             require(physical_content(fleet.snapshot("complete-pre-fault-rescue", quiescent=True)) == physical_content(plan["before"]),

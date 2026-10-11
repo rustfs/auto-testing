@@ -123,6 +123,7 @@ class QuotaRecoveryTests(unittest.TestCase):
             for run, value in [(12346, candidate), (12345, {**candidate, "package_sha256": "f" * 64})]:
                 with self.assertRaises(ValueError): recovery_plan(root, run, value)
 
+
     def test_retry_accepts_only_original_rescued_shards_and_no_other_drift(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -207,6 +208,42 @@ class QuotaRecoveryTests(unittest.TestCase):
         self.assertEqual(events[0], "start")
         self.assertEqual(events[-1], ("GET", "/rustfs/admin/v3/get-bucket-quota", [("bucket", "owned")]))
         self.assertFalse(result["authoritativeUsageClaimed"])
+
+
+class PerformanceBoundaryRecoveryTests(unittest.TestCase):
+    def archive(self, root):
+        case = "heal.performance-abba"
+        base = root / "rustfs-validation-12345-1" / "run" / case
+        evidence = base / "evidence" / case / "H2"
+        (base / "cases").mkdir(parents=True)
+        evidence.mkdir(parents=True)
+        candidate = {"source_sha": "a" * 40, "package_sha256": "b" * 64}
+        provenance = {"source_commit": "a" * 40, "candidate_sha256": "b" * 64,
+                      "binary_sha256": "c" * 64, "testing_commit": "d" * 40}
+        write = lambda path, value: path.write_text(json.dumps(value))
+        write(base / "cases" / (case + ".json"), {"case_id": case, "verdict": "FAIL",
+            "cleanup_status": "FAIL", "provenance": provenance})
+        write(evidence.parent / "healthy-summary.json", {"cleanup": "FAIL", "results": [{"topology": "H2",
+            "verdict": "FAIL", "cleanup": "FAIL", "failure": {"type": "ValueError",
+            "message": "Heal node vm000 apply-fault failed: fault lease expired"}}]})
+        scene = {node: {"formats": [{"disk": node}], "files": [{"path": "owned/key/part.1",
+            "sha256": node, "size": 1}]} for node in ("vm000", "vm001", "vm002", "vm003")}
+        binding = {"runId": "gh-12345-1-h2", "candidateBinarySha256": "c" * 64, "harnessCommit": "d" * 40}
+        write(evidence / "00001-binding.json", binding)
+        write(evidence / "00002-phase-protocol-g3-p3-B.json", {"group": 3, "phase": 3, "mode": "B"})
+        write(evidence / "00003-physical-phase-baseline-g3-p3-B.json", scene)
+        write(evidence / "00004-physical-failure.json", scene)
+        return candidate, evidence
+
+    def test_only_unapplied_fault_boundary_can_be_finalized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            candidate, evidence = self.archive(root)
+            plan = recovery_plan(root, 12345, candidate)[0]
+            self.assertEqual(plan["kind"], "performance-no-fault-applied")
+            self.assertEqual(plan["nodes"], ["vm000", "vm001", "vm002", "vm003"])
+            (evidence / "00005-fault-g3-p3-B.json").write_text("{}")
+            with self.assertRaises(ValueError): recovery_plan(root, 12345, candidate)
 
 
 if __name__ == "__main__":
