@@ -21,6 +21,8 @@ def prepare_shared(source, commit, output):
     (output / 'src/main.rs').write_bytes(helper.read_bytes())
     manifest = output / 'Cargo.toml'
     manifest.write_text(manifest.read_text().replace('name = "heal-meta-inspect"', 'name = "heal-shared-fixture"'))
+    with manifest.open('a') as stream:
+        stream.write('[dev-dependencies]\ntime = "0.3"\n')
     path = output / 'source.json'
     proof = json.loads(path.read_text())
     proof.update(role=ROLE, helperSourceSha256=hashlib.sha256(helper.read_bytes()).hexdigest(),

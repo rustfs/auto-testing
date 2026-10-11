@@ -162,12 +162,19 @@ mod tests {
 
     fn fixture() -> FileMeta {
         let mut meta = FileMeta::new();
-        for (version, directory) in [(SOURCE, SOURCE_DIR), (DESTINATION, DESTINATION_DIR)] {
+        for (index, (version, directory)) in [(SOURCE, SOURCE_DIR), (DESTINATION, DESTINATION_DIR)]
+            .into_iter()
+            .enumerate()
+        {
             let info = FileInfo {
                 volume: "bucket".to_owned(),
                 name: "shared.bin".to_owned(),
                 version_id: Some(version.parse().unwrap()),
                 data_dir: Some(directory.parse().unwrap()),
+                mod_time: Some(
+                    time::OffsetDateTime::from_unix_timestamp(1_700_000_000 + index as i64)
+                        .unwrap(),
+                ),
                 size: 1024,
                 parts: vec![ObjectPartInfo {
                     number: 1,
