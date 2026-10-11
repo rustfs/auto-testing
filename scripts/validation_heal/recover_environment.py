@@ -195,8 +195,20 @@ def performance_recovery_plan(artifact, failed_run, candidate):
     nodes = sorted(failure_scene)
     require(nodes and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes),
             "performance archived node identity is invalid")
+    bucket = binding.get("bucketPrefix")
+    require(isinstance(bucket, str) and re.fullmatch(r"[a-z0-9][a-z0-9.-]+[a-z0-9]", bucket),
+            "performance binding has no exact primary bucket")
+    buckets = {bucket}
+    for value in failure_scene.values():
+        for item in value.get("files", []):
+            name = item.get("path", "").split("/", 1)[0]
+            if name == bucket or name.startswith(bucket + "-"):
+                buckets.add(name)
+    require(buckets == {bucket, bucket + "-load"},
+            "performance retained scene omitted or added a run-owned bucket")
     return [{"kind": "performance-no-fault-applied", "runId": binding["runId"], "nodes": nodes,
              "node": nodes[0],
+             "buckets": sorted(buckets),
              "before": failure_scene, "expectedSceneSha256": hashlib.sha256(json.dumps(
                  physical_content(failure_scene)[nodes[0]], sort_keys=True, separators=(",", ":")
              ).encode()).hexdigest(), "binarySha256": provenance["binary_sha256"]}]
@@ -241,6 +253,8 @@ def main():
     complete = []
     for plan in plans:
         fleet = Fleet(plan["nodes"], args.evidence, plan["runId"])
+        if plan.get("buckets"):
+            fleet.snapshot_buckets = plan["buckets"]
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
         current = fleet.snapshot("audited-physical-scene", quiescent=True)
         require(recovery_scene_matches(current, plan),

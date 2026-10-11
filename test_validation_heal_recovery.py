@@ -226,9 +226,12 @@ class PerformanceBoundaryRecoveryTests(unittest.TestCase):
         write(evidence.parent / "healthy-summary.json", {"cleanup": "FAIL", "results": [{"topology": "H2",
             "verdict": "FAIL", "cleanup": "FAIL", "failure": {"type": "ValueError",
             "message": "Heal node vm000 apply-fault failed: fault lease expired"}}]})
-        scene = {node: {"formats": [{"disk": node}], "files": [{"path": "owned/key/part.1",
-            "sha256": node, "size": 1}]} for node in ("vm000", "vm001", "vm002", "vm003")}
-        binding = {"runId": "gh-12345-1-h2", "candidateBinarySha256": "c" * 64, "harnessCommit": "d" * 40}
+        scene = {node: {"formats": [{"disk": node}], "files": [
+            {"path": "rv-heal-0123456789abcd/objects/key/part.1", "sha256": node, "size": 1},
+            {"path": "rv-heal-0123456789abcd-load/load/00.bin/xl.meta", "sha256": node, "size": 1},
+        ]} for node in ("vm000", "vm001", "vm002", "vm003")}
+        binding = {"runId": "gh-12345-1-h2", "bucketPrefix": "rv-heal-0123456789abcd",
+                   "candidateBinarySha256": "c" * 64, "harnessCommit": "d" * 40}
         write(evidence / "00001-binding.json", binding)
         write(evidence / "00002-phase-protocol-g3-p3-B.json", {"group": 3, "phase": 3, "mode": "B"})
         write(evidence / "00003-physical-phase-baseline-g3-p3-B.json", scene)
