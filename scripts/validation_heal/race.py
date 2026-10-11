@@ -41,12 +41,14 @@ except ImportError:
     from versions import public_version_id
 
 
-CASE_IDS = ("heal.race-unversioned-overwrite", "heal.race-version-delete")
+CASE_IDS = ("heal.race-unversioned-overwrite", "heal.race-versioned-put", "heal.race-version-delete")
 CASE_BRANCHES = {
     "heal.race-unversioned-overwrite": ("overwrite-vs-deep", "overwrite-vs-read-repair", "native-commit-cleanup"),
+    "heal.race-versioned-put": ("new-version-vs-historical-heal", "read-all-versions-during-heal", "native-version-fence"),
     "heal.race-version-delete": ("delete-old-version-vs-deep", "delete-current-version-vs-deep", "native-delete-fence"),
 }
 G01_BRANCHES = CASE_BRANCHES["heal.race-unversioned-overwrite"][:2]
+G02_BRANCHES = CASE_BRANCHES["heal.race-versioned-put"][:2]
 G03_BRANCHES = CASE_BRANCHES["heal.race-version-delete"][:2]
 OBJECTS = 257
 SIZE = 257 * 1024 + 123
@@ -121,14 +123,14 @@ def sample_overlap(ack, observed, path, token):
 
 
 def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
-    require(branch in (*G01_BRANCHES, *G03_BRANCHES) and type(count) is int and 3 <= count <= OBJECTS, "G01/G03 unregistered fixture")
+    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES) and type(count) is int and 3 <= count <= OBJECTS, "G01/G02/G03 unregistered fixture")
     recorder.call("create_bucket", {"Bucket": bucket})
-    if branch in G03_BRANCHES:
+    if branch in (*G02_BRANCHES, *G03_BRANCHES):
         recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})
     entries = []
     keys = [f"objects/{index:04d}.bin" for index in range(count - 1)] + [TARGET_KEY]
     for key in keys:
-        versions = 3 if key == TARGET_KEY and branch in G03_BRANCHES else 1
+        versions = 3 if key == TARGET_KEY and branch in (*G02_BRANCHES, *G03_BRANCHES) else 1
         for generation in range(versions):
             nonce = f"{bucket}/{key}/{generation}"
             body = payload(nonce, SIZE)
@@ -142,7 +144,7 @@ def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
 
 
 def operation_plan(bucket, branch, expected):
-    require(branch in (*G01_BRANCHES, *G03_BRANCHES), "G01/G03 unregistered foreground branch")
+    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES), "G01/G02/G03 unregistered foreground branch")
     if branch in G01_BRANCHES:
         # Three distinct serial commits; the final independent reference was
         # written before injection, allowing a coding-index byte comparison.
@@ -152,6 +154,14 @@ def operation_plan(bucket, branch, expected):
                  "nonce": f"{bucket}/overwrite/{index}" if index < 2 else f"{bucket}/{REFERENCE_KEY}/0"}
                 for index in range(3)]
     target = [row for row in expected if row["key"] == TARGET_KEY]
+    if branch in G02_BRANCHES:
+        require(len(target) == 3 and len({row["versionId"] for row in target}) == 3, "G02 DV lacks three ACK-ordered versions")
+        return [{"operation": "put_object", "params": {"Bucket": bucket, "Key": TARGET_KEY,
+                    "ContentType": "application/octet-stream", "Metadata": {"race": "versioned-put", "nonce": str(index)},
+                    "Tagging": "race=versioned-put"},
+                 "nonce": f"{bucket}/versioned-put/{index}", "readVersionId": target[0]["versionId"],
+                 "readPayload": target[0].get("payload")}
+                for index in range(3)]
     require(len(target) == 3 and len({row["versionId"] for row in target}) == 3
             and target[-1]["isLatest"], "G01/G03 DV lacks three ACK-ordered versions")
     return [{"operation": "delete_object", "params": {"Bucket": bucket, "Key": TARGET_KEY,
@@ -159,19 +169,29 @@ def operation_plan(bucket, branch, expected):
 
 
 def final_inventory(baseline, branch, plan, responses):
-    require(len(plan) == len(responses) == (3 if branch in G01_BRANCHES else 1),
+    require(len(plan) == len(responses) == (3 if branch in (*G01_BRANCHES, *G02_BRANCHES) else 1),
             "G01/G03 foreground plan/ACK sequence is incomplete")
     result = copy.deepcopy(baseline)
-    if branch in G01_BRANCHES:
+    if branch in (*G01_BRANCHES, *G02_BRANCHES):
         entry = next(row for row in result["entries"] if row["key"] == TARGET_KEY)
         step, ack = plan[-1], responses[-1]
         body = payload(step["nonce"], SIZE)
         require(isinstance(ack.get("ETag"), str) and ack["ETag"]
-                and ack.get("VersionId") in {None, "null"}, "G01/G03 last PUT ACK lost its identity")
-        entry.update(payload={"size": len(body), "sha256": hashlib.sha256(body).hexdigest()},
-                     tags=[{"Key": "race", "Value": "overwrite"}])
-        entry["properties"].update(ETag=ack["ETag"], ContentLength=len(body), ContentType="application/octet-stream",
-                                   Metadata=step["params"]["Metadata"])
+                and (branch in G02_BRANCHES or ack.get("VersionId") in {None, "null"}), "G01/G02/G03 last PUT ACK lost its identity")
+        if branch in G01_BRANCHES:
+            entry.update(payload={"size": len(body), "sha256": hashlib.sha256(body).hexdigest()},
+                         tags=[{"Key": "race", "Value": "overwrite"}])
+            entry["properties"].update(ETag=ack["ETag"], ContentLength=len(body), ContentType="application/octet-stream",
+                                       Metadata=step["params"]["Metadata"])
+        else:
+            for row in result["entries"]:
+                if row["key"] == TARGET_KEY: row["isLatest"] = False
+            result["entries"].append({"key": TARGET_KEY, "versionId": public_version_id(ack.get("VersionId")),
+                "isLatest": True, "deleteMarker": False,
+                "payload": {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()},
+                "properties": {"ETag": ack["ETag"], "ContentLength": len(body),
+                                "ContentType": "application/octet-stream", "Metadata": step["params"]["Metadata"]},
+                "tags": [{"Key": "race", "Value": "versioned-put"}]})
     else:
         version = plan[0]["params"]["VersionId"]
         require(responses[0].get("VersionId") == version, "G01/G03 DELETE response changed the selected VersionId")
@@ -216,6 +236,16 @@ def physical_transition(before, after, bucket, mapped, final, branch):
         require({part["index"]: (part["sha256"], part["size"]) for part in reference["cohort"]}
                 == {part["index"]: (part["sha256"], part["size"]) for part in current_target[0]["cohort"]},
                 "G01/G03 last ACK shard bytes/coding indices differ from the independent payload reference")
+    elif branch in G02_BRANCHES:
+        require(len(original_target) == 3 and len(current_target) == 6,
+                "G02 version race lost an acknowledged historical or new version")
+        old_dirs = {target["dataDir"] for target in original_target}
+        new_dirs = {target["dataDir"] for target in current_target} - old_dirs
+        require(len(new_dirs) == 3 and old_dirs.isdisjoint(new_dirs),
+                "G02 versions share or resurrect a physical data directory")
+        require(all(any(part["size"] == SIZE for part in target["cohort"])
+                    for target in current_target if target["dataDir"] in new_dirs),
+                "G02 new version physical parts are incomplete")
     else:
         remaining = {(row["key"], row["versionId"]) for row in final["entries"]}
         removed = [value for pair, value in mapped.items() if pair not in remaining]
@@ -314,15 +344,24 @@ def race(recorder, plan, probe, fleet, path, token):
     # Only the worker mutates Recorder state. All Fleet.record writes run on
     # the controller, so evidence sequence allocation never races.
     readers = []
-    read_branch = bool(plan and plan[0].get("branch") == "overwrite-vs-read-repair")
+    read_branch = bool(plan and plan[0].get("branch") in {"overwrite-vs-read-repair", "read-all-versions-during-heal"})
     with ThreadPoolExecutor(max_workers=2 if read_branch else 1) as pool:
         worker = pool.submit(foreground, recorder, plan)
         if read_branch:
             def read_repair():
                 deadline = time.monotonic() + 90
                 while not worker.done() and time.monotonic() < deadline:
-                    readers.append(probe.s3("get_object", {"Bucket": plan[0]["params"]["Bucket"],
-                                                               "Key": plan[0]["params"]["Key"]}))
+                    params = {"Bucket": plan[0]["params"]["Bucket"], "Key": plan[0]["params"]["Key"]}
+                    if plan[0].get("readVersionId"): params["VersionId"] = plan[0]["readVersionId"]
+                    observed = probe.s3("get_object", params)
+                    if plan[0].get("branch") == "read-all-versions-during-heal":
+                        response = observed.get("response") or {}
+                        require(observed.get("acknowledged") is True and not observed.get("resultUnknown")
+                                and response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 200
+                                and response.get("VersionId") == params["VersionId"]
+                                and observed.get("payload") == plan[0]["readPayload"],
+                                "G02 exact historical read was not acknowledged with original bytes")
+                    readers.append(observed)
                     time.sleep(.01)
             read_future = pool.submit(read_repair)
         else:
@@ -371,7 +410,7 @@ def run_branch(args, topology, nodes, branch):
         "maxInventoryObjects": 512, "maxInventoryBytes": 512 * 1024**2}
     fleet.record("binding", binding)
     fleet.record("source-contract", {**REFERENCE, "branch": branch, "objectCount": OBJECTS, "objectSize": SIZE,
-        "requiredPUTs": 3 if branch in G01_BRANCHES else 0, "serverCommitOverlapProved": False})
+        "requiredPUTs": 3 if branch in (*G01_BRANCHES, *G02_BRANCHES) else 0, "serverCommitOverlapProved": False})
     probe, active, recorder, writer = Probe(binding), [], None, None
     result = {"topology": topology, "branch": branch, "fixture": "DL" if branch in G01_BRANCHES else "DV",
               "verdict": "RUNNING", "cleanup": "PENDING", "canonicalCasePassClaimed": False}
@@ -379,7 +418,7 @@ def run_branch(args, topology, nodes, branch):
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
-        recorder = RaceRecorder(probe, directory / "seed-ACKs", versioned=branch in G03_BRANCHES)
+        recorder = RaceRecorder(probe, directory / "seed-ACKs", versioned=branch in (*G02_BRANCHES, *G03_BRANCHES))
         expected = seed_fixture(recorder, bucket, branch)
         baseline = fleet.record("complete-baseline-S3", probe.inventory(bucket, unversioned_current_tags=branch in G01_BRANCHES))
         verify_seed(expected, baseline)
@@ -392,7 +431,7 @@ def run_branch(args, topology, nodes, branch):
         mapped = map_fixture(before, bucket, expected)
         verify_part_manifest(fleet, list(mapped.values()), "baseline-streaming", count=len(mapped))
         target_version = (next(entry for entry in expected if entry["key"] == TARGET_KEY and entry["isLatest"])
-                          if branch == G03_BRANCHES[1]
+                          if branch in (G02_BRANCHES[1], G03_BRANCHES[1])
                           else next(entry for entry in expected if entry["key"] == TARGET_KEY))
         targets = [mapped[row["key"], row["versionId"]] for row in expected
                    if row["key"] != TARGET_KEY or row["versionId"] == target_version["versionId"]]
@@ -421,7 +460,7 @@ def run_branch(args, topology, nodes, branch):
         target = next(target for target in targets if target["key"] == TARGET_KEY)
         if (target["node"], target["disk"], target["relativePath"]) in files(witness):
             raise WindowNotObserved("G01/G03 old target already repaired before foreground mutations")
-        writer = RaceRecorder(probe, directory / "foreground-ACKs", versioned=branch in G03_BRANCHES)
+        writer = RaceRecorder(probe, directory / "foreground-ACKs", versioned=branch in (*G02_BRANCHES, *G03_BRANCHES))
         writer.seen.update((row["key"], row["versionId"]) for row in expected)
         responses, overlapped = race(writer, plan, probe, fleet, path, token)
         final = fleet.record("ACK-derived-final-manifest", final_inventory(baseline, branch, plan, responses))

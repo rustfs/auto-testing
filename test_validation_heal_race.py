@@ -28,6 +28,14 @@ class RaceTests(unittest.TestCase):
         self.assertEqual(old[0]["params"]["VersionId"], "v0")
         self.assertEqual(current[0]["params"]["VersionId"], "v2")
 
+    def test_g02_plan_creates_three_acknowledged_versions(self):
+        expected = [{"key": race.TARGET_KEY, "versionId": value, "isLatest": value == "v2"}
+                    for value in ("v0", "v1", "v2")]
+        plan = race.operation_plan("rv-heal-0123456789abcdef", "read-all-versions-during-heal", expected)
+        self.assertEqual(len(plan), 3)
+        self.assertEqual({step["readVersionId"] for step in plan}, {"v0"})
+        self.assertEqual([step["params"]["Metadata"]["nonce"] for step in plan], ["0", "1", "2"])
+
     def test_native_branch_remains_in_denominator_for_each_case(self):
         for case_id, branches in race.CASE_BRANCHES.items():
             native = race.native_blocked({"source_sha": race.REFERENCE["candidateCommit"]}, "H1", case_id)
@@ -39,7 +47,8 @@ class RaceTests(unittest.TestCase):
     def test_dispatch_and_source_contract_are_present(self):
         dispatch = Path("scripts/validation_heal/run_case.sh").read_text()
         top_dispatch = Path("scripts/run_validation_case.sh").read_text()
-        for case_id, code in (("heal.race-unversioned-overwrite", "G01"), ("heal.race-version-delete", "G03")):
+        for case_id, code in (("heal.race-unversioned-overwrite", "G01"), ("heal.race-versioned-put", "G02"),
+                              ("heal.race-version-delete", "G03")):
             self.assertIn(case_id, dispatch)
             self.assertIn(case_id, top_dispatch)
             catalog = json.loads(Path("validation-cases.json").read_text())
