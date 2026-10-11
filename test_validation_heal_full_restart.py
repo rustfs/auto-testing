@@ -68,7 +68,7 @@ class FullRestartTests(unittest.TestCase):
         owner = {"node": "n0", "disk": 2, "value": {"options": {"timeout": {"secs": 149, "nanos": 0}}}}
         terminal = {"schema": 1, "task_id": self.token, "status": "Completed", "heal_type": {"type": "cluster"},
                     "options": copy.deepcopy(owner["value"]["options"])}
-        item = {"bucket": "versions", "object": "history", "versionId": "marker", "objectSize": 0}
+        item = {"type": "object", "bucket": "versions", "object": "history", "versionId": "marker", "objectSize": 0}
         report = {"schema": 1, "terminal": terminal, "outcome": current["outcome"], "min_seq": 1027,
                   "next_seq": 1028, "seqed_items": [[1027, item]]}
         observed = {node: {"taskId": self.token, "readOnly": True, "records": [
@@ -80,6 +80,16 @@ class FullRestartTests(unittest.TestCase):
     def test_original_record_and_retained_suffix_are_required_after_all_peer_restart(self):
         observed, owner, current = self.journal()
         self.assertTrue(restart.terminal_records(observed, self.token, owner, current, self.wanted())["sameRecordDisk"])
+        # The product sequence also contains durable bucket events; the
+        # retained suffix must remain contiguous while next_seq exceeds the
+        # object counter by those explicit events.
+        with_offset = copy.deepcopy(observed)
+        offset_report = next(row for row in with_offset["n0"]["records"] if row["kind"] == "report" and row["present"])
+        offset_report["value"]["min_seq"] = 1028
+        offset_report["value"]["next_seq"] = 1030
+        offset_report["value"]["seqed_items"] = [[1028, {"type": "bucket", "bucket": "db", "object": "", "versionId": "", "objectSize": 0}],
+                                                    [1029, offset_report["value"]["seqed_items"][0][1]]]
+        self.assertTrue(restart.terminal_records(with_offset, self.token, owner, current, self.wanted())["sameRecordDisk"])
         for kind in ("missing", "owner", "intent", "token", "scope", "budget", "outcome", "sequence", "suffix", "marker-size"):
             with self.subTest(kind=kind):
                 bad = copy.deepcopy(observed)

@@ -102,18 +102,30 @@ def terminal_records(observed, token, owner, current, wanted):
     require(type(report.get("schema")) is int and report["schema"] == 1 and report.get("terminal") == terminal
             and canonical(report.get("outcome")) == canonical(current.get("outcome")),
             "root durable report differs from the original recovered task")
-    require(type(report.get("next_seq")) is int and report["next_seq"] == len(wanted) + 1
+    counters = (report.get("outcome") or {}).get("counters") or {}
+    require(type(report.get("next_seq")) is int and type(counters.get("processed")) is int
+            and report["next_seq"] >= counters["processed"] + 1
             and type(report.get("min_seq")) is int and 1 <= report["min_seq"] <= report["next_seq"]
             and isinstance(report.get("seqed_items"), list) and 0 < len(report["seqed_items"]) <= 1024,
             "root durable report has incomplete retained sequence bounds")
-    seen, previous = set(), report["min_seq"] - 1
+    seen, bucket_events, previous = set(), set(), report["min_seq"] - 1
+    wanted_buckets = {pair[0] for pair in wanted}
     for sequence, item in report["seqed_items"]:
-        pair = item.get("bucket"), item.get("object"), public_version_id(item.get("versionId"))
-        require(type(sequence) is int and sequence == previous + 1 and sequence < report["next_seq"]
-                and pair in wanted and pair not in seen
-                and item.get("objectSize") == wanted[pair].get("payload", {}).get("size", 0),
-                "root durable report skipped a sequence or changed an ACK version/marker/size")
-        seen.add(pair); previous = sequence
+        require(type(sequence) is int and sequence == previous + 1 and sequence < report["next_seq"],
+                "root durable report skipped a sequence or changed its retained suffix")
+        if item.get("type") == "bucket":
+            require(item.get("bucket") in wanted_buckets and item.get("object") == ""
+                    and item.get("versionId") == "" and item.get("objectSize") == 0
+                    and item["bucket"] not in bucket_events,
+                    "root durable report contains an unknown or duplicate bucket event")
+            bucket_events.add(item["bucket"])
+        else:
+            pair = item.get("bucket"), item.get("object"), public_version_id(item.get("versionId"))
+            require(item.get("type") == "object" and pair in wanted and pair not in seen
+                    and item.get("objectSize") == wanted[pair].get("payload", {}).get("size", 0),
+                    "root durable report changed an ACK version/marker/size")
+            seen.add(pair)
+        previous = sequence
     require(previous == report["next_seq"] - 1, "root durable report omitted its retained suffix")
     return {"sameRecordDisk": True, "runnableIntentRetiredOnEveryDisk": True,
             "terminalAndReportMatchOriginalToken": True, "retainedItems": len(seen)}
