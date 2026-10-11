@@ -129,6 +129,55 @@ class CapacityContractTests(unittest.TestCase):
         self.assertEqual(config["RUSTFS_HEAL_AUTO_HEAL_ENABLE"], "false")
         self.assertEqual(config["RUSTFS_SCANNER_ENABLED"], "false")
 
+    def test_bounded_journal_profile_requires_fixed_block_exhaustion_and_disables_background_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            owner = {"runtimeProfile": "journal-bounded", "runId": "gh-1-1-h1"}
+            with self.assertRaisesRegex(ValueError, "only fixed block"):
+                volume.create(state, (), owner, "bounded-inode-exhaustion")
+            self.assertFalse((state / volume.MARKER).exists())
+            with self.assertRaises(ValueError): volume.views(state, (), owner)
+            with self.assertRaises(ValueError): volume.properties(state, (), owner)
+        config = fleet_node.runtime_config("journal-bounded")
+        self.assertEqual(config["RUSTFS_UNSAFE_BYPASS_DISK_CHECK"], "true")
+        self.assertEqual(config["RUSTFS_HEAL_PAGE_PARALLEL_ENABLE"], "false")
+        for field in ("RUSTFS_HEAL_MRF_ENABLE", "RUSTFS_HEAL_AUTO_HEAL_ENABLE", "RUSTFS_SCANNER_ENABLED"):
+            self.assertEqual(config[field], "false")
+
+    def test_bounded_journal_start_uses_only_verified_private_service_bindings(self):
+        state, roots = Path('/owned/state'), [Path('/owned/disk' + str(i)) for i in range(4)]
+        owner = {"runtimeProfile": "journal-bounded", "unit": "owned-test.service", "binarySha256": "a" * 64,
+                 "volumes": [str(root / 'data') for root in roots]}
+        bindings = ['--property=PrivateMounts=true', '--property=BindPaths=/verified/private/data:/owned/disk0/data']
+        with patch.object(fleet_node, "owned", return_value=(state, roots, owner)), patch.object(fleet_node, "stopped"), \
+             patch.object(fleet_node, "digest", return_value=owner["binarySha256"]), \
+             patch.object(fleet_node, "command") as command, \
+             patch.object(fleet_node, "gate_module", return_value=SimpleNamespace(checked_gate=lambda *args: None, start_properties=lambda *args: [])), \
+             patch.object(fleet_node, "quorum_gate_module", return_value=SimpleNamespace(properties=lambda *args: [])), \
+             patch.object(fleet_node, "replacement_module", return_value=SimpleNamespace(start_properties=lambda *args: [])), \
+             patch.object(fleet_node, "volume_module", return_value=SimpleNamespace(properties=lambda *args: bindings)):
+            fleet_node.start({"runId": "gh-1-1-h1"})
+        issued = command.call_args.args
+        self.assertEqual(issued[0], 'systemd-run')
+        for property in bindings: self.assertIn(property, issued)
+        self.assertIn('--property=RemainAfterExit=yes', issued)
+        self.assertEqual(issued[-4:], tuple(owner["volumes"]))
+
+    def test_bounded_journal_capacity_refuses_arbitrary_limits_paths_or_process_birth(self):
+        owner = {"runtimeProfile": "journal-bounded"}
+        identity = {field: field for field in fleet_node.PROCESS_FIELDS}; identity['pid'] = 50
+        request = {"runId": "gh-1-1-h1", "action": "bounded-volumes-fill", "expected": identity}
+        backend = SimpleNamespace(views=lambda *args: (), read=lambda *args: {'branch': 'bounded-volume-enospc'},
+                                  fill=lambda *args: {}, witness=lambda *args, **kwargs: {})
+        with patch.object(fleet_node, 'owned', return_value=(None, (), owner)), \
+             patch.object(fleet_node, 'volume_module', return_value=backend):
+            with patch.object(fleet_node, 'process', side_effect=[identity, identity]):
+                self.assertTrue(fleet_node.volume_operation(request)['sameOriginalProcess'])
+            for extra in ({'path': '/foreign'}, {'imageBytes': 10**12}, {'branch': 'bounded-inode-exhaustion'}):
+                with self.subTest(extra=extra), self.assertRaises(ValueError): fleet_node.volume_operation({**request, **extra})
+            with patch.object(fleet_node, 'process', return_value={**identity, 'startTicks': 999}), self.assertRaises(ValueError):
+                fleet_node.volume_operation(request)
+
     def test_allocation_registers_exact_undo_before_formatting_only_bounded_files(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state"

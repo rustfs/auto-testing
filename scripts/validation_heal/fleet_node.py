@@ -33,7 +33,7 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
     if profile == "queue-pressure":
         logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true",
@@ -49,8 +49,10 @@ def runtime_config(profile):
         return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:1"}
     if profile == "multi-pool":
         return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "4", "RUSTFS_STORAGE_CLASS_STANDARD": "EC:2"}
-    if profile == "bounded-capacity":
-        return {**BACKGROUND_CONFIG, "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true"}
+    if profile in {"bounded-capacity", "journal-bounded"}:
+        return {**BACKGROUND_CONFIG, "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true",
+                **({"RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
+                   if profile == "journal-bounded" else {})}
     if profile == "lock-quorum":
         return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:8"}
     if profile == "scope-isolation":
@@ -305,12 +307,12 @@ def start(request):
             "--property=MemoryMax=4G",
             *(["--property=PrivateMounts=true", "--property=CapabilityBoundingSet=~CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"]
               if owner.get("runtimeProfile") in {"flapping", "queue-pressure"} else []),
-            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "durable-mrf", "mrf-crash", "replacement", "replacement-target", "schema-refusal"} else []),
+            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "journal-bounded", "durable-mrf", "mrf-crash", "replacement", "replacement-target", "schema-refusal"} else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)),
             *quorum_gate_module().properties(state, roots),
-            *(volume_module().properties(state, roots, owner) if owner.get("runtimeProfile") == "bounded-capacity" else []),
+            *(volume_module().properties(state, roots, owner) if owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"} else []),
             *replacement_module().start_properties(state, roots), str(state / "rustfs"), *owner["volumes"])
     return {"unit": owner["unit"], "started": True}
 
@@ -430,7 +432,7 @@ def process_signal(request):
 
 
 def process_graceful(request):
-    require(owned(request["runId"])[2].get("runtimeProfile") in {"root-restart", "replacement", "replacement-target"}
+    require(owned(request["runId"])[2].get("runtimeProfile") in {"root-restart", "journal-bounded", "replacement", "replacement-target"}
             and process(request).get("state") == "T", "graceful observation requires the paused run-owned root service")
     before = pidfd_signal(request, signal.SIGTERM)
     # A paused process must receive CONT to handle TERM. Use the same pidfd
@@ -454,7 +456,7 @@ def process_graceful(request):
 
 
 def process_crash(request):
-    require(owned(request["runId"])[2].get("runtimeProfile") in {"replacement", "replacement-target", "root-restart", "durable-mrf", "mrf-crash"}
+    require(owned(request["runId"])[2].get("runtimeProfile") in {"replacement", "replacement-target", "root-restart", "journal-bounded", "durable-mrf", "mrf-crash"}
             and process(request).get("state") == "T", "crash observation requires a paused owned recovery service")
     before = pidfd_signal(request, signal.SIGKILL)
     deadline = time.monotonic() + 30
@@ -507,12 +509,12 @@ def volume_module():
 
 
 def volume_views(state, roots, owner):
-    return volume_module().views(state, roots, owner) if owner.get("runtimeProfile") == "bounded-capacity" else roots
+    return volume_module().views(state, roots, owner) if owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"} else roots
 
 
 def volume_operation(request):
     state, roots, owner = owned(request["runId"])
-    require(owner.get("runtimeProfile") == "bounded-capacity", "bounded operation requires its exact dedicated runtime")
+    require(owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"}, "bounded operation requires its exact dedicated runtime")
     module = volume_module()
     if request["action"] == "bounded-volumes-create":
         require(set(request) == {"runId", "action", "branch"}, "bounded allocation accepts no supplied path or limits")
@@ -887,7 +889,7 @@ def snapshot(request):
             "resourceLimits": limits,
             "files": sorted(files, key=lambda value: (value["disk"], value["path"])), "formats": formats,
             "encryptionConfigAttestation": encryption,
-            "boundedVolumeViews": None if owner.get("runtimeProfile") != "bounded-capacity" else {
+            "boundedVolumeViews": None if owner.get("runtimeProfile") not in {"bounded-capacity", "journal-bounded"} else {
                 "actualBackingRoots": [str(root) for root in roots],
                 "privateServiceBindingsRequired": True, "originalPhysicalDriveCountIncreased": False}}
 
@@ -975,9 +977,12 @@ def configure_encryption(request):
 def journal_operation(request):
     state, roots, owner = owned(request["runId"])
     require(digest(state / "rustfs") == owner["binarySha256"], "durable-record candidate changed")
-    require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash"}, "durable records require the owned recovery runtime")
+    require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash", "journal-bounded"}, "durable records require the owned recovery runtime")
     require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected", "captureId"},
             "durable-record adapter accepts no arbitrary system paths or commands")
+    if owner.get("runtimeProfile") == "journal-bounded":
+        require(request.get("family") == "checkpoint", "bounded journal runtime observes only the owned Admin checkpoint family")
+        roots = volume_views(state, roots, owner)
     module, fault = globals()["journal_fault_backend"], fault_module()
     if request["action"] in {"journal-observe", "journal-capture"}:
         fields = {"runId", "action", "family", "taskId", "expected"}
@@ -1073,7 +1078,7 @@ def cleanup(request):
     gate_module().release_gate(state, roots)
     quorum_gate_module().release(state, roots)
     replacement_module().attest(state, roots)
-    if owner.get("runtimeProfile") == "bounded-capacity":
+    if owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"}:
         volume_module().dispose(state, roots, owner)
     command("systemctl", "reset-failed", owner["unit"], check=False)
     for root in (*roots, state):

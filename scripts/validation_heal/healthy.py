@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -188,7 +188,7 @@ class Fleet:
             network_source = NODE_SOURCE.with_name("network_gate.py").read_text()
             source += "\nimport types\nnetwork_gate_backend = types.ModuleType('network_gate')\nexec(" + repr(
                 network_source) + ", network_gate_backend.__dict__)\nNETWORK_GATE_SOURCE = " + repr(network_source) + "\n"
-        if self.runtime_profile == "bounded-capacity":
+        if self.runtime_profile in {"bounded-capacity", "journal-bounded"}:
             source += "\nimport types\nbounded_volume_backend = types.ModuleType('bounded_volume')\nexec(" + repr(
                 NODE_SOURCE.with_name("bounded_volume.py").read_text()) + ", bounded_volume_backend.__dict__)\n"
         if action == "mrf-records" or action.startswith("journal-"):
@@ -324,6 +324,10 @@ class Fleet:
         if self.journal_faults:
             try:
                 self.stop()
+                if self.runtime_profile == "journal-bounded":
+                    for node in self.reserved:
+                        self.record("bounded-journal-filler-recovery", {"node": node, **self.remote(
+                            node, "bounded-volumes-release", quiescent=True)})
                 for node, params in tuple(self.journal_faults):
                     receipt = self.record("durable-record-recovery", {"node": node, **self.remote(node, "journal-recover", **params)})
                     require(receipt.get("backupRetained") is True and receipt.get("originalResponsibilityRecreated") is False
@@ -393,7 +397,7 @@ class Fleet:
         if (self.faults or self.bucket_record_faults) and not failures:
             try:
                 self.stop()
-                if self.runtime_profile == "bounded-capacity":
+                if self.runtime_profile in {"bounded-capacity", "journal-bounded"}:
                     for node in self.reserved:
                         self.record("bounded-filler-recovery", {"node": node, **self.remote(
                             node, "bounded-volumes-release", quiescent=True)})

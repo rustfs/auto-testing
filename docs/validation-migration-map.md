@@ -1853,3 +1853,18 @@ are execution prerequisites: F07's six branches on both H1 and H2, including
 bounded write failure and full retained-responsibility diagnostics/rescan,
 remain required. Automatic coverage remains 134/158 with 24 Heal executors
 outstanding; no canonical fleet PASS is added by these changes.
+
+F07 also has a dedicated `journal-bounded` runtime using the existing
+fixed 128-MiB-per-drive filesystem backend. Only fixed block exhaustion is
+accepted for this profile; caller-supplied limits, arbitrary paths, inode
+faults, root admissions and MRF payload mutations are rejected. The candidate
+receives verified private service bindings on the same four original physical
+drives, with scanner/MRF/automatic repair disabled. Exact checkpoint reads use
+those actual bounded views, and capacity witnesses retain the original process
+birth, namespace, UID, device and precise ENOSPC result. Filler is released
+before registered journal rescue; failed release retains all namespaces.
+Six new boundary regressions pass. The complete local suite now executes
+490 tests with eight macOS skips. Linux `38110756752` independently confirms
+the preceding captured-generation implementation executed all 484 tests
+without skips and all six checks passed. No bounded-journal live execution or
+complete F07 executor is claimed yet.

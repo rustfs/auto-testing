@@ -449,5 +449,57 @@ class DurableRecordFaultTests(unittest.TestCase):
             self.assertEqual(recovery["cleanup"], "FAIL")
             self.assertTrue(recovery["errors"][0]["namespacesRetained"])
 
+    def test_bounded_journal_census_reads_verified_candidate_views_and_rejects_other_families(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+            root = Path(temp).resolve(); owner, request, _, raw = self.fixture(root)
+            owner["runtimeProfile"] = "journal-bounded"
+            request = {key: request[key] for key in ("runId", "family", "taskId")}; request["action"] = "journal-census"
+            with patch.object(fleet_node, "owned", return_value=(root, ['/original/unbound-root'], owner)), \
+                 patch.object(fleet_node, "volume_views", return_value=[root]) as views, \
+                 patch.object(fleet_node, "digest", return_value=owner['binarySha256']), \
+                 patch.object(fleet_node, "fault_module", return_value=fault), patch.object(fleet_node, "stopped"), \
+                 patch.dict(fleet_node.__dict__, journal_fault_backend=journal):
+                result = fleet_node.journal_operation(request)
+                self.assertEqual(base64.b64decode(next(row for row in result['records'] if row['present'])['rawBase64']), raw)
+                views.assert_called_once()
+                for family in ('root', 'mrf'):
+                    with self.subTest(family=family), self.assertRaises(ValueError):
+                        fleet_node.journal_operation({**request, 'family': family})
+
+    def test_bounded_journal_cleanup_releases_filler_before_rescue_and_preserves_failed_release(self):
+        for failed in (False, True):
+            with tempfile.TemporaryDirectory() as temp:
+                fleet = Fleet(['node'], Path(temp), 'gh-12345-1-h1', runtime_profile='journal-bounded')
+                fleet.reserved = ['node']; fleet.journal_faults.append(('node', {'faultId': 'F07-checkpoint-0'}))
+                actions = []
+                def remote(node, action, **params):
+                    actions.append(action)
+                    if action == 'bounded-volumes-release':
+                        self.assertTrue(params['quiescent'])
+                        if failed: raise ValueError('owned filesystem identity changed')
+                    if action == 'journal-recover':
+                        return {'backupRetained': True, 'originalResponsibilityRecreated': False, 'productRepairClaimed': False}
+                    return {}
+                with patch.object(fleet, 'remote', side_effect=remote): self.assertEqual(fleet.cleanup(), not failed)
+                if failed:
+                    self.assertNotIn('journal-recover', actions); self.assertNotIn('cleanup', actions)
+                    self.assertTrue(fleet.journal_faults)
+                else:
+                    self.assertLess(actions.index('bounded-volumes-release'), actions.index('journal-recover'))
+                    self.assertLess(actions.index('journal-recover'), actions.index('cleanup'))
+
+    def test_bounded_remote_journal_and_cleanup_embed_the_exact_capacity_backend(self):
+        with tempfile.TemporaryDirectory() as temp, patch('scripts.validation_heal.healthy.subprocess.run',
+                return_value=types.SimpleNamespace(returncode=0, stdout='{}', stderr='')) as command:
+            fleet = Fleet(['node'], Path(temp), 'gh-12345-1-h1', runtime_profile='journal-bounded')
+            for action in ('journal-census', 'cleanup'):
+                fleet.remote('node', action, family='checkpoint', taskId=self.token)
+                source = command.call_args.kwargs['input'].rsplit('\nmain(', 1)[0]
+                scope = {'__name__': 'bounded_journal_remote'}
+                exec(compile(source, 'bounded-journal-remote', 'exec'), scope)
+                self.assertTrue(callable(scope['volume_module']().views))
+                self.assertTrue(callable(scope['volume_module']().dispose))
+                if action == 'journal-census': self.assertTrue(callable(scope['journal_fault_backend'].census))
+
 
 if __name__ == "__main__": unittest.main()

@@ -177,12 +177,14 @@ def transform(raw, request, owner, mrf, *, earlier=None):
 
 
 def binding(root_fd, request, owner, fault):
-    require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash"}, "journal mutation requires an owned recovery runtime")
+    require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash", "journal-bounded"}, "journal mutation requires an owned recovery runtime")
     require(owner["runId"] == request["runId"] and type(request.get("disk")) is int and 0 <= request["disk"] < 4,
             "journal run or disk identity differs")
     identifier = request.get("faultId")
     require(isinstance(identifier, str) and re.fullmatch(r"F07-[a-z0-9-]{1,48}", identifier), "journal fault identity is invalid")
     path = relative(request)
+    require(owner.get("runtimeProfile") != "journal-bounded" or request["family"] == "checkpoint",
+            "bounded journal mutation cannot target root admissions or MRF payloads")
     require(request["family"] == "checkpoint" and path[-1] == task_id(request["taskId"]) + "_ahm_checkpoint.json"
             or request["family"] == "root" and path[-1] == "root-heal-" + task_id(request["taskId"]) + ".json"
             or request["family"] == "mrf" and re.fullmatch(r"\.heal-mrf-snapshot\.[01]\.bin", path[-1]),

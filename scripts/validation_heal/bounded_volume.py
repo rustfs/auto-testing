@@ -69,6 +69,8 @@ def read(state, roots, owner):
             and value.get("imageBytes") == IMAGE_BYTES and value.get("maxInodes") == MAX_INODES
             and len(value.get("volumes", [])) == len(roots) == 4,
             "bounded-volume contract differs from its original run")
+    require(owner.get("runtimeProfile") != "journal-bounded" or value["branch"] == "bounded-volume-enospc",
+            "bounded journal runtime has no reviewed inode-exhaustion branch")
     for index, row in enumerate(value["volumes"]):
         require(type(row.get("disk")) is int and row["disk"] == index and row.get("image") == str(roots[index] / "bounded-volume.img")
                 and row.get("mount") == str(state / "bounded" / f"disk{index}")
@@ -108,8 +110,10 @@ def mounted(row):
 
 
 def create(state, roots, owner, branch):
-    require(owner.get("runtimeProfile") == "bounded-capacity" and read(state, roots, owner) is None
+    require(owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"} and read(state, roots, owner) is None
             and branch in {"bounded-volume-enospc", "bounded-inode-exhaustion"}, "invalid bounded capacity allocation")
+    require(owner.get("runtimeProfile") != "journal-bounded" or branch == "bounded-volume-enospc",
+            "bounded journal allocation accepts only fixed block exhaustion")
     require(all(not any((root / "data").iterdir()) and not (root / "bounded-volume.img").exists()
                 and shutil.disk_usage(root).free >= MIN_SHARED_FREE + IMAGE_BYTES for root in roots),
             "bounded allocation requires empty owned roots and shared-drive safety margin")
@@ -155,7 +159,7 @@ def create(state, roots, owner, branch):
 def views(state, roots, owner):
     value = read(state, roots, owner)
     if value is None:
-        require(owner.get("runtimeProfile") != "bounded-capacity", "bounded runtime has no durable allocation intent")
+        require(owner.get("runtimeProfile") not in {"bounded-capacity", "journal-bounded"}, "bounded runtime has no durable allocation intent")
         return roots
     result = []
     for original, row in zip(roots, value["volumes"], strict=True):
@@ -177,7 +181,7 @@ def views(state, roots, owner):
 
 def properties(state, roots, owner):
     if read(state, roots, owner) is None:
-        require(owner.get("runtimeProfile") != "bounded-capacity", "bounded runtime is not configured")
+        require(owner.get("runtimeProfile") not in {"bounded-capacity", "journal-bounded"}, "bounded runtime is not configured")
         return []
     actual = views(state, roots, owner)
     return ["--property=PrivateMounts=true", "--property=BindPaths=" + " ".join(
