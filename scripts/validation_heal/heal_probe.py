@@ -259,9 +259,9 @@ class Probe:
         with observation_phase(observation, 'requestPreparation'):
             validate_binding(self.binding)
             quota_path = path.startswith("/rustfs/admin/v3/quota/")
-            quota_stats_path = path.startswith("/rustfs/admin/v3/quota-stats/")
+            quota_config_path = path == "/rustfs/admin/v3/get-bucket-quota"
             pool_path = path in {"/rustfs/admin/v3/pools/list", "/rustfs/admin/v3/pools/status"}
-            require(path.startswith("/rustfs/admin/v3/heal/") or quota_path or quota_stats_path or pool_path or path in {
+            require(path.startswith("/rustfs/admin/v3/heal/") or quota_path or quota_config_path or pool_path or path in {
                 "/rustfs/admin/v3/background-heal/status", "/rustfs/admin/v4/heal/replacement-recovery",
                 "/rustfs/admin/v3/info"}, "only bounded Heal evidence routes are allowed")
             if path == "/rustfs/admin/v3/info":
@@ -287,11 +287,11 @@ class Probe:
                             and quota["quota_type"] == "HARD" and type(quota["quota"]) is int
                             and quota["quota"] in {1024**2, 256 * 1024**2},
                             "quota mutation is outside the two registered I02 limits")
-            if quota_stats_path:
-                bucket = path.removeprefix("/rustfs/admin/v3/quota-stats/")
-                bucket_allowed(self.binding, bucket)
-                require(method == "GET" and not query and body == b"" and auth == "signed",
-                        "owned quota-stats evidence requires an exact signed read-only GET")
+            if quota_config_path:
+                require(method == "GET" and len(query) == 1 and len(query[0]) == 2
+                        and query[0][0] == "bucket" and body == b"" and auth == "signed",
+                        "owned quota config requires an exact signed read-only GET")
+                bucket_allowed(self.binding, query[0][1])
             require("?" not in path and "#" not in path and len(body) <= 2 * 1024**2,
                     "invalid Admin path or body budget")
             require(not any(part in {".", ".."} for part in unquote(path).split("/")),

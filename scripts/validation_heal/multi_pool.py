@@ -11,7 +11,6 @@ import re
 import secrets
 import signal
 import sys
-import time
 
 try:
     from .heal_probe import Probe, compare_inventories, payload, require, save
@@ -53,6 +52,10 @@ REFERENCE = {'candidateCommit': SELECTOR_REFERENCE['candidateCommit'], 'selector
     'placement': 'observe actual full-set XL2/version authority; no assumed pool hash or internal PUT selector',
     'scope': 'pool selector must match admitted pool; an unrestricted set may be null in the raw receipt, with independent exact physical binding',
     'control': 'unselected defects stay missing before any target GET or rescue; repair them in independent tasks only after proof'}
+REFERENCE['quotaConfig'] = {'sourceFile': 'rustfs/src/admin/handlers/quota.rs',
+    'sourceSha256': '6a2b062d3d1c4cd81d934c570d21cb44dcd2c1883f6a85d2265e01b466924f5c',
+    'route': '/rustfs/admin/v3/get-bucket-quota', 'query': 'one exact owned bucket',
+    'assertion': 'unchanged no-quota config on every original peer; no authoritative usage claim'}
 
 
 def fixture_call(recorder, ledger, operation, params, body=None):
@@ -302,38 +305,21 @@ def pool_status(probe, fleet, endpoint_expressions, label):
     return [{name: row[name] for name in ('id', 'cmdline', 'status', 'totalSize')} for row in values]
 
 
-def quota_usage_ready(probe, fleet, bucket, label):
-    """Wait for the server's authoritative usage snapshot before reading config."""
-    deadline = time.monotonic() + 30
-    attempts = 0
-    while True:
-        attempts += 1
-        value = fleet.record(label + '-readiness', probe.admin(
-            '/rustfs/admin/v3/quota-stats/' + bucket, [], b'', method='GET'))
-        response = value.get('response') or {}
-        if value.get('httpStatus') == 200:
-            require(response.get('bucket') == bucket and type(response.get('current_usage')) is int
-                    and response.get('current_usage') >= 0,
-                    'H06 quota readiness returned an invalid owned-bucket usage snapshot')
-            return {'bucket': bucket, 'currentUsage': response['current_usage'], 'attempts': attempts}
-        require(value.get('httpStatus') == 503
-                and isinstance(response, str)
-                and 'authoritative bucket usage is not available yet' in response,
-                'H06 quota readiness returned an unreviewed response')
-        require(time.monotonic() < deadline, 'H06 authoritative bucket usage did not become ready within 30 seconds')
-        time.sleep(1)
-
-
 def quota_status(probe, fleet, buckets, label):
+    # Scanner stays disabled to preserve unselected defects. The reviewed
+    # config-only route checks bucket existence and reads persisted policy
+    # without requiring a scanner usage snapshot or reading target objects.
     result = {}
     for bucket in buckets:
-        quota_usage_ready(probe, fleet, bucket, label)
-        value = fleet.record(label, probe.admin('/rustfs/admin/v3/quota/' + bucket, [], b'', method='GET'))
-        response = value.get('response') or {}
-        require(value.get('httpStatus') == 200 and response.get('bucket') == bucket
-                and response.get('quota') is None and response.get('quota_type') == 'HARD',
-                'H06 changed the owned bucket quota or queried a different logical bucket')
-        result[bucket] = {name: response[name] for name in ('bucket', 'quota', 'quota_type')}
+        for endpoint in probe.binding['endpoints']:
+            value = fleet.record(label, Probe(probe.binding, endpoint).admin(
+                REFERENCE['quotaConfig']['route'], [('bucket', bucket)], b'', method='GET'))
+            response = value.get('response')
+            require(value.get('httpStatus') == 200 and isinstance(response, dict)
+                    and set(response) == {'quota', 'size', 'rate', 'requests'}
+                    and all(type(response[name]) is int and response[name] == 0 for name in response),
+                    'H06 changed the owned bucket quota or queried a different logical bucket')
+            result[bucket] = dict(response)
     return result
 
 

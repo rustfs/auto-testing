@@ -84,18 +84,39 @@ class MultiPoolTests(unittest.TestCase):
         self.assertEqual(runtime_config('multi-pool')['RUSTFS_STORAGE_CLASS_STANDARD'], 'EC:2')
         with self.assertRaises(ValueError): volumes('gh-123-1-h2')
 
-    def test_quota_status_waits_for_authoritative_usage_before_reading_config(self):
+    def test_quota_status_reads_exact_owned_config_on_every_peer_without_scanner(self):
         probe, fleet = Mock(), Mock()
+        probe.binding = {'endpoints': {'node1': 'a', 'node2': 'b', 'node3': 'c', 'node4': 'd'}}
         fleet.record.side_effect = lambda label, value: value
-        probe.admin.side_effect = [
-            {'httpStatus': 503, 'response': '<Error><Message>authoritative bucket usage is not available yet</Message></Error>'},
-            {'httpStatus': 200, 'response': {'bucket': self.buckets[0], 'current_usage': 0}},
-        ]
-        with patch.object(runner.time, 'sleep') as sleep:
-            ready = runner.quota_usage_ready(probe, fleet, self.buckets[0], 'quota')
-        self.assertEqual(ready['attempts'], 2)
-        self.assertEqual(probe.admin.call_args_list[0].args[0], '/rustfs/admin/v3/quota-stats/' + self.buckets[0])
-        sleep.assert_called_once_with(1)
+        config = {'quota': 0, 'size': 0, 'rate': 0, 'requests': 0}
+        with patch.object(runner, 'Probe') as peers:
+            peers.return_value.admin.return_value = {'httpStatus': 200, 'response': config}
+            self.assertEqual(runner.quota_status(probe, fleet, self.buckets, 'quota'),
+                             {bucket: config for bucket in self.buckets})
+        self.assertEqual(peers.call_count, 8)
+        self.assertEqual([call.args[1] for call in peers.call_args_list], list(probe.binding['endpoints']) * 2)
+        self.assertEqual(peers.return_value.admin.call_count, 8)
+        for index, call in enumerate(peers.return_value.admin.call_args_list):
+            self.assertEqual(call.args, ('/rustfs/admin/v3/get-bucket-quota',
+                                         [('bucket', self.buckets[index // 4])], b''))
+            self.assertEqual(call.kwargs, {'method': 'GET'})
+
+    def test_quota_config_rejects_changed_limits_bool_and_peer_refusal(self):
+        probe, fleet = Mock(), Mock()
+        probe.binding = {'endpoints': {'node1': 'a', 'node2': 'b'}}
+        fleet.record.side_effect = lambda label, value: value
+        good = {'httpStatus': 200, 'response': {'quota': 0, 'size': 0, 'rate': 0, 'requests': 0}}
+        for drift in ('limit', 'bool', 'soft', 'missing', 'http', 'usage'):
+            changed = copy.deepcopy(good)
+            if drift == 'limit': changed['response'].update(quota=1024, size=1024, quotatype='hard')
+            elif drift == 'bool': changed['response']['quota'] = False
+            elif drift == 'soft': changed['response']['quotatype'] = 'soft'
+            elif drift == 'missing': changed['response'].pop('requests')
+            elif drift == 'http': changed['httpStatus'] = 503
+            else: changed['response'] = {'bucket': self.buckets[0], 'quota': None, 'quota_type': 'HARD'}
+            with self.subTest(drift=drift), patch.object(runner, 'Probe') as peers:
+                peers.return_value.admin.side_effect = [good, changed]
+                with self.assertRaises(ValueError): runner.quota_status(probe, fleet, self.buckets, 'quota')
 
     def test_h5_pool_observations_accept_only_exact_signed_get_queries(self):
         binding = {'schemaVersion': 1, 'runId': 'gh-123-1-h5', 'jumpHostOnly': True, 'exclusiveHealService': True,
