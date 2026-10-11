@@ -262,9 +262,18 @@ mod tests {
                 .find(|version| version.version_id == Some(DESTINATION.parse().unwrap()))
                 .unwrap();
             if deleted {
-                info.deleted = true;
+                // A deleted payload with erasure geometry is purge-pending,
+                // not a canonical delete marker in the candidate codec.
+                info = FileInfo {
+                    version_id: info.version_id,
+                    mod_time: info.mod_time,
+                    deleted: true,
+                    ..Default::default()
+                };
             } else {
-                info.parts[0].etag = "different-payload-ack".to_owned();
+                // Single-part ETags are not stored in PartETags. Change a
+                // durable part field so the rejection input survives load.
+                info.parts[0].size -= 1;
             }
             meta.add_version(info).unwrap();
             assert!(
@@ -275,7 +284,8 @@ mod tests {
                     SOURCE,
                     DESTINATION
                 )
-                .is_err()
+                .is_err(),
+                "incompatible destination was accepted (delete_marker={deleted})"
             );
         }
     }
