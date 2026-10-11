@@ -1092,6 +1092,22 @@ def cleanup(request):
     return {"cleanup": "PASS", "unitStopped": True, "rootsRemoved": True, "hostname": owner["hostname"]}
 
 
+def namespace_state(request):
+    """Inspect one exact run namespace without requiring its owner marker."""
+    require(set(request) == {"runId", "action"}, "namespace inspection accepts only the run ID")
+    state, roots = paths(request["runId"])
+    service = {}
+    for field in ("LoadState", "ActiveState", "SubState", "MainPID"):
+        service[field] = command("systemctl", "show", "-p", field, "--value",
+                                 unit(request["runId"]), check=False).stdout.strip()
+    return {"runId": request["runId"], "service": service,
+            "state": {"path": str(state), "exists": state.exists(),
+                      "ownerMarker": (state / "owner.json").is_file()},
+            "roots": [{"path": str(root), "exists": root.exists(),
+                       "ownerMarker": (root / "owner.json").is_file(),
+                       "data": (root / "data").is_dir()} for root in roots]}
+
+
 def audit_finalize(request):
     """Finalize only an invalid-ID rejection proved identical to its archived pre-fault scene."""
     _, _, owner = owned(request["runId"])
@@ -1256,6 +1272,7 @@ def replacement_records(request):
 def main(request):
     require(os.geteuid() == 0, "node adapter requires passwordless sudo")
     actions = {"preflight": preflight, "reserve": reserve, "start": start, "stop": stop, "snapshot": snapshot,
+               "namespace-state": namespace_state,
                "mrf-records": mrf_records,
                "logs": logs, "cleanup": cleanup, "audit-finalize": audit_finalize, "install-inspector": install_inspector,
                "apply-fault": apply_fault, "recover-fault": recover_fault, "verify-part": verify_part, "verify-parts": verify_parts,

@@ -65,6 +65,7 @@ class QuotaRecoveryTests(unittest.TestCase):
             scope = {"__name__": "validation_remote_recovery"}
             exec(compile(source, "standalone-recovery", "exec"), scope)
             self.assertTrue(callable(scope["quota_audit_finalize"]))
+            self.assertTrue(callable(scope["namespace_state"]))
             self.assertTrue(callable(scope["quorum_gate_backend"].release))
             self.assertTrue(callable(scope["replacement"].attest))
             self.assertTrue(callable(scope["network_gate_backend"].release))

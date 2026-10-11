@@ -256,6 +256,18 @@ def main():
         if plan.get("buckets"):
             fleet.snapshot_buckets = plan["buckets"]
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
+        states = [fleet.record("namespace-state", {"node": node,
+            **fleet.remote(node, "namespace-state")}) for node in plan["nodes"]]
+        if all(not item["state"]["exists"] and not any(root["exists"] for root in item["roots"])
+               for item in states):
+            for item in states:
+                fleet.record("already-clean", {"node": item["node"], "cleanup": "PASS",
+                    "unitStopped": item["service"].get("MainPID", "0") in {"", "0"},
+                    "rootsRemoved": True})
+            complete.append({"failedRunId": args.failed_run_id, "runId": plan["runId"],
+                             "cleanup": "PASS", "originalVerdictRewritten": False,
+                             "alreadyClean": True})
+            continue
         current = fleet.snapshot("audited-physical-scene", quiescent=True)
         require(recovery_scene_matches(current, plan),
                 "retained fleet drifted from its exact archived scene; no recovery performed")

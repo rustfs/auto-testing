@@ -36,6 +36,7 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(select(perf.CASE_ID)[0]["variants"], list(perf.BRANCHES))
         self.assertIn(perf.CASE_ID, AUTOMATIC_CASES)
         self.assertEqual([phase["mode"] for phase in perf.schedule()], list("ABBAABBAABBA"))
+        self.assertGreaterEqual(perf.PROTOCOL["faultLeaseMinutes"], 120)
         with self.assertRaises(ValueError): perf.schedule({**perf.PROTOCOL, "maxErrorRate": 1})
 
     def test_nearest_rank_percentiles_keep_the_slowest_request(self):

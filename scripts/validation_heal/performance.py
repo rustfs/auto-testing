@@ -45,6 +45,10 @@ except ImportError:
 
 CASE_ID = "heal.performance-abba"
 BRANCHES = ("abba-repeat-1", "abba-repeat-2", "abba-repeat-3")
+# The twelve fixed phases run close to the original 45-minute lease once
+# physical snapshots and remote cleanup are included. Keep the fault lease
+# alive for the whole candidate-bound run and leave room for final evidence.
+FAULT_LEASE_MINUTES = 120
 # These are acceptance gates chosen before deployment, not results derived
 # from the measured candidate. Changing one requires a new immutable run.
 PROTOCOL = {"groups": 3, "order": ["A", "B", "B", "A"], "secondsPerPhase": 30,
@@ -58,6 +62,7 @@ PROTOCOL = {"groups": 3, "order": ["A", "B", "B", "A"], "secondsPerPhase": 30,
     "minimumRepairMiBPerSecond": .001, "maxProcessCpuCores": 2.5,
     "maxProcessRssBytes": 2800 * 1024**2, "maxProcessFDs": 4096,
     "metricsIntervalSeconds": 2, "repairDeadlineSeconds": 300,
+    "faultLeaseMinutes": FAULT_LEASE_MINUTES,
     "cachePolicy": "same original four roots; restart every phase; fixed warmup; no host cache eviction",
     "latencyScope": "collector scheduled admission through complete SDK response/body; includes queue delay and errors",
     "retryPolicy": "no retries; every scheduled GET and PUT remains in the denominator",
@@ -354,7 +359,7 @@ def run(args, nodes):
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
     binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,
-        "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat(), "bucketPrefix": bucket,
+        "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=FAULT_LEASE_MINUTES)).isoformat(), "bucketPrefix": bucket,
         "endpoints": {f"node{index}": f"http://rustfs-node{index}:9000" for index in range(1, 5)},
         "defaultEndpoint": "node1", "candidateCommit": candidate["source_sha"], "harnessCommit": args.testing_commit,
         "candidatePackageSha256": candidate["package_sha256"], "candidateBinarySha256": args.binary_sha,
