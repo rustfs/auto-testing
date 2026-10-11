@@ -108,6 +108,14 @@ def expected_reads(snapshot, node, relative):
     return result
 
 
+def partition_snapshot(fleet, plan, label):
+    """Keep every physical member while attesting each actual process state."""
+    offline = set(plan['offlineNodes'])
+    require(offline <= set(fleet.nodes), 'quorum snapshot has a foreign stopped node')
+    return fleet.record(label, {node: fleet.remote(node, 'snapshot', quiescent=node in offline)
+                               for node in fleet.nodes})
+
+
 def validate_gate_witness(observed, plan, online):
     require(set(observed) == set(online), "quorum probe omitted an available candidate")
     rows = [(node, row) for node, sample in observed.items() for row in sample["disks"]]
@@ -240,7 +248,7 @@ def run_branch(args, topology, nodes, branch):
                 expectedReads=expected_reads(original, node, relative)) for node in online})
             return validate_gate_witness(raw, plan, online)
         fleet.record("quorums-before-operations", witness("service-quorum-before"))
-        require(physical_content(faulted) == physical_content(fleet.snapshot("physical-before-operations")),
+        require(physical_content(faulted) == physical_content(partition_snapshot(fleet, plan, "physical-before-operations")),
                 "quorum loss changed the fault before its negative operations")
         read = fleet.record("read-without-write-admission", probe.s3("get_object", {"Bucket": bucket, "Key": selected["key"]}))
         require(read.get("acknowledged") is True and read.get("resultUnknown") is False

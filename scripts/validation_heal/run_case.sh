@@ -30,6 +30,7 @@ case "${case_id}" in
   heal.mrf-offline-write-replay) driver=mrf_replay.py ;;
   heal.performance-abba) driver=performance.py ;;
   heal.admin-scope-isolation) driver=scopes.py ;;
+  heal.admin-option-contract) driver=options.py ;;
   heal.bucket-metadata-integrity) driver=bucket_metadata.py ;;
   heal.disk-replacement-unformatted) driver=unformatted.py ;;
   heal.below-write-quorum) driver=write_quorum.py ;;

@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 132 currently dispatchable IDs include all 74 non-Heal cases and fifty-eight Heal cases. Forty-nine have complete canonical live PASS evidence; the other 109 have no live PASS claim.
+case evidence. The 133 currently dispatchable IDs include all 74 non-Heal cases and fifty-nine Heal cases. Forty-nine have complete canonical live PASS evidence; the other 109 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,7 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 32 Heal cases remain
+The other 25 Heal cases remain
 operator-assisted and are not claimed as migrated automatic executors.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
@@ -1624,3 +1624,48 @@ VersionId calls and complete shared-conversion/seed recovery with retained
 original metadata, parts and commitments. The updated complete local suite
 passes 399 tests with eight macOS skips; C10 now has 22 tests. Its queued live
 plan is updated to this corrected revision before fleet dispatch.
+
+
+A10 now dispatches all nine source option branches on H1/H2, with fresh DB and
+DV namespaces for both baseline and selected requests: 72 distinct instances.
+Each pair changes only the reviewed option, or the inseparable pool/set
+selector pair. The exact candidate Admin/selector source hashes and supported
+fields are recorded in the contract; this is API coverage, not an rc claim.
+H2 scope probes use two actual eight-drive sets across the original four
+nodes. Recursive probes include a child prefix, an adjacent prefix and outside
+controls; selectors bind each ACK version to its measured physical set.
+Every historical version and marker must have complete, exact responsibility,
+truthful counters and retained settings. `readRepair=true` and invalid selectors
+must return HTTP 400 `InvalidArgument`, leave no active responsibility and
+preserve both missing and bitflipped control parts.
+
+The remove pair reuses C10 descriptor capture, complete original-member census,
+post-DELETE authority and safe recovery. Both DB and DV delete every original
+target generation through separately recorded S3 ACKs, prove no live metadata
+or payload reference, then replay only one owned data directory. Both phases
+use the same data-only fault; only `remove` changes. Product physical and all
+peer S3 checks precede recovery. An accepted parameter which fails its registered
+physical behavior remains FAIL; it is never counted as default repair or as
+option rejection. Unknown, wrong or duplicate mutation ACKs and incomplete
+post-DELETE restoration retain DIRTY namespaces. This executor has 18 local
+contract tests and still requires canonical live evidence.
+
+B08 live run `38104014806` remains FAIL with cleanup PASS: both write-loss
+branches produced incomplete target identities; H2 lock loss also failed a
+snapshot that incorrectly required a live PID on stopped peers. The collector
+now attests online processes normally and reads every stopped original member
+only with the quiescent check. Two regressions retain all physical members and
+reject foreign stopped-node bindings. No quorum or identity assertion changed.
+A new immutable live run is required; the old failure stays visible.
+
+The current flapping/MRF queue retains `38104306522` and `38104630791` as
+canonical FAIL with cleanup PASS. F03 drive-offline observation, MRF admission
+and source ownership checks failed. E03 offline PUT and marker branches passed,
+but its exact offline version DELETE had no committed durable MRF responsibility
+within the registered window. These partial results do not add canonical PASS.
+All six checks passed at `23953a96b7c565da3bee9f7c9442d803ba9ab7cc`; Linux run
+`38104493427` executed all 399 then-current tests without skips. The current
+A10/B08 local suite passes 419 tests with eight macOS skips. There are now 133
+automatic executors (74 non-Heal, 59 Heal), 25 remaining Heal executors and
+49/158 complete canonical live PASS results. All original 158 IDs/hashes and
+84/301/532 Heal recipes/branches/topology templates remain unchanged.

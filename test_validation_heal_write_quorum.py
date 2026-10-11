@@ -15,6 +15,25 @@ import test_validation_heal as oracle
 class WriteQuorumTests(unittest.TestCase):
     contract = {"recognized": True, "writeQuorumRule": "data-plus-one-if-equal-parity"}
 
+    def test_partition_snapshot_keeps_stopped_members_and_attests_online_processes(self):
+        import types
+        calls = []
+        def remote(node, action, **params):
+            calls.append((node, action, params))
+            return {'files': [node], 'formats': [node]}
+        fleet = types.SimpleNamespace(nodes=['n0', 'n1', 'n2', 'n3'], remote=remote,
+                                      record=lambda label, value: value)
+        result = executor.partition_snapshot(fleet, {'offlineNodes': ['n2', 'n3']}, 'partition')
+        self.assertEqual(set(result), set(fleet.nodes))
+        self.assertEqual(calls, [(node, 'snapshot', {'quiescent': node in {'n2', 'n3'}}) for node in fleet.nodes])
+        self.assertEqual(result['n2']['formats'], ['n2'])
+
+    def test_partition_snapshot_rejects_foreign_process_bindings_before_reading(self):
+        import types
+        def forbidden(*args, **params): self.fail('foreign partition performed a node operation')
+        fleet = types.SimpleNamespace(nodes=['n0'], remote=forbidden, record=forbidden)
+        with self.assertRaises(ValueError): executor.partition_snapshot(fleet, {'offlineNodes': ['foreign']}, 'partition')
+
     def scene(self, total=4, branch=executor.BRANCHES[0]):
         source = oracle.HealReadQuorumBoundaryTest()
         snapshot, expected = source.scene(total=total, data=total // 2)
