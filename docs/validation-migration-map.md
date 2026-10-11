@@ -1385,5 +1385,17 @@ must redeem its actual VersionId, bytes, metadata and tags on every peer.
 Foreign rules, lost expiry guards, unknown ACKs or failed recovery retain DIRTY
 evidence. No I03 live PASS is claimed. The implementation now has 129 automatic
 executors (74 non-Heal, 55 Heal); 29 Heal executors remain. The focused suite
-contains 332 tests, including the real Linux private-network nftables gate;
+contains 333 tests, including the real Linux private-network nftables gate;
 six platform-specific tests are skipped locally on macOS.
+
+All six I03 checks passed at `7698230c53184168d0174e21e4aa34c0ca158aad`.
+The Linux gate installed, inspected and removed real kernel rules inside a
+private network namespace and rejected an injected foreign rule. The adapter
+uses nft's canonical IP/TCP payload expressions, retains exact address/port/drop
+checks, and refuses aliases with an unguarded IPv6 route before mutation.
+The serial I03 live plan binds this immutable SHA and the existing candidate
+package/tool runs; it has no live verdict yet. Current RustFS CI has runner
+shutdown failures in Workspace Test and Lint, Connect Short Credential Boundary
+and S3 Implemented Tests; their original job logs show shutdown/cancellation,
+not a completed passing check. The two optional workflow files remain the only
+RustFS changes.
