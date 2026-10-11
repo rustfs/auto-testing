@@ -1733,3 +1733,17 @@ scene and remove its private bucket/quota namespace without starting a
 service. Invoked/uncertain PUTs, changed candidate/run/versions, missing fault
 receipts or another dirty instance reject finalization. Original failure
 results remain immutable; any subsequent recovery has separate evidence.
+
+Recovery run `38107394081` rescued both exact original shards but failed
+before namespace removal because its remote finalization snapshot lacked the
+encryption attestation module. Both audited finalization actions now carry
+that dependency. An interrupted quota rescue may resume only when every
+remaining file and format matches the archived failed scene and each added
+file is one of the exact original missing shards. The original fault intents
+and backups are revalidated even for already restored bytes. Unexpected
+content, missing controls, duplicate files or another host still retain the
+namespace. Two regressions exercise remote dependency loading and every
+accepted/rejected retry scene. The fleet remains guarded until a separate
+successful recovery proves namespace removal; neither original FAIL changes.
+Linux contract run `38107374734` independently confirms all 441 tests passed
+with no skips at `e40fd9d74a902b9b9733c7bddfdc0b9d1b3f5c03`.

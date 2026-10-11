@@ -212,7 +212,7 @@ class Fleet:
         if action == "format-schema-fault":
             source += "\nimport types\nschema_faults = types.ModuleType('schema_faults')\nexec(" + repr(
                 NODE_SOURCE.with_name("schema_faults.py").read_text()) + ", schema_faults.__dict__)\n"
-        if action in {"encryption-configure", "snapshot"}:
+        if action in {"encryption-configure", "snapshot", "audit-finalize", "quota-audit-finalize"}:
             source += "\nimport types\nencryption_runtime = types.ModuleType('encryption_runtime')\nexec(" + repr(
                 NODE_SOURCE.with_name("encryption_runtime.py").read_text()) + ", encryption_runtime.__dict__)\n"
         replacement_actions = {"start", "cleanup", "audit-finalize", "quota-audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot", "format-schema-fault"}

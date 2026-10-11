@@ -134,6 +134,30 @@ def recovery_plan(artifact, failed_run, candidate):
     return plans
 
 
+def recovery_scene_matches(current, plan):
+    """A retry may contain only the exact original shards already rescued."""
+    observed = physical_content(current)
+    expected = physical_content(plan.get("failure", plan["before"]))
+    if plan.get("kind") != "owned-quota":
+        return observed == expected
+    original = physical_content(plan["before"])
+    if set(observed) != set(expected):
+        return False
+    for node, scene in observed.items():
+        if scene["formats"] != expected[node]["formats"]:
+            return False
+        files = {(entry["disk"], entry["path"]): entry for entry in scene["files"]}
+        failed = {(entry["disk"], entry["path"]): entry for entry in expected[node]["files"]}
+        before = {(entry["disk"], entry["path"]): entry for entry in original[node]["files"]}
+        if len(files) != len(scene["files"]) or not set(failed) <= set(files) <= set(before):
+            return False
+        if any(files[key] != entry for key, entry in failed.items()):
+            return False
+        if any(files[key] != before[key] for key in set(files) - set(failed)):
+            return False
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--failed-run-id", type=int, required=True)
@@ -151,7 +175,7 @@ def main():
         fleet = Fleet(plan["nodes"], args.evidence, plan["runId"])
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
         current = fleet.snapshot("audited-physical-scene", quiescent=True)
-        require(physical_content(current) == physical_content(plan.get("failure", plan["before"])),
+        require(recovery_scene_matches(current, plan),
                 "retained fleet drifted from its exact archived scene; no recovery performed")
         fleet.record("retained-service-logs", fleet.remote(plan["node"], "logs"))
         if plan.get("kind") == "owned-quota":

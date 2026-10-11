@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from scripts.validation_heal.heal_fault import bounded_fault_id
 from scripts.validation_heal.fleet_node import audit_finalize, quota_audit_finalize
-from scripts.validation_heal.recover_environment import recovery_plan
+from scripts.validation_heal.recover_environment import recovery_plan, recovery_scene_matches
 from scripts.validation_heal.capacity import release_quota
 from scripts.validation_heal.healthy import Fleet
 
@@ -68,6 +68,17 @@ class QuotaRecoveryTests(unittest.TestCase):
             self.assertTrue(callable(scope["quorum_gate_backend"].release))
             self.assertTrue(callable(scope["replacement"].attest))
             self.assertTrue(callable(scope["network_gate_backend"].release))
+            self.assertTrue(callable(scope["encryption_module"]().attest))
+
+    def test_standalone_rejected_id_finalization_loads_snapshot_backend(self):
+        import types
+        with tempfile.TemporaryDirectory() as temp, patch("scripts.validation_heal.healthy.subprocess.run",
+                return_value=types.SimpleNamespace(returncode=0, stdout='{}', stderr='')) as command:
+            Fleet(["node"], Path(temp), "gh-12345-1-h1").remote("node", "audit-finalize")
+            source = command.call_args.kwargs["input"].rsplit("\nmain(", 1)[0]
+            scope = {"__name__": "validation_remote_recovery"}
+            exec(compile(source, "standalone-recovery", "exec"), scope)
+            self.assertTrue(callable(scope["encryption_module"]().attest))
 
     def archive(self, root):
         case = "heal.enospc-inodes-and-quota"
@@ -111,6 +122,28 @@ class QuotaRecoveryTests(unittest.TestCase):
             self.assertEqual(plan["nodes"], ["node"])
             for run, value in [(12346, candidate), (12345, {**candidate, "package_sha256": "f" * 64})]:
                 with self.assertRaises(ValueError): recovery_plan(root, run, value)
+
+    def test_retry_accepts_only_original_rescued_shards_and_no_other_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            candidate, _, _ = self.archive(root)
+            plan = recovery_plan(root, 12345, candidate)[0]
+            self.assertTrue(recovery_scene_matches(plan["failure"], plan))
+            self.assertTrue(recovery_scene_matches(plan["before"], plan))
+            partial = json.loads(json.dumps(plan["failure"]))
+            partial["node"]["files"].append(plan["before"]["node"]["files"][0])
+            self.assertTrue(recovery_scene_matches(partial, plan))
+            for changed in ["format", "control", "rescued", "missing-control", "extra", "duplicate", "node"]:
+                current = json.loads(json.dumps(partial))
+                if changed == "format": current["node"]["formats"] = []
+                elif changed == "control": current["node"]["files"][0]["sha256"] = "wrong"
+                elif changed == "rescued": current["node"]["files"][1]["sha256"] = "wrong"
+                elif changed == "missing-control": current["node"]["files"].pop(0)
+                elif changed == "extra": current["node"]["files"].append({"disk": 3, "path": "foreign"})
+                elif changed == "duplicate": current["node"]["files"].append(current["node"]["files"][0])
+                else: current["foreign"] = current.pop("node")
+                with self.subTest(changed=changed):
+                    self.assertFalse(recovery_scene_matches(current, plan))
 
     def test_uncertain_workload_and_collateral_drift_always_keep_namespace(self):
         for changed in ["invoked-PUT", "unknown-ACK", "collateral", "wrong-run", "duplicate-fault", "other-retained"]:
