@@ -976,18 +976,30 @@ def journal_operation(request):
     state, roots, owner = owned(request["runId"])
     require(digest(state / "rustfs") == owner["binarySha256"], "durable-record candidate changed")
     require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash"}, "durable records require the owned recovery runtime")
-    require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected"},
+    require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected", "captureId"},
             "durable-record adapter accepts no arbitrary system paths or commands")
     module, fault = globals()["journal_fault_backend"], fault_module()
-    if request["action"] == "journal-observe":
-        require(set(request) == {"runId", "action", "family", "taskId", "expected"},
-                "live durable-record observation accepts only a process-bound exact family/task")
+    if request["action"] in {"journal-observe", "journal-capture"}:
+        fields = {"runId", "action", "family", "taskId", "expected"}
+        if request["action"] == "journal-capture":
+            fields |= {"disk", "relativePath", "faultId", "expectedBefore"}
+        require(set(request) == fields, "live durable-record observation/capture has unknown mutation or path inputs")
         before = process(request)
         expected = request.get("expected")
         require(isinstance(expected, dict) and before.get("pid", 0) > 1
                 and all(name in expected and before.get(name) == expected[name] for name in PROCESS_FIELDS),
                 "live durable-record observation lost its exact service birth or candidate")
         observed = module.stable_census(roots, request, fault)
+        if request["action"] == "journal-capture":
+            require(request["family"] == "checkpoint" and type(request["disk"]) is int and 0 <= request["disk"] < 4,
+                    "earlier checkpoint capture has no exact owned Admin record/disk")
+            selected = [row for row in observed["records"]
+                        if (row["disk"], row["relativePath"]) == (request["disk"], request["relativePath"])]
+            require(len(selected) == 1 and selected[0].get("present") is True
+                    and module.same_json({name: selected[0].get(name) for name in ("size", "sha256")}, request["expectedBefore"]),
+                    "NOT_OBSERVED: earlier checkpoint differs from its two stable process-bound reads")
+            with fault.directory(roots[request["disk"]]) as fd:
+                observed = {**module.capture(fd, request, owner, fault), "observation": observed}
         after = process(request)
         require(all(after.get(name) == before.get(name) for name in PROCESS_FIELDS),
                 "service restarted while observing exact durable records")
@@ -1245,7 +1257,7 @@ def main(request):
     actions["task-records"] = task_records
     actions["environment-capabilities"] = environment_capabilities
     actions["quota-audit-finalize"] = quota_audit_finalize
-    for action in ("journal-census", "journal-observe", "journal-apply", "journal-recover"):
+    for action in ("journal-census", "journal-observe", "journal-capture", "journal-apply", "journal-recover"):
         actions[action] = journal_operation
     for action in ('generation-capture', 'generation-install', 'generation-recover'):
         actions[action] = generation_operation

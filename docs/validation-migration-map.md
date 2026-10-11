@@ -1827,3 +1827,29 @@ verified the retained `38108127382` artifact for all three scopes. It exports
 no canonical fleet execution, individual fsync-hook, emitted barrier-log or
 physical power-loss claim. These required evidence inputs do not make the
 three incomplete canonical executors dispatchable.
+
+F07 stale-generation injection now consumes an immutable earlier checkpoint
+captured from the actual candidate process, rather than synthesizing a record.
+The capture brackets two stable exact-path reads with the original service
+birth and retains the original bytes and run/candidate/disk/device/mount/task
+binding in separate quarantine files. A later generation must prove strictly
+greater durable progress in the same incarnation, set and JSON-typed options,
+with truthful monotonic disposition counters and an original runnable cursor.
+The bounded orchestration waits for this actual advance before freezing the
+owner. Capture does not mutate product metadata and does not claim a live CAS
+barrier; the independently collected native stale-manager test retains that
+separate responsibility.
+
+Fault backups preserve the newer pre-fault generation. Rescue reinstalls that
+newer record, retains the injected older bytes and original capture, and
+refuses to overwrite any advanced or deleted product responsibility. Fleet
+cleanup now restores registered journal faults before namespace deletion;
+failed restoration marks cleanup FAIL and retains every private namespace.
+Eleven additional regressions exercise real-file capture/advance/inject/rescue,
+immutable evidence, strict JSON identities, process drift, missing or foreign
+capture proof, counter/cursor drift and retained failed cleanup. The complete
+local contract suite executes 484 tests with eight macOS platform skips. These
+are execution prerequisites: F07's six branches on both H1 and H2, including
+bounded write failure and full retained-responsibility diagnostics/rescan,
+remain required. Automatic coverage remains 134/158 with 24 Heal executors
+outstanding; no canonical fleet PASS is added by these changes.

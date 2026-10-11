@@ -109,5 +109,47 @@ class AdminCheckpointTests(unittest.TestCase):
         self.assertEqual(calls, [(reader.PATH, [], reader.OPTIONS)])
         self.assertEqual(active, [(reader.PATH, TOKEN)])
 
+    def test_earlier_capture_requires_original_bytes_bound_to_process_and_physical_owner(self):
+        observed, _, _ = self.fixture()
+        owner = reader.owned_checkpoint(observed, TOKEN, BUCKET)
+        identity = {"binarySha256": "a" * 64}
+        receipt = {"processBound": True, "originalProductBytes": True, "productMetadataMutated": False,
+            "runId": "gh-12345-1-h1", "family": "checkpoint", "taskId": TOKEN, "disk": 1,
+            "relativePath": owner["checkpoint"]["relativePath"], "faultId": "F07-early", "binarySha256": "a" * 64,
+            "captured": journal.entry(reader.bytes_of(owner["checkpoint"]))}
+        requests = []
+        fleet = SimpleNamespace(run_id=receipt["runId"], record=lambda label, value: value,
+            remote=lambda node, action, **params: requests.append((node, action, params)) or
+                (identity if action == "process" else receipt))
+        with patch.object(reader, "records", return_value=observed):
+            result = reader.capture_earlier(fleet, TOKEN, BUCKET, "F07-early")
+            self.assertEqual(result["captureId"], "F07-early")
+            self.assertEqual(requests[-1], ("node", "journal-capture", {
+                "family": "checkpoint", "taskId": TOKEN, "disk": 1, "relativePath": receipt["relativePath"],
+                "faultId": "F07-early", "expectedBefore": receipt["captured"], "expected": identity}))
+            for key, value in [("processBound", False), ("productMetadataMutated", True), ("disk", True),
+                               ("binarySha256", "b" * 64), ("captured", {"size": 3, "sha256": "a" * 64})]:
+                original = receipt[key]; receipt[key] = value
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    reader.capture_earlier(fleet, TOKEN, BUCKET, "F07-early")
+                receipt[key] = original
+
+    def test_stale_boundary_requires_actual_newer_progress_in_the_same_original_responsibility(self):
+        observed, value, _ = self.fixture()
+        earlier = reader.owned_checkpoint(observed, TOKEN, BUCKET)
+        with self.assertRaisesRegex(ValueError, "NOT_OBSERVED"): reader.after_generation(earlier, earlier)
+        value["checkpoint_time"] += 1; value["current_object_index"] += 1
+        value["admin"]["outcome"]["counters"]["processed"] += 1
+        value["admin"]["outcome"]["counters"]["unchanged"] += 1
+        observed["node"]["records"][4].update(encoded(value, signed=True))
+        current = reader.owned_checkpoint(observed, TOKEN, BUCKET)
+        reader.after_generation(current, earlier)
+        for key, new in [("disk", 2), ("node", "peer"), ("taskId", INCARNATION), ("bucketIncarnationId", TOKEN)]:
+            with self.subTest(key=key), self.assertRaises(ValueError): reader.after_generation({**current, key: new}, earlier)
+        changed = copy.deepcopy(current)
+        changed["value"]["admin"]["options"]["pool"] = False
+        changed["checkpoint"].update(encoded(changed["value"], signed=True))
+        with self.assertRaises(ValueError): reader.after_generation(changed, earlier)
+
 
 if __name__ == "__main__": unittest.main()

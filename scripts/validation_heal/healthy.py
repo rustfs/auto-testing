@@ -153,6 +153,7 @@ class Fleet:
         self.network_gates = set()
         self.generation_faults = []
         self.orphan_faults = []
+        self.journal_faults = []
         self.secret_values = set()
         self.frozen_processes = {}
         self.snapshot_buckets = None
@@ -320,6 +321,17 @@ class Fleet:
 
     def cleanup(self):
         failures = []
+        if self.journal_faults:
+            try:
+                self.stop()
+                for node, params in tuple(self.journal_faults):
+                    receipt = self.record("durable-record-recovery", {"node": node, **self.remote(node, "journal-recover", **params)})
+                    require(receipt.get("backupRetained") is True and receipt.get("originalResponsibilityRecreated") is False
+                            and receipt.get("productRepairClaimed") is False,
+                            "durable-record rescue lost the original evidence or claims product repair")
+                    self.journal_faults.remove((node, params))
+            except Exception as exc:
+                failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
         if self.orphan_faults:
             try:
                 self.stop()

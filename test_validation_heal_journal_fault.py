@@ -1,6 +1,7 @@
 """Exact durable-record corruption preserves ownership and refuses stale rescue."""
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import zlib
 from scripts.validation_heal import journal_fault as journal, heal_fault as fault, mrf_records as mrf
 from scripts.validation_heal.healthy import Fleet
 from scripts.validation_heal import fleet_node
+from scripts.validation_heal.checkpoint import OPTIONS
 
 
 class DurableRecordFaultTests(unittest.TestCase):
@@ -23,15 +25,38 @@ class DurableRecordFaultTests(unittest.TestCase):
     incarnation = "22345678-1234-4234-8234-123456789abc"
     bucket = "rv-heal-0123456789abcdef"
 
-    def checkpoint(self):
-        value = {"task_id": self.token, "schema_version": 8,
-            "admin": {"completed": False, "buckets": {self.bucket: self.incarnation}},
-            "processed_objects": ["objects/second", "objects/first"], "failed_objects": [], "skipped_objects": [],
-            "integrity_digest": None, "current_object_index": 2, "successful_objects": 2}
-        unsigned = {**value, "processed_objects": sorted(value["processed_objects"])}
+    def signed(self, value):
+        value = copy.deepcopy(value)
+        value["integrity_digest"] = None
+        unsigned = copy.deepcopy(value)
+        for name in ("processed_objects", "failed_objects", "skipped_objects"): unsigned[name].sort()
         value["integrity_digest"] = base64.b64encode(hashlib.sha256(json.dumps(unsigned,
             sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).digest()).decode()
         return json.dumps(value).encode()
+
+    def checkpoint(self, processed=2, time=100):
+        return self.signed({"task_id": self.token, "schema_version": 8, "checkpoint_time": time,
+            "current_bucket_index": 0, "current_object_index": processed,
+            "admin": {"completed": False, "buckets": {self.bucket: self.incarnation}, "options": OPTIONS,
+                "set_disk_id": "pool_0_set_0", "outcome": {"execution": {"state": "running"}, "coverage": "partial",
+                    "objects": [], "objectsTruncated": False, "counters": {"processed": processed, "healed": 1,
+                        "unchanged": processed - 1, "skipped": 0, "failed": 0, "unknown": 0,
+                        "attemptFailures": 0, "overflowed": False}}},
+            "processed_objects": [f"objects/{i}" for i in reversed(range(processed))],
+            "failed_objects": [], "skipped_objects": [], "successful_objects": processed,
+            "failed_object_count": 0, "skipped_object_count": 0, "skipped_new_versions": 0, "skipped_ilm_expired": 0,
+            "processed_bytes": processed, "total_objects": 8, "total_bytes": 8,
+            "baseline_generation": None, "baseline_known": False, "counter_unknown": False})
+
+    def stale_fixture(self, root):
+        owner, request, path, early = self.fixture(root, kind="stale-generation")
+        capture_request = {key: value for key, value in request.items() if key != "kind"}
+        capture_request["faultId"] = "F07-early"
+        with fault.directory(root) as fd: journal.capture(fd, capture_request, owner, fault)
+        newer = self.checkpoint(processed=3, time=101)
+        path.write_bytes(newer)
+        request.update(expectedBefore=journal.entry(newer), captureId=capture_request["faultId"])
+        return owner, request, path, early, newer
 
     def fixture(self, root, kind="truncate", family="checkpoint"):
         (root / "data/.rustfs.sys/buckets").mkdir(parents=True)
@@ -64,6 +89,120 @@ class DurableRecordFaultTests(unittest.TestCase):
                 self.assertEqual((root / "data/.rustfs.sys/unrelated.json").read_bytes(), b"untouched control")
                 self.assertEqual((root / "quarantine/F07-checkpoint-0.original").read_bytes(), raw)
                 self.assertEqual(len(list((root / "quarantine").glob("*.failed-*"))), 1)
+
+    def test_stale_injection_uses_original_capture_and_rescue_restores_newer_pre_fault_bytes(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+            root = Path(temp).resolve(); owner, request, path, early, newer = self.stale_fixture(root)
+            with fault.directory(root) as fd:
+                result = journal.install(fd, request, owner, fault, mrf)
+                self.assertEqual(path.read_bytes(), early)
+                self.assertEqual(result["capturedGeneration"], journal.entry(early))
+                self.assertEqual(result["before"], journal.entry(newer))
+                self.assertEqual((root / "quarantine/F07-checkpoint-0.original").read_bytes(), newer)
+                self.assertTrue(journal.recover(fd, request, owner, fault)["restoredFromBackup"])
+                self.assertEqual(path.read_bytes(), newer)
+                self.assertFalse(journal.recover(fd, request, owner, fault)["restoredFromBackup"])
+            self.assertEqual((root / "quarantine/F07-early.early.checkpoint").read_bytes(), early)
+            self.assertEqual(next((root / "quarantine").glob("*.failed-*")).read_bytes(), early)
+            self.assertEqual((root / "data/.rustfs.sys/unrelated.json").read_bytes(), b"untouched control")
+
+    def test_stale_generation_rejects_valid_digests_with_different_scopes_or_unproven_progress(self):
+        owner = {"bucket": self.bucket}
+        request = {"family": "checkpoint", "taskId": self.token, "kind": "stale-generation",
+                   "relativePath": journal.names("checkpoint", self.token)[0]}
+        current = self.checkpoint(processed=3, time=101)
+        for change in ("task", "incarnation", "options", "option-type", "set", "equal", "newer", "zero",
+                       "counter-type", "regressed-counter", "dishonest-counter", "overflow", "time", "time-type",
+                       "cursor", "cursor-type", "completed", "coverage", "schema-type"):
+            old = json.loads(self.checkpoint())
+            counters = old["admin"]["outcome"]["counters"]
+            if change == "task": old["task_id"] = str(uuid.uuid4())
+            elif change == "incarnation": old["admin"]["buckets"][self.bucket] = str(uuid.uuid4())
+            elif change == "options": old["admin"]["options"]["nolock"] = True
+            elif change == "option-type": old["admin"]["options"]["pool"] = False
+            elif change == "set": old["admin"]["set_disk_id"] = "pool_0_set_1"
+            elif change == "equal": old = json.loads(current)
+            elif change == "newer": old = json.loads(self.checkpoint(processed=4, time=102))
+            elif change == "zero": counters.update(processed=0, healed=0, unchanged=0)
+            elif change == "counter-type": counters["healed"] = True
+            elif change == "regressed-counter": counters.update(healed=2, unchanged=0)
+            elif change == "dishonest-counter": counters["unchanged"] = 0
+            elif change == "overflow": counters["overflowed"] = True
+            elif change == "time": old["checkpoint_time"] = 102
+            elif change == "time-type": old["checkpoint_time"] = True
+            elif change == "cursor": old["current_object_index"] = 4
+            elif change == "cursor-type": old["current_object_index"] = 2.0
+            elif change == "completed": old["admin"]["completed"] = True
+            elif change == "coverage": old["admin"]["outcome"]["coverage"] = "complete"
+            else: old["schema_version"] = 8.0
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                journal.transform(current, request, owner, mrf, earlier=self.signed(old))
+        self.assertEqual(journal.transform(current, request, owner, mrf, earlier=self.checkpoint()), self.checkpoint())
+
+    def test_missing_corrupt_or_foreign_capture_never_modifies_current_checkpoint(self):
+        for change in ("missing-proof", "missing-bytes", "proof", "bytes", "candidate", "device", "mount",
+                       "disk", "disk-type", "run", "task", "path", "capture-id", "same-id", "entry-type", "duplicate-key"):
+            with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+                root = Path(temp).resolve(); owner, request, path, _, newer = self.stale_fixture(root)
+                proof_path = root / "quarantine/F07-early.early.intent.json"
+                bytes_path = root / "quarantine/F07-early.early.checkpoint"
+                proof = json.loads(proof_path.read_text())
+                if change == "missing-proof": proof_path.unlink()
+                elif change == "missing-bytes": bytes_path.unlink()
+                elif change == "proof": proof_path.write_bytes(b'{"invalid":true}')
+                elif change == "bytes": bytes_path.write_bytes(b"changed product bytes")
+                elif change == "capture-id": request["captureId"] = "F07-foreign"
+                elif change == "same-id": request["captureId"] = request["faultId"]
+                elif change == "duplicate-key": proof_path.write_bytes(proof_path.read_bytes()[:-1] + b',"disk":0}')
+                else:
+                    if change == "candidate": proof["binarySha256"] = "b" * 64
+                    elif change == "device": proof["device"] = -1
+                    elif change == "mount": proof["mountId"] = 2
+                    elif change == "disk": proof["disk"] = 1
+                    elif change == "disk-type": proof["disk"] = False
+                    elif change == "run": proof["runId"] = "gh-other-1-h1"
+                    elif change == "task": proof["taskId"] = str(uuid.uuid4())
+                    elif change == "path": proof["relativePath"] = ".rustfs.sys/foreign"
+                    else: proof["captured"]["size"] = float(proof["captured"]["size"])
+                    proof_path.write_text(json.dumps(proof))
+                with fault.directory(root) as fd, self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                    journal.install(fd, request, owner, fault, mrf)
+                self.assertEqual(path.read_bytes(), newer)
+                self.assertFalse((root / "quarantine/F07-checkpoint-0.original").exists())
+
+    def test_capture_is_immutable_and_rejects_drift_without_touching_product_bytes(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+            root = Path(temp).resolve(); owner, request, path, raw = self.fixture(root)
+            request.pop("kind")
+            with fault.directory(root) as fd:
+                with self.assertRaisesRegex(ValueError, "NOT_OBSERVED"):
+                    journal.capture(fd, {**request, "expectedBefore": journal.entry(raw + b" ")}, owner, fault)
+                self.assertEqual(list((root / "quarantine").iterdir()), [])
+                captured = journal.capture(fd, request, owner, fault)
+                self.assertTrue(captured["originalProductBytes"])
+                self.assertFalse(captured["productMetadataMutated"])
+                with self.assertRaises(FileExistsError): journal.capture(fd, request, owner, fault)
+                self.assertEqual(path.read_bytes(), raw)
+
+    def test_stale_rescue_rejects_advanced_deleted_checkpoint_or_lost_capture_identity(self):
+        for change in ("advance", "delete", "capture-id", "capture-bytes", "capture-proof", "device-type"):
+            with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+                root = Path(temp).resolve(); owner, request, path, _, _ = self.stale_fixture(root)
+                with fault.directory(root) as fd:
+                    journal.install(fd, request, owner, fault, mrf)
+                    if change == "advance": path.write_bytes(self.checkpoint(processed=4, time=102))
+                    elif change == "delete": path.unlink()
+                    elif change == "capture-id": request["captureId"] = "F07-other"
+                    elif change == "capture-bytes": (root / "quarantine/F07-early.early.checkpoint").write_bytes(b"changed")
+                    elif change == "capture-proof": (root / "quarantine/F07-early.early.intent.json").unlink()
+                    else:
+                        p = root / "quarantine/F07-checkpoint-0.intent.json"
+                        intent = json.loads(p.read_text()); intent["device"] = float(intent["device"])
+                        p.write_text(json.dumps(intent))
+                    current = path.read_bytes() if path.exists() else None
+                    with self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                        journal.recover(fd, request, owner, fault)
+                    self.assertEqual(path.read_bytes() if path.exists() else None, current)
 
     def test_root_fault_requires_exact_bucket_admission_and_preserves_terminal_names(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
@@ -218,6 +357,48 @@ class DurableRecordFaultTests(unittest.TestCase):
             with patch.object(fleet_node, "process", return_value=identity), self.assertRaises(ValueError):
                 fleet_node.journal_operation({**request, "kind": "truncate"})
 
+    def test_live_capture_requires_the_same_stable_record_and_service_birth(self):
+        for changed in (None, "record", "process"):
+            with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+                root = Path(temp).resolve(); owner, request, path, raw = self.fixture(root)
+                identity = {name: name for name in fleet_node.PROCESS_FIELDS}
+                identity.update(pid=50, state="S")
+                request.pop("kind"); request.update(action="journal-capture", expected=identity)
+                if changed == "record": request["expectedBefore"] = journal.entry(raw + b" ")
+                successor = {**identity, "startTicks": 999} if changed == "process" else identity
+                with patch.object(fleet_node, "owned", return_value=(root, [root], owner)), \
+                     patch.object(fleet_node, "digest", return_value=owner["binarySha256"]), \
+                     patch.object(fleet_node, "fault_module", return_value=fault), \
+                     patch.dict(fleet_node.__dict__, journal_fault_backend=journal), \
+                     patch.object(fleet_node, "stopped", side_effect=AssertionError("capture must not stop service")), \
+                     patch.object(fleet_node, "process", side_effect=[identity, successor]):
+                    if changed:
+                        with self.subTest(changed=changed), self.assertRaises(ValueError): fleet_node.journal_operation(request)
+                    else:
+                        result = fleet_node.journal_operation(request)
+                        self.assertTrue(result["processBound"])
+                        self.assertFalse(result["serviceFrozen"])
+                        self.assertEqual(result["observation"]["independentReads"], 2)
+                        self.assertEqual(result["captured"], journal.entry(raw))
+                self.assertEqual(path.read_bytes(), raw)
+                captured = root / "quarantine/F07-checkpoint-0.early.checkpoint"
+                self.assertEqual(captured.exists(), changed != "record")
+
+    def test_non_stale_fault_cannot_consume_a_capture_and_capture_cannot_mutate_records(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+            root = Path(temp).resolve(); owner, request, path, raw = self.fixture(root)
+            with fault.directory(root) as fd, self.assertRaises(ValueError):
+                journal.install(fd, {**request, "captureId": "F07-early"}, owner, fault, mrf)
+            identity = {name: name for name in fleet_node.PROCESS_FIELDS}; identity.update(pid=50, state="S")
+            capture = {**request, "action": "journal-capture", "expected": identity}
+            with patch.object(fleet_node, "owned", return_value=(root, [root], owner)), \
+                 patch.object(fleet_node, "digest", return_value=owner["binarySha256"]), \
+                 patch.object(fleet_node, "fault_module", return_value=fault), \
+                 patch.dict(fleet_node.__dict__, journal_fault_backend=journal), self.assertRaises(ValueError):
+                fleet_node.journal_operation(capture)
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertEqual(list((root / "quarantine").iterdir()), [])
+
     def test_remote_action_loads_exact_record_and_fault_dependencies(self):
         with tempfile.TemporaryDirectory() as temp, patch("scripts.validation_heal.healthy.subprocess.run",
                 return_value=types.SimpleNamespace(returncode=0, stdout='{}', stderr='')) as command:
@@ -228,6 +409,45 @@ class DurableRecordFaultTests(unittest.TestCase):
             self.assertTrue(callable(scope["journal_fault_backend"].install))
             self.assertTrue(callable(scope["fault_module"]().read_file))
             self.assertTrue(callable(scope["mrf"].checkpoint))
+
+    def test_fleet_cleanup_restores_newer_original_before_deleting_private_namespace(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+            root = Path(temp).resolve(); owner, request, path, _, newer = self.stale_fixture(root)
+            fleet = Fleet(["node"], root, owner["runId"]); fleet.reserved = ["node"]
+            fleet.journal_faults.append(("node", request))
+            with fault.directory(root) as fd: journal.install(fd, request, owner, fault, mrf)
+            actions = []
+            def remote(node, action, **params):
+                actions.append(action)
+                if action == "journal-recover":
+                    with fault.directory(root) as fd: return journal.recover(fd, params, owner, fault)
+                if action == "cleanup": self.assertEqual(path.read_bytes(), newer)
+                return {}
+            with patch.object(fleet, "remote", side_effect=remote): self.assertTrue(fleet.cleanup())
+            self.assertLess(actions.index("stop"), actions.index("journal-recover"))
+            self.assertLess(actions.index("journal-recover"), actions.index("cleanup"))
+            self.assertEqual(fleet.journal_faults, [])
+
+    def test_fleet_cleanup_keeps_every_namespace_and_pending_fault_when_product_advanced(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(fault, "mount_id", return_value=1):
+            root = Path(temp).resolve(); owner, request, path, _, _ = self.stale_fixture(root)
+            fleet = Fleet(["node", "peer"], root, owner["runId"]); fleet.reserved = ["node", "peer"]
+            fleet.journal_faults.append(("node", request))
+            with fault.directory(root) as fd: journal.install(fd, request, owner, fault, mrf)
+            advanced = self.checkpoint(processed=4, time=102); path.write_bytes(advanced)
+            actions = []
+            def remote(node, action, **params):
+                actions.append(action)
+                if action == "journal-recover":
+                    with fault.directory(root) as fd: return journal.recover(fd, params, owner, fault)
+                return {}
+            with patch.object(fleet, "remote", side_effect=remote): self.assertFalse(fleet.cleanup())
+            self.assertNotIn("cleanup", actions)
+            self.assertEqual(path.read_bytes(), advanced)
+            self.assertEqual(fleet.journal_faults, [("node", request)])
+            recovery = json.loads(next(root.glob("*-recovery.json")).read_text())
+            self.assertEqual(recovery["cleanup"], "FAIL")
+            self.assertTrue(recovery["errors"][0]["namespacesRetained"])
 
 
 if __name__ == "__main__": unittest.main()

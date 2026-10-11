@@ -111,12 +111,51 @@ def admit(probe, fleet, active):
     return token
 
 
-def freeze(fleet, token, bucket, *, timeout=60):
+def capture_earlier(fleet, token, bucket, identifier, *, timeout=60):
+    require(type(timeout) is int and 0 < timeout <= 120, "unreviewed checkpoint capture budget")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            owner = owned_checkpoint(records(fleet, token, "Admin-checkpoint-before-capture"), token, bucket)
+            identity = fleet.record("checkpoint-capture-process", fleet.remote(owner["node"], "process"))
+            receipt = fleet.record("Admin-checkpoint-original-capture", fleet.remote(owner["node"], "journal-capture",
+                family="checkpoint", taskId=token, disk=owner["disk"], relativePath=owner["checkpoint"]["relativePath"],
+                faultId=identifier, expectedBefore=journal.entry(bytes_of(owner["checkpoint"])), expected=identity))
+            require(receipt.get("processBound") is True and receipt.get("originalProductBytes") is True
+                    and receipt.get("productMetadataMutated") is False
+                    and all(journal.same_json(receipt.get(name), value) for name, value in {
+                        "runId": fleet.run_id, "family": "checkpoint", "taskId": token, "disk": owner["disk"],
+                        "relativePath": owner["checkpoint"]["relativePath"], "faultId": identifier,
+                        "binarySha256": identity.get("binarySha256"),
+                        "captured": journal.entry(bytes_of(owner["checkpoint"]))}.items()),
+                    "checkpoint capture lost its original process, bytes or exact physical owner")
+            return {**owner, "captureId": identifier, "captureReceipt": receipt}
+        except ValueError as exc:
+            if not str(exc).startswith("NOT_OBSERVED:"): raise
+            require(time.monotonic() < deadline, "NOT_OBSERVED: actual earlier checkpoint capture exceeded its frozen budget")
+            time.sleep(.1)
+
+
+def after_generation(current, earlier):
+    require(all(journal.same_json(current.get(name), earlier.get(name))
+                for name in ("taskId", "bucket", "bucketIncarnationId", "node", "disk")),
+            "checkpoint advanced on a different original task, incarnation or physical owner")
+    require(current["value"]["admin"]["outcome"]["counters"]["processed"] >
+            earlier["value"]["admin"]["outcome"]["counters"]["processed"],
+            "NOT_OBSERVED: original checkpoint has not durably advanced past its captured generation")
+    # The same admission, counters, cursor and digest checks precede actual mutation.
+    journal.transform(bytes_of(current["checkpoint"]), {"family": "checkpoint", "taskId": current["taskId"],
+        "relativePath": current["checkpoint"]["relativePath"], "kind": "stale-generation"},
+        {"bucket": current["bucket"]}, None, earlier=bytes_of(earlier["checkpoint"]))
+
+
+def freeze(fleet, token, bucket, *, timeout=60, earlier=None):
     require(type(timeout) is int and 0 < timeout <= 120, "unreviewed checkpoint observation budget")
     deadline = time.monotonic() + timeout
     while True:
         try:
             owner = owned_checkpoint(records(fleet, token, "Admin-checkpoint-live"), token, bucket)
+            if earlier is not None: after_generation(owner, earlier)
             break
         except ValueError as exc:
             if not str(exc).startswith("NOT_OBSERVED:"): raise
@@ -133,6 +172,7 @@ def freeze(fleet, token, bucket, *, timeout=60):
     current = owned_checkpoint(records(fleet, token, "Admin-checkpoint-frozen"), token, bucket)
     require((current["node"], current["disk"], current["bucketIncarnationId"]) ==
             (owner["node"], owner["disk"], owner["bucketIncarnationId"]), "checkpoint owner changed during freeze")
+    if earlier is not None: after_generation(current, earlier)
     return current, identity
 
 

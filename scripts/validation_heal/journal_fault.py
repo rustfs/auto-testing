@@ -43,6 +43,13 @@ def entry(raw):
     return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
 
 
+def same_json(left, right):
+    # JSON scope identities distinguish booleans, integers and floating-point values.
+    def canonical(value):
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return canonical(left) == canonical(right)
+
+
 def read(root_fd, path, fault):
     with fault.parent(root_fd, ["data", *path[:-1]]) as directory:
         return fault.read_file(directory, path[-1], LIMIT * (4 if "lifecycle" in path[-1] else 1))
@@ -86,7 +93,7 @@ def decode_json(raw):
 
 def checkpoint_value(raw, token, bucket):
     value = decode_json(raw)
-    require(value.get("task_id") == task_id(token) and value.get("schema_version") == 8,
+    require(value.get("task_id") == task_id(token) and type(value.get("schema_version")) is int and value["schema_version"] == 8,
             "checkpoint does not belong to the exact original Admin task")
     admin = value.get("admin") or {}
     buckets = admin.get("buckets")
@@ -107,14 +114,45 @@ def checkpoint_value(raw, token, bucket):
     return value
 
 
-def transform(raw, request, owner, mrf):
+def transform(raw, request, owner, mrf, *, earlier=None):
     family, kind = request["family"], request.get("kind")
-    require(kind in {"truncate", "future-schema", "checksum"}, "unknown durable-record byte fault")
+    require(kind in {"truncate", "future-schema", "checksum", "stale-generation"}, "unknown durable-record byte fault")
     path = relative(request)
     if family == "checkpoint":
         require(path[-1].endswith("_ahm_checkpoint.json"), "only the exact validated Admin checkpoint may be corrupted")
         value = checkpoint_value(raw, request["taskId"], owner["bucket"])
-        require(kind in {"truncate", "future-schema"}, "checkpoint checksum is independently collected by native guards")
+        require(kind in {"truncate", "future-schema", "stale-generation"}, "checkpoint checksum is independently collected by native guards")
+        if kind == "stale-generation":
+            require(isinstance(earlier, bytes), "stale checkpoint requires an original captured earlier record")
+            old = checkpoint_value(earlier, request["taskId"], owner["bucket"])
+            require(isinstance(value["admin"].get("options"), dict) and value["admin"].get("set_disk_id") == "pool_0_set_0"
+                    and all(same_json(old["admin"].get(name), value["admin"].get(name))
+                            for name in ("buckets", "options", "set_disk_id")),
+                    "earlier checkpoint belongs to a different incarnation, set or admitted options")
+            before = old["admin"].get("outcome", {}).get("counters", {})
+            after = value["admin"].get("outcome", {}).get("counters", {})
+            fields = ("processed", "healed", "unchanged", "skipped", "failed", "unknown", "attemptFailures")
+            require(all(type(before.get(name)) is int and type(after.get(name)) is int
+                        and 0 <= before[name] <= after[name] < 2**64 for name in fields)
+                    and 0 < before["processed"] < after["processed"]
+                    and before.get("overflowed") is False and after.get("overflowed") is False,
+                    "captured checkpoint is not an earlier proven durable progress generation")
+            for checkpoint in (old, value):
+                require(type(checkpoint.get("checkpoint_time")) is int and 0 <= checkpoint["checkpoint_time"] < 2**64
+                        and all(type(checkpoint.get(name)) is int and 0 <= checkpoint[name] < 2**64
+                                for name in ("current_bucket_index", "current_object_index"))
+                        and checkpoint["admin"].get("outcome", {}).get("execution") == {"state": "running"}
+                        and checkpoint["admin"]["outcome"].get("coverage") == "partial",
+                        "stale-generation fault has no original runnable cursor/time")
+                counters = checkpoint["admin"]["outcome"]["counters"]
+                require(counters["processed"] == sum(counters[name] for name in ("healed", "unchanged", "skipped", "failed"))
+                        and counters["unknown"] <= counters["skipped"] and counters["attemptFailures"] >= counters["failed"],
+                        "stale checkpoint counters do not account for original durable dispositions")
+            require(old["checkpoint_time"] <= value["checkpoint_time"]
+                    and (old["current_bucket_index"], old["current_object_index"]) <=
+                        (value["current_bucket_index"], value["current_object_index"]),
+                    "earlier checkpoint has a future or incomparable scan position")
+            return earlier
     elif family == "root":
         require(path[-1] == "root-heal-" + task_id(request["taskId"]) + ".json" and kind == "truncate",
                 "only the exact runnable root admission may be truncated")
@@ -155,6 +193,37 @@ def binding(root_fd, request, owner, fault):
             "mountId": fault.mount_id(root_fd), "productRepairClaimed": False}
 
 
+def capture(root_fd, request, owner, fault):
+    require(request.get("family") == "checkpoint", "only an actual Admin checkpoint has an earlier progress capture")
+    identity = binding(root_fd, request, owner, fault)
+    raw = read(root_fd, relative(request), fault)
+    checkpoint_value(raw, request["taskId"], owner["bucket"])
+    require(same_json(request.get("expectedBefore"), entry(raw)), "NOT_OBSERVED: checkpoint changed before its earlier capture")
+    proof = {**identity, "captured": entry(raw), "originalProductBytes": True, "productMetadataMutated": False}
+    with fault.parent(root_fd, ["quarantine"]) as backup:
+        # Capture identity and bytes are immutable and distinct from fault backups.
+        fault.new_file(backup, identity["faultId"] + ".early.intent.json", fault.encode(proof))
+        fault.new_file(backup, identity["faultId"] + ".early.checkpoint", raw)
+    return proof
+
+
+def captured(root_fd, request, owner, fault):
+    identity = binding(root_fd, request, owner, fault)
+    identifier = request.get("captureId")
+    require(isinstance(identifier, str) and re.fullmatch(r"F07-[a-z0-9-]{1,48}", identifier)
+            and identifier != identity["faultId"] and request["family"] == "checkpoint",
+            "stale-generation capture has no separate original snapshot identity")
+    with fault.parent(root_fd, ["quarantine"]) as backup:
+        proof = decode_json(fault.read_file(backup, identifier + ".early.intent.json", 16384))
+        require(all(same_json(proof.get(name), value) for name, value in {**identity, "faultId": identifier}.items())
+                and proof.get("originalProductBytes") is True and proof.get("productMetadataMutated") is False,
+                "earlier checkpoint capture changed task, run, candidate, physical owner or record identity")
+        raw = fault.read_file(backup, identifier + ".early.checkpoint", LIMIT)
+        require(same_json(entry(raw), proof.get("captured")), "captured earlier product checkpoint bytes changed")
+        checkpoint_value(raw, request["taskId"], owner["bucket"])
+        return raw
+
+
 def replace(root_fd, path, raw, identifier, fault, *, rescue=False):
     with fault.parent(root_fd, ["data", *path[:-1]]) as directory:
         temporary = ".F07-" + identifier + (".rescue" if rescue else ".inject")
@@ -171,9 +240,13 @@ def install(root_fd, request, owner, fault, mrf):
     identity = binding(root_fd, request, owner, fault)
     path = relative(request)
     before = read(root_fd, path, fault)
-    require(request.get("expectedBefore") == entry(before), "journal bytes drifted from their archived pre-fault identity")
-    injected = transform(before, request, owner, mrf)
+    require(same_json(request.get("expectedBefore"), entry(before)), "journal bytes drifted from their archived pre-fault identity")
+    earlier = captured(root_fd, request, owner, fault) if request.get("kind") == "stale-generation" else None
+    require(earlier is not None or "captureId" not in request, "only a stale-generation fault consumes an earlier checkpoint")
+    injected = transform(before, request, owner, mrf, earlier=earlier)
     intent = {**identity, "kind": request["kind"], "before": entry(before), "injected": entry(injected)}
+    if earlier is not None:
+        intent.update(captureId=request["captureId"], capturedGeneration=entry(earlier))
     with fault.parent(root_fd, ["quarantine"]) as backup:
         fault.new_file(backup, identity["faultId"] + ".original", before)
         fault.new_file(backup, identity["faultId"] + ".intent.json", fault.encode(intent))
@@ -187,10 +260,14 @@ def install(root_fd, request, owner, fault, mrf):
 def recover(root_fd, request, owner, fault):
     identity = binding(root_fd, request, owner, fault)
     with fault.parent(root_fd, ["quarantine"]) as backup:
-        intent = json.loads(fault.read_file(backup, identity["faultId"] + ".intent.json", 16384))
-        require(all(intent.get(key) == value for key, value in identity.items()), "journal recovery lost original run/candidate/device/record identity")
+        intent = decode_json(fault.read_file(backup, identity["faultId"] + ".intent.json", 16384))
+        require(all(same_json(intent.get(key), value) for key, value in identity.items()), "journal recovery lost original run/candidate/device/record identity")
         before = fault.read_file(backup, identity["faultId"] + ".original", LIMIT * 4)
         require(entry(before) == intent["before"], "journal original backup is corrupt")
+        if intent["kind"] == "stale-generation":
+            require(intent.get("captureId") == request.get("captureId"), "stale recovery changed its original earlier snapshot")
+            require(entry(captured(root_fd, request, owner, fault)) == intent.get("capturedGeneration"),
+                    "stale recovery lost original earlier generation evidence")
         path = relative(request)
         current = read(root_fd, path, fault)
         require(entry(current) in (intent["before"], intent["injected"]),
