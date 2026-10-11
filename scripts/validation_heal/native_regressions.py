@@ -47,6 +47,23 @@ REGRESSIONS = {
         "fenceKind": "uncontrolled concurrency, not deterministic fence evidence",
         "relatedCases": ["heal.race-version-delete"],
         "limits": "does not prove a deterministic delete/repair commit fence"},
+    "conflicting-authority-guard": {
+        "test": PREFIX + "dangling_delete_guard_preserves_conflicting_identities_without_writing_metadata",
+        "sourceAssertions": ["conflicting candidates share one explicit version ID but different data directories",
+            "both original and reversed candidate order return UnsafeToDelete",
+            "explicit-version regeneration refuses both conflicting authorities",
+            "missing drives retain FileNotFound; both original data-directory identities remain"],
+        "fenceKind": "deterministic authority decision assertions in the unmodified candidate test",
+        "relatedCases": ["heal.conflicting-subquorum-authority"],
+        "limits": "controlled guard decisions; does not emit or prove a concurrent runtime commit-pause fence"},
+    "reconstructable-authority-preservation": {
+        "test": PREFIX + "heal_meta_quorum_failure_preserves_reconstructable_uncommitted_candidate",
+        "sourceAssertions": ["the actual read_all_fileinfo result is UnsafeToDelete",
+            "no_lock Heal returns typed FileNotFound without deleting the surviving metadata",
+            "surviving data-directory identity is unchanged; missing drives receive no manufactured metadata"],
+        "fenceKind": "deterministic preservation assertions in the unmodified candidate test",
+        "relatedCases": ["heal.conflicting-subquorum-authority"],
+        "limits": "separate native regression; does not certify a live split, overlap or runtime pause"},
 }
 
 

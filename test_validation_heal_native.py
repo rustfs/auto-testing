@@ -34,6 +34,16 @@ class NativeRegressionTests(unittest.TestCase):
             self.assertIn('not deterministic fence', native.REGRESSIONS[key]['fenceKind'])
         self.assertIn('cannot invent emitted barrier logs', native.REGRESSIONS['read-repair-lock-owner']['limits'])
 
+    def test_authority_guards_bind_exact_candidate_tests_without_claiming_runtime_pause(self):
+        for key, suffix in (
+                ('conflicting-authority-guard', 'dangling_delete_guard_preserves_conflicting_identities_without_writing_metadata'),
+                ('reconstructable-authority-preservation', 'heal_meta_quorum_failure_preserves_reconstructable_uncommitted_candidate')):
+            spec = native.REGRESSIONS[key]
+            self.assertEqual(spec['test'], native.PREFIX + suffix)
+            self.assertEqual(spec['relatedCases'], ['heal.conflicting-subquorum-authority'])
+            self.assertIn('deterministic', spec['fenceKind'])
+            self.assertIn('pause', spec['limits'])
+
     def test_wrong_source_modified_contract_or_collector_fail_before_execution(self):
         base = {'schemaVersion': 1, 'candidateCommit': native.CANDIDATE, 'sourceFiles': {native.SOURCE: native.SOURCE_SHA},
             'sourceUnmodified': True, 'regressions': native.REGRESSIONS, 'optimized': True,
