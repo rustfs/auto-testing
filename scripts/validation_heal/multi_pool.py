@@ -48,7 +48,7 @@ REFERENCE = {'candidateCommit': SELECTOR_REFERENCE['candidateCommit'], 'selector
     'layoutSourceFiles': ['crates/ecstore/src/layout/disks_layout.rs', 'crates/utils/src/string.rs'],
     'topology': 'H5: two endpoint-expansion arguments, eight original independent mounts per pool, two four-peer sets per pool',
     'storageClass': 'explicit EC:2; every actual object must decode as 2+2',
-    'boundedFixture': {'DBKeys': 48, 'DVKeys': 24, 'versionsPerDVKey': 2, 'bytesPerVersion': SIZE},
+    'boundedFixture': {'DBKeys': 48, 'DVKeys': 24, 'versionsPerDVKey': 3, 'bytesPerVersion': SIZE},
     'placement': 'observe actual full-set XL2/version authority; no assumed pool hash or internal PUT selector',
     'scope': 'pool selector must match admitted pool; an unrestricted set may be null in the raw receipt, with independent exact physical binding',
     'control': 'unselected defects stay missing before any target GET or rescue; repair them in independent tasks only after proof'}
@@ -135,9 +135,9 @@ def resolve_pending_fixture(fleet, binding, ledger):
 def seed_fixtures(probe, directory, buckets, ledger):
     recorder = Recorder(probe, directory / 'fixture')
     expected = {}
-    for bucket, count, versions in ((buckets[0], 48, 1), (buckets[1], 24, 2)):
+    for bucket, count, versions in ((buckets[0], 48, 1), (buckets[1], 24, 3)):
         fixture_call(recorder, ledger, 'create_bucket', {'Bucket': bucket})
-        if versions == 2:
+        if versions == 3:
             fixture_call(recorder, ledger, 'put_bucket_versioning', {'Bucket': bucket, 'VersioningConfiguration': {'Status': 'Enabled'}})
         expected[bucket] = []
         for index in range(count):
@@ -148,7 +148,7 @@ def seed_fixtures(probe, directory, buckets, ledger):
                     'ContentType': 'application/octet-stream', 'Metadata': {'heal-fixture': 'H06', 'nonce': f'{index}-{version}'},
                     'Tagging': 'suite=heal&fixture=H06'}, body)
                 version_id = response.get('VersionId', 'null')
-                require((versions == 1 and version_id == 'null') or (versions == 2 and version_id not in {None, 'null'}),
+                require((versions == 1 and version_id == 'null') or (versions == 3 and version_id not in {None, 'null'}),
                         'H06 versioning mode differs from its exact PUT ACK')
                 expected[bucket].append({'key': key, 'versionId': version_id, 'deleteMarker': False,
                     'isLatest': version == versions - 1, 'payload': {'size': SIZE, 'sha256': hashlib.sha256(body).hexdigest()}})

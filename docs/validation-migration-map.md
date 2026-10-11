@@ -1410,7 +1410,7 @@ order and exact public pool cmdlines. The runtime explicitly uses set width
 four and EC:2. Full format/UUID/set mappings and decoded object geometry must
 prove actual cross-node EC 2+2 before any fault.
 
-Bounded DB and two-version DV fixtures must populate all four observed
+Bounded DB and three-version DV fixtures must populate all four observed
 pool/set combinations. Every acknowledged version is mapped without an
 assumed placement hash or internal PUT selector. A measured stop of one owned
 peer must leave three physical slots per set and redeem every original

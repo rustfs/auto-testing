@@ -26,7 +26,7 @@ class MultiPoolTests(unittest.TestCase):
             for pool in range(2):
                 for group in range(2):
                     key = f'p{pool}/s{group}.bin'
-                    versions = ('v1', 'v2') if bucket.endswith('-dv') else ('null',)
+                    versions = ('v1', 'v2', 'v3') if bucket.endswith('-dv') else ('null',)
                     for offset, version in enumerate(versions):
                         expected[bucket].append({'key': key, 'versionId': version})
                     for node, observed in enumerate(snapshot.values()):
@@ -91,7 +91,7 @@ class MultiPoolTests(unittest.TestCase):
         layout, mapped = runner.map_versions(snapshot, expected)
         self.assertEqual(snapshot, before)
         self.assertEqual(layout['independentDrives'], 16)
-        self.assertEqual(len(mapped), 12)
+        self.assertEqual(len(mapped), 16)
         self.assertEqual({(row['poolIndex'], row['setIndex']) for row in mapped.values()}, {(0, 0), (0, 1), (1, 0), (1, 1)})
         self.assertTrue(all(len(row['cohort']) == len({member['node'] for member in row['cohort']}) == 4 for row in mapped.values()))
 
@@ -127,7 +127,7 @@ class MultiPoolTests(unittest.TestCase):
         self.assertTrue(proof['rawUnrestrictedSetNotRewritten'])
         self.assertEqual({row['setIndex'] for row in proof['physicalScopeBindings']}, {0, 1})
         self.assertEqual(proof['repaired'], 4)
-        self.assertEqual(proof['versions'], 6)
+        self.assertEqual(proof['versions'], 8)
 
     def test_wrong_selectors_versions_responsibility_and_false_counts_fail(self):
         for kind in ('pool', 'set', 'bool', 'version', 'duplicate', 'missing', 'foreign', 'unknown', 'counter', 'settings', 'truncated', 'incarnation'):
@@ -241,8 +241,8 @@ class MultiPoolTests(unittest.TestCase):
                     with self.assertRaises(ValueError): runner.witness_peer_loss(fleet, binding, expected, mapped)
                 else:
                     proof = runner.witness_peer_loss(fleet, binding, expected, mapped)
-                    self.assertEqual(proof['exactVersions'], 12)
-                    self.assertEqual(probe.return_value.s3.call_count, 36)
+                    self.assertEqual(proof['exactVersions'], 16)
+                    self.assertEqual(probe.return_value.s3.call_count, 48)
                     self.assertEqual({call.args[1] for call in probe.call_args_list}, {'node1', 'node2', 'node3'})
 
     def test_unresolved_seed_prevents_namespace_cleanup_and_next_branch_admission(self):
