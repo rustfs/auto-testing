@@ -44,6 +44,8 @@ class RaceTests(unittest.TestCase):
         tags = race.operation_plan("rv-heal-0123456789abcdef", "update-tags", expected)
         self.assertEqual(len(tags), 16)
         self.assertEqual(tags[-1]["operation"], "put_object_tagging")
+        self.assertEqual(race.target_key("copy-source"), race.G06_TARGET_KEY)
+        self.assertEqual(race.reference_key("copy-source"), race.G06_REFERENCE_KEY)
 
     def test_native_branch_remains_in_denominator_for_each_case(self):
         for case_id, branches in race.CASE_BRANCHES.items():
