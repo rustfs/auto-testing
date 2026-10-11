@@ -94,6 +94,7 @@ class RaceRecorder(Recorder):
         super().__init__(*args, **kwargs)
         self.versioned, self.pending, self.seen = versioned, None, set()
         self.marker_branch = None
+        self.batch_expected_ids = set()
 
     def call(self, operation, params, body=None, **kwargs):
         self.pending = {"operation": operation, "params": copy.deepcopy(params)}
@@ -131,7 +132,9 @@ class RaceRecorder(Recorder):
         elif operation == "delete_objects" and self.marker_branch == "batch-version-delete":
             deleted = result.get("Deleted") or []
             errors = result.get("Errors") or []
-            require(not errors and len(deleted) == 2 and all(isinstance(row.get("VersionId"), str) for row in deleted),
+            deleted_ids = {row.get("VersionId") for row in deleted}
+            require(not errors and deleted_ids == self.batch_expected_ids
+                    and all(isinstance(value, str) for value in deleted_ids),
                     "G04 batch DELETE ACK has errors or incomplete per-item receipts")
         self.pending = None
         return result
@@ -818,6 +821,8 @@ def run_branch(args, topology, nodes, branch):
                               versioned=branch in (*G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES[:3]))
         writer.marker_branch = branch if branch in G04_BRANCHES else None
         writer.seen.update((row["key"], row["versionId"]) for row in expected)
+        if branch == "batch-version-delete":
+            writer.batch_expected_ids = {item["VersionId"] for item in plan[0]["params"]["Delete"]["Objects"]}
         responses, overlapped = race(writer, plan, probe, fleet, path, token)
         mpu_runtime = plan[0].get("runtime") if branch in G05_BRANCHES else None
         if branch in G05_BRANCHES:
