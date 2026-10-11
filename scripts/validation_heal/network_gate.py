@@ -83,7 +83,10 @@ def addresses(values):
 def resolve():
     values = []
     for index in range(1, 5):
-        found = {row[4][0] for row in socket.getaddrinfo(f'rustfs-node{index}', PORT, socket.AF_INET, socket.SOCK_STREAM)}
+        rows = socket.getaddrinfo(f'rustfs-node{index}', PORT, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        require(rows and all(row[0] == socket.AF_INET for row in rows),
+                'peer alias exposes an unguarded IPv6 path; no partition will be installed')
+        found = {row[4][0] for row in rows}
         require(len(found) == 1, 'peer alias has ambiguous IPv4 resolution')
         values.append(found.pop())
     return addresses(values)

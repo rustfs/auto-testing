@@ -133,6 +133,12 @@ class NetworkTests(unittest.TestCase):
             with self.subTest(address=address), self.assertRaises(ValueError):
                 gate.addresses([address, '10.0.0.2', '10.0.0.3', '10.0.0.4'])
 
+    def test_ipv6_alias_cannot_bypass_the_registered_ipv4_partition(self):
+        rows = [(gate.socket.AF_INET, gate.socket.SOCK_STREAM, 6, '', ('10.0.0.1', 9000)),
+                (gate.socket.AF_INET6, gate.socket.SOCK_STREAM, 6, '', ('fd00::1', 9000, 0, 0))]
+        with patch.object(gate.socket, 'getaddrinfo', return_value=rows), self.assertRaisesRegex(ValueError, 'unguarded IPv6'):
+            gate.resolve()
+
     def table(self):
         table, blocked = 'rv_i03_test', ['10.0.0.2', '10.0.0.3']
         rows = []
