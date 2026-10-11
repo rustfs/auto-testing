@@ -33,7 +33,10 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    if profile in {"orphan-preserve", "orphan-before", "orphan-after"}:
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_DANGLING_DELETE_GRACE_SECS":
+                {"orphan-preserve": "0", "orphan-before": "300", "orphan-after": "30"}[profile]}
     if profile == "authority-split":
         return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:1"}
     if profile == "multi-pool":
@@ -1055,6 +1058,43 @@ def generation_operation(request):
         return method(root, owner, request, fault_module())
 
 
+def orphan_operation(request):
+    state, roots, owner = owned(request['runId'])
+    stopped(owner)
+    require(owner.get('runtimeProfile') in {'orphan-preserve', 'orphan-before', 'orphan-after'}
+            and digest(state / 'rustfs') == owner['binarySha256'], 'C10 runtime/candidate changed')
+    fault, generation, backend = fault_module(), globals()['generation_backend'], globals()['orphan_backend']
+    action = request['action']
+    tool = state / 'heal-shared-fixture'
+    if action == 'orphan-install-tool':
+        require(re.fullmatch(r'[0-9a-f]{64}', request['sha256']), 'C10 encoder digest absent')
+        with fault.directory(state) as fd:
+            raw = fault.read_file(fd, tool.name)
+            require(fault.digest(raw) == request['sha256'] and os.stat(tool, follow_symlinks=False).st_uid == 0,
+                    'C10 uploaded encoder changed or is not privately root owned')
+            fault.new_file(fd, 'shared-tool.json', fault.encode({'runId': owner['runId'],
+                'ownerSha256': digest(state / 'owner.json'), 'binarySha256': owner['binarySha256'], 'sha256': request['sha256']}))
+        tool.chmod(0o500)
+        return {'installed': True, 'sha256': request['sha256']}
+    disk = request['disk']
+    require(type(disk) is int and 0 <= disk < 4, 'C10 escaped an original independent root')
+    with fault.directory(roots[disk]) as root:
+        if action == 'orphan-multipart': return backend.multipart(root, fault)
+        if action == 'orphan-observe':
+            present, _, files = backend.scene(root, owner, request, fault, generation)
+            return {'present': present, 'files': files, 'nodeEpoch': time.time()}
+        if action == 'orphan-convert':
+            with fault.directory(state) as fd:
+                record = json.loads(fault.read_file(fd, 'shared-tool.json', 65536))
+                require(record == {'runId': owner['runId'], 'ownerSha256': digest(state / 'owner.json'),
+                    'binarySha256': owner['binarySha256'], 'sha256': digest(tool)}, 'C10 encoder binding changed')
+            return backend.convert(root, owner, request, fault, generation, checked(tool, state))
+        methods = {'orphan-capture': backend.capture, 'orphan-arm': backend.arm, 'orphan-install': backend.install,
+                   'orphan-recover': backend.recover, 'orphan-disarm': backend.disarm}
+        require(action in methods, 'unregistered C10 operation')
+        return methods[action](root, owner, request, fault, generation)
+
+
 def mrf_records(request):
     require(set(request) <= {"runId", "action", "quiescent"}, "MRF observer does not accept paths or mutation options")
     state, roots, owner = owned(request["runId"])
@@ -1091,6 +1131,9 @@ def main(request):
     actions["task-records"] = task_records
     for action in ('generation-capture', 'generation-install', 'generation-recover'):
         actions[action] = generation_operation
+    for action in ('orphan-install-tool', 'orphan-observe', 'orphan-multipart', 'orphan-convert',
+                   'orphan-capture', 'orphan-arm', 'orphan-install', 'orphan-recover', 'orphan-disarm'):
+        actions[action] = orphan_operation
     for action in ("bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover"):
         actions[action] = bucket_record_operation
     for action in ("quorum-gate", "quorum-gate-probe"):

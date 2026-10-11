@@ -25,11 +25,12 @@ def scope(owner, request):
     return [bucket, key]
 
 
-def tree(fd, fault):
+def tree(fd, fault, *, allow_sparse=False):
     """Read the complete small object tree; reject aliases or unexpected leaves."""
     values = {}
     names = sorted(os.listdir(fd))
-    require('xl.meta' in names and 1 < len(names) <= 17, 'generation lacks bounded external metadata/data directories')
+    require(len(names) <= 17 and (allow_sparse or 'xl.meta' in names and len(names) > 1),
+            'generation lacks bounded external metadata/data directories')
     for name in names:
         if name == 'xl.meta':
             values[name] = fault.read_file(fd, name)

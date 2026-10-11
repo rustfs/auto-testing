@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 131 currently dispatchable IDs include all 74 non-Heal cases and fifty-seven Heal cases. Forty-eight have complete canonical live PASS evidence; the other 110 have no live PASS claim.
+case evidence. The 132 currently dispatchable IDs include all 74 non-Heal cases and fifty-eight Heal cases. Forty-nine have complete canonical live PASS evidence; the other 109 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -1551,6 +1551,57 @@ descriptor may change; all version identities and unrelated metadata are
 reloaded and compared before output. Three actual codec tests must pass against
 the candidate before the artifact can be consumed. Python guards additionally
 bind source/tree/Cargo.lock/helper/binary/role and the successful build attempt,
-and reject incomplete, ignored or zero-test output. This is C10 prerequisite
-tooling; the full five-branch executor is still in progress and the count
-remains 131 automatic / 27 remaining Heal executors.
+and reject incomplete, ignored or zero-test output. This artifact is the prerequisite for the complete C10 executor described below;
+tool success remains independent of the canonical live verdict.
+
+
+C10 now dispatches all five source branches on both H1 and H2. Runtime profiles
+freeze the source's 0/300/30-second dangling policy, and each trigger records
+server LastModified, original-node clock agreement and the actual elapsed age.
+All independent original roots archive their complete objects, including real
+integrity sidecars and absent post-DELETE trees. Durable arm records precede
+controlled replay or shared conversion. Rescue uses the last acknowledged
+post-DELETE authority on every original root, preserves the failed scene and
+cannot restore the deleted old generation. A shared seed is retired before
+later ACKs; unknown writes, lost arm receipts and partial recovery retain DIRTY
+namespaces and block cleanup.
+
+The shared branch proves two independently acknowledged original generations
+have identical physical parts before the candidate codec changes only their
+shared data-directory/commitment references. Both full peer S3 inventories and
+all physical references must agree before the later third version is created.
+The retained shared references and delete-marker controls survive orphan
+removal. Pending MPU uses a bounded, descriptor-relative, read-only census of
+the isolated run's complete multipart tree, exact all-peer UploadId/list_parts
+checks, and an acknowledged completion followed by full payload verification.
+Product physical and S3 assertions run before any fixture rescue. Every live
+part receives candidate-bound streaming verification before final S3 checks.
+
+Hosted tools run `38103474555` attempt 1 succeeded at driver
+`9b4cc40abd5ea3a0a5ee6c52fb7e113b57102d6e` and helper
+`6cc8cb79a0f8024b0089a43d31b0708a46bbae4c`. Independent original artifact/API
+verification confirms all three codec tests, source/tree/Cargo.lock/helper/role
+and binary `eb2991cf6f84b6998a474c51cd142c2b1c84106fd7f49f569fce7a241dc4ecea`.
+Runs `38102872003` and `38103273662` failed on invalid synthetic timestamp and
+non-persisted/non-marker rejection inputs; these failures remain retained.
+The corrected inputs keep all transformation/refusal assertions. The earlier
+wrong-SHA dispatch `38102848357` was cancelled and is not tool evidence.
+Ordinary C10 execution consumes this artifact without a RustFS checkout.
+
+The complete local validation suite now runs 397 tests with eight macOS skips.
+C10 has 20 tests covering source completeness, typed deferred/refusal results,
+all-member live reference/part/commitment/control safety, absent-authority
+recovery, foreign device/candidate refusal, uncertain ACK retention, shared
+seed retirement and pending-MPU alias refusal. Its real Linux descriptor,
+root-owned recovery and nested bind-mount test is mandatory in CI. C10 still
+requires canonical live evidence; there are 132 automatic executors and 26
+remaining Heal executors.
+
+F06 `heal.cancelled-task-restart` passed in run `38102031029` at harness
+`f248cb63d032cfc1658d32c508bce745f96b885f`: both H1/H2 partial cancellations,
+quiet physical windows, persisted cancellation after restart, no old-task
+replay, new-token repair, all-peer S3 and cleanup passed. Its independently
+rerun canonical gate passed, increasing complete live PASS to 49.
+F07's coordinator process-crash run `38103118033` remains canonical FAIL with
+cleanup PASS. The serial fleet queue continues under its existing lock and
+unclean-environment guard.
