@@ -220,6 +220,24 @@ class OrphanDescriptorTests(unittest.TestCase):
         self.invoke('disarm', generation='seed', expectedFiles=manifest)
         with self.assertRaisesRegex(ValueError, 'retired'): self.recover('seed')
 
+    def test_codec_conversion_preserves_retired_bytes_and_seed_rescue_can_restore_both_ack_generations(self):
+        self.seed(self.live_dir, b'old')
+        self.capture('seed'); self.invoke('arm', generation='seed')
+        source, destination = str(uuid.UUID(int=1)), str(uuid.UUID(int=2))
+        receipt = {'sourceVersion': source, 'destinationVersion': destination, 'sharedDataDir': self.old_dir,
+            'retiredDataDir': self.live_dir, 'filesystemMutationPerformed': False, 'physicalByteEqualityClaimed': False}
+        result = subprocess.CompletedProcess([], 0, b'controlled-encoded-meta', json.dumps(receipt).encode())
+        with fault.directory(self.root) as root, patch.object(backend.subprocess, 'run', return_value=result):
+            proof = backend.convert(root, self.owner, {**self.request, 'sourceDataDir': self.old_dir, 'destinationDataDir': self.live_dir,
+                'sourceVersion': source, 'destinationVersion': destination}, fault, generation, self.root / 'verified-codec')
+        self.assertTrue(proof['physicalByteEqualityVerified'])
+        self.assertEqual((self.object / 'xl.meta').read_bytes(), b'controlled-encoded-meta')
+        self.assertFalse((self.object / self.live_dir).exists())
+        self.assertEqual((self.root / 'quarantine/C10-retired-shared-data/part.1').read_bytes(), b'old' * 256)
+        self.recover('seed')
+        self.assertEqual((self.object / 'xl.meta').read_bytes(), b'XL2 old')
+        self.assertEqual((self.object / self.live_dir / 'part.1').read_bytes(), b'old' * 256)
+
     def test_mpu_census_is_complete_read_only_and_refuses_aliases(self):
         folder = self.root / 'data/.rustfs.sys/multipart/hash/upload'; folder.mkdir(parents=True)
         (folder / 'part.1').write_bytes(b'pending-part')
@@ -267,6 +285,21 @@ class OrphanOracleTests(unittest.TestCase):
         self.assertEqual(source['variants'], list(orphan.BRANCHES))
         self.assertEqual(source['contract']['probes']['topology'], 'H1,H2')
         self.assertIn(orphan.CASE_ID, AUTOMATIC_CASES)
+
+    def test_shared_paths_are_streamed_through_both_exact_ack_version_ids(self):
+        mapping = {}
+        for version in (str(uuid.UUID(int=1)), str(uuid.UUID(int=2))):
+            mapping[(self.bucket, orphan.KEY, version)] = {'bucket': self.bucket, 'key': orphan.KEY, 'versionId': version,
+                'cohort': [{'node': 'node1', 'disk': disk, 'relativePath': 'shared/part.1'} for disk in range(4)]}
+        with patch.object(orphan, 'verify_parts', return_value={'exactStreamingParts': 4}) as verify:
+            proof = orphan.verify_live_parts(object(), mapping, 'exact-shared-ACK')
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual({next(iter(call.args[1]))[2] for call in verify.call_args_list}, {identity[2] for identity in mapping})
+        self.assertEqual(proof['versionAddressedStreamingParts'], 8)
+        self.assertEqual(proof['distinctPhysicalParts'], 4)
+        self.assertFalse(proof['sharedPathsCountedAsIndependentDisks'])
+        next(iter(mapping.values()))['versionId'] = 'foreign'
+        with self.assertRaises(ValueError): orphan.verify_live_parts(object(), mapping, 'foreign-ACK')
 
     def scene(self, branch):
         live, stale = str(uuid.UUID(int=12)), str(uuid.UUID(int=11))

@@ -1614,3 +1614,13 @@ run `38104232517` show 397 Python tests in total with no skips, including real
 C10 absent post-DELETE recovery and nested bind-mount refusal. The serial C10
 live plan binds this harness and successful shared tools run `38103474555`;
 it waits for the existing queue and does not change an active plan or guard.
+
+
+C10 verifies each ACK version separately when two versions share one physical
+part path. The general scope verifier keeps its independent-path requirement;
+C10 reports version-addressed streaming checks and distinct physical parts
+separately, without inventing independent disks. New regressions verify both
+VersionId calls and complete shared-conversion/seed recovery with retained
+original metadata, parts and commitments. The updated complete local suite
+passes 399 tests with eight macOS skips; C10 now has 22 tests. Its queued live
+plan is updated to this corrected revision before fleet dispatch.

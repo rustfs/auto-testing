@@ -175,6 +175,22 @@ def pending_snapshot(fleet):
         **fleet.remote(node, 'orphan-multipart', disk=disk)})['files'] for node in fleet.nodes for disk in range(4)}
 
 
+def verify_live_parts(fleet, mapping, label):
+    require(mapping, 'C10 streaming manifest is empty')
+    total, identities = 0, set()
+    for identity, target in mapping.items():
+        require(identity == (target['bucket'], target['key'], target['versionId']),
+                'C10 streaming manifest lost its exact version-addressed authority')
+        # Two independently ACKed shared versions deliberately reference the
+        # same path. Each version must validate its own metadata commitment;
+        # the general selector verifier still rejects aliases within a cohort.
+        proof = verify_parts(fleet, {identity: target}, label)
+        total += proof['exactStreamingParts']
+        identities.update((member['node'], member['disk'], member['relativePath']) for member in target['cohort'])
+    return {'versionAddressedStreamingParts': total, 'distinctPhysicalParts': len(identities),
+            'exactACKVersions': len(mapping), 'sharedPathsCountedAsIndependentDisks': False}
+
+
 def verify_public(fleet, binding, bucket, expected, deleted, label):
     for endpoint in binding['endpoints']:
         peer = Probe(binding, endpoint)
@@ -421,7 +437,7 @@ def run_branch(args, topology, nodes, branch):
         restored = fleet.snapshot('C10-final-current-ACK-physical', quiescent=True)
         mapping = {(bucket, entry['key'], entry['versionId']): map_target(restored, bucket, entry['key'], 'data', 1,
                     entry['versionId'], latest_required=entry['isLatest']) for entry in expected if not entry['deleteMarker']}
-        result['streaming'] = verify_parts(fleet, mapping, 'C10-all-live-ACK-streaming')
+        result['streaming'] = verify_live_parts(fleet, mapping, 'C10-all-live-ACK-streaming')
         fleet.start()
         verify_public(fleet, binding, bucket, expected, deleted, 'C10-all-peer-final-S3')
         result.update(verdict='PASS', postDeleteAuthorityRestored=True, backupRestorationIsProductRepair=False)
