@@ -259,12 +259,20 @@ class Probe:
         with observation_phase(observation, 'requestPreparation'):
             validate_binding(self.binding)
             quota_path = path.startswith("/rustfs/admin/v3/quota/")
-            require(path.startswith("/rustfs/admin/v3/heal/") or quota_path or path in {
+            pool_path = path in {"/rustfs/admin/v3/pools/list", "/rustfs/admin/v3/pools/status"}
+            require(path.startswith("/rustfs/admin/v3/heal/") or quota_path or pool_path or path in {
                 "/rustfs/admin/v3/background-heal/status", "/rustfs/admin/v4/heal/replacement-recovery",
                 "/rustfs/admin/v3/info"}, "only bounded Heal evidence routes are allowed")
             if path == "/rustfs/admin/v3/info":
                 require(method == "GET" and not query and body == b"" and auth == "signed",
                         "server-info evidence requires an exact signed read-only GET")
+            if pool_path:
+                require(self.binding['runId'].endswith('-h5') and len(self.binding['endpoints']) == 4
+                        and method == 'GET' and body == b'' and auth == 'signed',
+                        'pool observations require the dedicated four-node H5 read-only binding')
+                allowed_query = query == [] if path.endswith('/list') else query in (
+                    [('pool', '0'), ('by-id', 'true')], [('pool', '1'), ('by-id', 'true')])
+                require(allowed_query, 'pool observation selector escaped the two exact registered H5 pools')
             if quota_path:
                 bucket = path.removeprefix("/rustfs/admin/v3/quota/")
                 bucket_allowed(self.binding, bucket)

@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import types
@@ -82,6 +83,26 @@ class MultiPoolTests(unittest.TestCase):
         self.assertEqual(runtime_config('multi-pool')['RUSTFS_ERASURE_SET_DRIVE_COUNT'], '4')
         self.assertEqual(runtime_config('multi-pool')['RUSTFS_STORAGE_CLASS_STANDARD'], 'EC:2')
         with self.assertRaises(ValueError): volumes('gh-123-1-h2')
+
+    def test_h5_pool_observations_accept_only_exact_signed_get_queries(self):
+        binding = {'schemaVersion': 1, 'runId': 'gh-123-1-h5', 'jumpHostOnly': True, 'exclusiveHealService': True,
+            'leaseExpiresAt': (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+            'bucketPrefix': self.buckets[0], 'endpoints': {f'node{i}': f'http://rustfs-node{i}:9000' for i in range(1, 5)},
+            'defaultEndpoint': 'node1', 'candidateCommit': 'a' * 40, 'harnessCommit': 'b' * 40,
+            'candidatePackageSha256': 'c' * 64, 'candidateBinarySha256': 'd' * 64, 'rcBinarySha256': 'e' * 64,
+            'maxInventoryObjects': 256, 'maxInventoryBytes': 512 * 1024**2}
+        for path, query, method, auth, allowed in (
+                ('list', [], 'GET', 'signed', True), ('status', [('pool', '1'), ('by-id', 'true')], 'GET', 'signed', True),
+                ('list', [], 'POST', 'signed', False), ('list', [], 'GET', 'anonymous', False),
+                ('list', [('pool', '0')], 'GET', 'signed', False), ('status', [('pool', '2'), ('by-id', 'true')], 'GET', 'signed', False),
+                ('status', [('pool', '0'), ('by-id', 'true'), ('pool', '1')], 'GET', 'signed', False)):
+            probe = runner.Probe(binding)
+            with self.subTest(path=path, query=query, method=method, auth=auth), patch.object(probe, 'credentials', side_effect=RuntimeError('allowed route reached signing')):
+                if allowed:
+                    with self.assertRaisesRegex(RuntimeError, 'reached signing'):
+                        probe.admin('/rustfs/admin/v3/pools/' + path, query, b'', method=method, auth=auth)
+                else:
+                    with self.assertRaises(ValueError): probe.admin('/rustfs/admin/v3/pools/' + path, query, b'', method=method, auth=auth)
 
     def test_original_h2_mapper_rejects_multi_pool_without_explicit_authority(self):
         snapshot, expected = self.fixture()
