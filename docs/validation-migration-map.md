@@ -1816,3 +1816,14 @@ non-finite values and duplicate dedup identities reject injection. Ten new
 negative tests cover live replacement/process drift, missing/duplicate owners,
 foreign scope and fabricated progress. These are F07/C11 prerequisites;
 the remaining 24 complete executors are still outstanding.
+
+The Functional Chain consumer downloads the manager artifact from the exact
+successful tools run attempt before fleet mutation. `manager_fixture.py`
+independently rechecks all fifteen original results, then exposes only the
+ten F07, three C11 or two J02 prerequisite tests assigned to the selected case.
+A failed/partial attempt, foreign workflow, wrong candidate, changed result
+or unrelated case rejects the artifact. The same consumer independently
+verified the retained `38108127382` artifact for all three scopes. It exports
+no canonical fleet execution, individual fsync-hook, emitted barrier-log or
+physical power-loss claim. These required evidence inputs do not make the
+three incomplete canonical executors dispatchable.
