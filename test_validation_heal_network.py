@@ -153,8 +153,8 @@ class NetworkTests(unittest.TestCase):
             broken = copy.deepcopy(raw)
             rule = next(row['rule'] for row in broken['nftables'] if 'rule' in row)
             chain = next(row['chain'] for row in broken['nftables'] if 'chain' in row)
-            if kind == 'ssh': rule['expr'][3]['match']['right'] = 22
-            elif kind == 'address': rule['expr'][2]['match']['right'] = '10.0.0.9'
+            if kind == 'ssh': rule['expr'][1]['match']['right'] = 22
+            elif kind == 'address': rule['expr'][0]['match']['right'] = '10.0.0.9'
             elif kind == 'accept': rule['expr'][-1] = {'accept': None}
             elif kind == 'priority': chain['prio'] = -100
             elif kind == 'foreign-rule': rule['comment'] = 'foreign'

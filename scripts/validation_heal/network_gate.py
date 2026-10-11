@@ -98,8 +98,8 @@ def spec(table, blocked):
             for field in ('sport', 'dport'):
                 result.append({'add': {'rule': {'family': 'inet', 'table': table, 'chain': chain,
                     'comment': f'{table}:{chain}:{peer}:{field}', 'expr': [
-                        {'match': {'op': '==', 'left': {'meta': {'key': 'nfproto'}}, 'right': 'ipv4'}},
-                        {'match': {'op': '==', 'left': {'meta': {'key': 'l4proto'}}, 'right': 'tcp'}},
+                        # IP/TCP payload selectors imply their protocol guards.
+                        # nft removes redundant explicit meta guards on export.
                         {'match': {'op': '==', 'left': {'payload': {'protocol': 'ip',
                             'field': 'saddr' if chain == 'input' else 'daddr'}}, 'right': peer}},
                         {'match': {'op': '==', 'left': {'payload': {'protocol': 'tcp', 'field': field}}, 'right': PORT}},
