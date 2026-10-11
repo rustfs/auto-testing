@@ -1539,3 +1539,18 @@ payload-less, repeated or ambiguous commitments are rejected. Two additional
 regressions verify complete A/B commitment preservation and invalid-leaf
 refusal. The updated local suite runs 377 tests with seven macOS skips; the
 real Linux generation test also includes a commitment file.
+
+C10's shared-version branch requires the candidate's real metadata codec,
+two independent same-payload ACK versions and physically identical original
+parts. Its encoder is built as an optional immutable helper alongside the
+read-only inspector, without modifying the candidate source. It reads bounded
+original metadata from stdin and emits a separately encoded result on stdout;
+it has no filesystem mutation API and makes no physical byte-equality claim.
+Only the destination data-directory reference and its source commitment
+descriptor may change; all version identities and unrelated metadata are
+reloaded and compared before output. Three actual codec tests must pass against
+the candidate before the artifact can be consumed. Python guards additionally
+bind source/tree/Cargo.lock/helper/binary/role and the successful build attempt,
+and reject incomplete, ignored or zero-test output. This is C10 prerequisite
+tooling; the full five-branch executor is still in progress and the count
+remains 131 automatic / 27 remaining Heal executors.
