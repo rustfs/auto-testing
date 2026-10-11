@@ -183,7 +183,7 @@ class AuthorityNativeEvidenceTests(unittest.TestCase):
         for key, spec in native.REGRESSIONS.items():
             row = {'regression': key, 'test': spec['test'], 'verdict': 'PASS', 'candidateCommit': native.CANDIDATE,
                 'binarySha256': manifest['binarySha256'], 'fleetPassClaimed': False, 'emittedBarrierLogsClaimed': False,
-                'command': ['native-tools/ecstore-native-tests', spec['test'], '--exact', '--nocapture', '--test-threads=1'],
+                'command': [authority.HOSTED_BINARY, spec['test'], '--exact', '--nocapture', '--test-threads=1'],
                 'sourceAssertions': spec['sourceAssertions'], 'fenceKind': spec['fenceKind'], 'exitCode': 0}
             (evidence / (key + '.json')).write_text(json.dumps(row))
             (evidence / (key + '.log')).write_text(f"running 1 test\ntest {spec['test']} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n")

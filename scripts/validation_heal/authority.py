@@ -25,6 +25,7 @@ BRANCHES = ('disjoint-version-quorums', 'disjoint-incarnations', 'native-authori
 NATIVE_KEYS = ('conflicting-authority-guard', 'reconstructable-authority-preservation')
 SOURCE_TREE = '8071fb0a9e5353eb7d3fa58c8a58c8622473f2bd'
 CARGO_LOCK = 'd8f7bc416ba67d19873d34e9389e5aa823b22d7d7552706a5a810cee26f6eda2'
+HOSTED_BINARY = '/home/runner/work/rustfs/rustfs/native-tools/ecstore-native-tests'
 
 
 def object_files(snapshot, bucket, key):
@@ -199,7 +200,7 @@ def verify_native(directory, candidate):
                 and row.get('test') == spec['test'] and row.get('candidateCommit') == native.CANDIDATE
                 and row.get('binarySha256') == manifest['binarySha256'] and row.get('emittedBarrierLogsClaimed') is False
                 and row.get('fleetPassClaimed') is False
-                and row.get('command') == ['native-tools/ecstore-native-tests', spec['test'], '--exact', '--nocapture', '--test-threads=1']
+                and row.get('command') == [HOSTED_BINARY, spec['test'], '--exact', '--nocapture', '--test-threads=1']
                 and row.get('sourceAssertions') == spec['sourceAssertions'] and row.get('fenceKind') == spec['fenceKind'],
                 'C07 native result does not bind one exact original test execution')
         native.exact_listing(listing, spec['test'])

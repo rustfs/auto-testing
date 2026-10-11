@@ -1510,3 +1510,22 @@ descriptors, root-owned generation recovery and nested bind-mount refusal.
 The 158 IDs/hashes and 84/301/532 matrix, Bash syntax, scoped actionlint and
 whitespace checks passed. C07 has no canonical live PASS claim; hosted native
 run `38100407691` is still building.
+
+Hosted build `38100407691` has now completed successfully. Independent local
+artifact verification confirmed all six exact tests against unchanged source
+tree `8071fb0a9e5353eb7d3fa58c8a58c8622473f2bd`, candidate Cargo.lock
+`d8f7bc416ba67d19873d34e9389e5aa823b22d7d7552706a5a810cee26f6eda2`,
+collector `6f4901573967c53b88239af361c1ab543f44fd4d` / SHA-256
+`ca6d2087416761ba3b5398366391b9f5d8108b59272f5759ea4b67752d9caf45`,
+and executable `0c9e005ae877f741a62100f0d70af6c2256d1078d546ac97e963d6979aa05bc1`.
+The original collector resolves its executable path before recording commands;
+C07 verifies that exact hosted path, without replacing it with a downloaded
+local path. Both authority guards passed, independently of any fleet result.
+No new canonical PASS is claimed.
+
+All six auto-testing checks passed at `07627ade0667e67e5560fccbc08215458d506b04`.
+The Linux contract job ran all 375 validation tests without skips, including
+real original mount-descriptor recovery and nested bind-mount refusal. The
+C07 pending serial plan uses this successful native tools attempt; the active
+queue resumed F06 in run `38102031029` after the hosted build completed. Shared
+fleet locks, cleanup guards and the active plan are retained.
