@@ -972,6 +972,34 @@ def configure_encryption(request):
     return encryption_module().configure(state, owner, request, fault_module())
 
 
+def journal_operation(request):
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    require(digest(state / "rustfs") == owner["binarySha256"], "durable-record candidate changed")
+    require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash"}, "durable records require the owned recovery runtime")
+    require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore"},
+            "durable-record adapter accepts no arbitrary system paths or commands")
+    module, fault = globals()["journal_fault_backend"], fault_module()
+    if request["action"] == "journal-census":
+        return module.census(roots, request, fault)
+    require(request["action"] in {"journal-apply", "journal-recover"}
+            and type(request.get("disk")) is int and 0 <= request["disk"] < 4, "invalid durable-record operation or slot")
+    root = roots[request["disk"]]
+    with fault.directory(root) as fd:
+        if request["action"] == "journal-apply":
+            if request["family"] == "mrf":
+                observed = globals()["mrf"].read_records(state, roots, owner, checked)
+                committed = globals()["mrf"].checkpoint(observed)
+                require(committed.get("present") is True and committed["intents"]
+                        and all(item["bucket"] == owner["bucket"] and item.get("lifecycle", {}).get("state") == {"state": "active"}
+                                for item in committed["intents"])
+                        and any(row["disk"] == request["disk"] and request["relativePath"] ==
+                                f".rustfs.sys/.heal-mrf-snapshot.{row['slot']}.bin" for row in committed["replicas"]),
+                        "MRF fault lacks an actual committed active owned responsibility on this exact slot")
+            return module.install(fd, request, owner, fault, globals()["mrf"])
+        return module.recover(fd, request, owner, fault)
+
+
 def network_operation(request):
     state, _, owner = owned(request["runId"])
     module = globals()["network_gate_backend"]
@@ -1202,6 +1230,8 @@ def main(request):
     actions["task-records"] = task_records
     actions["environment-capabilities"] = environment_capabilities
     actions["quota-audit-finalize"] = quota_audit_finalize
+    for action in ("journal-census", "journal-apply", "journal-recover"):
+        actions[action] = journal_operation
     for action in ('generation-capture', 'generation-install', 'generation-recover'):
         actions[action] = generation_operation
     for action in ('orphan-install-tool', 'orphan-observe', 'orphan-multipart', 'orphan-convert',

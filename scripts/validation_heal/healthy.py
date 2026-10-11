@@ -190,7 +190,7 @@ class Fleet:
         if self.runtime_profile == "bounded-capacity":
             source += "\nimport types\nbounded_volume_backend = types.ModuleType('bounded_volume')\nexec(" + repr(
                 NODE_SOURCE.with_name("bounded_volume.py").read_text()) + ", bounded_volume_backend.__dict__)\n"
-        if action == "mrf-records":
+        if action == "mrf-records" or action.startswith("journal-"):
             source += "\nimport types\nmrf = types.ModuleType('mrf_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("mrf_records.py").read_text()) + ", mrf.__dict__)\n"
         if action == "replacement-records":
@@ -200,9 +200,12 @@ class Fleet:
             source += "\nimport types\ngeneration_backend = types.ModuleType('generation_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("generation_fault.py").read_text()) + ", generation_backend.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
-                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure"} or action.startswith("generation-") or action.startswith("orphan-"):
+                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith("journal-"):
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
+        if action.startswith("journal-"):
+            source += "\nimport types\njournal_fault_backend = types.ModuleType('journal_fault')\nexec(" + repr(
+                NODE_SOURCE.with_name("journal_fault.py").read_text()) + ", journal_fault_backend.__dict__)\n"
         if action.startswith("orphan-"):
             source += "\nimport types\norphan_backend = types.ModuleType('orphan_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("orphan_fault.py").read_text()) + ", orphan_backend.__dict__)\n"

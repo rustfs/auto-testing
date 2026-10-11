@@ -1774,3 +1774,19 @@ source or executable identities. This suite does not inject individual fsync
 hooks, demonstrate physical power loss or execute canonical fleet branches;
 it adds no automatic executor or live PASS count by itself. Existing C07
 native collector and pinned artifacts retain their exact contract.
+
+The F07 durable-record backend now reads only exact root/checkpoint task names
+or the six allowlisted MRF slot files, without enumerating system metadata.
+Injection requires the stopped owned recovery service, unchanged candidate,
+actual run/disk/mount identity and archived complete file digest. An Admin
+checkpoint must retain its original task, owned bucket incarnation and valid
+candidate integrity digest. MRF injection additionally proves an actual
+committed active responsibility on the selected slot. Controlled truncation,
+future schema and CRC corruption retain original backups and intents before
+mutation. Terminal reports, resume states, blocked fences, commit manifests
+and unrelated records are read-only. Rescue revalidates backups and exact
+injected/original bytes; advanced or removed product responsibility is never
+resurrected. Distinct injection/rescue temporaries preserve interrupted
+evidence. Ten file/remote-boundary regressions cover these guarantees. This
+backend remains an F07 prerequisite; the six canonical branches and their
+full live execution are still outstanding, with no count or PASS increase.
