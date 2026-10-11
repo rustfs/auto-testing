@@ -269,6 +269,13 @@ def release(state, owner, *, expired=False):
         table, _ = identities(owner)
         require(not table_present(table), 'network table has no ownership intent; preserve namespace')
         return {'state': 'CLEAR', 'gateWasAbsent': True}
+    expired = expired or (state / EXPIRY).exists()
+    if expired:
+        for suffix in ('.timer', '.service'):
+            require(command('systemctl', 'show', value['timer'] + suffix, '-p', 'LoadState', '--value').strip()
+                    in {'not-found', 'loaded'}, 'expired network unit identity is unknown')
+            require(command('systemctl', 'show', value['timer'] + suffix, '-p', 'ActiveState', '--value').strip()
+                    in {'inactive', 'failed', 'unknown'}, 'expired network unit remains active')
     # Stop the expiry worker before inspecting/deleting, avoiding a concurrent
     # deletion. A TTL worker does not stop its own unit.
     if not expired:
@@ -284,7 +291,10 @@ def release(state, owner, *, expired=False):
         'removedCounters': counters, 'expiryTriggered': expired or (state / EXPIRY).exists(),
         'unrelatedTablesChanged': False}
     if expired:
-        write(state / EXPIRY, receipt)
+        if not (state / EXPIRY).exists():
+            write(state / EXPIRY, receipt)
+        (state / MARKER).unlink()
+        (state / SCRIPT).unlink()
     else:
         for suffix in ('.timer', '.service'):
             require(command('systemctl', 'show', value['timer'] + suffix, '-p', 'ActiveState', '--value').strip() in {'inactive', 'failed'},

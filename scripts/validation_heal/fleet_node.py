@@ -1039,10 +1039,12 @@ def network_operation(request):
     module = globals()["network_gate_backend"]
     module.identities(owner)
     action = request["action"]
-    require(set(request) <= {"runId", "action", "addresses", "localIndex", "blockedIndices"},
+    require(set(request) <= {"runId", "action", "addresses", "localIndex", "blockedIndices", "expired"},
             "network adapter accepts no external paths, ports, rules or commands")
     if action == "network-release":
-        return module.release(state, owner)
+        require(set(request) <= {"runId", "action", "expired"},
+                "network release accepts only its expiry proof")
+        return module.release(state, owner, expired=request.get("expired", False))
     identity = process(request)
     require(identity["pid"] > 1 and identity["executable"] == str(state / "rustfs"),
             "network fault requires an actual owned candidate process")

@@ -87,11 +87,63 @@ def quota_recovery_plan(artifact, failed_run, candidate):
                                                                separators=(",", ":")).encode()).hexdigest()}]
 
 
+def network_recovery_plan(artifact, failed_run, candidate):
+    """Recover only an I03 gate whose independent expiry unit is gone."""
+    case = "heal.network-partition-and-lock-quorum"
+    results = list(artifact.glob(f"*/run/{case}/cases/{case}.json"))
+    require(len(results) == 1, "network recovery requires one exact I03 result")
+    result = json.loads(results[0].read_text())
+    provenance = result.get("provenance") or {}
+    require(result.get("case_id") == case and result.get("verdict") == "FAIL"
+            and result.get("cleanup_status") == "FAIL"
+            and provenance.get("source_commit") == candidate["source_sha"]
+            and provenance.get("candidate_sha256") == candidate["package_sha256"],
+            "network failed-result candidate or cleanup differs")
+    evidence = results[0].parents[1] / f"evidence/{case}/H2/minority-partition"
+    summary = json.loads((results[0].parents[1] / f"evidence/{case}/healthy-summary.json").read_text())
+    rows = [row for row in summary.get("results", []) if row.get("cleanup") != "PASS"]
+    require(summary.get("cleanup") == "FAIL" and len(rows) == 1
+            and rows[0].get("branch") == "minority-partition"
+            and "below-quorum GET returned data" in rows[0].get("failure", {}).get("message", "")
+            and "network-release failed" in rows[0].get("recoveryError", "")
+            and "not loaded" in rows[0].get("recoveryError", ""),
+            "network recovery only supports the expired I03 gate boundary")
+    bindings = list(evidence.glob("*-binding.json"))
+    intents = sorted(evidence.glob("*-network-expiry-and-rule-intent.json"))
+    activations = sorted(evidence.glob("*-atomic-owned-table-activation.json"))
+    require(len(bindings) == 1 and len(intents) == len(activations) == 4,
+            "network recovery lacks four exact gate intents and activations")
+    binding = json.loads(bindings[0].read_text())
+    require(re.fullmatch(rf"gh-{failed_run}-[1-9][0-9]*-h2", binding.get("runId", ""))
+            and binding.get("candidateBinarySha256") == provenance.get("binary_sha256")
+            and binding.get("candidateCommit") == candidate["source_sha"],
+            "network binding is not the original candidate-bound H2 run")
+    intent_values = [json.loads(path.read_text()) for path in intents]
+    activation_values = [json.loads(path.read_text()) for path in activations]
+    nodes = [value.get("node") for value in intent_values]
+    require(set(nodes) == {"vm000", "vm001", "vm002", "vm003"}
+            and all(value.get("runId") == binding["runId"] and value.get("phase") == "armed"
+                    and value.get("binarySha256") == provenance.get("binary_sha256")
+                    and re.fullmatch(r"rv_i03_[0-9a-f]{24}", value.get("table", ""))
+                    and re.fullmatch(r"rv-i03-expiry-[0-9a-f]{24}", value.get("timer", ""))
+                    for value in intent_values)
+            and all(value.get("state") == "ACTIVE" and value.get("node") in set(nodes)
+                    and value.get("table") in {intent["table"] for intent in intent_values}
+                    for value in activation_values),
+            "network gate evidence is not a complete four-node owned expiry boundary")
+    return [{"kind": "network-expiry-recovery", "runId": binding["runId"], "nodes": nodes,
+             "node": nodes[0], "binarySha256": provenance["binary_sha256"],
+             "intents": intent_values, "activations": activation_values}]
+
+
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
     if list(artifact.glob("*/run/heal.enospc-inodes-and-quota/cases/heal.enospc-inodes-and-quota.json")):
         require(not list(artifact.glob("*/run/heal.object-size-boundaries/cases/*.json")), "mixed failed case recovery artifact")
         return quota_recovery_plan(artifact, failed_run, candidate)
+    network = list(artifact.glob("*/run/heal.network-partition-and-lock-quorum/cases/heal.network-partition-and-lock-quorum.json"))
+    if network:
+        return network_recovery_plan(artifact, failed_run, candidate)
     performance = list(artifact.glob("*/run/heal.performance-abba/cases/heal.performance-abba.json"))
     if performance:
         return performance_recovery_plan(artifact, failed_run, candidate)
@@ -256,6 +308,21 @@ def main():
         if plan.get("buckets"):
             fleet.snapshot_buckets = plan["buckets"]
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
+        if plan.get("kind") == "network-expiry-recovery":
+            for node in plan["nodes"]:
+                fleet.record("network-recovery-stop", {"node": node, **fleet.remote(node, "stop")})
+            for node in plan["nodes"]:
+                proof = fleet.record("network-expiry-recovery", {"node": node,
+                    **fleet.remote(node, "network-release", expired=True)})
+                require(proof.get("state") == "CLEAR" and proof.get("rulesRemaining") == 0,
+                        "expired network gate was not removed exactly")
+            for node in plan["nodes"]:
+                proof = fleet.record("network-finalization", {"node": node, **fleet.remote(node, "cleanup")})
+                require(proof.get("cleanup") == "PASS" and proof.get("unitStopped") is True
+                        and proof.get("rootsRemoved") is True, "network namespace finalization failed")
+            complete.append({"failedRunId": args.failed_run_id, "runId": plan["runId"],
+                             "cleanup": "PASS", "originalVerdictRewritten": False})
+            continue
         states = [fleet.record("namespace-state", {"node": node,
             **fleet.remote(node, "namespace-state")}) for node in plan["nodes"]]
         if all(not item["state"]["exists"] and not any(root["exists"] for root in item["roots"])
