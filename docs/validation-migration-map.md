@@ -1602,6 +1602,15 @@ F06 `heal.cancelled-task-restart` passed in run `38102031029` at harness
 quiet physical windows, persisted cancellation after restart, no old-task
 replay, new-token repair, all-peer S3 and cleanup passed. Its independently
 rerun canonical gate passed, increasing complete live PASS to 49.
-F07's coordinator process-crash run `38103118033` remains canonical FAIL with
-cleanup PASS. The serial fleet queue continues under its existing lock and
+F04's coordinator process-crash run `38103118033` remains canonical FAIL with
+cleanup PASS: root restart readiness, the MRF collector event budget and
+replacement disk-UUID observation did not satisfy their gates. The serial fleet queue continues under its existing lock and
 unclean-environment guard.
+
+
+All six auto-testing checks passed at C10 executor commit
+`b0fc7d15ba170bd592e6f4012c1ba15125186afb`. Original Linux contract logs from
+run `38104232517` show 397 Python tests in total with no skips, including real
+C10 absent post-DELETE recovery and nested bind-mount refusal. The serial C10
+live plan binds this harness and successful shared tools run `38103474555`;
+it waits for the existing queue and does not change an active plan or guard.
