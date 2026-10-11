@@ -143,6 +143,46 @@ def mounts():
     return observed
 
 
+def environment_capabilities(request):
+    """Read existing mounts and kernel interfaces without reserving a run."""
+    paths(request['runId'])
+    observed = []
+    for number in range(1, 9):
+        mount = Path(f'/data/rustfs{number}')
+        row = {'target': str(mount), 'mounted': False, 'independentBlockDeviceVerified': False}
+        raw = command('findmnt', '--json', '--mountpoint', str(mount), '--output',
+                      'TARGET,SOURCE,FSTYPE,UUID,MAJ:MIN,OPTIONS', check=False)
+        require(raw.returncode in {0, 1}, 'environment mount inventory failed')
+        if raw.returncode == 0:
+            values = json.loads(raw.stdout).get('filesystems', [])
+            require(len(values) == 1 and values[0].get('target') == str(mount), 'environment inventory has an ambiguous mount')
+            value = values[0]
+            row.update(mounted=True, mount=value, availableBytes=shutil.disk_usage(mount).free)
+            device = value.get('maj:min', '')
+            require(re.fullmatch(r'[0-9]+:[0-9]+', device), 'environment inventory omitted the actual device identity')
+            link = Path('/sys/dev/block') / device
+            if link.exists():
+                block = link.resolve(strict=True)
+                if (block / 'partition').exists(): block = block.parent
+                # Stacked/virtual devices need a separately reviewed fault
+                # backend; directory or partition counts cannot prove H4.
+                stacked = (block / 'slaves').is_dir() and any((block / 'slaves').iterdir())
+                physical = (block / 'dev').read_text().strip()
+                require(re.fullmatch(r'[0-9]+:[0-9]+', physical), 'environment physical device is ambiguous')
+                row.update(physicalDevice=physical, blockName=block.name,
+                    independentBlockDeviceVerified=not stacked and not block.name.startswith(('loop', 'dm-', 'ram')))
+            row['writableMount'] = 'rw' in value.get('options', '').split(',')
+        observed.append(row)
+    binary = Path('/usr/bin/rustfs')
+    return {'hostname': socket.gethostname(), 'mounts': observed, 'inspectionOnly': True, 'mutated': False,
+        'kernel': {'pidfd': hasattr(os, 'pidfd_open'), 'cgroupV2': Path('/sys/fs/cgroup/cgroup.controllers').is_file(),
+                   'fuseDevice': Path('/dev/fuse').exists() and stat.S_ISCHR(Path('/dev/fuse').stat().st_mode)},
+        'commands': {name: shutil.which(name) is not None for name in ('docker', 'fusermount3', 'nft', 'az')},
+        'installedBinarySha256': digest(binary) if binary.is_file() and not binary.is_symlink() else None,
+        'platformRestartAuthorityVerified': False, 'compatibleReleasePairVerified': False,
+        'canonicalPassClaimed': False}
+
+
 def resource_limits(profile):
     require(profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
     # DX has 1,025 external objects on four local roots. The candidate keeps
@@ -1129,6 +1169,7 @@ def main(request):
                "drive-gate-activate": drive_gate_activate, "gate-state": drive_gate_state,
                "drive-gate-release-live": drive_gate_release_live, "drive-gate-arm-live": drive_gate_arm_live}
     actions["task-records"] = task_records
+    actions["environment-capabilities"] = environment_capabilities
     for action in ('generation-capture', 'generation-install', 'generation-recover'):
         actions[action] = generation_operation
     for action in ('orphan-install-tool', 'orphan-observe', 'orphan-multipart', 'orphan-convert',

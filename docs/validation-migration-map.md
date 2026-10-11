@@ -1669,3 +1669,28 @@ A10/B08 local suite passes 419 tests with eight macOS skips. There are now 133
 automatic executors (74 non-Heal, 59 Heal), 25 remaining Heal executors and
 49/158 complete canonical live PASS results. All original 158 IDs/hashes and
 84/301/532 Heal recipes/branches/topology templates remain unchanged.
+
+
+All six A10/B08 checks passed at `7128b50818de3206f6fb368d4ea696e56da7206b`.
+Original Linux run `38105302558` executed all 419 tests with no skips. The
+A10/B08 live plan retains that exact revision and successful inspector attempt
+`38103474555`, under the original fleet lock and cleanup guard.
+
+`environment.inspect` is a separate read-only workflow operation, outside the
+158 canonical IDs. It records the current four Heal hosts, all eight possible
+mount endpoints on each, filesystem and physical-device identities, available
+space and kernel/command interfaces. A shared partition, stacked/virtual
+device, ordinary directory, duplicate filesystem identity or insufficient
+space cannot certify an independent endpoint. H3/H4 resource shapes remain
+separate from actual EC8+4 layout and fault proof. An installed cloud command
+cannot certify platform restart permission or a compatible release pair.
+No namespace is reserved, no service is stopped or installed, and no case is
+scored. Five regressions guard these boundaries; the updated complete local
+suite passes 424 tests with eight macOS skips.
+
+The six pending live plans now write their downloaded original evidence to
+`/Volumes/Developer/KAI/validation-migration-evidence`; their candidate, tool
+and harness identities are unchanged. This moves only future outputs because
+the system disk has about one GiB free. The currently active flapping/MRF plan
+and every existing artifact remain at their original locations. The local
+`pending-output-locations.json` records each prior/new destination.
