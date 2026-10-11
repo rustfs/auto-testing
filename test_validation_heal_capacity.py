@@ -229,6 +229,21 @@ class CapacityContractTests(unittest.TestCase):
                 self.assertIn("Authorization", outgoing.call_args.args[0].headers)
             self.assertEqual(probe.admin(path, [], b"", method="GET")["httpStatus"], 200)
 
+    def test_quota_stats_probe_is_an_exact_read_only_readiness_route(self):
+        probe = Probe(binding())
+        path = "/rustfs/admin/v3/quota-stats/" + probe.binding["bucketPrefix"]
+        class Response(BytesIO):
+            code = 200
+            def __init__(self):
+                super().__init__(b'{"bucket":"' + probe.binding["bucketPrefix"].encode() + b'","current_usage":0}')
+                self.headers = {"Content-Length": str(self.getbuffer().nbytes)}
+        with patch.object(probe, "credentials", return_value=("access", "secret")), \
+             patch.object(probe, "_open_admin", return_value=Response()) as outgoing:
+            observed = probe.admin(path, [], b"", method="GET")
+        self.assertEqual(observed["httpStatus"], 200)
+        self.assertEqual(observed["response"]["bucket"], probe.binding["bucketPrefix"])
+        self.assertEqual(outgoing.call_args.args[0].get_method(), "GET")
+
     def test_quota_probe_refuses_foreign_buckets_unregistered_limits_and_auth(self):
         probe = Probe(binding())
         path = "/rustfs/admin/v3/quota/" + probe.binding["bucketPrefix"]
@@ -243,6 +258,8 @@ class CapacityContractTests(unittest.TestCase):
                  patch.object(probe, "_open_admin") as outgoing, self.assertRaises(ValueError):
                 probe.admin(route, [], body, method=method, auth=auth)
             outgoing.assert_not_called()
+        with self.assertRaises(ValueError):
+            probe.admin("/rustfs/admin/v3/quota-stats/foreign-bucket", [], b"", method="GET")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import re
 import secrets
 import signal
 import sys
+import time
 
 try:
     from .heal_probe import Probe, compare_inventories, payload, require, save
@@ -301,9 +302,32 @@ def pool_status(probe, fleet, endpoint_expressions, label):
     return [{name: row[name] for name in ('id', 'cmdline', 'status', 'totalSize')} for row in values]
 
 
+def quota_usage_ready(probe, fleet, bucket, label):
+    """Wait for the server's authoritative usage snapshot before reading config."""
+    deadline = time.monotonic() + 30
+    attempts = 0
+    while True:
+        attempts += 1
+        value = fleet.record(label + '-readiness', probe.admin(
+            '/rustfs/admin/v3/quota-stats/' + bucket, [], b'', method='GET'))
+        response = value.get('response') or {}
+        if value.get('httpStatus') == 200:
+            require(response.get('bucket') == bucket and type(response.get('current_usage')) is int
+                    and response.get('current_usage') >= 0,
+                    'H06 quota readiness returned an invalid owned-bucket usage snapshot')
+            return {'bucket': bucket, 'currentUsage': response['current_usage'], 'attempts': attempts}
+        require(value.get('httpStatus') == 503
+                and isinstance(response, str)
+                and 'authoritative bucket usage is not available yet' in response,
+                'H06 quota readiness returned an unreviewed response')
+        require(time.monotonic() < deadline, 'H06 authoritative bucket usage did not become ready within 30 seconds')
+        time.sleep(1)
+
+
 def quota_status(probe, fleet, buckets, label):
     result = {}
     for bucket in buckets:
+        quota_usage_ready(probe, fleet, bucket, label)
         value = fleet.record(label, probe.admin('/rustfs/admin/v3/quota/' + bucket, [], b'', method='GET'))
         response = value.get('response') or {}
         require(value.get('httpStatus') == 200 and response.get('bucket') == bucket

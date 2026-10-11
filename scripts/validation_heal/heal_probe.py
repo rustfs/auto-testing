@@ -259,8 +259,9 @@ class Probe:
         with observation_phase(observation, 'requestPreparation'):
             validate_binding(self.binding)
             quota_path = path.startswith("/rustfs/admin/v3/quota/")
+            quota_stats_path = path.startswith("/rustfs/admin/v3/quota-stats/")
             pool_path = path in {"/rustfs/admin/v3/pools/list", "/rustfs/admin/v3/pools/status"}
-            require(path.startswith("/rustfs/admin/v3/heal/") or quota_path or pool_path or path in {
+            require(path.startswith("/rustfs/admin/v3/heal/") or quota_path or quota_stats_path or pool_path or path in {
                 "/rustfs/admin/v3/background-heal/status", "/rustfs/admin/v4/heal/replacement-recovery",
                 "/rustfs/admin/v3/info"}, "only bounded Heal evidence routes are allowed")
             if path == "/rustfs/admin/v3/info":
@@ -286,6 +287,11 @@ class Probe:
                             and quota["quota_type"] == "HARD" and type(quota["quota"]) is int
                             and quota["quota"] in {1024**2, 256 * 1024**2},
                             "quota mutation is outside the two registered I02 limits")
+            if quota_stats_path:
+                bucket = path.removeprefix("/rustfs/admin/v3/quota-stats/")
+                bucket_allowed(self.binding, bucket)
+                require(method == "GET" and not query and body == b"" and auth == "signed",
+                        "owned quota-stats evidence requires an exact signed read-only GET")
             require("?" not in path and "#" not in path and len(body) <= 2 * 1024**2,
                     "invalid Admin path or body budget")
             require(not any(part in {".", ".."} for part in unquote(path).split("/")),
