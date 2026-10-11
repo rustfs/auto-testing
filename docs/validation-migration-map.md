@@ -1747,3 +1747,30 @@ accepted/rejected retry scene. The fleet remains guarded until a separate
 successful recovery proves namespace removal; neither original FAIL changes.
 Linux contract run `38107374734` independently confirms all 441 tests passed
 with no skips at `e40fd9d74a902b9b9733c7bddfdc0b9d1b3f5c03`.
+
+Independent quota recovery `38107681061` at
+`6ef733d6d62e6a9fe6f9e0d6e8f4f01cdb947165` completed with the owned service
+stopped, both original shards restored and the complete archived scene hash
+`979e39a78712ed39bba8af43acbd1187d57c9e5edd730f474cad3c2f2936d2d4`.
+Its original finalization evidence proves private roots and bucket/quota
+namespace removal. Original I02 canonical FAIL and cleanup FAIL are retained.
+The serial queue resumed after independent successful-attempt API identity,
+artifact hashes and exact failure/guard binding were checked. Rejected
+short-SHA dispatch `38107655997` never entered recovery. Linux contract
+`38107650661` executed all 443 tests without skips; all six checks passed.
+
+`manager_native.py` adds a separately collected exact-source manager suite
+for F07/C11/J02 prerequisites. Fifteen original candidate tests cover corrupt,
+future and stale checkpoints, real MRF payload/manifest write failures,
+four deterministic migration publication interruptions, uncertain root
+terminal publication, incarnation replay/checkpoint guards and outcome truth.
+Hosted `build_manager_native` builds the unmodified `rustfs-heal` library with
+the immutable candidate tree, lock and eight reviewed source hashes. Every
+test runs by its complete name in a fresh process. Verification retains both
+inventories, exact commands, executable and collector digests, original logs
+and individual results. Seven negative evidence tests reject zero/ignored
+execution, scope inflation, wrong build attempts, filtered names and modified
+source or executable identities. This suite does not inject individual fsync
+hooks, demonstrate physical power loss or execute canonical fleet branches;
+it adds no automatic executor or live PASS count by itself. Existing C07
+native collector and pinned artifacts retain their exact contract.
