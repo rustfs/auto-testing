@@ -261,9 +261,12 @@ def main():
         if all(not item["state"]["exists"] and not any(root["exists"] for root in item["roots"])
                for item in states):
             for item in states:
+                require(item["service"].get("MainPID") == "0"
+                        and item["service"].get("ActiveState") == "inactive"
+                        and item["service"].get("SubState") == "dead",
+                        "absent namespace still has an active or unknown service; no finalization claimed")
                 fleet.record("already-clean", {"node": item["node"], "cleanup": "PASS",
-                    "unitStopped": item["service"].get("MainPID", "0") in {"", "0"},
-                    "rootsRemoved": True})
+                    "unitStopped": True, "rootsRemoved": True})
             complete.append({"failedRunId": args.failed_run_id, "runId": plan["runId"],
                              "cleanup": "PASS", "originalVerdictRewritten": False,
                              "alreadyClean": True})
@@ -289,9 +292,10 @@ def main():
         else:
             proof = fleet.record("audited-finalization", fleet.remote(plan["node"], "audit-finalize", **{
                 key: plan[key] for key in ("disk", "rejectedFaultId", "binarySha256", "expectedSceneSha256")}))
-        for node in plan["nodes"]:
-            if node != plan["node"]:
-                fleet.record("unchanged-peer-finalization", fleet.remote(node, "cleanup"))
+        if plan.get("kind") != "performance-no-fault-applied":
+            for node in plan["nodes"]:
+                if node != plan["node"]:
+                    fleet.record("unchanged-peer-finalization", fleet.remote(node, "cleanup"))
         require(proof.get("cleanup") == "PASS", "audited environment finalization failed")
         complete.append({"failedRunId": args.failed_run_id, "runId": plan["runId"], "cleanup": "PASS", "originalVerdictRewritten": False})
     save(args.evidence / "recovery-summary.json", {"cleanup": "PASS", "environments": complete, "canonicalPassClaimed": False})

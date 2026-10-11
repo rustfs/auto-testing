@@ -938,8 +938,12 @@ uses physical target bytes, separately from logical S3 throughput. Frozen gates
 require zero errors, GET/PUT P95 <= 5s and P99 <= 10s, paired B/A ratios <= 3,
 positive verified repair throughput and bounded resources. All twelve phases
 and every paired difference are reported; no phase may be omitted or reordered
-and functional success cannot substitute for performance acceptance. J06 has
-no live PASS claim yet.
+and functional success cannot substitute for performance acceptance. The first
+candidate run expired its 45-minute fault lease before group 3 phase 3; its
+physical failure scene showed no applied fault and the retained namespace was
+later independently finalized. The executor now binds a 120-minute lease for
+the full evidence window. J06 has no live PASS claim yet and needs a fresh
+candidate run.
 
 
 F05 `38087158034` passed the expanded physical census and reached the real
@@ -1851,7 +1855,7 @@ failed restoration marks cleanup FAIL and retains every private namespace.
 Eleven additional regressions exercise real-file capture/advance/inject/rescue,
 immutable evidence, strict JSON identities, process drift, missing or foreign
 capture proof, counter/cursor drift and retained failed cleanup. The complete
-local contract suite executes 495 tests with eight macOS platform skips. These
+local contract suite executes 498 tests with eight macOS platform skips. These
 are execution prerequisites: F07's six branches on both H1 and H2, including
 bounded write failure and full retained-responsibility diagnostics/rescan,
 remain required. Automatic coverage remains 134/158 with 24 Heal executors
@@ -1867,11 +1871,11 @@ those actual bounded views, and capacity witnesses retain the original process
 birth, namespace, UID, device and precise ENOSPC result. Filler is released
 before registered journal rescue; failed release retains all namespaces.
 Six new boundary regressions pass. The complete local suite now executes
-495 tests with eight macOS skips. The current Linux contract run
+498 tests with eight macOS skips. The current Linux contract run
 `38111929721` passes its catalog/matrix/shell/scanner gates and the Heal
 contract step executes 479 tests. The prior Linux run `38111242118`
 independently confirms 490 tests without skips at the preceding helper; no
 result is relabeled to the current helper. No bounded-journal live execution or
 complete F07 executor is claimed yet.
 
-Current reconciliation: helper `ad5cad0e719441f1464e018e4ec593e1ccae6959` is pushed to auto-testing PR #113; all six auto-testing checks are green. The independent canonical census records 86 unique complete live PASS cases, split into 74 current-candidate and 12 older-candidate cases. Full-status-budget run `38111278609` remains a canonical FAIL with cleanup PASS; its retained root report exposed an explicit durable bucket event, and the validator fix is covered by the current helper. A performance retry `38112625718` is running before the remaining serial plans; I04 and current-candidate foundation rechecks remain behind the same lock. These counts exclude native, read-only, recovery, duplicate and incomplete pool-tail audits.
+Current reconciliation: helper `7d8467707ec924727c0b7801f2bc943b2e47dc5e` is pushed to auto-testing PR #113; its targeted local contract suite passes 498 tests with eight macOS skips. The independent canonical census records 86 unique complete live PASS cases, split into 74 current-candidate and 12 older-candidate cases. Full-status-budget run `38111278609` remains a canonical FAIL with cleanup PASS; its retained root report exposed an explicit durable bucket event, and the validator fix is covered by the current helper. Performance run `38112625718` remains a canonical FAIL because the original 45-minute fault lease expired before group 3 phase 3; no fault was applied and no canonical PASS is added. Evidence-based cleanup run `38116647348` independently verified all four nodes already clean with inactive services and removed namespace paths, recording `cleanup: PASS` and `canonicalPassClaimed: false`. The performance executor now pre-registers a 120-minute lease and cleanup is idempotent for an already-clean namespace. These counts exclude native, read-only, recovery, duplicate and incomplete pool-tail audits.

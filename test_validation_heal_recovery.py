@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from scripts.validation_heal.fleet_node import audit_finalize, quota_audit_final
 from scripts.validation_heal.recover_environment import recovery_plan, recovery_scene_matches
 from scripts.validation_heal.capacity import release_quota
 from scripts.validation_heal.healthy import Fleet
+from scripts.validation_heal import recover_environment as recovery
 
 
 class RejectedFaultRecoveryTest(unittest.TestCase):
@@ -248,6 +250,51 @@ class PerformanceBoundaryRecoveryTests(unittest.TestCase):
             self.assertEqual(plan["nodes"], ["vm000", "vm001", "vm002", "vm003"])
             (evidence / "00005-fault-g3-p3-B.json").write_text("{}")
             with self.assertRaises(ValueError): recovery_plan(root, 12345, candidate)
+
+    def test_full_performance_finalization_cleans_each_node_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            candidate, _ = self.archive(root)
+            plan = recovery_plan(root, 12345, candidate)[0]
+            candidate_path = root / "candidate.json"
+            candidate_path.write_text(json.dumps(candidate))
+            calls = []
+            def remote(node, action, **params):
+                calls.append((node, action))
+                if action == "namespace-state":
+                    return {"state": {"exists": True}, "roots": [{"exists": True}]}
+                if action == "logs": return {}
+                self.assertEqual(action, "cleanup")
+                return {"cleanup": "PASS", "unitStopped": True, "rootsRemoved": True}
+            fake = types.SimpleNamespace(record=lambda label, value: value,
+                snapshot=lambda *args, **kwargs: plan["before"], remote=remote)
+            argv = ["recover_environment.py", "--failed-run-id", "12345", "--artifact", str(root),
+                    "--candidate", str(candidate_path), "--evidence", str(root / "recovery")]
+            with patch.object(recovery, "Fleet", return_value=fake), patch("sys.argv", argv), \
+                    patch.dict("os.environ", RUSTFS_NODES="vm000 vm001 vm002 vm003"):
+                recovery.main()
+            self.assertEqual([node for node, action in calls if action == "cleanup"], plan["nodes"])
+            self.assertEqual(json.loads((root / "recovery/recovery-summary.json").read_text())["cleanup"], "PASS")
+
+    def test_absent_namespace_with_active_or_unknown_service_cannot_claim_cleanup(self):
+        for service in ({"MainPID": "7", "ActiveState": "active", "SubState": "running"},
+                        {}, {"MainPID": "0", "ActiveState": "active", "SubState": "exited"}):
+            with self.subTest(service=service), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                candidate, _ = self.archive(root)
+                candidate_path = root / "candidate.json"
+                candidate_path.write_text(json.dumps(candidate))
+                def remote(node, action):
+                    self.assertEqual(action, "namespace-state")
+                    return {"state": {"exists": False}, "roots": [{"exists": False}], "service": service}
+                fake = types.SimpleNamespace(record=lambda label, value: value, remote=remote)
+                argv = ["recover_environment.py", "--failed-run-id", "12345", "--artifact", str(root),
+                        "--candidate", str(candidate_path), "--evidence", str(root / "recovery")]
+                with patch.object(recovery, "Fleet", return_value=fake), patch("sys.argv", argv), \
+                        patch.dict("os.environ", RUSTFS_NODES="vm000 vm001 vm002 vm003"):
+                    with self.assertRaisesRegex(ValueError, "active or unknown service"):
+                        recovery.main()
+                self.assertFalse((root / "recovery/recovery-summary.json").exists())
 
 
 if __name__ == "__main__":
