@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 128 currently dispatchable IDs include all 74 non-Heal cases and fifty-four Heal cases. Forty-six have live PASS evidence; the other 112 have no live PASS claim.
+case evidence. The 131 currently dispatchable IDs include all 74 non-Heal cases and fifty-seven Heal cases. Forty-eight have complete canonical live PASS evidence; the other 110 have no live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -1473,3 +1473,40 @@ still building native evidence. Earlier dispatch `38100369019` used an
 incorrect complete collector revision and was cancelled; it is not a success
 or native evidence source. C07 fleet migration is still in progress and does
 not change the 130 automatic executors / 28 remaining Heal executor count.
+
+C07 now has all three registered source branches on H1/H2. Its isolated EC:1
+profile establishes actual 3+1/R3 and 15+1/R15 sets; each exact half-generation
+group is below its observed read quorum. Full A/B original-member trees are
+archived while the owned units are stopped, then replayed through descriptor
+relative operations with durable rename intents. The versioned branch creates
+three distinct acknowledged generations before capturing A and explicitly
+deletes prior versions so hidden historical metadata cannot create an authority
+quorum. The unversioned branch tests distinct physical generations as in the
+source gate; it does not claim a bucket-incarnation split.
+
+The complete census counts every live identity, binds original format UUID,
+slot, role and geometry, and compares every chosen-generation byte. Every peer
+must return the exact candidate-derived negative quorum GET error; a Heal task
+must either receive the same typed admission refusal or prove explicit failed
+or untraversable responsibility. Partial negative coverage remains partial,
+and all peers have one 30-second budget to converge on the original path/token
+and exact outcome. Original mixed/control bytes must remain unchanged before
+fixture recovery. Only the complete last acknowledged B generation is rescued;
+streaming bitrot and full all-peer S3 manifests then prove that ACK. Unknown
+mutation receipts or partial recovery retain DIRTY namespaces.
+
+The driver downloads C07's native artifact from the same pinned successful
+tools attempt, verifies original source/tree/Cargo.lock/collector/executable
+identities and all six exact test listings/results before fleet deployment,
+and maps only the two original authority guards. Their actual native fixture
+has four members; repeating that independent proof in an H2 result does not
+claim sixteen-member native execution or an emitted runtime-pause fence.
+
+The implementation now has 131 automatic executors (74 non-Heal, 57 Heal),
+with 27 Heal executors remaining. The complete local suite ran 375 tests with
+seven macOS skips, including 21 C07 census, native-evidence, pending-ACK,
+recovery and filesystem tests. Linux CI additionally requires real mount
+descriptors, root-owned generation recovery and nested bind-mount refusal.
+The 158 IDs/hashes and 84/301/532 matrix, Bash syntax, scoped actionlint and
+whitespace checks passed. C07 has no canonical live PASS claim; hosted native
+run `38100407691` is still building.

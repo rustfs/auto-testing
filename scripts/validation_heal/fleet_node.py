@@ -33,7 +33,9 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
-    require(profile in {"manual", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    if profile == "authority-split":
+        return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:1"}
     if profile == "multi-pool":
         return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "4", "RUSTFS_STORAGE_CLASS_STANDARD": "EC:2"}
     if profile == "bounded-capacity":
@@ -1039,6 +1041,20 @@ def task_records(request):
     return {"taskId": token, "binarySha256": owner["binarySha256"], "readOnly": True, "records": records}
 
 
+def generation_operation(request):
+    state, roots, owner = owned(request['runId'])
+    stopped(owner)
+    require(digest(state / 'rustfs') == owner['binarySha256'], 'generation candidate binary changed')
+    disk = request['disk']
+    require(type(disk) is int and 0 <= disk < 4, 'generation operation escaped an original independent root')
+    operation = request['action']
+    require(operation in {'generation-capture', 'generation-install', 'generation-recover'}, 'unregistered generation operation')
+    backend = globals()['generation_backend']
+    with fault_module().directory(roots[disk]) as root:
+        method = {'generation-capture': backend.capture, 'generation-install': backend.install, 'generation-recover': backend.recover}[operation]
+        return method(root, owner, request, fault_module())
+
+
 def mrf_records(request):
     require(set(request) <= {"runId", "action", "quiescent"}, "MRF observer does not accept paths or mutation options")
     state, roots, owner = owned(request["runId"])
@@ -1073,6 +1089,8 @@ def main(request):
                "drive-gate-activate": drive_gate_activate, "gate-state": drive_gate_state,
                "drive-gate-release-live": drive_gate_release_live, "drive-gate-arm-live": drive_gate_arm_live}
     actions["task-records"] = task_records
+    for action in ('generation-capture', 'generation-install', 'generation-recover'):
+        actions[action] = generation_operation
     for action in ("bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover"):
         actions[action] = bucket_record_operation
     for action in ("quorum-gate", "quorum-gate-probe"):

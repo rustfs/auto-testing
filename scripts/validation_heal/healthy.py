@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"manual", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"manual", "authority-split", "multi-pool", "bounded-capacity", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -151,6 +151,7 @@ class Fleet:
         self.drive_gates = set()
         self.quorum_gates = set()
         self.network_gates = set()
+        self.generation_faults = []
         self.secret_values = set()
         self.frozen_processes = {}
         self.snapshot_buckets = None
@@ -194,8 +195,11 @@ class Fleet:
         if action == "replacement-records":
             source += "\nimport types\nreplacement_journal = types.ModuleType('replacement_journal')\nexec(" + repr(
                 NODE_SOURCE.with_name("replacement_journal.py").read_text()) + ", replacement_journal.__dict__)\n"
+        if action.startswith("generation-"):
+            source += "\nimport types\ngeneration_backend = types.ModuleType('generation_fault')\nexec(" + repr(
+                NODE_SOURCE.with_name("generation_fault.py").read_text()) + ", generation_backend.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
-                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure"}:
+                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure"} or action.startswith("generation-"):
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
         if action.startswith("bucket-record-"):
@@ -309,6 +313,16 @@ class Fleet:
 
     def cleanup(self):
         failures = []
+        if self.generation_faults:
+            try:
+                self.stop()
+                for node, params in tuple(self.generation_faults):
+                    receipt = self.record("generation-last-ACK-recovery", {"node": node, **self.remote(node, "generation-recover", **params)})
+                    require(receipt.get("state") == "CLEAR" and receipt.get("originalLastACKGenerationRestored") is True,
+                            "generation replay lacks complete last-ACK restoration")
+                    self.generation_faults.remove((node, params))
+            except Exception as exc:
+                failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
         if self.network_gates:
             try:
                 self.stop()
