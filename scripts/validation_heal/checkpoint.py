@@ -1,0 +1,151 @@
+"""Locate original Admin erasure-set responsibility before F07/C11 faults."""
+
+import base64
+import json
+import time
+
+try:
+    from . import journal_fault as journal
+    from .healthy import BASE_OPTIONS
+    from .heal_probe import canonical, require
+    from .fleet_node import PROCESS_FIELDS
+except ImportError:
+    import journal_fault as journal
+    from healthy import BASE_OPTIONS
+    from heal_probe import canonical, require
+    from fleet_node import PROCESS_FIELDS
+
+
+PATH = "/rustfs/admin/v3/heal/"
+OPTIONS = {**BASE_OPTIONS, "recursive": True}
+REFERENCE = {"candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926", "sourceFiles": {
+    "rustfs/src/admin/handlers/heal.rs": "7e4007c29a8329ced8e48b88111400e79cffd845bd6ddc6243b79f3cd48e8199",
+    "crates/heal/src/heal/channel.rs": "7f669ca43b9559db9b97fba6b419a6c76a94d76acd8526db132d74b7c534d6b0",
+    "crates/heal/src/heal/resume.rs": "ed55baa03fafa79bf662393eafcf53b4f7752ca8b2f77824cc6deff085a0cf1d",
+    "crates/heal/src/heal/resume/checkpoint.rs": "fe067b39ee406e16517bd665f7f49457daffa05d5d7bc298bd965e927b1381c1",
+    "crates/heal/src/heal/erasure_healer/admin.rs": "776c03e4dfbd27f51da506d8f637de3a3973d86d22dc83a7cda24f2e0d642ee5"},
+    "route": "empty bucket/object plus explicit pool=0,set=0 selects Admin ErasureSet",
+    "checkpointSchema": 8, "resumeSchema": 7, "durableOwnerRequired": True,
+    "bucketOrClusterScanIsCheckpointProof": False, "canonicalPassClaimed": False}
+
+
+def bytes_of(row):
+    require(row.get("present") is True and isinstance(row.get("rawBase64"), str), "record has no original bytes")
+    raw = base64.b64decode(row["rawBase64"], validate=True)
+    require(journal.entry(raw) == {name: row.get(name) for name in ("size", "sha256")},
+            "record bytes differ from their exact archived size/digest")
+    return raw
+
+
+def owned_checkpoint(observed, token, bucket, *, require_progress=True):
+    journal.task_id(token)
+    names = journal.names("checkpoint", token)
+    require(isinstance(observed, dict) and len(observed) in {1, 4}, "checkpoint census omitted bound nodes")
+    present = {}
+    for node, census in observed.items():
+        rows = census.get("records")
+        require(census.get("readOnly") is True and census.get("family") == "checkpoint"
+                and census.get("taskId") == token and census.get("directoryEnumerationUsed") is False
+                and (census.get("quiescent") is True or census.get("stable") is True
+                     and census.get("processBound") is True and census.get("independentReads") == 2)
+                and isinstance(rows, list) and len(rows) == 16, "checkpoint has no stopped or stable process-bound census")
+        seen = set()
+        for row in rows:
+            pair = row.get("disk"), row.get("relativePath")
+            require(type(pair[0]) is int and 0 <= pair[0] < 4 and pair[1] in names and pair not in seen
+                    and type(row.get("present")) is bool, "checkpoint census duplicated or escaped its exact task/disk paths")
+            seen.add(pair)
+            if row["present"]:
+                require(pair[1] not in present, "Admin task has multiple physical checkpoint owners")
+                bytes_of(row)
+                present[pair[1]] = {"node": node, **row}
+    require(set(present) == set(names[:2]),
+            "NOT_OBSERVED: original runnable Admin checkpoint/resume pair is absent, blocked or has an unexpected digest record")
+    checkpoint, resume = present[names[0]], present[names[1]]
+    require((checkpoint["node"], checkpoint["disk"]) == (resume["node"], resume["disk"]),
+            "Admin checkpoint and resume state have different physical owners")
+    value = journal.checkpoint_value(bytes_of(checkpoint), token, bucket)
+    admin = value["admin"]
+    require(admin.get("set_disk_id") == "pool_0_set_0" and canonical(admin.get("options")) == canonical(OPTIONS),
+            "checkpoint changed the exact admitted set or Admin options")
+    outcome = admin.get("outcome") or {}
+    counters = outcome.get("counters") or {}
+    require(outcome.get("execution", {}).get("state") == "running"
+            and outcome.get("coverage") == "partial"
+            and all(type(counters.get(name)) is int and 0 <= counters[name] < 2**64
+                    for name in ("processed", "healed", "unchanged", "skipped", "failed", "unknown", "attemptFailures"))
+            and counters.get("overflowed") is False, "Admin checkpoint omitted truthful running outcome counters")
+    require(counters["processed"] == sum(counters[name] for name in ("healed", "unchanged", "skipped", "failed"))
+            and counters["unknown"] <= counters["skipped"] and counters["attemptFailures"] >= counters["failed"],
+            "Admin checkpoint counters do not account for the actual durable dispositions")
+    require(not require_progress or counters["processed"] > 0,
+            "NOT_OBSERVED: original Admin checkpoint has no durable object progress")
+    state = journal.decode_json(bytes_of(resume))
+    require(type(state.get("schema_version")) is int and state["schema_version"] == 7
+            and state.get("task_id") == token and state.get("task_type") == "admin_erasure_set"
+            and state.get("set_disk_id") == "pool_0_set_0" and state.get("completed") is False
+            and not state.get("replacement_generation") and not state.get("replacement_targets"),
+            "checkpoint companion is not the original runnable Admin erasure-set resume state")
+    return {"taskId": token, "bucket": bucket, "bucketIncarnationId": admin["buckets"][bucket],
+            "node": checkpoint["node"], "disk": checkpoint["disk"], "checkpoint": checkpoint,
+            "resume": resume, "value": value, "resumeValue": state, "originalDurableResponsibility": True}
+
+
+def records(fleet, token, label, *, quiescent=False):
+    result = {}
+    for node in fleet.nodes:
+        params = {"family": "checkpoint", "taskId": token}
+        if not quiescent:
+            params["expected"] = fleet.record(label + "-process", {"node": node, **fleet.remote(node, "process")})
+        result[node] = fleet.remote(node, "journal-census" if quiescent else "journal-observe", **params)
+    return fleet.record(label, result)
+
+
+def admit(probe, fleet, active):
+    fleet.record("Admin-checkpoint-route-contract", REFERENCE)
+    result = fleet.record("Admin-erasure-set-admission", probe.admin(PATH, [], json.dumps(OPTIONS).encode()))
+    require(result.get("httpStatus") == 200 and isinstance(result.get("response"), dict),
+            "Admin erasure-set admission failed")
+    token = journal.task_id(result["response"].get("clientToken"))
+    active.append((PATH, token))
+    return token
+
+
+def freeze(fleet, token, bucket, *, timeout=60):
+    require(type(timeout) is int and 0 < timeout <= 120, "unreviewed checkpoint observation budget")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            owner = owned_checkpoint(records(fleet, token, "Admin-checkpoint-live"), token, bucket)
+            break
+        except ValueError as exc:
+            if not str(exc).startswith("NOT_OBSERVED:"): raise
+            require(time.monotonic() < deadline, "NOT_OBSERVED: actual durable Admin checkpoint window exceeded its frozen budget")
+            time.sleep(.1)
+    node = owner["node"]
+    identity = fleet.record("checkpoint-owner-process", fleet.remote(node, "process"))
+    require(node not in fleet.frozen_processes, "checkpoint owner is already tracked as frozen")
+    fleet.frozen_processes[node] = identity
+    fleet.record("checkpoint-owner-freeze", fleet.remote(node, "process-signal", signal="SIGSTOP", expected=identity))
+    frozen = fleet.record("checkpoint-owner-frozen-process", fleet.remote(node, "process"))
+    require(frozen.get("state") == "T" and all(frozen.get(name) == identity.get(name) for name in PROCESS_FIELDS),
+            "checkpoint freeze missed the original process")
+    current = owned_checkpoint(records(fleet, token, "Admin-checkpoint-frozen"), token, bucket)
+    require((current["node"], current["disk"], current["bucketIncarnationId"]) ==
+            (owner["node"], owner["disk"], owner["bucketIncarnationId"]), "checkpoint owner changed during freeze")
+    return current, identity
+
+
+def stop_for_fault(fleet, token, bucket, frozen, identity):
+    node = frozen["node"]
+    require(fleet.frozen_processes.get(node) == identity, "checkpoint crash lost its tracked original process")
+    exit_proof = fleet.record("checkpoint-owner-exact-crash", fleet.remote(node, "process-crash", expected=identity))
+    require(exit_proof.get("actualSignal") == 9 and exit_proof.get("pidfdBound") is True
+            and exit_proof.get("graceful") is False and exit_proof.get("platformEventIssued") is False,
+            "checkpoint interruption has no exact process-bound SIGKILL witness")
+    del fleet.frozen_processes[node]
+    fleet.stop()
+    current = owned_checkpoint(records(fleet, token, "Admin-checkpoint-stopped", quiescent=True), token, bucket)
+    require(current["checkpoint"] == frozen["checkpoint"] and current["resume"] == frozen["resume"],
+            "Admin durable responsibility changed between freeze and stopped fault boundary")
+    return current

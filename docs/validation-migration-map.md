@@ -1790,3 +1790,29 @@ resurrected. Distinct injection/rescue temporaries preserve interrupted
 evidence. Ten file/remote-boundary regressions cover these guarantees. This
 backend remains an F07 prerequisite; the six canonical branches and their
 full live execution are still outstanding, with no count or PASS increase.
+
+Hosted manager run `38108127382` attempt 1 succeeded with driver
+`b8126e50f78e40dfd108c7bf32162c751d4a87dd` and collector
+`aba6f5c6a36121adcc5a67663b767d0de5667ba9`. Independent artifact verification
+confirmed the immutable source tree/lock/eight source hashes, both collector
+digests, executable SHA-256
+`3ec2d5cfb22db74ae44ddacb6548e0b30fbf0fc35359e0fa04bc4c88e83c431b`,
+the complete build/runtime listings and fifteen original one-test commands,
+logs and PASS results. The original four publication interruption hooks are
+distinct from individual fsync hooks and physical power loss. This adds no
+canonical fleet PASS.
+
+`checkpoint.py` locates the actual Admin erasure-set checkpoint selected by
+an empty root request with explicit pool/set selectors. Ordinary bucket and
+cluster scans cannot substitute for that record. Exact task/disk paths must
+contain one schema-8 checkpoint and one schema-7 Admin resume state on the
+same physical owner, with unchanged scope/options, valid candidate digest,
+owned bucket incarnation and truthful durable progress. Read-only live
+observation brackets two identical bounded record reads with the original
+service birth, candidate, command and environment. The freeze/crash boundary
+requires pidfd-bound SIGSTOP/SIGKILL and unchanged stopped record bytes before
+any fault; no platform power event is claimed. Duplicate JSON fields,
+non-finite values and duplicate dedup identities reject injection. Ten new
+negative tests cover live replacement/process drift, missing/duplicate owners,
+foreign scope and fabricated progress. These are F07/C11 prerequisites;
+the remaining 24 complete executors are still outstanding.

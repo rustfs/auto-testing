@@ -48,7 +48,7 @@ def read(root_fd, path, fault):
         return fault.read_file(directory, path[-1], LIMIT * (4 if "lifecycle" in path[-1] else 1))
 
 
-def census(roots, request, fault):
+def census(roots, request, fault, *, quiescent=True):
     paths = names(request.get("family"), request.get("taskId"))
     rows = []
     for disk, root in enumerate(roots):
@@ -59,12 +59,33 @@ def census(roots, request, fault):
                 except FileNotFoundError: rows.append(row); continue
                 row.update(present=True, **entry(raw), rawBase64=base64.b64encode(raw).decode())
                 rows.append(row)
-    return {"readOnly": True, "quiescent": True, "family": request["family"],
+    return {"readOnly": True, "quiescent": quiescent, "family": request["family"],
             "taskId": request.get("taskId"), "records": rows, "directoryEnumerationUsed": False}
 
 
+def stable_census(roots, request, fault):
+    first = census(roots, request, fault, quiescent=False)
+    second = census(roots, request, fault, quiescent=False)
+    require(first == second, "NOT_OBSERVED: exact durable records changed between the two bounded reads")
+    return {**second, "stable": True, "independentReads": 2}
+
+
+def decode_json(raw):
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, "durable record contains duplicate JSON fields")
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise ValueError("durable record contains a non-finite JSON value")
+    value = json.loads(raw, object_pairs_hook=unique_pairs, parse_constant=invalid_constant)
+    require(isinstance(value, dict), "durable record is not a JSON object")
+    return value
+
+
 def checkpoint_value(raw, token, bucket):
-    value = json.loads(raw)
+    value = decode_json(raw)
     require(value.get("task_id") == task_id(token) and value.get("schema_version") == 8,
             "checkpoint does not belong to the exact original Admin task")
     admin = value.get("admin") or {}
@@ -72,10 +93,11 @@ def checkpoint_value(raw, token, bucket):
     require(admin.get("completed") is False and isinstance(buckets, dict) and set(buckets) == {bucket}
             and isinstance(buckets[bucket], str) and str(uuid.UUID(buckets[bucket])) == buckets[bucket]
             and uuid.UUID(buckets[bucket]).int != 0, "checkpoint has no original owned bucket incarnation")
-    unsigned = json.loads(raw)
+    unsigned = decode_json(raw)
     unsigned["integrity_digest"] = None
     for field in ("processed_objects", "failed_objects", "skipped_objects"):
-        require(isinstance(unsigned.get(field), list) and all(isinstance(item, str) for item in unsigned[field]),
+        require(isinstance(unsigned.get(field), list) and all(isinstance(item, str) for item in unsigned[field])
+                and len(set(unsigned[field])) == len(unsigned[field]),
                 "checkpoint ledger has an unknown canonical representation")
         unsigned[field].sort()
     # Candidate serde_json::Value uses sorted object keys and UTF-8 strings.

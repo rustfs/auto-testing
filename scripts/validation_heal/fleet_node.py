@@ -974,12 +974,27 @@ def configure_encryption(request):
 
 def journal_operation(request):
     state, roots, owner = owned(request["runId"])
-    stopped(owner)
     require(digest(state / "rustfs") == owner["binarySha256"], "durable-record candidate changed")
     require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash"}, "durable records require the owned recovery runtime")
-    require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore"},
+    require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected"},
             "durable-record adapter accepts no arbitrary system paths or commands")
     module, fault = globals()["journal_fault_backend"], fault_module()
+    if request["action"] == "journal-observe":
+        require(set(request) == {"runId", "action", "family", "taskId", "expected"},
+                "live durable-record observation accepts only a process-bound exact family/task")
+        before = process(request)
+        expected = request.get("expected")
+        require(isinstance(expected, dict) and before.get("pid", 0) > 1
+                and all(name in expected and before.get(name) == expected[name] for name in PROCESS_FIELDS),
+                "live durable-record observation lost its exact service birth or candidate")
+        observed = module.stable_census(roots, request, fault)
+        after = process(request)
+        require(all(after.get(name) == before.get(name) for name in PROCESS_FIELDS),
+                "service restarted while observing exact durable records")
+        return {**observed, "processIdentity": {name: before[name] for name in PROCESS_FIELDS},
+                "processBound": True, "serviceFrozen": before.get("state") == after.get("state") == "T"}
+    require("expected" not in request, "stopped durable-record operations accept no live-process override")
+    stopped(owner)
     if request["action"] == "journal-census":
         return module.census(roots, request, fault)
     require(request["action"] in {"journal-apply", "journal-recover"}
@@ -1230,7 +1245,7 @@ def main(request):
     actions["task-records"] = task_records
     actions["environment-capabilities"] = environment_capabilities
     actions["quota-audit-finalize"] = quota_audit_finalize
-    for action in ("journal-census", "journal-apply", "journal-recover"):
+    for action in ("journal-census", "journal-observe", "journal-apply", "journal-recover"):
         actions[action] = journal_operation
     for action in ('generation-capture', 'generation-install', 'generation-recover'):
         actions[action] = generation_operation
