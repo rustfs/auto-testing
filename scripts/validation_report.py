@@ -151,7 +151,8 @@ def validate_results(
             case, result, gate=gated, artifacts_root=directory.parent,
             target_environments=target_environments,
         ))
-        rows.append({"case_id": case_id, "source_status": case["source_status"], "verdict": result.get("verdict")})
+        rows.append({"case_id": case_id, "source_status": case["source_status"], "verdict": result.get("verdict"),
+                     "reason": result.get("reason", "")})
     return rows, errors
 
 
@@ -159,9 +160,10 @@ def render_report(rows: list[dict], errors: list[str]) -> str:
     counts = Counter(row["verdict"] for row in rows)
     lines = ["# Validation migration report", "", f"Cases: {len(rows)}", ""]
     lines.extend(f"- {status}: {counts.get(status, 0)}" for status in ("PASS", "FAIL", "INFRA_ERROR", "BLOCKED", "UNSUPPORTED", "RUNNING", "MISSING"))
-    lines.extend(["", "| Case | Source status | Verdict |", "| --- | --- | --- |"])
+    lines.extend(["", "| Case | Source status | Verdict | Reason |", "| --- | --- | --- | --- |"])
     for row in rows:
-        lines.append(f"| {row['case_id']} | {row['source_status']} | {row['verdict']} |")
+        reason = str(row.get("reason", "")).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+        lines.append(f"| {row['case_id']} | {row['source_status']} | {row['verdict']} | {reason} |")
     if errors:
         lines.extend(["", "## Validation errors", ""])
         lines.extend(f"- {error}" for error in errors)

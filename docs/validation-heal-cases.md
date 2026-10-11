@@ -668,6 +668,10 @@ Source assertions:
 
 Topologies: H1,H2. Branches: old-metadata-rejoin, old-checkpoint-replay, old-mrf-replay, native-incarnation-fence.
 
+Execution policy: `evidence-blocked`; disabled by default: `false`.
+
+Blocked reason (`EVIDENCE_INCARNATION_LIVE_ORCHESTRATION`): 已有 3 项候选版本 incarnation 原生回归通过，但尚缺覆盖旧盘回归、旧 checkpoint/MRF 重放与同名新桶的完整真机编排和证据绑定；原生回归不能替代四个分支的 canonical 验收。
+
 1. 建旧 DV 桶并让一盘离线；按 S3 正常列举/删除全部版本和 marker，确认 delete_bucket 成功，禁止直接内部清空绕过删除。
 2. 同名 create_bucket 后写新内容，保存新 incarnation；恢复旧盘并让旧任务/持久 MRF 重放。
 3. 对比任务身份和代次守卫，旧责任不得删除/覆盖新对象，不得把旧 marker 或数据复活到新桶。
@@ -1196,6 +1200,10 @@ Source assertions:
 
 Topologies: H1,H2. Branches: checkpoint-truncate, mrf-checksum, future-schema, stale-generation, journal-write-failure, native-persist-fence.
 
+Execution policy: `evidence-blocked`; disabled by default: `false`.
+
+Blocked reason (`EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION`): 已有 journal 故障工具和 10 项候选版本持久化原生回归，但尚缺 H1/H2 全六分支编排、写失败诊断、责任保留和安全重扫；现有 publication interruption 证据也不等于每个 fsync 临界点或断电证据。
+
 1. 先制造并证明真实 durable root/MRF 责任，CHECKPOINT 定位精确本 run task/record，其他系统记录禁止触碰。
 2. 停止测试服务，按 FAULT_FORMAT 对这些已审核记录分别截断、坏校验、未来 schema、旧代次；写失败实例用独占限额故障层，不塞满真实共享盘。
 3. 重启后核对解析/错误状态：未知或损坏记录保留、可诊断，不能静默删除并 ACK；责任仍能安全重扫处理。
@@ -1218,6 +1226,10 @@ Source assertions:
 
 Topologies: H2. Branches: rolling-old-new, mixed-peer-status, rollback-new-old, mixed-restart.
 
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_IMMUTABLE_RELEASE_PAIR`): 需要两个已固定且相互兼容的 RustFS release、混合版本 peer 状态和经过审核的回滚兼容矩阵；当前 auto-testing Heal 节点没有这组不可变双版本资源。
+
 1. 固定两个 release optimized 包的 commit/tree/binary/格式兼容说明；UPGRADE 先验证支持回滚的记录版本，不能使用任意旧包。
 2. 有持久修复责任时逐节点升级，保留数据根和 unit；混合阶段通过各 endpoint STATUS/BACKGROUND 并持续唯一版本写入。
 3. 缺少能力的 peer 必须显示 partial/unsupported，不能 aggregate 成 complete；新记录不被老节点误退休。
@@ -1239,6 +1251,10 @@ Source assertions:
 ## F09: heal.dedicated-host-forced-restart
 
 Topologies: H6. Branches: dedicated-vm-forced-stop, dedicated-host-power-cycle.
+
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_DEDICATED_H6_HOST`): 需要 H6 专用主机、平台强制停启权限、带外恢复和 boot_id/平台事件证据；共享 Heal 节点不能证明真实电源循环。
 
 1. 先取得 H6 专项资源 ID、独占证明和带外恢复批准；普通 fixed fleet 禁止执行本例。
 2. 持续限量写入并在 replacement 部分重建窗口，记录已成功 ACK/结果未知写集合与最近持久化证据。
@@ -1394,6 +1410,10 @@ Source assertions:
 
 Topologies: H2. Branches: current-expiry, noncurrent-expiry, transition, restore, native-ilm-fence.
 
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_DEDICATED_ILM_TIER_WINDOW`): 需要隔离 ILM/tier 租户、真实 Expire/Transition/Restore 窗口和远端版本映射；共享 ILM 环境不能安全制造交叠窗口。
+
 1. 用现有 ILM 专用远端 tier 能力建立本例桶和规则；记录真实到期窗口/远端version映射，不在共享桶上改规则。
 2. 在实际出现 Expire/Transition/Restore 进度时启动缺片 heal，WINDOW 必须从日志/状态证明交叠；提前完成只能记 NOT_OBSERVED。
 3. 过期 ACK/ILM 删除证明决定哪些版本应不存在，禁止 heal 复活；迁移对象通过真实远端 GET/restore 验证原版本内容。
@@ -1415,6 +1435,10 @@ Source assertions:
 ## G08: heal.race-replication-resync
 
 Topologies: H2. Branches: replicate-put, replicate-delete, resync, native-replication-fence.
+
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_ISOLATED_REPLICATION_PAIR`): 需要隔离的复制两端、resync 控制、跨端版本映射和 Heal/resync 实际交叠窗口；当前固定 fleet 没有独占复制对。
 
 1. 准备两个隔离复制端点/本例桶、明确源目标版本映射和同步规则；先跑一份健康复制控制。
 2. 源端缺片 heal 同时提交 PUT/DELETE 并启动指定 resync；保存两侧日志与跨端版本映射，证明操作时间交叠。
@@ -1438,6 +1462,10 @@ Source assertions:
 
 Topologies: H5. Branches: expand-while-data-heal, expand-while-parity-heal, versioned-rebalance.
 
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_H5_EXPANSION_REBALANCE`): 需要 H5 pool 扩容、rebalance 和 Heal 同时活动的完整拓扑，并逐对象保存 pool/set 迁移证据；当前 auto-testing 未绑定扩容前后布局与专用操作窗口。
+
 1. 使用已批准 H5，先在源 pool 写 DB/DV 并以 FORMAT/PHYSICAL 证明位置；新 pool 为空且未纳入旧选择器。
 2. 目标 data/parity 缺失或bitflip后按 POOL 手册扩容重启，确认新拓扑；启动 rebalance 与 heal。
 3. WINDOW 保存两任务活动证据，逐对象跟踪源/目标 pool/set/版本身份，不能只看全局数量。
@@ -1459,6 +1487,10 @@ Source assertions:
 ## H02: heal.with-rebalance-stop-resume
 
 Topologies: H5. Branches: rebalance-stop, rebalance-resume, rebalance-service-restart.
+
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_H5_REBALANCE_LIFECYCLE`): 需要可观测的 H5 rebalance、停止/恢复/服务重启控制及独立 task 身份；当前 auto-testing 未绑定这两类任务的独立身份和操作窗口。
 
 1. H5 中使用足够对象使移动可观测，缺片 heal 与 rebalance 同时活动；记录两类独立 task ID。
 2. 只停止 rebalance，观察 heal 不被误取消；然后恢复 rebalance，重启实例仅重启本例 unit。
@@ -1482,6 +1514,10 @@ Source assertions:
 
 Topologies: H5. Branches: heal-decommission-source, heal-survivor-target, versioned-multipart.
 
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_H5_DECOMMISSION`): 需要 H5 pool decommission、survivor 目标、写入限制和移动 ACK/物理权威证据；当前 auto-testing 未绑定本例退役前后拓扑和恢复方案。
+
 1. 先证实夹具位于待退役源，另写 survivor control；分别在源和目标制造在quorum内可恢复故障。
 2. 按既有 Pool 行为启动退役与 heal；退役期间按当前与 MinIO 一致的写入限制检查拒绝，不能把拒绝写当数据丢失。
 3. 源数据只能在目标提交权威后删除；记录移动 ACK 与 target physical，而不是临时副本数量。
@@ -1504,6 +1540,10 @@ Source assertions:
 
 Topologies: H5. Branches: cancel-during-heal, clear-after-inflight-exit, resume-new-generation, capacity-lock-retry-window.
 
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_H5_DECOMMISSION_CANCEL`): 需要退役取消/清理/新代次恢复以及 #2423 所需容量锁重试窗口；普通取消结果不能替代这个临界点。
+
 1. 在移动和 heal 都有部分进度时取消退役；保存取消持久化记录、通知和在途退出顺序。
 2. 确认已退出后 Clear，再恢复/新建退役；旧 token/代次不得误取消新任务，持续 ACK ledger 不能丢。
 3. 容量锁超时实例需要 LOCK_WINDOW 或匹配 NATIVE 屏障，实际见证 #2423 所涉重试路径；普通取消成功不能代替。
@@ -1525,6 +1565,10 @@ Source assertions:
 ## H05: heal.after-retired-pool-removal
 
 Topologies: H5. Branches: survivor-missing-part, survivor-missing-metadata, retired-source-offline.
+
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_H5_RETIRED_POOL_REMOVAL`): 需要完整迁移后移除 retired pool、源保持离线和 survivor-only 访问；当前 auto-testing 未提供本例源持续离线和 survivor-only 的绑定证据。
 
 1. 依既有 Pool 全量迁移并完成退休配置移除，停止源服务，证明入口仅绑定 survivor；保留源不可达证据。
 2. 只在 survivor 的选定对象/版本制造缺片或metadata缺失；START root或正确pool/set deep。
@@ -1570,6 +1614,10 @@ Source assertions:
 
 Topologies: H3,H4. Branches: ec84-one-set-restart, ec84-one-set-crash, ec84-two-sets-restart, ec84-two-sets-crash.
 
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_EC84_MULTI_SET_TOPOLOGY`): 需要 H3 的 12 个独立盘和 H4 的至少 24 个独立 endpoint，并按 set 分别记录重启/崩溃窗口；当前 H4 资源不可用。
+
 1. 分别绑定 H3 12盘和 H4 至少24盘，FORMAT必须证实每set为8data+4parity；同一物理设备多个目录不能算独立故障盘。
 2. 每个set都准备DB/DV/DX并证明对象归属，REPLACE选定目标，在目标仅部分重建时优雅重启或SIGKILL。
 3. 保存实际中断窗口、盘代次、每set已修/未修对象，不能跨set合并片数。
@@ -1591,6 +1639,10 @@ Source assertions:
 ## I01: heal.slow-io-and-eio
 
 Topologies: H1,H2. Branches: bounded-latency, short-read, eio.
+
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_DEDICATED_FAULT_IO`): 需要专用 faultfs 或故障设备、可恢复的 slow/short-read/EIO 注入和 namespace 隔离；共享盘模拟会污染其他运行。
 
 1. IO_FAULT 只在预分配专用故障设备或受限faultfs，冻结延迟/错误率、IO范围、最长窗口和原状恢复命令。
 2. 在服务相同namespace/UID先证明迟延/短读/EIO真实生效，再启动目标缺片heal；不得让dd填满共享盘。
@@ -1680,6 +1732,10 @@ Source assertions:
 
 Topologies: H1,H2. Branches: object-lock-timeout, caller-disconnect, stale-read-repair, native-lock-owner-fence.
 
+Execution policy: `evidence-blocked`; disabled by default: `false`.
+
+Blocked reason (`NATIVE_LOCK_OWNER_ABORT_BARRIER`): 需要真实 lock owner、超时、调用方断开和 stale read-repair 的服务端所有权/提交顺序；黑盒请求耗时只能证明 TCP 断开，不能证明锁提交屏障，候选包没有 reviewed e2e-test-hooks。
+
 1. LOCK_WINDOW用本例慢IO/受控原生锁屏障持有目标对象锁，先证明真实争用超过预注册预算。
 2. 同时heal/覆盖或删除；调用方断开实例仅断本次TCP连接，不杀服务器或关闭跳板机；记录请求开始/断开/服务在途结束。
 3. 锁释放后观察取消/超时不提前释放所有权、不重复提交，陈旧read-repair必须重验版本。
@@ -1701,6 +1757,10 @@ Source assertions:
 ## I06: heal.kms-and-tier-outage
 
 Topologies: H2. Branches: kms-unavailable, kms-denied, tier-unavailable, tier-version-unavailable.
+
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_DEDICATED_KMS_TIER_TENANT`): 需要专用 KMS/tier 租户、依赖网络隔离和安全的 key/tier 版本证据；不能在共享依赖上全局断网。
 
 1. 先在专用KMS/tier租户验证DE/DV夹具可正常解密/restore，保存非敏感key/tier版本标识。
 2. DEPENDENCY仅断本测试客户端/服务到该依赖的专用namespace路由，或撤销本例租户权限；不全局停共享KMS。
@@ -1745,6 +1805,10 @@ Source assertions:
 ## J02: heal.outcome-counters-and-error-truth
 
 Topologies: H1,H2. Branches: mixed-healthy-repaired-failed, dry-run, deferred, unknown-negative.
+
+Execution policy: `evidence-blocked`; disabled by default: `false`.
+
+Blocked reason (`EVIDENCE_MIXED_OUTCOME_ORCHESTRATION`): 已有 2 项候选版本 outcome 原生回归和部分计数校验，但尚缺真实混合 healthy/repaired/failed/deferred/unknown 夹具、dry-run 独立任务、逐对象完整 manifest 与计数/attemptFailures 对账；这是执行器与证据未闭环，并非已证实产品缺少 API。
 
 1. 同批独立key建立健康、可恢复缺片、低于R的不可恢复对象；deferred由冻结的锁/依赖故障产生，dry-run另建任务。
 2. 保存逐对象物理基线和期望disposition，对结果的execution/coverage/counters/object identities做逐项对账。
@@ -1811,6 +1875,10 @@ Source assertions:
 ## J05: heal.long-soak
 
 Topologies: H2,H5. Branches: 24h, 72h.
+
+Execution policy: `environment-gated`; disabled by default: `true`.
+
+Blocked reason (`ENV_DEDICATED_LONG_SOAK_LANE`): 必须在独占 H2/H5 lane 真实运行 24 小时和 72 小时，包含限速、监控、到期回收和完整资源预算；短跑不能替代 soak 证据。
 
 1. 只在专门分配的H2/H5独占lane，冻结完整24h或72h墙钟窗口、循环故障日程、并发/限速/存储上限和到期回收安排。
 2. WORKLOAD持续记录逐请求ACK，周期性故障仅使用本run DRIVE_GATE/PROCESS/依赖规则；每轮见证与恢复，不无限加数据。

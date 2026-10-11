@@ -1202,7 +1202,23 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "evidence-blocked",
+        "disabledByDefault": false,
+        "dispatchable": false,
+        "code": "C11",
+        "reasonCode": "EVIDENCE_INCARNATION_LIVE_ORCHESTRATION",
+        "reason": "已有 3 项候选版本 incarnation 原生回归通过，但尚缺覆盖旧盘回归、旧 checkpoint/MRF 重放与同名新桶的完整真机编排和证据绑定；原生回归不能替代四个分支的 canonical 验收。",
+        "requiredCapabilities": [
+          "bucket_incarnation_isolation",
+          "checkpoint_mrf_replay_guard",
+          "incarnation_native_evidence_binding",
+          "complete_live_orchestrator"
+        ],
+        "enableVariable": null,
+        "capabilitiesVariable": null
+      }
     },
     {
       "code": "D01",
@@ -2132,7 +2148,23 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "evidence-blocked",
+        "disabledByDefault": false,
+        "dispatchable": false,
+        "code": "F07",
+        "reasonCode": "EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION",
+        "reason": "已有 journal 故障工具和 10 项候选版本持久化原生回归，但尚缺 H1/H2 全六分支编排、写失败诊断、责任保留和安全重扫；现有 publication interruption 证据也不等于每个 fsync 临界点或断电证据。",
+        "requiredCapabilities": [
+          "durable_checkpoint_mrf_fault",
+          "write_failure_retention",
+          "publication_boundary_evidence_binding",
+          "complete_live_orchestrator"
+        ],
+        "enableVariable": null,
+        "capabilitiesVariable": null
+      }
     },
     {
       "code": "F08",
@@ -2172,7 +2204,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "F08",
+        "reasonCode": "ENV_IMMUTABLE_RELEASE_PAIR",
+        "reason": "需要两个已固定且相互兼容的 RustFS release、混合版本 peer 状态和经过审核的回滚兼容矩阵；当前 auto-testing Heal 节点没有这组不可变双版本资源。",
+        "requiredCapabilities": [
+          "immutable_release_pair",
+          "mixed_version_peer_status",
+          "rolling_upgrade_rollback",
+          "rollback_compatibility_matrix"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "F09",
@@ -2210,7 +2259,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "F09",
+        "reasonCode": "ENV_DEDICATED_H6_HOST",
+        "reason": "需要 H6 专用主机、平台强制停启权限、带外恢复和 boot_id/平台事件证据；共享 Heal 节点不能证明真实电源循环。",
+        "requiredCapabilities": [
+          "dedicated_h6_host",
+          "platform_power_cycle",
+          "out_of_band_recovery",
+          "boot_id_evidence"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "G01",
@@ -2490,7 +2556,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "G07",
+        "reasonCode": "ENV_DEDICATED_ILM_TIER_WINDOW",
+        "reason": "需要隔离 ILM/tier 租户、真实 Expire/Transition/Restore 窗口和远端版本映射；共享 ILM 环境不能安全制造交叠窗口。",
+        "requiredCapabilities": [
+          "dedicated_ilm_tier",
+          "real_expire_transition_restore_window",
+          "remote_version_mapping",
+          "isolated_rule_cleanup"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "G08",
@@ -2531,7 +2614,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "G08",
+        "reasonCode": "ENV_ISOLATED_REPLICATION_PAIR",
+        "reason": "需要隔离的复制两端、resync 控制、跨端版本映射和 Heal/resync 实际交叠窗口；当前固定 fleet 没有独占复制对。",
+        "requiredCapabilities": [
+          "isolated_replication_pair",
+          "resync_control",
+          "cross_endpoint_version_mapping",
+          "replication_overlap_window"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "H01",
@@ -2571,7 +2671,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "H01",
+        "reasonCode": "ENV_H5_EXPANSION_REBALANCE",
+        "reason": "需要 H5 pool 扩容、rebalance 和 Heal 同时活动的完整拓扑，并逐对象保存 pool/set 迁移证据；当前 auto-testing 未绑定扩容前后布局与专用操作窗口。",
+        "requiredCapabilities": [
+          "h5_pool_expansion",
+          "rebalance_task",
+          "per_object_pool_set_mapping",
+          "retired_scanner_evidence"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "H02",
@@ -2610,7 +2727,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "H02",
+        "reasonCode": "ENV_H5_REBALANCE_LIFECYCLE",
+        "reason": "需要可观测的 H5 rebalance、停止/恢复/服务重启控制及独立 task 身份；当前 auto-testing 未绑定这两类任务的独立身份和操作窗口。",
+        "requiredCapabilities": [
+          "h5_rebalance",
+          "rebalance_stop_resume",
+          "independent_task_identity",
+          "service_restart_control"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "H03",
@@ -2649,7 +2783,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "H03",
+        "reasonCode": "ENV_H5_DECOMMISSION",
+        "reason": "需要 H5 pool decommission、survivor 目标、写入限制和移动 ACK/物理权威证据；当前 auto-testing 未绑定本例退役前后拓扑和恢复方案。",
+        "requiredCapabilities": [
+          "h5_decommission",
+          "survivor_pool",
+          "decommission_write_guard",
+          "movement_ack_physical_proof"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "H04",
@@ -2691,7 +2842,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "H04",
+        "reasonCode": "ENV_H5_DECOMMISSION_CANCEL",
+        "reason": "需要退役取消/清理/新代次恢复以及 #2423 所需容量锁重试窗口；普通取消结果不能替代这个临界点。",
+        "requiredCapabilities": [
+          "h5_decommission",
+          "cancel_clear_resume",
+          "capacity_lock_retry_window",
+          "generation_bound_ack_ledger"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "H05",
@@ -2730,7 +2898,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "H05",
+        "reasonCode": "ENV_H5_RETIRED_POOL_REMOVAL",
+        "reason": "需要完整迁移后移除 retired pool、源保持离线和 survivor-only 访问；当前 auto-testing 未提供本例源持续离线和 survivor-only 的绑定证据。",
+        "requiredCapabilities": [
+          "h5_retired_pool_removal",
+          "source_offline_proof",
+          "survivor_authority",
+          "retired_pool_write_guard"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "H06",
@@ -2781,10 +2966,18 @@
         "ec84-two-sets-crash"
       ],
       "variantTopologies": {
-        "ec84-one-set-restart": ["H3"],
-        "ec84-one-set-crash": ["H3"],
-        "ec84-two-sets-restart": ["H4"],
-        "ec84-two-sets-crash": ["H4"]
+        "ec84-one-set-restart": [
+          "H3"
+        ],
+        "ec84-one-set-crash": [
+          "H3"
+        ],
+        "ec84-two-sets-restart": [
+          "H4"
+        ],
+        "ec84-two-sets-crash": [
+          "H4"
+        ]
       },
       "topologyApplicabilityReason": "H3 是 EC8+4 单 set，H4 是 EC8+4 至少两个 set；仅执行与该拓扑形状相符的重启/崩溃分支，不做全笛卡尔积。两个拓扑及四个操作分支均必须完成；缺少资源仍为 BLOCKED。",
       "steps": [
@@ -2816,7 +3009,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "H07",
+        "reasonCode": "ENV_EC84_MULTI_SET_TOPOLOGY",
+        "reason": "需要 H3 的 12 个独立盘和 H4 的至少 24 个独立 endpoint，并按 set 分别记录重启/崩溃窗口；当前 H4 资源不可用。",
+        "requiredCapabilities": [
+          "h3_ec84_12_independent_disks",
+          "h4_ec84_24_independent_endpoints",
+          "per_set_identity",
+          "per_set_restart_crash_evidence"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "I01",
@@ -2856,7 +3066,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "I01",
+        "reasonCode": "ENV_DEDICATED_FAULT_IO",
+        "reason": "需要专用 faultfs 或故障设备、可恢复的 slow/short-read/EIO 注入和 namespace 隔离；共享盘模拟会污染其他运行。",
+        "requiredCapabilities": [
+          "dedicated_faultfs_or_device",
+          "slow_io_short_read_eio",
+          "namespace_isolation",
+          "fault_layer_restore"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "I02",
@@ -3019,7 +3246,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "evidence-blocked",
+        "disabledByDefault": false,
+        "dispatchable": false,
+        "code": "I05",
+        "reasonCode": "NATIVE_LOCK_OWNER_ABORT_BARRIER",
+        "reason": "需要真实 lock owner、超时、调用方断开和 stale read-repair 的服务端所有权/提交顺序；黑盒请求耗时只能证明 TCP 断开，不能证明锁提交屏障，候选包没有 reviewed e2e-test-hooks。",
+        "requiredCapabilities": [
+          "server_lock_owner",
+          "lock_timeout_fence",
+          "caller_abort_sequence",
+          "stale_read_repair_fence",
+          "reviewed_e2e_test_hooks"
+        ],
+        "enableVariable": null,
+        "capabilitiesVariable": null
+      }
     },
     {
       "code": "I06",
@@ -3059,7 +3303,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "I06",
+        "reasonCode": "ENV_DEDICATED_KMS_TIER_TENANT",
+        "reason": "需要专用 KMS/tier 租户、依赖网络隔离和安全的 key/tier 版本证据；不能在共享依赖上全局断网。",
+        "requiredCapabilities": [
+          "dedicated_kms_tier_tenant",
+          "dependency_network_isolation",
+          "key_redaction",
+          "tier_version_mapping"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "J01",
@@ -3140,7 +3401,23 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "evidence-blocked",
+        "disabledByDefault": false,
+        "dispatchable": false,
+        "code": "J02",
+        "reasonCode": "EVIDENCE_MIXED_OUTCOME_ORCHESTRATION",
+        "reason": "已有 2 项候选版本 outcome 原生回归和部分计数校验，但尚缺真实混合 healthy/repaired/failed/deferred/unknown 夹具、dry-run 独立任务、逐对象完整 manifest 与计数/attemptFailures 对账；这是执行器与证据未闭环，并非已证实产品缺少 API。",
+        "requiredCapabilities": [
+          "mixed_outcome_fixture",
+          "per_object_canonical_receipts",
+          "complete_live_orchestrator",
+          "attempt_failure_visibility"
+        ],
+        "enableVariable": null,
+        "capabilitiesVariable": null
+      }
     },
     {
       "code": "J03",
@@ -3258,7 +3535,24 @@
         "logs"
       ],
       "recovery": "先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。",
-      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。"
+      "verdict": "逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。",
+      "executionPolicy": {
+        "kind": "environment-gated",
+        "disabledByDefault": true,
+        "dispatchable": true,
+        "code": "J05",
+        "reasonCode": "ENV_DEDICATED_LONG_SOAK_LANE",
+        "reason": "必须在独占 H2/H5 lane 真实运行 24 小时和 72 小时，包含限速、监控、到期回收和完整资源预算；短跑不能替代 soak 证据。",
+        "requiredCapabilities": [
+          "dedicated_soak_lane",
+          "wall_clock_24h_72h",
+          "resource_budget_monitoring",
+          "scheduled_fault_recovery"
+        ],
+        "enableVariable": "AUTO_TESTING_ENABLE_ENV_GATED_HEAL",
+        "capabilitiesVariable": "VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES",
+        "profile": "cluster-1pool"
+      }
     },
     {
       "code": "J06",

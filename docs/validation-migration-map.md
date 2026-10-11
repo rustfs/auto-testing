@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 134 currently dispatchable IDs include all 74 non-Heal cases and sixty Heal cases. Independent census currently confirms 86 unique complete canonical live PASS cases: 74 on the current candidate source and 12 on the older immutable source. Native, read-only, recovery and duplicate runs are excluded; the other 72 cases have no complete canonical live PASS claim.
+case evidence. The 154 currently dispatchable IDs include all 74 non-Heal cases, 67 automatic Heal executors, and 13 disabled-by-default environment gates. The gates preserve the operator procedures and emit explicit BLOCKED results; they are not automatic live executors or PASS claims. Independent census currently confirms 86 unique complete canonical live PASS cases: 74 on the current candidate source and 12 on the older immutable source. Native, read-only, recovery and duplicate runs are excluded; the other 72 cases have no complete canonical live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -197,8 +197,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-The other 25 Heal cases remain
-operator-assisted and are not claimed as migrated automatic executors.
+Four Heal cases remain native/evidence-blocked and outside dispatch: C11, F07, I05 and J02. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
 
@@ -1879,3 +1878,8 @@ result is relabeled to the current helper. No bounded-journal live execution or
 complete F07 executor is claimed yet.
 
 Current reconciliation: helper `6f91210f224dc0a9e460b8240c4a4cf73d7e64c1` is pushed to auto-testing PR #113 and contains the A09/G01/G02/G03/G04/G05/G06 race executors. The current local contract suite runs 518 tests with eight macOS skips; the preceding Linux contract run `38109944413` ran 473 tests without skips. The independent canonical census remains the source of live PASS totals; native, read-only, recovery, duplicate and incomplete runs are excluded, and the new G04/G05 executors add no canonical live PASS claim while their native marker/MPU fences are BLOCKED. A09 and G01-G06 preserve their source branch IDs, ACK-bound foreground operations, H1/H2 physical evidence, peer convergence and run-owned cleanup; native commit/version/delete/marker/MPU/copy fences remain in the denominator until a reviewed candidate barrier exists. The matrix has 141 registered dispatch IDs (74 non-Heal and 67 Heal), with 17 Heal cases still lacking automatic dispatch. Registration includes executors whose required native branches remain BLOCKED; it does not certify complete canonical migration or live PASS.
+
+
+The environment-gated batch now registers F08/F09, G07/G08, H01-H05/H07, I01/I06 and J05. The default gate writes a per-case BLOCKED reason and environment evidence before any SSH/install/fault operation. Explicit opt-in still requires exact candidate/client/runtime provenance, every required topology and a digest-bound resource adapter. The enabled control flows reuse auto-testing Probe/Recorder and physical fault oracles, retain every source branch and actual 24h/72h soak duration, stop on dirty cleanup, and require source-assertion review instead of manufacturing PASS from adapter responses. No live run or current-fleet adapter deployment is claimed. Second-batch blockers are recorded accurately: C11/F07/J02 already have 3/10/2 candidate native prerequisites but still need full live orchestration/evidence; I05 lacks an exact reviewed lock-owner/abort fence. See `docs/validation-heal-environment-gates.md`.
+
+This batch passes all 36 test modules selected by Validation Catalog CI: 537 local tests with eight macOS platform skips, plus exact source-catalog hash comparison, the 84/301/532 matrix, shell syntax and scanner mock gates. The 19 new environment tests cover disabled dispatch across all 13 IDs without SSH, explicit runtime provenance, topology and counter negatives, complete enabled IO control flow, actual overlap, full-duration soak control, and recovery after a lost setup ACK. These are local contract checks; no live environment-gated result is claimed.

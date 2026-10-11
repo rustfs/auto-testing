@@ -13,6 +13,11 @@ import re
 import socket
 import sys
 
+try:
+    from .execution_policy import DISPATCHABLE_CASES, ENVIRONMENT_GATED_CASES, EVIDENCE_BLOCKED_CASES, policy_for
+except ImportError:
+    from execution_policy import DISPATCHABLE_CASES, ENVIRONMENT_GATED_CASES, EVIDENCE_BLOCKED_CASES, policy_for
+
 
 ROOT = Path(__file__).resolve().parents[2]
 RECIPES = Path(__file__).with_name("recipes.json")
@@ -21,11 +26,7 @@ OPERATIONS = ROOT / "docs/validation-heal-operations.md"
 CONTRACT = ROOT / "docs/validation-heal-contract.md"
 TOPOLOGIES = {"H1", "H2", "H3", "H4", "H5", "H6"}
 STAGES = {"preflight", "baseline", "fault", "trigger", "control", "physical", "s3", "recovery", "logs"}
-AUTOMATIC_CASES = {"heal.queue-pressure-and-admission", "heal.admin-option-contract", "heal.admin-nolock-safety", "heal.race-unversioned-overwrite", "heal.race-versioned-put", "heal.race-version-delete", "heal.race-markers-and-batch-delete", "heal.race-multipart-complete-abort", "heal.race-copy-and-metadata-update", "heal.dangling-and-orphan-safety", "heal.conflicting-subquorum-authority", "heal.multi-pool-target-isolation", "heal.network-partition-and-lock-quorum", "heal.enospc-inodes-and-quota", "heal.disk-and-node-flapping", "heal.coordinator-process-crash", "heal.encrypted-objects", "heal.foreign-format-and-unknown-schema", "heal.below-write-quorum", "heal.bucket-metadata-integrity", "heal.admin-scope-isolation", "heal.admin-healthy-noop", "heal.admin-invalid-request", "heal.admin-token-cross-node-status", "heal.admin-dry-run", "heal.missing-part-file",
-                   "heal.data-shard-bitrot", "heal.parity-shard-bitrot", "heal.truncated-and-zeroed-shard",
-                   "heal.completed-multipart-object", "heal.range-head-and-conditions", "heal.manual-normal-attribution", "heal.manual-deep-attribution",
-                   "heal.performance-abba", "heal.historical-versions", "heal.repeat-idempotency", "heal.versioning-suspended-null", "heal.below-read-quorum",
-                   "heal.missing-or-corrupt-xlmeta", "heal.object-metadata-and-tags", "heal.multiple-shard-loss", "heal.special-keys-and-pagination", "heal.object-size-boundaries", "heal.admin-authorization", "heal.node-outage-rejoin", "heal.object-lock-retention", "heal.metadata-payload-mismatch", "heal.read-repair-attribution", "heal.disk-readonly-and-permission", "heal.scanner-cold-object-repair", "heal.delete-marker-semantics", "heal.status-partial-disabled-unknown", "heal.incremental-cursor-and-truncation", "heal.admin-stop-and-stale-token", "heal.cancelled-task-restart", "heal.admin-overlap-and-force-start", "heal.root-graceful-coordinator-restart", "heal.read-quorum-boundary", "heal.stale-version-rejoin", "heal.disk-loss-and-repair", "heal.disk-replacement-formatted", "heal.full-cluster-restart", "heal.replacement-auto-rebuild", "heal.target-graceful-restart", "heal.target-process-crash", "heal.mrf-offline-write-replay", "heal.disk-replacement-unformatted"}
+AUTOMATIC_CASES = DISPATCHABLE_CASES - set(ENVIRONMENT_GATED_CASES)
 
 
 def require(condition: bool, message: str) -> None:
@@ -82,6 +83,15 @@ def cases() -> list[dict]:
         require(bool(item["commands"]) and set(item["commands"]) <= anchors,
                 "Heal procedure refers to an undefined operation")
         require(bool(item["recovery"]) and bool(item["verdict"]), "missing Heal recovery/verdict contract")
+        expected_policy = policy_for(item["id"])
+        if expected_policy is None:
+            require("executionPolicy" not in item,
+                    f"unexpected execution policy for {item['id']}")
+        else:
+            require(item.get("executionPolicy") == expected_policy,
+                    f"execution policy mismatch for {item['id']}")
+            require(item["executionPolicy"]["dispatchable"] == (item["id"] in DISPATCHABLE_CASES),
+                    f"dispatchability mismatch for {item['id']}")
         item["contract"] = contract
         variant_topologies(item)
     return sorted(observed, key=lambda item: item["code"])
@@ -144,7 +154,8 @@ def compile_plan(selected: list[dict], topologies: set[str], run_id: str) -> dic
                                       "code": item["code"], "topology": topology, "branch": variant,
                                       "state": "NOT_RUN", "parameterBindings": {}, "sourceAssertions": item["contract"]["assertions"],
                                       "operatorSteps": item["steps"], "operations": item["commands"],
-                                      "requiredEvidence": item["requiredEvidence"], "caseVerdict": None})
+                                      "requiredEvidence": item["requiredEvidence"], "caseVerdict": None,
+                                      "executionPolicy": item.get("executionPolicy")})
     require(bool(instances), "selected Heal cases have no requested topology")
     return {"schemaVersion": 1, "runId": run_id, "createdAt": datetime.now(timezone.utc).isoformat(),
             "executionMode": "operator-assisted", "state": "PLAN_ONLY", "automaticExecution": False,
@@ -152,6 +163,10 @@ def compile_plan(selected: list[dict], topologies: set[str], run_id: str) -> dic
             "operationBookSha256": digest(OPERATIONS), "publicContractSha256": digest(CONTRACT),
             "selectedBaseCaseCount": len(selected),
             "selectedCaseIds": [item["id"] for item in selected], "selectedTopologies": sorted(topologies),
+            "dispatchableCaseCount": len(DISPATCHABLE_CASES),
+            "automaticCaseCount": len(AUTOMATIC_CASES),
+            "environmentGatedCaseCount": len(ENVIRONMENT_GATED_CASES),
+            "evidenceBlockedCaseCount": len(EVIDENCE_BLOCKED_CASES),
             "branchTemplateCount": len(instances), "scopeExclusions": excluded,
             "nonApplicableCombinations": non_applicable, "environmentBinding": fleet_binding(), "instances": instances}
 
@@ -203,12 +218,16 @@ def render(selected: list[dict]) -> str:
     for item in selected:
         lines += [f'<a id="{item["code"]}"></a>', "", f'## {item["code"]}: {item["id"]}', "",
                   f'Topologies: {item["contract"]["probes"]["topology"]}. Branches: {", ".join(item["variants"])}.', ""]
+        policy = item.get("executionPolicy")
+        if policy:
+            lines += [f"Execution policy: `{policy['kind']}`; disabled by default: `{str(policy['disabledByDefault']).lower()}`.",
+                      "", f"Blocked reason (`{policy['reasonCode']}`): {policy['reason']}", ""]
         lines += [f"{index}. {step}" for index, step in enumerate(item["steps"], 1)]
         lines += ["", "Operations: " + " → ".join(f"[{command}](validation-heal-operations.md#{command})" for command in item["commands"]),
                   "", "Source assertions:", ""]
         lines += [f"- {assertion}" for assertion in item["contract"]["assertions"]]
         lines += ["", item["recovery"], "", item["verdict"], ""]
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
 def main() -> int:
@@ -235,10 +254,15 @@ def main() -> int:
         inventory = cases()
         full = compile_plan(inventory, TOPOLOGIES, "manual-heal-contract-check")
         result = {"baseCases": len(inventory), "operatorBranches": sum(len(item["variants"]) for item in inventory),
-                  "topologyBranchTemplates": len(full["instances"]), "automaticCaseCount": len(AUTOMATIC_CASES), "livePassClaimed": False}
+                  "topologyBranchTemplates": len(full["instances"]), "automaticCaseCount": len(AUTOMATIC_CASES),
+                  "environmentGatedCaseCount": len(ENVIRONMENT_GATED_CASES),
+                  "evidenceBlockedCaseCount": len(EVIDENCE_BLOCKED_CASES),
+                  "dispatchableCaseCount": len(DISPATCHABLE_CASES), "livePassClaimed": False}
         if args.command == "list":
             result["cases"] = [{"code": item["code"], "id": item["id"], "variants": item["variants"],
-                                "automaticExecutor": item["id"] in AUTOMATIC_CASES} for item in inventory]
+                                "automaticExecutor": item["id"] in AUTOMATIC_CASES,
+                                "dispatchable": item["id"] in DISPATCHABLE_CASES,
+                                "executionPolicy": item.get("executionPolicy")} for item in inventory]
         print(json.dumps(result, ensure_ascii=False))
     elif args.command == "show":
         print(json.dumps(select(args.selection), ensure_ascii=False, indent=2))

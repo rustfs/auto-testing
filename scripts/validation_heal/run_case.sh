@@ -6,6 +6,7 @@ RUSTFS_HEAL_SCRIPT_SOURCE_ONLY=1 source "${ROOT}/rustfs_heal_test.sh"
 ASSUME_YES=1
 candidate="" testing_commit="" artifacts="" case_id=""
 driver=healthy.py
+environment_gate=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --validation-case) case_id="$2"; shift 2 ;;
@@ -46,12 +47,29 @@ case "${case_id}" in
   heal.dangling-and-orphan-safety) driver=orphan.py ;;
   heal.admin-nolock-safety) driver=nolock.py ;;
   heal.race-unversioned-overwrite|heal.race-versioned-put|heal.race-version-delete|heal.race-markers-and-batch-delete|heal.race-multipart-complete-abort|heal.race-copy-and-metadata-update) driver=race.py ;;
+  heal.mixed-version-upgrade-rollback|heal.dedicated-host-forced-restart|heal.race-ilm-expiry-and-transition|heal.race-replication-resync|heal.with-expansion-rebalance|heal.with-rebalance-stop-resume|heal.with-decommission|heal.with-decommission-cancel-clear|heal.after-retired-pool-removal|heal.ec84-multi-set-restart|heal.slow-io-and-eio|heal.kms-and-tier-outage|heal.long-soak)
+    driver=environment_gate.py; environment_gate=1 ;;
   heal.read-quorum-boundary) driver=quorum_boundary.py ;;
   heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null|heal.below-read-quorum|heal.missing-or-corrupt-xlmeta|heal.object-metadata-and-tags|heal.multiple-shard-loss|heal.special-keys-and-pagination|heal.object-size-boundaries|heal.object-lock-retention|heal.metadata-payload-mismatch|heal.read-repair-attribution|heal.disk-readonly-and-permission|heal.scanner-cold-object-repair|heal.delete-marker-semantics|heal.stale-version-rejoin|heal.disk-loss-and-repair|heal.disk-replacement-formatted|heal.replacement-auto-rebuild|heal.target-graceful-restart|heal.target-process-crash) driver=versions.py ;;
   heal.admin-token-cross-node-status|heal.admin-dry-run|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.range-head-and-conditions|heal.manual-normal-attribution|heal.manual-deep-attribution)
     driver=shards.py ;;
   *) die "automatic Heal executor is not migrated: ${case_id}" ;;
 esac
+if [ "${environment_gate}" -eq 1 ]; then
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "${case_id}: environment-gated and disabled by default; set AUTO_TESTING_ENABLE_ENV_GATED_HEAL=1 with a capability manifest to prepare an operator-assisted run"
+    exit 0
+  fi
+  [ -f "${candidate}" ] || die "candidate manifest missing"
+  [ -n "${artifacts}" ] || die "validation artifacts directory required"
+  [ ! -e "${artifacts}" ] || die "fresh artifact directory required"
+  python3 -B "${ROOT}/scripts/validation_heal/${driver}" \
+    --case-id "${case_id}" \
+    --candidate-manifest "${candidate}" \
+    --testing-commit "${testing_commit}" \
+    --validation-artifacts-dir "${artifacts}"
+  exit 0
+fi
 [ "${#NODES[@]}" -ge 4 ] || die "H1/H2 requires four current auto-testing Heal nodes"
 NODES=("${NODES[0]}" "${NODES[1]}" "${NODES[2]}" "${NODES[3]}")
 if [ "${DRY_RUN}" -eq 1 ]; then
