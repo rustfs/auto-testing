@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 134 currently dispatchable IDs include all 74 non-Heal cases and sixty Heal cases. Forty-nine have complete canonical live PASS evidence; the other 109 have no live PASS claim.
+case evidence. The 134 currently dispatchable IDs include all 74 non-Heal cases and sixty Heal cases. Independent census currently confirms 86 unique complete canonical live PASS cases: 74 on the current candidate source and 12 on the older immutable source. Native, read-only, recovery and duplicate runs are excluded; the other 72 cases have no complete canonical live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -1806,16 +1806,19 @@ canonical fleet PASS.
 an empty root request with explicit pool/set selectors. Ordinary bucket and
 cluster scans cannot substitute for that record. Exact task/disk paths must
 contain one schema-8 checkpoint and one schema-7 Admin resume state on the
-same physical owner, with unchanged scope/options, valid candidate digest,
-owned bucket incarnation and truthful durable progress. Read-only live
-observation brackets two identical bounded record reads with the original
-service birth, candidate, command and environment. The freeze/crash boundary
-requires pidfd-bound SIGSTOP/SIGKILL and unchanged stopped record bytes before
-any fault; no platform power event is claimed. Duplicate JSON fields,
-non-finite values and duplicate dedup identities reject injection. Ten new
-negative tests cover live replacement/process drift, missing/duplicate owners,
-foreign scope and fabricated progress. These are F07/C11 prerequisites;
-the remaining 24 complete executors are still outstanding.
+same physical owner, plus one schema-3 root admission on its exact owner, with
+unchanged scope/options, valid candidate digest, owned bucket incarnation and
+truthful durable progress. Read-only live observation brackets two identical
+bounded record reads with the original service birth, candidate, command and
+environment. The bounded profile exposes root records only for read-only census
+and observation; root mutation and MRF mutation remain rejected. The
+freeze/crash boundary requires pidfd-bound SIGSTOP/SIGKILL and unchanged
+stopped record bytes before any fault; no platform power event is claimed.
+Duplicate JSON fields, non-finite values and duplicate dedup identities reject
+injection. Root admission, live replacement/process drift, missing/duplicate
+owners, foreign scope, typed options and fabricated progress are covered by
+negative tests. These are F07/C11 prerequisites; the remaining 24 complete
+executors are still outstanding.
 
 The Functional Chain consumer downloads the manager artifact from the exact
 successful tools run attempt before fleet mutation. `manager_fixture.py`
@@ -1848,7 +1851,7 @@ failed restoration marks cleanup FAIL and retains every private namespace.
 Eleven additional regressions exercise real-file capture/advance/inject/rescue,
 immutable evidence, strict JSON identities, process drift, missing or foreign
 capture proof, counter/cursor drift and retained failed cleanup. The complete
-local contract suite executes 484 tests with eight macOS platform skips. These
+local contract suite executes 495 tests with eight macOS platform skips. These
 are execution prerequisites: F07's six branches on both H1 and H2, including
 bounded write failure and full retained-responsibility diagnostics/rescan,
 remain required. Automatic coverage remains 134/158 with 24 Heal executors
@@ -1864,7 +1867,11 @@ those actual bounded views, and capacity witnesses retain the original process
 birth, namespace, UID, device and precise ENOSPC result. Filler is released
 before registered journal rescue; failed release retains all namespaces.
 Six new boundary regressions pass. The complete local suite now executes
-490 tests with eight macOS skips. Linux `38110756752` independently confirms
-the preceding captured-generation implementation executed all 484 tests
-without skips and all six checks passed. No bounded-journal live execution or
+495 tests with eight macOS skips. The current Linux contract run
+`38111929721` passes its catalog/matrix/shell/scanner gates and the Heal
+contract step executes 479 tests. The prior Linux run `38111242118`
+independently confirms 490 tests without skips at the preceding helper; no
+result is relabeled to the current helper. No bounded-journal live execution or
 complete F07 executor is claimed yet.
+
+Current reconciliation: helper `ac3a5ea8844a553dd298401367407e2369bc307` is pushed to auto-testing PR #113; all six auto-testing checks are green. The independent canonical census now records 86 unique complete live PASS cases, split into 74 current-candidate and 12 older-candidate cases. The existing serial live queue has completed replication/pool-completion and is running full-status-budget before its remaining plans; I04 and current-candidate foundation rechecks remain behind the same lock. These counts exclude native, read-only, recovery, duplicate and incomplete pool-tail audits.
