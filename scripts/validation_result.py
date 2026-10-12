@@ -38,7 +38,7 @@ def main() -> int:
     parser.add_argument("--case-id", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--result-file", type=Path, required=True)
-    parser.add_argument("--verdict", choices=("RUNNING", "PASS", "FAIL", "INFRA_ERROR"), required=True)
+    parser.add_argument("--verdict", choices=("RUNNING", "PASS", "FAIL", "INFRA_ERROR", "BLOCKED"), required=True)
     parser.add_argument("--reason", default="")
     parser.add_argument("--cleanup-status", default="PENDING")
     parser.add_argument("--evidence", action="append", default=[])
@@ -53,7 +53,7 @@ def main() -> int:
         "schema_version": 1,
         "case_id": args.case_id,
         "source_status": case["source_status"],
-        "migration_status": "unverified" if args.verdict == "RUNNING" else "verified",
+        "migration_status": "unverified" if args.verdict in {"RUNNING", "BLOCKED"} else "verified",
         "profile": args.profile,
         "verdict": args.verdict,
         "cleanup_status": args.cleanup_status,

@@ -187,6 +187,18 @@ class ResultWriterTest(unittest.TestCase):
             bootstrap = json.loads((results / "s3.basic-object-round-trip.json").read_text())
             self.assertEqual(bootstrap["verdict"], "INFRA_ERROR")
             self.assertIsNone(bootstrap["provenance"]["binary_sha256"])
+            subprocess.run(command + identity + ["--verdict", "BLOCKED", "--cleanup-status", "PASS",
+                "--binary-sha256", "b" * 64, "--reason", "diagnostic branches require independent canonical audit",
+                "--evidence", "evidence.json"], check=True, capture_output=True)
+            blocked = json.loads((results / "s3.basic-object-round-trip.json").read_text())
+            self.assertEqual(blocked["verdict"], "BLOCKED")
+            self.assertEqual(blocked["migration_status"], "unverified")
+            self.assertNotIn("assertions", blocked)
+            self.assertEqual(blocked["provenance"]["binary_sha256"], "b" * 64)
+            catalog = json.loads((ROOT / "validation-cases.json").read_text(encoding="utf-8"))
+            _, blocked_errors = validate_results(catalog, results, gate_statuses=set(),
+                                                gate_cases={"s3.basic-object-round-trip"})
+            self.assertEqual(blocked_errors, ["s3.basic-object-round-trip: gate verdict is 'BLOCKED'"])
             invalid_pass = subprocess.run(command + identity + ["--verdict", "PASS", "--cleanup-status", "PASS",
                                                                 "--evidence", "evidence.json"], capture_output=True)
             self.assertNotEqual(invalid_pass.returncode, 0)
