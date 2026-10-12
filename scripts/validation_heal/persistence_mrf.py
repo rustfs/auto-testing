@@ -55,6 +55,26 @@ def indexed(observed):
     return result
 
 
+def corruption_targets(observed, bucket):
+    """Cover every committed replay source, including readable older slots."""
+    selected = records.checkpoint(observed)
+    require(selected.get("present") is True, "F07 MRF owner has no committed replay source")
+    entries, targets = indexed(observed), []
+    for disk in range(4):
+        for slot in (0, 1):
+            manifest = entries[disk, f".rustfs.sys/.heal-mrf-commit.{slot}.bin"]
+            if manifest is None:
+                continue
+            path = f".rustfs.sys/.heal-mrf-snapshot.{slot}.bin"
+            raw = entries[disk, path]
+            binding = records.commit(manifest, raw)
+            journal.owned_mrf_intents(records.decode_journal(raw), bucket)
+            require(binding["owner"] == selected["owner"], "F07 MRF replay sources mixed process owners")
+            targets.append({"disk": disk, "relativePath": path, **binding, "before": journal.entry(raw)})
+    require(targets, "F07 MRF corruption has no bound replay source")
+    return targets
+
+
 def retained_corruption(original, current, receipts, bucket):
     require(set(original) == set(current) and len(original) in {1, 4}, "F07 MRF evidence lost a bound physical node")
     expected, changed = {node: indexed(value) for node, value in original.items()}, set()
@@ -180,25 +200,26 @@ def run(args, topology, nodes, fixture, candidate):
         fleet.record("original-durable-responsibilities", {"obligations": obligations,
             "bindings": [{"identity": list(key), "owners": value} for key, value in bindings.items()]})
         authorities = fleet.snapshot("original-partial-write-physical", quiescent=True)
+        mutation_plan = {node: corruption_targets(observed, bucket) for node, observed in original.items()
+                         if any(owner["node"] == node for owners in bindings.values() for owner in owners)}
+        require(mutation_plan, "F07 MRF fault plan has no original responsibility owner")
+        fleet.record("all-original-committed-MRF-corruption-targets", mutation_plan)
         receipts = []
-        for node, observed in original.items():
-            if not any(owner["node"] == node for owners in bindings.values() for owner in owners): continue
-            selected = stopped[node]
-            journal.owned_mrf_intents(selected["intents"], bucket)
-            entries = indexed(observed)
-            # One committed replica per process is the corruption target;
-            # every untouched companion/replica remains a retention control.
-            for replica in selected["replicas"][:1]:
-                disk, path = replica["disk"], f".rustfs.sys/.heal-mrf-snapshot.{replica['slot']}.bin"
-                raw = entries[disk, path]
-                require(raw and records.decode_journal(raw), "F07 committed payload has no original responsibility")
+        # A healthy replica or older committed slot can still replay. Corrupt
+        # every owned source while retaining all manifests and lifecycle bytes.
+        for node, targets in mutation_plan.items():
+            for target in targets:
+                disk, path = target["disk"], target["relativePath"]
                 params = {"family": "mrf", "taskId": None, "disk": disk, "relativePath": path,
                     "faultId": f"F07-mrf-checksum-{nodes.index(node)}-{disk}-{path[-5]}", "kind": "checksum",
-                    "expectedBefore": journal.entry(raw)}
+                    "expectedBefore": target["before"]}
                 fleet.journal_faults.append((node, params.copy()))
                 receipts.append(fleet.record("actual-original-MRF-CRC-injection", {"node": node,
                     **fleet.remote(node, "journal-apply", **params)}))
         retained_corruption(original, observe(fleet, "injected-stopped-MRF-records"), receipts, bucket)
+        require({(row.get("node"), row.get("disk"), row.get("relativePath")) for row in receipts} ==
+                {(node, row["disk"], row["relativePath"]) for node, targets in mutation_plan.items() for row in targets},
+                "F07 MRF corruption omitted an original readable replay source")
         window = JournalWindow(fleet, "F07-corrupt-MRF-replay", event_targets={"rustfs::heal::mrf"})
         # Only business data is denied; disk initialization can still read
         # system metadata. Keep the same gate active through startup so MRF

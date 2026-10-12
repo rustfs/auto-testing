@@ -141,6 +141,66 @@ class MrfCorruptionTests(unittest.TestCase):
             row.update(journal.entry(corrupted), rawBase64=base64.b64encode(corrupted).decode())
         return original, current, receipts, "rv-heal-0123456789abcdef"
 
+    def add_older_slot(self, observed, *, foreign=False, empty=False):
+        fixture = fixtures.DurableMrfTests()
+        raw = fixture.journal()
+        if foreign:
+            body = raw[:-4].replace(b"rv-heal-0123456789abcdef", b"rv-heal-fedcba9876543210")
+            raw = body + struct.pack("<I", zlib.crc32(body))
+        if empty:
+            raw = b""
+        contents = {"snapshot": raw, "commit": fixture.manifest(raw, 6),
+                    "lifecycle": fixture.companion(raw, checkpoint_sequence=6)}
+        for row in observed["records"]:
+            if row["disk"] not in {0, 2} or not row["relativePath"].endswith(".1.bin"):
+                continue
+            kind = row["relativePath"].split(".heal-mrf-", 1)[1].split(".", 1)[0]
+            raw = contents[kind]
+            row.update(present=True, **journal.entry(raw), rawBase64=base64.b64encode(raw).decode())
+
+    def test_corruption_plan_covers_all_replicas_and_readable_older_slots(self):
+        fixture = fixtures.DurableMrfTests()
+        bucket = fixture.obligation()["bucket"]
+        original = fixture.observed()
+        self.add_older_slot(original)
+        self.assertEqual(suite.records.checkpoint(original)["sequence"], 7)
+        targets = suite.corruption_targets(original, bucket)
+        self.assertEqual({(row["disk"], row["relativePath"]) for row in targets},
+                         {(disk, f".rustfs.sys/.heal-mrf-snapshot.{slot}.bin") for disk in (0, 2) for slot in (0, 1)})
+        self.assertEqual({row["sequence"] for row in targets}, {6, 7})
+        current, receipts = copy.deepcopy(original), []
+        for target in targets:
+            row = next(row for row in current["records"] if
+                       (row["disk"], row["relativePath"]) == (target["disk"], target["relativePath"]))
+            raw = base64.b64decode(row["rawBase64"])
+            receipt = {"node": "node", "disk": target["disk"], "relativePath": target["relativePath"],
+                       "family": "mrf", "taskId": None, "kind": "checksum", "applied": True,
+                       "originalBackupRetained": True, "productRepairClaimed": False, "before": journal.entry(raw)}
+            corrupt = journal.transform(raw, receipt, {"bucket": bucket}, suite.records)
+            receipt["injected"] = journal.entry(corrupt)
+            row.update(**journal.entry(corrupt), rawBase64=base64.b64encode(corrupt).decode())
+            receipts.append(receipt)
+            manifest_path = row["relativePath"].replace("snapshot", "commit")
+            manifest = next(item for item in current["records"] if
+                            item["disk"] == row["disk"] and item["relativePath"] == manifest_path)
+            with self.assertRaises(ValueError):
+                suite.records.commit(base64.b64decode(manifest["rawBase64"]), corrupt)
+        proof = suite.retained_corruption({"node": original}, {"node": current}, receipts, bucket)
+        self.assertEqual(proof["corruptedPayloads"], 4)
+        self.assertTrue(proof["commitsAndLifecycleUnchanged"])
+
+    def test_corruption_plan_refuses_foreign_or_empty_older_replay_source(self):
+        for change in ("foreign", "empty"):
+            original = fixtures.DurableMrfTests().observed()
+            self.add_older_slot(original, foreign=change == "foreign", empty=change == "empty")
+            # The latest source remains owned; an older readable source still
+            # prevents safe construction of this all-source corruption fault.
+            self.assertEqual(suite.records.checkpoint(original)["sequence"], 7)
+            before = copy.deepcopy(original)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                suite.corruption_targets(original, "rv-heal-0123456789abcdef")
+            self.assertEqual(original, before)
+
     def test_corrupt_crc_keeps_every_manifest_lifecycle_and_unknown_byte(self):
         proof = suite.retained_corruption(*self.fixture())
         self.assertEqual(proof["corruptedPayloads"], 2)
@@ -195,14 +255,22 @@ class MrfCorruptionTests(unittest.TestCase):
 
     def test_corrupt_replay_preserves_the_same_active_business_gate_through_startup(self):
         actions = self.run_until_corruption_failure('replay')
-        replay = actions[actions.index('journal-apply') + 1:]
+        replay = actions[max(index for index, action in enumerate(actions) if action == 'journal-apply') + 1:]
         self.assertEqual(replay[:3], ['gate-state', 'start', 'drive-gate-probe'])
         self.assertNotIn('clear', replay[:replay.index('drive-gate-probe') + 1])
         self.assertNotIn('arm', replay)
 
     def test_changed_stopped_business_gate_keeps_rescue_and_does_not_restart(self):
         actions = self.run_until_corruption_failure('bad-state')
-        replay = actions[actions.index('journal-apply') + 1:]
+        replay = actions[max(index for index, action in enumerate(actions) if action == 'journal-apply') + 1:]
+        self.assertNotIn('start', replay)
+
+    def test_later_replica_lost_ack_is_registered_before_mutation_and_keeps_namespace(self):
+        self.run_until_corruption_failure('later-lost-ack')
+
+    def test_omitted_replica_receipt_cannot_restart_the_corrupt_replay(self):
+        actions = self.run_until_corruption_failure('omitted-receipt')
+        replay = actions[max(index for index, action in enumerate(actions) if action == 'journal-apply') + 1:]
         self.assertNotIn('start', replay)
 
     def run_until_corruption_failure(self, phase):
@@ -242,8 +310,11 @@ class MrfCorruptionTests(unittest.TestCase):
                     if action == "journal-apply":
                         actions.append(action)
                         assert (node, params) in self.journal_faults
-                        if phase == 'lost-ack': raise OSError("SSH acknowledgement lost after original CRC mutation")
-                        return {}
+                        if phase == 'lost-ack' or phase == 'later-lost-ack' and params['disk'] == 2:
+                            raise OSError("SSH acknowledgement lost after original CRC mutation")
+                        if phase == 'omitted-receipt' and params['disk'] == 2:
+                            return {"disk": 0, "relativePath": params["relativePath"]}
+                        return {"disk": params["disk"], "relativePath": params["relativePath"]}
                     if action == "journal-recover": raise ValueError("original transaction state must be audited")
                     if action == "cleanup": raise AssertionError("dirty namespace cannot be deleted")
                     return {}
@@ -262,14 +333,14 @@ class MrfCorruptionTests(unittest.TestCase):
             stack.enter_context(patch.object(suite.mrf, "acknowledge", return_value=(expected, [original.obligation()], {})))
             stack.enter_context(patch.object(suite.mrf, "read_checkpoints", return_value={}))
             stack.enter_context(patch.object(suite.mrf, "pending_bindings", return_value={(): [{"node": "node", "bucketIncarnationId": original.incarnation}]}))
-            if phase != 'lost-ack':
+            if phase not in {'lost-ack', 'later-lost-ack'}:
                 stack.enter_context(patch.object(suite, 'retained_corruption', return_value={}))
                 stack.enter_context(patch.object(suite, 'JournalWindow', return_value=SimpleNamespace(capture=lambda: {})))
                 stack.enter_context(patch.object(suite, 'diagnostics', side_effect=OSError('stop after replay readiness proof')))
             result = suite.run(args, "H1", ["node"], "DV", {"source_sha": "c" * 40, "package_sha256": "d" * 64})
             self.assertEqual((result["verdict"], result["cleanup"]), ("FAIL", "FAIL"))
-            self.assertEqual(result["failure"]["type"], "ValueError" if phase == 'bad-state' else "OSError")
-            self.assertEqual(len(captured[0].journal_faults), 1)
+            self.assertEqual(result["failure"]["type"], "ValueError" if phase in {'bad-state', 'omitted-receipt'} else "OSError")
+            self.assertEqual(len(captured[0].journal_faults), 1 if phase == 'lost-ack' else 2)
             self.assertFalse(result["canonicalCasePassClaimed"])
             return actions
 
