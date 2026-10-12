@@ -736,14 +736,16 @@ class HealVersionOracleTest(unittest.TestCase):
 
     def test_below_quorum_needs_exact_failure_and_never_accepts_transport_or_false_repair(self):
         status, expected = self.fixture()
+        status["summary"] = "stopped"
         outcome = status["outcome"]
         outcome["execution"]["state"] = "completed_with_errors"
         outcome["objects"][0]["disposition"] = {"state": "failed", "details": "retry_exhausted"}
         outcome["counters"].update(unchanged=3, failed=1, attemptFailures=2)
         validate_failed_version(status, "fixture", expected, expected[0])
-        for kind in ("completed", "unknown", "repaired", "wrong-version", "hidden-attempts", "wrong-counter"):
+        for kind in ("finished", "running", "completed", "unknown", "repaired", "wrong-version", "hidden-attempts", "wrong-counter"):
             value = copy.deepcopy(status)
-            if kind == "completed": value["outcome"]["execution"]["state"] = "completed"
+            if kind in {"finished", "running"}: value["summary"] = kind
+            elif kind == "completed": value["outcome"]["execution"]["state"] = "completed"
             elif kind in {"unknown", "repaired"}: value["outcome"]["objects"][0]["disposition"]["state"] = kind
             elif kind == "wrong-version": value["outcome"]["objects"][0]["identity"]["versionId"] = "different"
             elif kind == "hidden-attempts": value["outcome"]["counters"]["attemptFailures"] = 0

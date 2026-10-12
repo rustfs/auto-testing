@@ -290,7 +290,7 @@ def validate_unrecoverable_get(observation, contract):
 
 def validate_failed_version(status, bucket, expected, target):
     outcome = status.get("outcome") or {}
-    require(status.get("summary") == "finished" and status.get("truncated", False) is False
+    require(status.get("summary") == "stopped" and status.get("truncated", False) is False
             and outcome.get("execution", {}).get("state") == "completed_with_errors"
             and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False,
             "negative Heal task hid failed execution or incomplete responsibility")

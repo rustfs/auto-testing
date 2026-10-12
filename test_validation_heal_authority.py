@@ -101,7 +101,7 @@ class AuthorityCensusTests(unittest.TestCase):
 def negative_status(aborted=False):
     objects = [] if aborted else [{'identity': {'bucket': 'owned', 'object': 'conflict.bin', 'kind': 'object',
         'versionId': 'null', 'bucketIncarnationId': 'incarnation', 'poolIndex': 0, 'setIndex': 0}, 'disposition': {'state': 'failed'}}]
-    return {'summary': 'finished', 'truncated': False, 'settings': BASE_OPTIONS,
+    return {'summary': 'stopped', 'truncated': False, 'settings': BASE_OPTIONS,
         'outcome': {'execution': {'state': 'aborted', 'reason': 'untraversable'} if aborted else {'state': 'completed_with_errors'},
             'coverage': 'partial' if aborted else 'complete', 'objectsTruncated': False, 'objects': objects,
             'counters': {'processed': len(objects), 'healed': 0, 'unchanged': 0, 'skipped': 0, 'failed': len(objects),
@@ -115,6 +115,14 @@ class AuthorityResponsibilityTests(unittest.TestCase):
             proof = authority.validate_negative_task(value, 'owned', BASE_OPTIONS)
             self.assertTrue(proof['safeExplicitRefusal'])
             self.assertFalse(proof['runtimeCommitPauseClaimed'])
+
+    def test_failed_and_aborted_terminals_cannot_be_presented_as_finished_or_running(self):
+        for aborted in (False, True):
+            for summary in ('finished', 'running', 'unknown'):
+                value = negative_status(aborted)
+                value['summary'] = summary
+                with self.subTest(aborted=aborted, summary=summary), self.assertRaises(ValueError):
+                    authority.validate_negative_task(value, 'owned', BASE_OPTIONS)
 
     def test_false_health_missing_identity_duplicate_counters_and_false_complete_abort_fail(self):
         for kind in ('healthy', 'healed', 'foreign', 'pool', 'incarnation', 'duplicate', 'counters', 'empty', 'options', 'overflow', 'abort-coverage'):

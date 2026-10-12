@@ -118,7 +118,7 @@ def validate_split(snapshot, generation_a, generation_b, bucket, key, topology, 
 def validate_negative_task(status, bucket, options):
     outcome = status.get('outcome') or {}
     execution = outcome.get('execution') or {}
-    require(status.get('summary') == 'finished' and status.get('truncated', False) is False
+    require(status.get('summary') == 'stopped' and status.get('truncated', False) is False
             and status.get('settings') == options and outcome.get('objectsTruncated') is False
             and execution.get('state') in {'completed_with_errors', 'aborted'}
             and outcome.get('coverage') in {'complete', 'partial', 'unknown'},
