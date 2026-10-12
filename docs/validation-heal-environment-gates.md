@@ -32,7 +32,7 @@
 
 | Code | 用例 | Block 原因 | 解锁所需证据 |
 | --- | --- | --- | --- |
-| C11 | `heal.bucket-incarnation-recreation` | 已有 3 项 incarnation 原生回归；缺旧盘回归、旧 checkpoint/MRF 重放、新桶隔离的全四分支真机编排 | 真机旧/新责任与 S3 ACK、物理范围及原生 artifact 精确绑定 |
+| C11 | `heal.bucket-incarnation-recreation` | 已有 3 项 incarnation 原生回归及 `incarnation.py` 的 H1/H2 旧元数据盘回归编排；后者尚无 live 结果。仍缺旧 checkpoint/MRF 重放与精确提交屏障 | 旧/新 incarnation、正常 S3 删除与新 ACK、物理范围和原生 artifact 精确绑定；单分支不提升整例 |
 | F07 | `heal.checkpoint-and-mrf-corruption` | 已有 journal 工具和 10 项原生回归；缺 H1/H2 全六分支、写失败诊断、责任保留和安全重扫编排 | 真实 durable 记录故障与 publication 证据绑定；现有 interruption hooks 不等于每个 fsync 或断电 |
 | I05 | `heal.lock-timeout-and-caller-abort` | 请求耗时/TCP 断开不能证明服务端锁 owner 与提交顺序 | lock owner、timeout、caller abort 和 stale read-repair 的服务端屏障 |
 | J02 | `heal.outcome-counters-and-error-truth` | 已有 2 项 outcome 原生回归；缺混合 healthy/repaired/failed/deferred/unknown 真机夹具、dry-run 独立任务与完整 manifest 对账 | 每个 disposition、计数和 attemptFailures 对账；不是已证实产品缺少 API |
