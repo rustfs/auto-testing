@@ -2,6 +2,7 @@
 """Audit and finalize only explicitly supported, exactly archived failures."""
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -139,6 +140,9 @@ def network_recovery_plan(artifact, failed_run, candidate):
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
     if list(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/cases/*.json")):
+        folder = next(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/evidence/heal.checkpoint-and-mrf-corruption"))
+        if list((folder / "DB/H2/mrf-checksum").glob("*-actual-original-MRF-CRC-injection.json")):
+            return retained_mrf_recovery_plan(artifact, failed_run, candidate)
         return rejected_mrf_recovery_plan(artifact, failed_run, candidate)
     if list(artifact.glob("*/run/heal.bucket-incarnation-recreation/cases/*.json")):
         return recreation_recovery_plan(artifact, failed_run, candidate)
@@ -257,6 +261,96 @@ def rejected_mrf_recovery_plan(artifact, failed_run, candidate):
     return [{"kind": "rejected-mrf-injection", "runId": binding["runId"], "nodes": nodes, "node": nodes[0],
              "bucket": bucket, "before": failure, "originalMrf": original,
              "binarySha256": provenance["binary_sha256"], "rejectedFaultId": "F07-mrf-checksum-0-0-0"}]
+
+
+def retained_mrf_recovery_plan(artifact, failed_run, candidate):
+    """Export and discard an advanced stopped fixture without resurrecting MRF bytes."""
+    try:
+        from . import persistence_mrf, journal_fault
+    except ImportError:
+        import persistence_mrf, journal_fault
+    case = "heal.checkpoint-and-mrf-corruption"
+    paths = list(artifact.glob("*/run/*/cases/*.json"))
+    require(len(paths) == 1 and paths[0].name == case + ".json", "retained MRF recovery requires one unmixed result")
+    result = json.loads(paths[0].read_text())
+    provenance = result.get("provenance") or {}
+    require(result.get("case_id") == case and result.get("verdict") == "FAIL" and result.get("cleanup_status") == "FAIL"
+            and provenance.get("source_commit") == candidate["source_sha"]
+            and provenance.get("candidate_sha256") == candidate["package_sha256"], "retained MRF candidate or result differs")
+    evidence = paths[0].parents[1] / "evidence" / case
+    summary = json.loads((evidence / "healthy-summary.json").read_text())
+    rows = summary.get("results") or []
+    require(summary.get("caseId") == case and summary.get("cleanup") == "FAIL" and summary.get("complete") is False
+            and summary.get("canonicalCasePassClaimed") is False and rows
+            and all(row.get("cleanup") == "PASS" for row in rows[:-1])
+            and rows[-1].get("topology") == "H2" and rows[-1].get("fixture") == "DB"
+            and rows[-1].get("branch") == "mrf-checksum" and rows[-1].get("verdict") == "FAIL"
+            and rows[-1].get("cleanup") == "FAIL" and "unresolvedMutation" not in rows[-1]
+            and rows[-1].get("failure", {}).get("message") ==
+                "NOT_OBSERVED: original MRF corruption has no candidate diagnostic on vm000",
+            "retained MRF recovery supports only its archived post-restart diagnostic refusal")
+    folder = evidence / "DB/H2/mrf-checksum"
+    def one(label):
+        found = [path for path in folder.glob("*-" + label + ".json")
+                 if re.fullmatch(r"[0-9]{5}-" + re.escape(label) + r"\.json", path.name)]
+        require(len(found) == 1, "retained MRF recovery lacks one exact " + label)
+        return json.loads(found[0].read_text())
+    binding, failure = one("binding"), one("original-physical-failure-scene")
+    original, injected, retained = (one(label) for label in
+        ("original-stopped-MRF-records", "injected-stopped-MRF-records", "original-MRF-failure-scene"))
+    nodes = [f"vm00{index}" for index in range(4)]
+    bucket = binding.get("bucketPrefix", "")
+    require(re.fullmatch(rf"gh-{failed_run}-[1-9][0-9]*-h2", binding.get("runId", ""))
+            and re.fullmatch(r"rv-heal-[0-9a-f]{16}", bucket)
+            and binding.get("candidateCommit") == candidate["source_sha"]
+            and binding.get("candidatePackageSha256") == candidate["package_sha256"]
+            and binding.get("candidateBinarySha256") == provenance.get("binary_sha256")
+            and binding.get("harnessCommit") == provenance.get("testing_commit")
+            and all(set(scene) == set(nodes) for scene in (failure, original, injected, retained))
+            and all(value.get("quiescent") is True and value.get("pid") == 0
+                    and value.get("binarySha256") == provenance.get("binary_sha256") for value in failure.values()),
+            "retained MRF run, candidate, stopped scene or node identity differs")
+    receipts = [json.loads(path.read_text()) for path in folder.glob("*-actual-original-MRF-CRC-injection.json")]
+    require(len(receipts) == 1 and receipts[0].get("node") == "vm000"
+            and receipts[0].get("faultId") == "F07-mrf-checksum-0-0-0" and receipts[0].get("disk") == 0
+            and receipts[0].get("runId") == binding["runId"]
+            and receipts[0].get("binarySha256") == provenance.get("binary_sha256"),
+            "retained MRF recovery cannot omit another injection")
+    persistence_mrf.retained_corruption(original, injected, receipts, bucket)
+    for observed in retained.values():
+        persistence_mrf.indexed(observed)
+        require(observed.get("binarySha256") == provenance.get("binary_sha256"), "retained MRF candidate bytes differ")
+    gate = one("gate-recovery")
+    require(gate.get("node") == "vm003" and gate.get("state") == "CLEAR"
+            and gate.get("originalPermissionsRestored") is True, "retained MRF gate was not restored")
+    recovery = one("recovery")
+    require(recovery.get("cleanup") == "FAIL" and len(recovery.get("errors", [])) == 1
+            and recovery["errors"][0].get("state") == "DIRTY"
+            and recovery["errors"][0].get("namespacesRetained") is True
+            and "product changed or advanced the durable responsibility; refusing old-record resurrection" in
+                recovery["errors"][0].get("error", ""), "retained MRF rescue refusal differs")
+    requests, acks = sorted((folder / "fixture").glob("*-request.json")), sorted((folder / "fixture").glob("*-ack.json"))
+    require(len(requests) == len(acks) == 7, "retained MRF recovery lacks complete fixture acknowledgements")
+    for seq, (request_path, ack_path) in enumerate(zip(requests, acks), 1):
+        request, ack = json.loads(request_path.read_text()), json.loads(ack_path.read_text())
+        observed = ack.get("observation") or {}
+        require(type(request.get("sequence")) is int and type(ack.get("sequence")) is int
+                and request["sequence"] == ack["sequence"] == seq
+                and request.get("runId") == ack.get("runId") == binding["runId"]
+                and ack.get("requestFile") == request_path.name
+                and ack.get("requestSha256") == hashlib.sha256(request_path.read_bytes()).hexdigest()
+                and observed.get("operation") == request.get("operation") == ("create_bucket" if seq == 1 else "put_object")
+                and observed.get("params") == request.get("params") and request.get("params", {}).get("Bucket") == bucket
+                and observed.get("clientCallInvoked") is True and observed.get("resultUnknown") is False
+                and observed.get("acknowledged") is True and ack.get("operationCheck") == "PASS",
+                "retained MRF ledger changed identity or contains an unknown mutation")
+    fault = {key: value for key, value in receipts[0].items() if key not in {"node", "applied", "originalBackupRetained"}}
+    raw = persistence_mrf.indexed(original["vm000"])[0, fault["relativePath"]]
+    require(journal_fault.entry(raw) == fault["before"], "retained MRF original backup identity differs")
+    return [{"kind": "advanced-mrf-fixture", "runId": binding["runId"], "nodes": nodes, "node": nodes[0],
+        "bucket": bucket, "before": failure, "originalMrf": retained,
+        "binarySha256": provenance["binary_sha256"], "faults": {"vm000": [fault]},
+        "originalBackup": {"vm000": {fault["faultId"]: base64.b64encode(raw).decode()}}}]
 
 
 def recreation_recovery_plan(artifact, failed_run, candidate):
@@ -510,7 +604,24 @@ def main():
         require(recovery_scene_matches(current, plan),
                 "retained fleet drifted from its exact archived scene; no recovery performed")
         fleet.record("retained-service-logs", fleet.remote(plan["node"], "logs"))
-        if plan.get("kind") == "rejected-mrf-injection":
+        if plan.get("kind") == "advanced-mrf-fixture":
+            archived = fleet.record("retained-advanced-MRF-records", {node: fleet.remote(node,
+                "mrf-records", quiescent=True) for node in plan["nodes"]})
+            require(archived == plan["originalMrf"], "advanced MRF scene drifted; retain namespace")
+            for action in ("journal-retained-audit", "journal-retained-audit-finalize"):
+                for node in plan["nodes"]:
+                    scene = physical_content(plan["before"])[node]
+                    proof = fleet.record("audited-finalization" if action.endswith("finalize") else "exported-original-journal-backups", {"node": node,
+                        **fleet.remote(node, action, bucket=plan["bucket"], binarySha256=plan["binarySha256"],
+                            faults=plan["faults"].get(node, []), originalBackup=plan["originalBackup"].get(node, {}),
+                            expectedMrfSha256=hashlib.sha256(json.dumps(plan["originalMrf"][node], sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                            expectedSceneSha256=hashlib.sha256(json.dumps(scene, sort_keys=True, separators=(",", ":")).encode()).hexdigest())})
+                    require(proof.get("originalEvidenceExported") is True and proof.get("backupRestorationUsed") is False
+                            and proof.get("productRepairClaimed") is False
+                            and (proof.get("readyToFinalize") is True if action.endswith("audit") else
+                                proof.get("cleanup") == "PASS" and proof.get("unitStopped") is True and proof.get("rootsRemoved") is True),
+                            "advanced MRF evidence export or finalization failed")
+        elif plan.get("kind") == "rejected-mrf-injection":
             archived = fleet.record("retained-original-MRF-records", {node: fleet.remote(node,
                 "mrf-records", quiescent=True) for node in plan["nodes"]})
             require(archived == plan["originalMrf"], "F07 original MRF bytes drifted; retain namespace")
@@ -560,7 +671,7 @@ def main():
         else:
             proof = fleet.record("audited-finalization", fleet.remote(plan["node"], "audit-finalize", **{
                 key: plan[key] for key in ("disk", "rejectedFaultId", "binarySha256", "expectedSceneSha256")}))
-        if plan.get("kind") not in {"performance-no-fault-applied", "rejected-mrf-injection"}:
+        if plan.get("kind") not in {"performance-no-fault-applied", "rejected-mrf-injection", "advanced-mrf-fixture"}:
             for node in plan["nodes"]:
                 if node != plan["node"]:
                     fleet.record("unchanged-peer-finalization", fleet.remote(node, "cleanup"))

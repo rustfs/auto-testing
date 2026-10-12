@@ -1,6 +1,8 @@
 """A rejected fault ID cannot bypass ownership, intent or physical-scene checks."""
 
 import hashlib
+import base64
+import binascii
 import copy
 import json
 import sys
@@ -158,6 +160,121 @@ class RejectedMrfRecoveryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "backup or intent"):
                     fleet_node.journal_rejection_audit_finalize(request)
                 cleanup.assert_not_called()
+
+
+class AdvancedMrfRecoveryTests(unittest.TestCase):
+    def archive(self, root):
+        from test_validation_heal_mrf import DurableMrfTests
+        from scripts.validation_heal import journal_fault as journal
+        candidate, folder = RejectedMrfRecoveryTests().archive(root)
+        def one(label): return next(folder.glob("*-" + label + ".json"))
+        summary = json.loads((folder.parents[2] / "healthy-summary.json").read_text())
+        summary["results"][0]["failure"]["message"] = "NOT_OBSERVED: original MRF corruption has no candidate diagnostic on vm000"
+        (folder.parents[2] / "healthy-summary.json").write_text(json.dumps(summary))
+        helper = DurableMrfTests(); observed = helper.observed()
+        observed["binarySha256"] = "c" * 64
+        original = {node: copy.deepcopy(observed) for node in (f"vm00{i}" for i in range(4))}
+        raw = helper.journal()
+        receipt = {"schemaVersion": 1, "runId": "gh-12345-1-h2", "disk": 0, "family": "mrf", "taskId": None,
+            "relativePath": ".rustfs.sys/.heal-mrf-snapshot.0.bin", "faultId": "F07-mrf-checksum-0-0-0",
+            "binarySha256": "c" * 64, "device": 1, "mountId": 2, "productRepairClaimed": False, "kind": "checksum",
+            "before": journal.entry(raw), "injected": journal.entry(raw[:-1] + bytes([raw[-1] ^ 1])),
+            "node": "vm000", "applied": True, "originalBackupRetained": True}
+        injected = copy.deepcopy(original)
+        row = next(row for row in injected["vm000"]["records"] if row["disk"] == 0 and row["relativePath"] == receipt["relativePath"])
+        row.update(receipt["injected"], rawBase64=base64.b64encode(raw[:-1] + bytes([raw[-1] ^ 1])).decode())
+        for label, value in (("original-stopped-MRF-records", original), ("injected-stopped-MRF-records", injected),
+                             ("original-MRF-failure-scene", original)):
+            one(label).write_text(json.dumps(value)) if list(folder.glob("*-" + label + ".json")) else (folder / ("00004-" + label + ".json")).write_text(json.dumps(value))
+        (folder / "00005-actual-original-MRF-CRC-injection.json").write_text(json.dumps(receipt))
+        (folder / "00006-recovery.json").write_text(json.dumps({"cleanup": "FAIL", "errors": [{"state": "DIRTY",
+            "namespacesRetained": True, "error": "product changed or advanced the durable responsibility; refusing old-record resurrection"}]}))
+        return candidate, folder
+
+    def test_plan_requires_complete_acks_exact_injection_and_stopped_failure(self):
+        for change in (None, "unknown", "receipt", "records", "candidate", "extra-injection", "earlier-dirty"):
+            with tempfile.TemporaryDirectory() as temp, self.subTest(change=change):
+                root = Path(temp); candidate, folder = self.archive(root)
+                if change == "unknown":
+                    path = folder / "fixture/000007-ack.json"; value = json.loads(path.read_text())
+                    value["observation"]["resultUnknown"] = True; path.write_text(json.dumps(value))
+                elif change == "receipt":
+                    path = next(folder.glob("*-actual-original-MRF-CRC-injection.json")); value = json.loads(path.read_text())
+                    value["injected"]["sha256"] = "f" * 64; path.write_text(json.dumps(value))
+                elif change == "records":
+                    path = next(folder.glob("*-original-MRF-failure-scene.json")); value = json.loads(path.read_text())
+                    value["vm000"]["records"][0]["rawBase64"] = "bad"; path.write_text(json.dumps(value))
+                elif change == "candidate": candidate["package_sha256"] = "f" * 64
+                elif change == "extra-injection": (folder / "00007-actual-original-MRF-CRC-injection.json").write_text("{}")
+                elif change == "earlier-dirty":
+                    path = folder.parents[2] / "healthy-summary.json"; value = json.loads(path.read_text())
+                    value["results"].insert(0, {"cleanup": "FAIL"}); path.write_text(json.dumps(value))
+                if change is None:
+                    plan = recovery_plan(root, 12345, candidate)[0]
+                    self.assertEqual(plan["kind"], "advanced-mrf-fixture")
+                    self.assertEqual(set(plan["faults"]), {"vm000"})
+                else:
+                    with self.assertRaises((ValueError, binascii.Error)): recovery_plan(root, 12345, candidate)
+
+    def test_remote_retained_audit_loads_real_guard_backends(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fleet = Fleet(["vm000"], Path(temp), "gh-12345-1-h2")
+            def execute(*args, **kwargs):
+                namespace = {"__name__": "__validation_node_contract__"}
+                with patch.dict(sys.modules): exec(compile(kwargs["input"].rsplit("\nmain(", 1)[0], "remote-node.py", "exec"), namespace)
+                self.assertTrue({"fault", "mrf", "journal_fault_backend", "encryption_runtime", "gate", "quorum_gate_backend", "replacement"} <= set(namespace))
+                return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
+            with patch("scripts.validation_heal.healthy.subprocess.run", side_effect=execute):
+                for action in ("journal-retained-audit", "journal-retained-audit-finalize"): fleet.remote("vm000", action)
+
+    def test_node_exports_original_backup_and_rejects_drift_before_deletion(self):
+        import base64
+        from test_validation_heal_mrf import DurableMrfTests
+        from scripts.validation_heal import journal_fault as journal, mrf_records as mrf
+        for change in (None, "foreign-backup", "extra", "missing", "intent", "scene", "records", "gate", "path"):
+            with tempfile.TemporaryDirectory() as temp, self.subTest(change=change):
+                state = Path(temp).resolve(); roots = tuple(state / f"disk{i}" for i in range(4))
+                for root in roots: (root / "quarantine").mkdir(parents=True)
+                owner = {"runId": "gh-12345-1-h2", "runtimeProfile": "mrf-crash", "bucket": "rv-heal-0123456789abcdef", "binarySha256": "c" * 64}
+                raw = DurableMrfTests().journal()
+                params = {"runId": owner["runId"], "disk": 0, "family": "mrf", "taskId": None,
+                    "relativePath": ".rustfs.sys/.heal-mrf-snapshot.0.bin", "faultId": "F07-mrf-checksum-0-0-0", "kind": "checksum"}
+                with patch.object(heal_fault, "mount_id", return_value=2), heal_fault.directory(roots[0]) as fd:
+                    intent = {**journal.binding(fd, params, owner, heal_fault), "kind": "checksum",
+                        "before": journal.entry(raw), "injected": journal.entry(journal.transform(raw, params, owner, mrf))}
+                backup = roots[0] / "quarantine"
+                for suffix, data in ((".original", raw), (".intent.json", heal_fault.encode(intent)), (".applied.json", heal_fault.encode(intent))):
+                    (backup / (params["faultId"] + suffix)).write_bytes(data)
+                scene = {"files": [], "formats": []}; records = {"readOnly": True, "stable": True, "records": []}
+                sha = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                request = {"runId": owner["runId"], "action": "journal-retained-audit-finalize", "bucket": owner["bucket"],
+                    "binarySha256": owner["binarySha256"], "faults": [intent], "originalBackup": {params["faultId"]: base64.b64encode(raw).decode()},
+                    "expectedSceneSha256": sha(scene), "expectedMrfSha256": sha(records)}
+                if change == "foreign-backup": (backup / (params["faultId"] + ".original")).write_bytes(b"foreign")
+                elif change == "extra": (roots[1] / "quarantine/unregistered.original").write_bytes(b"evidence")
+                elif change == "missing": (backup / (params["faultId"] + ".applied.json")).unlink()
+                elif change == "intent": (backup / (params["faultId"] + ".intent.json")).write_text("{}")
+                elif change == "scene": request["expectedSceneSha256"] = "f" * 64
+                elif change == "records": request["expectedMrfSha256"] = "f" * 64
+                elif change == "path": intent["relativePath"] = ".rustfs.sys/foreign"
+                with patch.object(fleet_node, "owned", return_value=(state, roots, owner)), patch.object(fleet_node, "stopped"), \
+                     patch.object(fleet_node, "digest", return_value="c" * 64), patch.object(fleet_node, "fault", heal_fault, create=True), \
+                     patch.object(heal_fault, "mount_id", return_value=2), patch.object(fleet_node, "journal_fault_backend", journal, create=True), \
+                     patch.object(fleet_node, "mrf", mrf, create=True), patch.object(fleet_node, "mrf_records", return_value=records), \
+                     patch.object(fleet_node, "snapshot", return_value=scene), patch.object(fleet_node, "gate_module") as gate, \
+                     patch.object(fleet_node, "cleanup", return_value={"cleanup": "PASS", "unitStopped": True, "rootsRemoved": True}) as cleanup:
+                    gate.return_value.checked_gate.return_value = {} if change == "gate" else None
+                    if change is None:
+                        audit = fleet_node.journal_retained_audit_finalize({**request, "action": "journal-retained-audit"})
+                        cleanup.assert_not_called()
+                        self.assertEqual(base64.b64decode(audit["originalJournalBackups"][0]["original"]["rawBase64"]), raw)
+                        result = fleet_node.journal_retained_audit_finalize(request)
+                        self.assertFalse(result["backupRestorationUsed"])
+                        self.assertFalse(result["productRepairClaimed"])
+                        cleanup.assert_called_once()
+                    else:
+                        with self.assertRaises(ValueError): fleet_node.journal_retained_audit_finalize(request)
+                        cleanup.assert_not_called()
 
 
 class RecreationRecoveryTests(unittest.TestCase):

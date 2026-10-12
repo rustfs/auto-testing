@@ -1305,6 +1305,69 @@ def journal_rejection_audit_finalize(request):
             "sceneSha256": scene_sha, "backupRestorationUsed": False, "productRepairClaimed": False}
 
 
+def journal_retained_audit_finalize(request):
+    """Export an advanced MRF fault fixture; never restore its earlier product record."""
+    require(set(request) == {"runId", "action", "bucket", "binarySha256", "faults", "originalBackup",
+                             "expectedSceneSha256", "expectedMrfSha256"}, "retained journal audit accepts only its archived identity")
+    require(request["action"] in {"journal-retained-audit", "journal-retained-audit-finalize"}, "invalid retained journal audit")
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    require(request["runId"].endswith("-h2") and owner.get("runtimeProfile") == "mrf-crash"
+            and owner.get("bucket") == request["bucket"] and request["binarySha256"] == owner["binarySha256"]
+            and digest(state / "rustfs") == owner["binarySha256"]
+            and gate_module().checked_gate(state, roots) is None,
+            "retained journal candidate, bucket, runtime or member gate differs")
+    module, fault = globals()["journal_fault_backend"], fault_module()
+    faults, originals = request["faults"], request["originalBackup"]
+    require(isinstance(faults, list) and len(faults) <= 1 and isinstance(originals, dict)
+            and set(originals) == {item.get("faultId") for item in faults}, "retained journal backup bindings differ")
+    by_disk = {}
+    exported = []
+    for item in faults:
+        require(isinstance(item, dict) and set(item) == {"schemaVersion", "runId", "disk", "family", "taskId", "relativePath",
+                    "faultId", "binarySha256", "device", "mountId", "productRepairClaimed", "kind", "before", "injected"}
+                and item.get("disk") == 0 and type(item["disk"]) is int and item.get("family") == "mrf"
+                and item.get("taskId") is None and item.get("kind") == "checksum"
+                and item.get("faultId") == "F07-mrf-checksum-0-0-0"
+                and item.get("relativePath") == ".rustfs.sys/.heal-mrf-snapshot.0.bin", "retained journal fault escaped its exact identity")
+        by_disk[item["disk"]] = item
+    for disk, root in enumerate(roots):
+        with fault.directory(root) as fd, fault.parent(fd, ["quarantine"]) as backup:
+            item = by_disk.get(disk)
+            names = set() if item is None else {item["faultId"] + suffix for suffix in (".original", ".intent.json", ".applied.json")}
+            require(set(os.listdir(backup)) == names, "retained journal has an unarchived mutation or missing backup")
+            if item is None: continue
+            identity = module.binding(fd, item, owner, fault)
+            require(all(module.same_json(item.get(key), value) for key, value in identity.items()), "retained journal physical fault binding differs")
+            original = fault.read_file(backup, item["faultId"] + ".original", module.LIMIT)
+            require(isinstance(originals[item["faultId"]], str)
+                    and len(originals[item["faultId"]]) <= (module.LIMIT + 2) // 3 * 4,
+                    "retained journal original bytes exceed their bound")
+            require(base64.b64decode(originals[item["faultId"]], validate=True) == original
+                    and module.entry(original) == item["before"], "retained journal original backup drifted")
+            raw_intent = fault.read_file(backup, item["faultId"] + ".intent.json", 16384)
+            raw_applied = fault.read_file(backup, item["faultId"] + ".applied.json", 16384)
+            require(module.same_json(module.decode_json(raw_intent), item)
+                    and module.same_json(module.decode_json(raw_applied), item)
+                    and module.entry(module.transform(original, item, owner, globals()["mrf"])) == item["injected"],
+                    "retained journal intent, applied receipt or exact corruption differs")
+            exported.append({"disk": disk, "faultId": item["faultId"],
+                "original": {**module.entry(original), "rawBase64": base64.b64encode(original).decode()},
+                "intent": {**module.entry(raw_intent), "rawBase64": base64.b64encode(raw_intent).decode()},
+                "applied": {**module.entry(raw_applied), "rawBase64": base64.b64encode(raw_applied).decode()}})
+    records = mrf_records({"runId": request["runId"], "action": "mrf-records", "quiescent": True})
+    mrf_sha = hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    observed = snapshot({"runId": request["runId"], "action": "snapshot", "quiescent": True})
+    content = {key: observed[key] for key in ("files", "formats")}
+    scene_sha = hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    require(all(re.fullmatch(r"[0-9a-f]{64}", request.get(name, "")) for name in ("expectedMrfSha256", "expectedSceneSha256"))
+            and mrf_sha == request["expectedMrfSha256"] and scene_sha == request["expectedSceneSha256"],
+            "retained journal or physical scene drifted; retain namespace")
+    result = cleanup(request) if request["action"] == "journal-retained-audit-finalize" else {"readyToFinalize": True}
+    return {**result, "originalEvidenceExported": True, "originalJournalBackups": exported, "retainedMrf": records,
+            "sceneSha256": scene_sha, "backupRestorationUsed": False, "productRepairClaimed": False}
+
+
 def task_records(request):
     """Read three exact Admin journal names; never mutate system metadata."""
     state, roots, owner = owned(request["runId"])
@@ -1438,6 +1501,8 @@ def main(request):
     actions["quota-audit-finalize"] = quota_audit_finalize
     actions["journal-rejection-audit-finalize"] = journal_rejection_audit_finalize
     actions["journal-rejection-audit"] = journal_rejection_audit_finalize
+    actions["journal-retained-audit"] = journal_retained_audit_finalize
+    actions["journal-retained-audit-finalize"] = journal_retained_audit_finalize
     for action in ("journal-census", "journal-observe", "journal-capture", "journal-apply", "journal-recover"):
         actions[action] = journal_operation
     for action in ('generation-capture', 'generation-install', 'generation-recover'):

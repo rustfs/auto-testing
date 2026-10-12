@@ -185,7 +185,7 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
-        if action.startswith("network-") or action in {"cleanup", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize"}:
+        if action.startswith("network-") or action in {"cleanup", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize", "journal-retained-audit", "journal-retained-audit-finalize"}:
             network_source = NODE_SOURCE.with_name("network_gate.py").read_text()
             source += "\nimport types\nnetwork_gate_backend = types.ModuleType('network_gate')\nexec(" + repr(
                 network_source) + ", network_gate_backend.__dict__)\nNETWORK_GATE_SOURCE = " + repr(network_source) + "\n"
@@ -220,11 +220,11 @@ class Fleet:
         if action == "format-schema-fault":
             source += "\nimport types\nschema_faults = types.ModuleType('schema_faults')\nexec(" + repr(
                 NODE_SOURCE.with_name("schema_faults.py").read_text()) + ", schema_faults.__dict__)\n"
-        if action in {"encryption-configure", "snapshot", "audit-finalize", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize"}:
+        if action in {"encryption-configure", "snapshot", "audit-finalize", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize", "journal-retained-audit", "journal-retained-audit-finalize"}:
             source += "\nimport types\nencryption_runtime = types.ModuleType('encryption_runtime')\nexec(" + repr(
                 NODE_SOURCE.with_name("encryption_runtime.py").read_text()) + ", encryption_runtime.__dict__)\n"
-        replacement_actions = {"start", "cleanup", "audit-finalize", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot", "format-schema-fault"}
-        if action in {"start", "cleanup", "audit-finalize", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize", "drive-gate", "drive-gate-arm-live", "replace-drive", "quorum-gate", "quorum-gate-probe"}:
+        replacement_actions = {"start", "cleanup", "audit-finalize", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize", "journal-retained-audit", "journal-retained-audit-finalize", "replace-drive", "replacement-state", "replacement-probe", "foreign-format", "restore-replacement", "snapshot", "format-schema-fault"}
+        if action in {"start", "cleanup", "audit-finalize", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize", "journal-retained-audit", "journal-retained-audit-finalize", "drive-gate", "drive-gate-arm-live", "replace-drive", "quorum-gate", "quorum-gate-probe"}:
             source += "\nimport types\nquorum_gate_backend = types.ModuleType('quorum_gate')\nexec(" + repr(
                 NODE_SOURCE.with_name("quorum_gate.py").read_text()) + ", quorum_gate_backend.__dict__)\n"
         if action in {"drive-gate", "drive-gate-arm-live", "drive-gate-probe", "drive-gate-activate", "gate-state", "drive-gate-release-live"} | replacement_actions:
