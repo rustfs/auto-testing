@@ -44,6 +44,7 @@ ASSUME_YES=0
 PACKAGE_URL="${PACKAGE_URL:-}"
 FT_STRICT="${FT_STRICT:-0}"
 SETTLE_SECS="${FT_SETTLE_SECS:-45}"
+RECOVERY_TIMEOUT_SECS="${FT_RECOVERY_TIMEOUT_SECS:-120}"
 
 # ---------------------------------------------------------------- config ----
 NODES_ENV="${RUSTFS_NODES:-}"
@@ -299,6 +300,50 @@ capture_health() { # capture_health <label> <endpoint-base>
 settle() {
   log "settling ${SETTLE_SECS}s for failure/recovery detection"
   [ "${DRY_RUN}" -eq 1 ] || sleep "${SETTLE_SECS}"
+}
+
+# Recovery probes must wait until the probe endpoint re-admits the restored
+# peers. systemd READY on a restarted node only means that node serves
+# requests; EP1 keeps the peer's drives offline until its recovery monitor
+# sees RUSTFS_DRIVE_RETURNING_SUCCESS_THRESHOLD (3) consecutive probes spaced
+# RUSTFS_DRIVE_RETURNING_PROBE_INTERVAL_SECS (2s) apart. Probing inside that
+# window measures the hysteresis, not the EC contract (rustfs/backlog#2618).
+# A timeout is not fatal: the probes that follow report the non-convergence,
+# and the elapsed time lands in the evidence directory either way.
+await_write_quorum() { # await_write_quorum <label> <endpoint-base>
+  local label="$1" ep="$2" started now state
+  local out="${EVIDENCE}/recovery-${label//\//_}.secs"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: ${label} waits for write quorum @ ${ep}"
+    return 0
+  fi
+  started="$(date +%s)"
+  while :; do
+    state="$(curl -s --max-time 5 "${ep}/health/ready" 2>/dev/null | jq -r '
+      if (.details.storage.writeQuorum | type) != "boolean" then "absent"
+      elif .details.storage.writeQuorum and (.details.lock.ready != false) then "ready"
+      else "waiting" end' 2>/dev/null || true)"
+    now="$(date +%s)"
+    case "${state}" in
+      ready)
+        printf '%s\n' "$((now - started))" > "${out}"
+        log "[${label}] write quorum restored after $((now - started))s"
+        return 0
+        ;;
+      absent)
+        # Builds without readiness details: keep the historical settle.
+        warn "[${label}] /health/ready has no storage.writeQuorum; settling instead"
+        settle
+        return 0
+        ;;
+    esac
+    if [ "$((now - started))" -ge "${RECOVERY_TIMEOUT_SECS}" ]; then
+      printf 'timeout\n' > "${out}"
+      warn "[${label}] write quorum not restored within ${RECOVERY_TIMEOUT_SECS}s (last state: ${state:-unreachable})"
+      return 0
+    fi
+    sleep 1
+  done
 }
 
 expect_read() { # expect_read <case-id> <endpoint> <ok|fail> <key>
@@ -586,6 +631,7 @@ scenario_b() {
   expect_write "B3/write" "${EP1}" "fail" "${PROBE_PREFIX}-b3"
 
   start_nodes "${NODES[1]}" "${NODES[2]}" "${NODES[3]}" # B4: recovery
+  await_write_quorum "B4" "${EP1}"
   capture_health "B4-recovered" "${EP1}"
   expect_read  "B4/read"          "${EP1}" "ok" "ft-mid-1m.bin"
   expect_read  "B4/read-b1-probe" "${EP1}" "ok" "${PROBE_PREFIX}-b1"
@@ -610,6 +656,7 @@ scenario_c() {
   expect_write "C2/write" "${EP1}" "fail" "${PROBE_PREFIX}-c2"
 
   start_nodes "${NODES[2]}" "${NODES[3]}"
+  await_write_quorum "C3" "${EP1}"
   capture_health "C3-recovered" "${EP1}"
   expect_read  "C3/read"  "${EP1}" "ok" "ft-small-16k.bin"
   expect_write "C3/write" "${EP1}" "ok" "${PROBE_PREFIX}-c3"
@@ -634,6 +681,7 @@ scenario_c2() {
   expect_write "C2-2/write" "${EP1}" "fail" "${PROBE_PREFIX}-c2-2"
 
   start_nodes "${NODES[2]}" "${NODES[3]}"
+  await_write_quorum "C2-3" "${EP1}"
   capture_health "C2-3-recovered" "${EP1}"
   expect_read  "C2-3/read"  "${EP1}" "ok" "ft-mid-1m.bin"
   expect_write "C2-3/write" "${EP1}" "ok" "${PROBE_PREFIX}-c2-3"
@@ -662,6 +710,7 @@ scenario_d() {
   expect_write "D2/write" "${EP1}" "fail" "${PROBE_PREFIX}-d2"
 
   start_nodes "${NODES[2]}" "${NODES[3]}"
+  await_write_quorum "D3" "${EP1}"
   capture_health "D3-recovered" "${EP1}"
   expect_read  "D3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
   expect_write "D3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-d3"
@@ -688,6 +737,7 @@ scenario_e() {
   expect_write "E2/write" "${EP1}" "fail" "${PROBE_PREFIX}-e2"
 
   start_nodes "${NODES[1]}" "${NODES[2]}"; settle
+  await_write_quorum "E3" "${EP1}"
   capture_health "E3-recovered" "${EP1}"
   expect_read  "E3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
   expect_write "E3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-e3"
@@ -709,32 +759,33 @@ Usage: $0 [options]
   --strict               known-divergence also fails the suite (FT_STRICT=1)
   --matrix               full topology x EC outage sweep (38 combinations)
   --matrix-topo KEY [EC] sweep one topology (like 4x2), optionally one EC level
-Environment: RUSTFS_NODES, RUSTFS_SSH_USER, FT_SETTLE_SECS, FT_STRICT, MATRIX_EC
+Environment: RUSTFS_NODES, RUSTFS_SSH_USER, FT_SETTLE_SECS, FT_RECOVERY_TIMEOUT_SECS,
+             FT_STRICT, MATRIX_EC
 EOF
 }
 
 # ── matrix: topology x EC exhaustive outage sweep ───────────────────────────
 # For each topology (nodes x drives-per-node) and each EC level P in 1..N/2:
-#   install + seed, full-capacity read/write asserts, then stop nodes one by
-#   one. Per-phase expectations derive from quorum arithmetic:
-#     online drives D >= data (N-P)      -> reads OK
-#     online drives D >= data + 1        -> writes OK
-#     otherwise                          -> reads and writes fail
+#   install with RUSTFS_STORAGE_CLASS_STANDARD=EC:P + seed, full-capacity
+#   read/write asserts, then stop nodes one by one. Per-phase expectations
+#   derive from the product quorum arithmetic (WriteLayout::from_parity):
+#     online drives D >= data (N-P)                   -> reads OK
+#     online drives D >= data + (data == parity)      -> writes OK
+#     otherwise                                       -> reads and writes fail
 # Case ids: M-<topo>EC<P>-full | -n<k> | -rec. Register new topologies by
 # appending to MATRIX_TOPOS.
-# 4x1 (one drive per node) is excluded: the product rejects a distributed
-# pool whose nodes do not all have at least 2 drive endpoints - startup
-# dies with FATAL "Incorrect number of endpoints provided, size 1"
-# (BelowMinimum) before any case can run (see runs 36204915029 and
-# 36239607351). Revisit if the startup constraint is lifted.
-MATRIX_TOPOS=("1x2" "1x4" "2x2" "2x4" "3x2" "3x4" "4x2" "4x3" "4x4")
+MATRIX_TOPOS=("1x2" "1x4" "2x2" "2x4" "3x2" "3x4" "4x1" "4x2" "4x3" "4x4")
 
+# One ellipses expression spanning every node, so each topology is a single
+# pool with one N-drive erasure set. Space-separated per-node expressions
+# would make every node its own server pool (rustfs/backlog#2618): stopping a
+# node then takes a whole pool offline, and single-drive pools (4x1) cannot
+# start at all.
 matrix_volumes_expr() { # <nodes> <drives-per>
-  local list="" i
-  for ((i = 1; i <= $1; i++)); do
-    list+="${list:+ }http://rustfs-node${i}:9000/data/rustfs{1...$2}/mnmd"
-  done
-  printf '%s' "$list"
+  local host="rustfs-node1" drive="rustfs1"
+  [ "$1" -gt 1 ] && host="rustfs-node{1...$1}"
+  [ "$2" -gt 1 ] && drive="rustfs{1...$2}"
+  printf 'http://%s:9000/data/%s/mnmd' "${host}" "${drive}"
 }
 
 matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
@@ -744,7 +795,7 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   local total=$(( nodes * per ))
   local data=$(( total - parity ))
   local readq=$(( data ))
-  local writeq=$(( data + 1 ))
+  local writeq=$(( data + (data == parity ? 1 : 0) ))
   local tag="M-${key}EC${parity}"
   log "matrix[${tag}]: total=${total} readq=${readq} writeq=${writeq}"
   # Register this combination's case ids up front: unregistered verdicts
@@ -756,7 +807,7 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   done
   mc+=("${tag}-rec/read" "${tag}-rec/write")
   register_expected_cases "${mc[@]}"
-  install_and_start "$(matrix_volumes_expr "${nodes}" "${per}")"
+  install_and_start "$(matrix_volumes_expr "${nodes}" "${per}")" "RUSTFS_STORAGE_CLASS_STANDARD=\"EC:${parity}\""
   seed_baseline "${EP1}"
 
   # full capacity
@@ -788,12 +839,13 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   for ((idx = 1; idx < nodes; idx++)); do restart+=("${NODES[$((idx))]}"); done
   if [ "${#restart[@]}" -gt 0 ]; then start_nodes "${restart[@]}"; fi
   settle
+  await_write_quorum "${tag}-rec" "${EP1}"
   expect_read  "${tag}-rec/read"  "${EP1}" "ok" "ft-small-16k.bin"
   expect_write "${tag}-rec/write" "${EP1}" "ok" "${PROBE_PREFIX}-${tag}-rec"
   do_cleanup
 }
 
-run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (36 combos)
+run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (38 combos)
   local filter="${1:-}" spec nodes_n per parity combos=0
   for spec in "${MATRIX_TOPOS[@]}"; do
     [ -n "${filter}" ] && [ "${spec}" != "${filter}" ] && continue
