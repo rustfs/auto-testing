@@ -172,8 +172,8 @@ def incarnation_operation(request):
     if request["action"] == "incarnation-census":
         require(set(request) == {"runId", "action", "family", "taskId", "bucketIncarnationId"},
                 "C11 stopped census accepts only the original binding")
-        return {"readOnly": True, "stable": True, "records": backend.census(
-            roots, backend.identity(owner, request, journal), journal, fault)}
+        binding = backend.identity(owner, request, journal)
+        return {**binding, "readOnly": True, "stable": True, "records": backend.census(roots, binding, journal, fault)}
     methods = {"incarnation-capture": backend.capture, "incarnation-install": backend.install,
                "incarnation-finalize": backend.finalize}
     require(request["action"] in methods, "unknown C11 record transaction")

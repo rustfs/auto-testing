@@ -439,7 +439,7 @@ class ReplayOrderingTests(unittest.TestCase):
                             assert (node, {key: params[key] for key in ("family", "taskId", "bucketIncarnationId")}) in self.incarnation_replays
                             raise OSError("SSH acknowledgement lost after mutation")
                         if action == "incarnation-finalize": raise ValueError("original transaction incomplete")
-                        if action == "incarnation-capture": return {"detached": True, "originalProductBytes": True, "replacementBytesAccepted": False}
+                        if action == "incarnation-capture": return {"detached": True, "originalProductBytes": True, "replacementBytesAccepted": False, "records": []}
                         if action == "incarnation-census": return {"records": []}
                         if action == "drive-gate-probe": return {"readProbe": {"errno": 13}, "errno": 13, "dacBypassRemoved": True}
                         return {}

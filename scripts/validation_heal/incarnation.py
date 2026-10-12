@@ -516,11 +516,15 @@ def run_replay(args, topology, nodes, branch, candidate):
                 observed.sort(key=lambda row: (row["disk"], [*journal.names("checkpoint", token), *journal.names("root", token)].index(row["relativePath"])))
             else:
                 observed = fleet.remote(node, "incarnation-census", **params)["records"]
+            fleet.record("C11-independent-original-record-census", {"node": node, **params, "records": observed})
             fleet.incarnation_replays.append((node, params.copy()))
             receipt = fleet.record("archive-and-detach-original-replay", {"node": node, **fleet.remote(
                 node, "incarnation-capture", **params, expectedRecords=record_digests(observed))})
             require(receipt.get("detached") is True and receipt.get("originalProductBytes") is True
                     and receipt.get("replacementBytesAccepted") is False, "C11 original durable record detachment is incomplete")
+            detached = fleet.record("C11-independent-detached-record-census", {"node": node, **fleet.remote(
+                node, "incarnation-census", **params)})
+            require(all(not row["present"] for row in detached["records"]), "C11 independent observer still sees original replay sources")
             fleet.record("C11-transition-runtime", {"node": node, **fleet.remote(node, "incarnation-phase", phase="transition")})
         if gate_member is not None:
             fleet.record("C11-old-MRF-member-release", fleet.remote(gate_member[0], "drive-gate", mode="clear"))
@@ -547,6 +551,10 @@ def run_replay(args, topology, nodes, branch, candidate):
             receipt = fleet.record("install-exact-original-replay", {"node": node, **fleet.remote(node, "incarnation-install", **params)})
             require(receipt.get("installed") is True and receipt.get("originalArchiveRetained") is True,
                     "C11 original record transaction was not completely installed")
+            installed = fleet.record("C11-independent-installed-record-census", {"node": node, **fleet.remote(
+                node, "incarnation-census", **params)})
+            require(journal.same_json(installed["records"], receipt["records"]),
+                    "C11 independent observer differs from the exact installed original bytes")
             fleet.record("C11-replay-runtime", {"node": node, **fleet.remote(node, "incarnation-phase", phase="replay")})
         authority = fleet.snapshot("successor-physical-before-original-replay", quiescent=True)
         system_before = system_snapshot(fleet, [bucket, control], "successor-system-before-original-replay")
