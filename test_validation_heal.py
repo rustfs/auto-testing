@@ -1217,11 +1217,10 @@ class HealReadRepairTest(unittest.TestCase):
     def execute(self, *, stale_only=False):
         bucket, key, calls = "rv-heal-read-unit", "target.bin", []
         entry = {"key": key, "versionId": "historical", "payload": {"size": 3, "sha256": hashlib.sha256(b"abc").hexdigest()}}
-        old = self.event(request_id="old-task")
         fresh = self.event()
-        logs = [json.dumps(old), json.dumps(old) + ("" if stale_only else "\n" + json.dumps(fresh))]
         fleet = types.SimpleNamespace(runtime_profile="read-repair", nodes=["host-one"],
-            record=lambda label, value: value, remote=lambda *args: {"journal": logs.pop(0) if logs else json.dumps(old)})
+            record=lambda label, value: value)
+        window = types.SimpleNamespace(capture=lambda: {"host-one": [] if stale_only else [fresh]})
         def read(operation, params):
             calls.append((operation, params))
             return {"acknowledged": True, "payload": entry["payload"], "response": {"VersionId": "historical",
@@ -1235,6 +1234,7 @@ class HealReadRepairTest(unittest.TestCase):
         observer = types.SimpleNamespace(admin=status)
         ticks = [0, 1, 181] if stale_only else [0, 1]
         with patch("scripts.validation_heal.read_repair.Probe", return_value=observer) as factory, \
+             patch("scripts.validation_heal.read_repair.JournalWindow", return_value=window) as journal, \
              patch("scripts.validation_heal.read_repair.time.monotonic", side_effect=ticks), \
              patch("scripts.validation_heal.read_repair.time.sleep"):
             if stale_only:
@@ -1244,6 +1244,7 @@ class HealReadRepairTest(unittest.TestCase):
             else:
                 self.assertEqual(tracked_read_task(client, fleet, bucket, "historical-version-read", entry)["summary"], "finished")
                 factory.assert_called_once_with({}, "node1")
+            journal.assert_called_once_with(fleet, "read-source", event_targets={ADMISSION_TARGET})
         self.assertEqual(sum(call[0] == "get_object" for call in calls), 1)
         self.assertEqual(calls[0][1], {"Bucket": bucket, "Key": key, "VersionId": "historical"})
         self.assertTrue(all(len(call) == 2 or call[1] == [("clientToken", "automatic-task")] for call in calls))
@@ -1251,6 +1252,23 @@ class HealReadRepairTest(unittest.TestCase):
     def test_only_one_target_read_and_observation_of_the_fresh_automatic_task(self):
         self.execute()
         self.execute(stale_only=True)
+
+    def test_complete_cursor_window_finds_admission_before_more_than_2000_tail_lines(self):
+        event = self.event()
+        def remote(node, action, **params):
+            self.assertEqual(action, "logs")
+            if params.get("checkpoint"):
+                return {"complete": True, "afterCursor": "before-read"}
+            self.assertEqual(params, {"afterCursor": "before-read"})
+            return {"complete": True, "beforeCursor": "before-read", "afterCursor": "after-read",
+                    "hasMore": False, "journal": "\n".join([json.dumps(event)] + ['{"target":"unrelated"}'] * 2100)}
+        fleet = types.SimpleNamespace(nodes=["host-one"], remote=remote, record=lambda label, value: value)
+        window = JournalWindow(fleet, "read-source", event_targets={ADMISSION_TARGET})
+        events = window.capture()
+        self.assertEqual(events, {"host-one": [event]})
+        self.assertEqual(source_tasks({node: {"journal": "\n".join(json.dumps(row) for row in rows)}
+                                     for node, rows in events.items()}, event["bucket"], event["object"]),
+                         {("host-one", "automatic-task")})
 
     def test_read_profile_keeps_other_repair_sources_disabled(self):
         profile = runtime_config("read-repair")

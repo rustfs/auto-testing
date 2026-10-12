@@ -7,8 +7,10 @@ from urllib.parse import quote
 
 try:
     from .heal_probe import Probe, payload, require
+    from .scanner_repair import JournalWindow
 except ImportError:
     from heal_probe import Probe, payload, require
+    from scanner_repair import JournalWindow
 
 
 BRANCHES = ("get-missing", "range-bitrot", "historical-version-read")
@@ -62,9 +64,7 @@ def validate_read(observed, entry, *, expected_range=None, body=None):
 
 def tracked_read_task(probe, fleet, bucket, branch, entry):
     require(fleet.runtime_profile == "read-repair", "read repair requires its explicit isolated runtime profile")
-    def capture(label):
-        return fleet.record(label, {node: fleet.remote(node, "logs") for node in fleet.nodes})
-    baseline = source_tasks(capture("read-source-before"), bucket, entry["key"])
+    window = JournalWindow(fleet, "read-source", event_targets={ADMISSION_TARGET})
     params = {"Bucket": bucket, "Key": entry["key"]}
     if entry["versionId"] != "null": params["VersionId"] = entry["versionId"]
     interval = (0, min(1024**2 + 16, entry["payload"]["size"]) - 1) if branch == "range-bitrot" else None
@@ -75,7 +75,9 @@ def tracked_read_task(probe, fleet, bucket, branch, entry):
     deadline = time.monotonic() + 180
     fresh = set()
     while not fresh:
-        fresh = source_tasks(capture("read-source-progress"), bucket, entry["key"]) - baseline
+        events = window.capture()
+        fresh = source_tasks({node: {"journal": "\n".join(json.dumps(event) for event in rows)}
+                              for node, rows in events.items()}, bucket, entry["key"])
         require(time.monotonic() < deadline, "ATTRIBUTION_NOT_OBSERVED: no fresh accepted ReadRepair task for the read target")
         if not fresh: time.sleep(0.2)
     require(len(fresh) == 1, "read source has ambiguous task ownership")
