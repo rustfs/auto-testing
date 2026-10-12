@@ -195,7 +195,7 @@ fi
 if [ "${case_id}" = heal.checkpoint-and-mrf-corruption ] && [ "${cleanup_status}" = PASS ] && \
    jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
      "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
-  verdict=BLOCKED; reason="F07 diagnostic execution lacks journal write-failure and full native cut coverage; partial success cannot certify the canonical case"
+  verdict=BLOCKED; reason="F07 diagnostic execution lacks full native cut coverage and independent live audit; partial success cannot certify the canonical case"
 fi
 args=("${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool
   --result-file "${artifacts}/cases/${case_id}.json" --verdict "${verdict}" --cleanup-status "${cleanup_status}"

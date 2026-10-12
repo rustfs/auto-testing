@@ -24,7 +24,9 @@ try:
     from .matrix import select
     from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical
     from .stop import idle_fleet, status
-    from .root_restart import recovery_status
+    from .root_restart import recovery_status, same_owner
+    from .scanner_repair import JournalWindow
+    from .fleet_node import PROCESS_FIELDS
     from .persistence_mrf import run as run_mrf_checksum
     from .versions import public_version_id, verify_proof, version_identity
 except ImportError:
@@ -37,7 +39,9 @@ except ImportError:
     from matrix import select
     from shards import files, map_target, run_task, validate_fault, validate_repaired_physical
     from stop import idle_fleet, status
-    from root_restart import recovery_status
+    from root_restart import recovery_status, same_owner
+    from scanner_repair import JournalWindow
+    from fleet_node import PROCESS_FIELDS
     from persistence_mrf import run as run_mrf_checksum
     from versions import public_version_id, verify_proof, version_identity
 
@@ -47,19 +51,19 @@ BRANCHES = ("checkpoint-truncate", "mrf-checksum", "future-schema", "stale-gener
             "journal-write-failure", "native-persist-fence")
 IMPLEMENTED = {"checkpoint-truncate": "truncate", "future-schema": "future-schema",
                "stale-generation": "stale-generation"}
-BLOCKERS = {
-    "journal-write-failure": "the private bounded volume exists; actual checkpoint write refusal, retained ownership and release/rescan orchestration is still required",
-}
+BLOCKERS = {}
 SIZE = 5 * 1024**2 + 123
 
 
-def exact_records(observed, token, family):
+def exact_records(observed, token, family, *, allow_frozen=False):
     names = journal.names(family, token)
     require(isinstance(observed, dict) and len(observed) in {1, 4}, "journal omitted bound physical nodes")
     present = {}
     for node, census in observed.items():
         rows = census.get("records")
-        require(census.get("readOnly") is True and census.get("quiescent") is True
+        require(census.get("readOnly") is True and (census.get("quiescent") is True
+                or allow_frozen and census.get("stable") is True and census.get("serviceFrozen") is True
+                    and census.get("processBound") is True and census.get("independentReads") == 2)
                 and census.get("family") == family and census.get("taskId") == token
                 and census.get("directoryEnumerationUsed") is False
                 and isinstance(rows, list) and len(rows) == 4 * len(names),
@@ -277,17 +281,186 @@ def successful_stale_replay(fleet, probe, binding, expected, baseline, original,
             "completePhysicalAndS3ManifestsVerified": True, "canonicalCasePassClaimed": False}
 
 
+def retained_write_failure(observed, roots, frozen, current, events):
+    token = frozen["taskId"]
+    outcome = current.get("outcome") or {}
+    detail = current.get("detail", "")
+    require(current.get("summary") == "stopped" and current.get("settings") == checkpoints.OPTIONS
+            and outcome.get("execution") == {"state": "aborted", "reason": "untraversable"}
+            and outcome.get("coverage") == "partial" and isinstance(detail, str)
+            and "failed to save checkpoint" in detail.lower()
+            and any(word in detail.lower() for word in ("no space", "enospc", "os error 28")),
+            "journal write refusal was not an actual checkpoint ENOSPC diagnostic")
+    expected = frozen["value"]["admin"]["outcome"]
+    require(all(canonical(outcome.get(name)) == canonical(expected.get(name))
+            for name in ("counters", "objects", "objectsTruncated")),
+            "failed checkpoint write lost or invented acknowledged durable progress")
+    owner = checkpoints.owned_checkpoint(observed, token, frozen["bucket"])
+    require(owner["checkpoint"] == frozen["checkpoint"] and owner["resume"] == frozen["resume"],
+            "journal failure removed or rewrote the last original durable checkpoint/resume")
+    root = exact_records(roots, token, "root", allow_frozen=True)
+    names, original = journal.names("root", token), frozen["rootAdmission"]
+    require(set(root) in ({names[0]}, set(names[1:]), set(names))
+            and all((row["node"], row["disk"]) == (original["node"], original["disk"]) for row in root.values()),
+            "journal failure silently retired or changed its original durable owner")
+    if names[0] in root:
+        raw = checkpoints.bytes_of(root[names[0]])
+        if raw != checkpoints.bytes_of(original):
+            # checkpoint_failed_execution may consume the original timeout;
+            # every other admitted field and the physical owner stay fixed.
+            same_owner(original, {**root[names[0]], "value": journal.decode_json(raw)})
+    if names[1] in root:
+        terminal = journal.decode_json(checkpoints.bytes_of(root[names[1]]))
+        report = journal.decode_json(checkpoints.bytes_of(root[names[2]]))
+        require(type(terminal.get("schema")) is int and terminal["schema"] == 1 and terminal.get("task_id") == token
+                and journal.same_json(terminal.get("heal_type"), original["value"]["heal_type"])
+                and journal.same_json(terminal.get("options"), original["value"]["options"])
+                and terminal.get("status") == {"Failed": {"error": detail}}
+                and type(report.get("schema")) is int and report["schema"] == 1
+                and journal.same_json(report.get("terminal"), terminal)
+                and journal.same_json(report.get("outcome"), outcome),
+                "journal failure lost its exact durable original failed terminal/report")
+    diagnostics = [event for values in events.values() for event in values
+        if event.get("target") == "rustfs::heal::task" and event.get("message") == "Heal task failed"
+        and event.get("task_id") == token and isinstance(event.get("error"), str)
+        and "failed to save checkpoint" in event["error"].lower()
+        and any(word in event["error"].lower() for word in ("no space", "enospc", "os error 28"))]
+    require(diagnostics, "NOT_OBSERVED: candidate has no original-task checkpoint write error")
+    return {"originalTaskId": token, "lastDurableProgressRetained": True, "originalResponsibilityRetained": True,
+            "originalAdmissionRetained": names[0] in root,
+            "actualCheckpointWriteFailure": True, "diagnostics": diagnostics,
+            "failedWriteAcknowledged": False, "originalFailureReclassified": False, "backupRescueUsed": False}
+
+
+def journal_write_failure(fleet, probe, binding, expected, baseline, original, targets, frozen, active):
+    token, bucket = frozen["taskId"], frozen["bucket"]
+    require(frozen["value"]["admin"]["outcome"]["counters"]["healed"] == 0,
+            "NOT_OBSERVED: journal failure missed the checkpoint before any actual repair")
+    window = JournalWindow(fleet, "F07-original-checkpoint-write-failure", event_targets={"rustfs::heal::task", "rustfs::heal::manager"})
+    for node in fleet.nodes:
+        filled = fleet.record("stopped-private-journal-exhaustion", {"node": node,
+            **fleet.remote(node, "bounded-volumes-fill", quiescent=True)})
+        require(filled.get("quiescent") is True and filled.get("hostSharedMountRemounted") is False
+                and filled.get("candidateProcessWitnessRequired") is True
+                and len(filled.get("changes", [])) == 4
+                and all(row.get("actualErrno") == 28 and row.get("freeBlocks") == 0 for row in filled["changes"]),
+                "journal failure did not exhaust only its four fixed owned volumes")
+    fleet.start()
+    for node in fleet.nodes:
+        identity = fleet.remote(node, "process")
+        witness = fleet.record("candidate-private-journal-ENOSPC", {"node": node,
+            **fleet.remote(node, "bounded-volumes-witness", expected=identity)})
+        require(witness.get("sameOriginalProcess") is True and witness.get("hostSharedMountRemounted") is False
+                and len(witness.get("disks", [])) == 4 and all(row.get("writeErrno") == 28
+                    and row.get("sameServiceUidAndMountNamespace") is True for row in witness["disks"]),
+                "journal write fault lacks a real candidate UID/mount/process ENOSPC witness")
+    deadline = time.monotonic() + 180
+    while True:
+        current = recovery_status(probe, fleet, token)
+        if current.get("summary") != "running": break
+        require(time.monotonic() < deadline, "original checkpoint write failure exceeded its bounded observation window")
+        time.sleep(.2)
+    # Pause every process before exporting the failed durable scene or freeing
+    # space. Partial pause/fill ACKs remain recoverable by the Fleet registry.
+    for node in fleet.nodes:
+        identity = fleet.record("write-failure-before-freeze", {"node": node, **fleet.remote(node, "process")})
+        fleet.frozen_processes[node] = {name: identity[name] for name in identity if name != "node"}
+        fleet.record("write-failure-freeze", {"node": node, **fleet.remote(node, "process-signal",
+            signal="SIGSTOP", expected=fleet.frozen_processes[node])})
+        after = fleet.remote(node, "process")
+        require(after.get("state") == "T" and all(after.get(name) == identity.get(name) for name in PROCESS_FIELDS),
+                "journal failure freeze missed its original candidate")
+    proof = retained_write_failure(checkpoints.records(fleet, token, "original-write-failed-checkpoint"),
+        checkpoints.records(fleet, token, "original-write-failed-admission", family="root"), frozen, current, window.capture())
+    scene = fleet.snapshot("original-journal-write-failure-physical")
+    indexed = files(scene)
+    remaining = [target for target in targets if (target["node"], target["disk"], target["relativePath"]) not in indexed]
+    require(remaining, "NOT_OBSERVED: failed journal task left no actual repair for its separate rescan")
+    partial = copy.deepcopy(original)
+    missing = {(target["node"], target["disk"], target["relativePath"]) for target in remaining}
+    for node, value in partial.items():
+        value["files"] = [row for row in value["files"] if (node, row["disk"], row["path"]) not in missing]
+    validate_repaired_physical(partial, scene, targets[0], repair_targets=targets)
+    for node in fleet.nodes:
+        released = fleet.record("release-only-owned-journal-filler", {"node": node,
+            **fleet.remote(node, "bounded-volumes-release", expected=fleet.frozen_processes[node])})
+        require(released.get("sameOriginalProcess") is True and released.get("hostSharedMountRemounted") is False
+                and len(released.get("disks", [])) == 4 and all(row.get("writeErrno") == 0
+                    and row.get("freeBlocks", 0) > 0 for row in released["disks"]),
+                "journal release did not restore its candidate's exact owned resource")
+    for node, identity in tuple(fleet.frozen_processes.items()):
+        fleet.record("write-failure-resume-after-release", {"node": node,
+            **fleet.remote(node, "process-signal", signal="SIGCONT", expected=identity)})
+        del fleet.frozen_processes[node]
+    active.remove((checkpoints.PATH, token))
+    idle_fleet(fleet, binding)
+    admissions = []
+    rescanned = run_task(probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
+        option_overrides={"recursive": True}, admissions=admissions)
+    require(len(admissions) == 1 and admissions[0]["clientToken"] != token,
+            "journal release rescan reused the failed original responsibility")
+    rescan = rescan_outcome(rescanned, bucket, expected, {version_identity(target) for target in remaining}, frozen["bucketIncarnationId"])
+    repeated = recovery_status(probe, fleet, token)
+    require(all(canonical(repeated.get(name)) == canonical(current.get(name)) for name in ("summary", "settings", "outcome", "detail")),
+            "safe rescan rewrote the original journal write failure")
+    fleet.stop()
+    repaired = fleet.snapshot("journal-rescan-complete-physical-before-any-GET", quiescent=True)
+    validate_repaired_physical(original, repaired, targets[0], repair_targets=targets)
+    for target in targets: verify_proof(fleet, target, "journal-rescan-full-shard-integrity")
+    retained_write_failure(checkpoints.records(fleet, token, "retained-write-failed-checkpoint", quiescent=True),
+        checkpoints.records(fleet, token, "retained-write-failed-admission", quiescent=True, family="root"), frozen, repeated, window.events)
+    fleet.start()
+    deadline = time.monotonic() + 180
+    while True:
+        final = recovery_status(probe, fleet, token)
+        if final.get("summary") != "running": break
+        require(time.monotonic() < deadline, "released original responsibility has no bounded restart outcome")
+        time.sleep(.2)
+    if final.get("summary") == "finished":
+        replay = rescan_outcome(final, bucket, expected, set(), frozen["bucketIncarnationId"])
+        replay.pop("originalFailedTaskReclassified")
+        replay.update(realSameTaskReplayAfterSeparateRescan=True, failedFirstAttemptRetained=True,
+                      separateRescanIsOriginalTaskCompletion=False)
+    else:
+        require(all(canonical(final.get(name)) == canonical(current.get(name)) for name in ("summary", "settings", "outcome", "detail")),
+                "restart neither retained the original failure nor completed a verified same-task replay")
+        replay = {"originalFailureStillRetained": True, "sameTaskCompletionClaimed": False}
+    for endpoint in binding["endpoints"]:
+        peer = Probe(binding, endpoint)
+        same = status(peer, fleet, checkpoints.PATH, token, "same-original-write-failure-peer")
+        require(all(canonical(same.get(name)) == canonical(final.get(name)) for name in ("summary", "settings", "outcome", "detail")),
+                "peer lost the failed original journal responsibility")
+        inventory = fleet.record("complete-peer-S3", {"endpoint": endpoint, **peer.inventory(bucket,
+            unversioned_current_tags=expected[0]["versionId"] == "null")})
+        verify_seed(expected, inventory); compare_inventories(baseline, inventory)
+    fleet.stop()
+    require(physical_content(repaired) == physical_content(fleet.snapshot("journal-after-business-reads", quiescent=True)),
+            "business reads repaired objects missing from the journal rescan proof")
+    final_roots = checkpoints.records(fleet, token, "retained-write-admission-after-reads", quiescent=True, family="root")
+    if final.get("summary") == "finished": replay["durableOriginalCompletion"] = completed_original(final_roots, frozen, final)
+    else:
+        retained_write_failure(checkpoints.records(fleet, token, "retained-write-failure-after-reads", quiescent=True),
+            final_roots, frozen, final, window.events)
+    fleet.record("complete-original-journal-write-reconciliation", {"firstFailedAttempt": current,
+        "retainedFailureProof": proof, "separateRescan": rescan, "originalAfterRestart": final, "restartProof": replay})
+    fleet.faults.clear()
+    return {"verdict": "PASS", "originalWriteFailure": proof, "separateRescan": rescan, "originalAfterRestart": replay,
+            "completePhysicalAndS3ManifestsVerified": True, "canonicalCasePassClaimed": False}
+
+
 def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
-    require(branch in IMPLEMENTED, "unimplemented journal branch cannot mutate the fleet")
+    require(branch in IMPLEMENTED or branch == "journal-write-failure", "unimplemented journal branch cannot mutate the fleet")
     directory = args.evidence / fixture / topology / branch
     directory.mkdir(parents=True)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory, resource_profile="cursor", runtime_profile="root-restart")
+    bounded = branch == "journal-write-failure"
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory, resource_profile="cursor",
+                  runtime_profile="journal-bounded" if bounded else "root-restart")
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     fleet.snapshot_buckets = [bucket]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
-    count = 257 if fixture == "DB" else 80
+    count = (129 if fixture == "DB" else 24) if bounded else (257 if fixture == "DB" else 80)
     binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,
         "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat(), "bucketPrefix": bucket,
         "endpoints": {f"node{index}": f"http://rustfs-node{index}:9000" for index in range(1, len(nodes) + 1)},
@@ -299,11 +472,17 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
     fleet.record("candidate-bound-inspector", verify_inspector(args.tool_directory, candidate))
     probe, active, pending = Probe(binding), [], None
     result = {"topology": topology, "fixture": fixture, "branch": branch, "verdict": "RUNNING", "cleanup": "PENDING"}
+    def allocate():
+        for node in nodes:
+            fleet.record("fixed-private-journal-volume-allocation", {"node": node,
+                **fleet.remote(node, "bounded-volumes-create", branch="bounded-volume-enospc")})
     try:
-        fleet.deploy(args.binary_sha, bucket, access, secret)
+        if bounded: fleet.deploy(args.binary_sha, bucket, access, secret, before_start=allocate)
+        else: fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         pending = {"operation": "seed-original-checkpoint-fixture"}
-        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, count, [SIZE])
+        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, count,
+                        [256 * 1024 + 123] if bounded else [SIZE])
         baseline = fleet.record("ACK-bound-complete-S3", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("complete-ACK-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         pending = None
@@ -335,6 +514,9 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
                     "NOT_OBSERVED: earlier generation missed the pre-repair capture window")
         frozen, identity = checkpoints.freeze(fleet, token, bucket, earlier=earlier)
         frozen = checkpoints.stop_for_fault(fleet, token, bucket, frozen, identity)
+        if bounded:
+            result.update(journal_write_failure(fleet, probe, binding, expected, baseline, original, targets, frozen, active))
+            return result
         params = {"family": "checkpoint", "taskId": token, "disk": frozen["disk"],
             "relativePath": frozen["checkpoint"]["relativePath"], "faultId": "F07-" + branch,
             "kind": IMPLEMENTED[branch], "expectedBefore": journal.entry(checkpoints.bytes_of(frozen["checkpoint"]))}
@@ -454,7 +636,7 @@ def main():
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes)):
             for fixture in ("DB", "DV"):
                 for branch in BRANCHES:
-                    if branch in IMPLEMENTED:
+                    if branch in IMPLEMENTED or branch == "journal-write-failure":
                         result = run_checkpoint_fault(args, topology, selected, fixture, branch, candidate)
                     elif branch == "mrf-checksum":
                         result = run_mrf_checksum(args, topology, selected, fixture, candidate)
@@ -477,7 +659,7 @@ def main():
             "diagnosticBranchesPassed": len(results) == 24 and all(row["cleanup"] == "PASS" and
                 row["verdict"] == ("BLOCKED" if row["branch"] in BLOCKERS else
                     "PREREQUISITE_PASS" if row["branch"] == "native-persist-fence" else "PASS") for row in results),
-            "canonicalCasePassClaimed": False, "reason": "journal-write-failure and full native cut coverage remain blocked"})
+            "canonicalCasePassClaimed": False, "reason": "full native cut coverage and independent live audit remain blocked"})
     return 1
 
 

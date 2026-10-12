@@ -178,6 +178,32 @@ class CapacityContractTests(unittest.TestCase):
             with patch.object(fleet_node, 'process', return_value={**identity, 'startTicks': 999}), self.assertRaises(ValueError):
                 fleet_node.volume_operation(request)
 
+    def test_stopped_fill_is_restricted_to_fixed_journal_volumes_and_stopped_candidate(self):
+        owner = {"runtimeProfile": "journal-bounded"}
+        events = []
+        backend = SimpleNamespace(read=lambda *args: {"branch": "bounded-volume-enospc"},
+            views=lambda *args: tuple(range(4)), fill=lambda view, branch: events.append((view, branch)) or {"actualErrno": 28})
+        request = {"runId": "gh-1-1-h1", "action": "bounded-volumes-fill", "quiescent": True}
+        with patch.object(fleet_node, "owned", return_value=(None, (), owner)), \
+             patch.object(fleet_node, "stopped") as stopped, patch.object(fleet_node, "volume_module", return_value=backend):
+            result = fleet_node.volume_operation(request)
+            stopped.assert_called_once_with(owner)
+            self.assertEqual(events, [(index, "bounded-volume-enospc") for index in range(4)])
+            self.assertTrue(result["candidateProcessWitnessRequired"])
+            self.assertFalse(result["productRepairClaimed"])
+            for changes in ({"path": "/shared"}, {"expected": {}}, {"limitBytes": 1}):
+                events.clear()
+                with self.assertRaises(ValueError): fleet_node.volume_operation({**request, **changes})
+                self.assertFalse(events)
+            for profile in ("manual", "bounded-capacity"):
+                owner["runtimeProfile"] = profile; events.clear()
+                with self.assertRaises(ValueError): fleet_node.volume_operation(request)
+                self.assertFalse(events)
+            owner["runtimeProfile"] = "journal-bounded"; events.clear()
+            with patch.object(fleet_node, "stopped", side_effect=ValueError("candidate still running")):
+                with self.assertRaises(ValueError): fleet_node.volume_operation(request)
+            self.assertFalse(events)
+
     def test_allocation_registers_exact_undo_before_formatting_only_bounded_files(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state"

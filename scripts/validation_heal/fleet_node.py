@@ -57,8 +57,10 @@ def runtime_config(profile):
     if profile == "multi-pool":
         return {**BACKGROUND_CONFIG, "RUSTFS_ERASURE_SET_DRIVE_COUNT": "4", "RUSTFS_STORAGE_CLASS_STANDARD": "EC:2"}
     if profile in {"bounded-capacity", "journal-bounded"}:
+        logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::resume=debug"
         return {**BACKGROUND_CONFIG, "RUSTFS_UNSAFE_BYPASS_DISK_CHECK": "true",
-                **({"RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false", "RUSTFS_OBS_LOGGER_LEVEL": "debug"}
+                **({"RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false", "RUSTFS_OBS_LOGGER_LEVEL": logging_filter,
+                    "RUST_LOG": logging_filter}
                    if profile == "journal-bounded" else {})}
     if profile == "lock-quorum":
         return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:8"}
@@ -632,6 +634,16 @@ def volume_operation(request):
         changed = [module.release_filler(view) for view in module.views(state, roots, owner)]
         return {"changes": changed, "ownedFillerReleased": True, "productRepairClaimed": False,
                 "quiescent": True, "privateMountRemovedByStoppedService": True}
+    if request["action"] == "bounded-volumes-fill" and request.get("quiescent") is True:
+        require(set(request) == {"runId", "action", "quiescent"}
+                and owner.get("runtimeProfile") == "journal-bounded",
+                "stopped exhaustion requires the dedicated journal runtime")
+        stopped(owner)
+        require(module.read(state, roots, owner)["branch"] == "bounded-volume-enospc",
+                "journal exhaustion cannot use another resource fault")
+        changed = [module.fill(view, "bounded-volume-enospc") for view in module.views(state, roots, owner)]
+        return {"changes": changed, "quiescent": True, "hostSharedMountRemounted": False,
+                "candidateProcessWitnessRequired": True, "productRepairClaimed": False}
     require(set(request) == {"runId", "action", "expected"}, "bounded operation lacks exact process binding")
     before = process(request)
     require(before["pid"] > 1 and isinstance(request["expected"], dict)
