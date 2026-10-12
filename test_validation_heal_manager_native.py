@@ -11,15 +11,16 @@ from scripts.validation_heal import manager_native as suite
 
 
 class ManagerNativeEvidenceTests(unittest.TestCase):
-    def fixture(self, root):
+    def fixture(self, root, candidate=suite.native.CANDIDATE):
         tools, evidence = root / "tools", root / "evidence"
         tools.mkdir(); evidence.mkdir()
         helper = "a" * 40
         binary = tools / "heal-manager-native-tests"
         binary.write_bytes(b"original candidate unit executable")
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-        manifest = {"schemaVersion": 1, "candidateCommit": suite.native.CANDIDATE,
-            "candidateSourceTree": suite.SOURCE_TREE, "candidateCargoLockSha256": suite.LOCK_SHA,
+        contract = suite.REVIEWED_CANDIDATES[candidate]
+        manifest = {"schemaVersion": 1, "candidateCommit": candidate,
+            "candidateSourceTree": contract["sourceTree"], "candidateCargoLockSha256": contract["cargoLockSha256"],
             "sourceFiles": suite.SOURCE_FILES, "collectorSources": suite.collectors(),
             "regressions": suite.REGRESSIONS, "sourceUnmodified": True, "optimized": True,
             "buildEnvironment": suite.BUILD_ENV, "binaryName": binary.name, "binarySha256": digest,
@@ -30,7 +31,7 @@ class ManagerNativeEvidenceTests(unittest.TestCase):
         (evidence / "runtime-inventory.log").write_text(listing)
         rows = []
         for key, value in suite.REGRESSIONS.items():
-            row = {"regression": key, **value, "candidateCommit": suite.native.CANDIDATE,
+            row = {"regression": key, **value, "candidateCommit": candidate,
                 "binarySha256": digest, "verdict": "PASS", "exitCode": 0, "elapsedNanoseconds": 100,
                 "command": ["/hosted/tools/" + binary.name, value["test"], "--exact", "--nocapture", "--test-threads=1"]}
             (evidence / (key + ".json")).write_text(json.dumps(row))
@@ -40,7 +41,7 @@ class ManagerNativeEvidenceTests(unittest.TestCase):
         summary = {"results": rows, "complete": True, "canonicalCasePassClaimed": False,
                    "fleetPassClaimed": False, "physicalPowerLossClaimed": False}
         (evidence / "manager-native-summary.json").write_text(json.dumps(summary))
-        return tools, evidence, {"source_sha": suite.native.CANDIDATE}, helper
+        return tools, evidence, {"source_sha": candidate}, helper
 
     def verify(self, fixture, **changes):
         tools, evidence, candidate, helper = fixture
@@ -53,6 +54,38 @@ class ManagerNativeEvidenceTests(unittest.TestCase):
             self.assertEqual(result["exactTests"], 15)
             self.assertFalse(result["canonicalCasePassClaimed"])
             self.assertFalse(result["fleetPassClaimed"])
+
+    def test_each_reviewed_candidate_requires_its_own_tree_and_results(self):
+        for candidate in suite.REVIEWED_CANDIDATES:
+            with self.subTest(candidate=candidate), tempfile.TemporaryDirectory() as temp:
+                result = self.verify(self.fixture(Path(temp), candidate))
+                self.assertEqual(result["candidateCommit"], candidate)
+                self.assertEqual(result["exactTests"], 15)
+                self.assertFalse(result["canonicalCasePassClaimed"])
+
+    def test_old_tree_cannot_be_relabelled_as_new_candidate(self):
+        newer = next(commit for commit in suite.REVIEWED_CANDIDATES if commit != suite.native.CANDIDATE)
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.fixture(Path(temp), newer)
+            path = fixture[0] / "manager-native.json"
+            manifest = json.loads(path.read_text())
+            manifest["candidateSourceTree"] = suite.SOURCE_TREE
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "reviewed source"):
+                self.verify(fixture)
+
+    def test_old_result_rows_cannot_certify_new_candidate_manifest(self):
+        newer = next(commit for commit in suite.REVIEWED_CANDIDATES if commit != suite.native.CANDIDATE)
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.fixture(Path(temp), newer)
+            summary_path = fixture[1] / "manager-native-summary.json"
+            summary = json.loads(summary_path.read_text())
+            for row in summary["results"]:
+                row["candidateCommit"] = suite.native.CANDIDATE
+                (fixture[1] / (row["regression"] + ".json")).write_text(json.dumps(row))
+            summary_path.write_text(json.dumps(summary))
+            with self.assertRaisesRegex(ValueError, "exact scope or identity"):
+                self.verify(fixture)
 
     def test_wrong_candidate_build_attempt_or_helper_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
