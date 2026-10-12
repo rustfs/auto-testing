@@ -77,14 +77,18 @@ def runtime_config(profile):
                 "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false"}
     if profile == "disabled":
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_ENABLED": "false"}
+    if profile == "read-repair":
+        # Admission evidence must survive journald's per-unit rate limit;
+        # global DEBUG floods it with unrelated HTTP/HTTP2 frame events.
+        logging_filter = "info,rustfs_ecstore=debug,rustfs::heal=debug"
+        return {**BACKGROUND_CONFIG, "RUSTFS_OBS_LOGGER_LEVEL": logging_filter, "RUST_LOG": logging_filter}
     if profile == "scanner":
         return {**BACKGROUND_CONFIG, "RUSTFS_SCANNER_ENABLED": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug",
                 "RUSTFS_SCANNER_START_DELAY_SECS": "5", "RUSTFS_SCANNER_CYCLE": "5",
                 "RUSTFS_SCANNER_SPEED": "fastest", "RUSTFS_SCANNER_DELAY": "0",
                 "RUSTFS_SCANNER_BITROT_CYCLE_SECS": "0", "RUSTFS_SCANNER_DEEP_VERIFY_COOLDOWN_SECS": "0",
                 "RUSTFS_HEAL_OBJECT_SELECT_PROB": "1", "RUSTFS_DATA_USAGE_UPDATE_DIR_CYCLES": "1"}
-    return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "offline-replay" else "false",
-            "RUSTFS_OBS_LOGGER_LEVEL": "debug" if profile == "read-repair" else "info"}
+    return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "offline-replay" else "false"}
 
 
 def require(condition, message):

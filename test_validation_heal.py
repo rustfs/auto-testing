@@ -1272,7 +1272,9 @@ class HealReadRepairTest(unittest.TestCase):
 
     def test_read_profile_keeps_other_repair_sources_disabled(self):
         profile = runtime_config("read-repair")
-        self.assertEqual(profile.pop("RUSTFS_OBS_LOGGER_LEVEL"), "debug")
+        logging_filter = profile.pop("RUSTFS_OBS_LOGGER_LEVEL")
+        self.assertEqual(profile.pop("RUST_LOG"), logging_filter)
+        self.assertEqual(logging_filter.split(","), ["info", "rustfs_ecstore=debug", "rustfs::heal=debug"])
         self.assertEqual(profile, {key: value for key, value in BACKGROUND_CONFIG.items() if key != "RUSTFS_OBS_LOGGER_LEVEL"})
         snapshot, bucket, expected = versioned_scene(["objects/0001.bin"])
         plan = branch_plan("heal.read-repair-attribution", "historical-version-read", snapshot, bucket, expected, "DV")
