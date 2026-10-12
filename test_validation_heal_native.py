@@ -7,6 +7,7 @@ from unittest.mock import patch
 import subprocess
 
 from scripts.validation_heal import native_regressions as native
+from scripts.validation_heal import persistence_native as persistence
 
 
 def evidence_fixture(root, commit=native.INCARNATION_CANDIDATE):
@@ -99,6 +100,99 @@ class NativeRegressionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     native.run(directory, ['read-repair-final-rename'], directory / 'evidence')
                 self.assertFalse((directory / 'evidence').exists())
+
+
+class PersistenceNativeTests(unittest.TestCase):
+    def fixture(self, root):
+        tools, original, _, _ = evidence_fixture(root)
+        inventory = tools / 'test-inventory.log'
+        inventory.write_text(inventory.read_text() + '\n' + '\n'.join(
+            persistence.PREFIX + suffix + ': test' for suffix, _ in persistence.REGRESSIONS.values()))
+        return tools, original, root / 'persistence'
+
+    def execute(self, tools, fail=None):
+        def child(command, **kwargs):
+            if command[-1] == '--list':
+                return subprocess.CompletedProcess(command, 0, (tools / 'test-inventory.log').read_text(), '')
+            self.assertEqual(command[2:], ['--exact', '--show-output', '--test-threads=1'])
+            self.assertEqual(kwargs['env']['RUST_MIN_STACK'], '33554432')
+            if fail == 'timeout': raise subprocess.TimeoutExpired(command, 120, output=b'original timeout output\n')
+            name = command[1]
+            output = f'running 1 test\ntest {name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n'
+            if fail == 'zero-test': output = 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n'
+            return subprocess.CompletedProcess(command, 0, output, '')
+        return child
+
+    def run_fixture(self, root):
+        tools, original, out = self.fixture(root)
+        with patch.object(persistence.subprocess, 'run', side_effect=self.execute(tools)):
+            persistence.run(tools, original, out, 'b' * 40)
+        return tools, original, out
+
+    def test_executes_existing_exact_tests_without_claiming_complete_cuts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            tools, original, out = self.run_fixture(Path(temp))
+            proof = persistence.verify(tools, original, out, 'b' * 40)
+            self.assertEqual(proof['exactTests'], 6)
+            self.assertEqual(proof['nativeTestingCommit'], 'a' * 40)
+            self.assertEqual(proof['collectorCommit'], 'b' * 40)
+            for flag in ('requiredNativeCoverageComplete', 'individualFileFsyncCovered', 'physicalPowerLossClaimed',
+                         'canonicalCasePassClaimed', 'fleetPassClaimed', 'emittedBarrierLogsClaimed'):
+                self.assertIs(proof[flag], False)
+
+    def test_unverified_original_suite_cannot_launch_supplement(self):
+        for change in ('source', 'binary', 'original-log', 'missing-test'):
+            with tempfile.TemporaryDirectory() as temp, self.subTest(change=change):
+                tools, original, out = self.fixture(Path(temp))
+                if change == 'source':
+                    path = tools / 'native-regressions.json'
+                    value = json.loads(path.read_text()); value['candidateCommit'] = native.CANDIDATE
+                    path.write_text(json.dumps(value))
+                elif change == 'binary': (tools / 'ecstore-native-tests').write_bytes(b'changed executable')
+                elif change == 'original-log': (original / 'incarnation-final-rename.log').write_text('running 0 tests')
+                else:
+                    path = tools / 'test-inventory.log'
+                    path.write_text(path.read_text().replace(persistence.PREFIX + next(iter(persistence.REGRESSIONS.values()))[0] + ': test', ''))
+                with patch.object(persistence.subprocess, 'run') as execute, self.assertRaises(ValueError):
+                    persistence.run(tools, original, out, 'b' * 40)
+                execute.assert_not_called()
+                self.assertFalse(out.exists())
+
+    def test_zero_test_and_timeout_keep_original_failed_diagnostics(self):
+        for failure in ('zero-test', 'timeout'):
+            with tempfile.TemporaryDirectory() as temp, self.subTest(failure=failure):
+                tools, original, out = self.fixture(Path(temp))
+                with patch.object(persistence.subprocess, 'run', side_effect=self.execute(tools, failure)), self.assertRaises(ValueError):
+                    persistence.run(tools, original, out, 'b' * 40)
+                summary = json.loads((out / 'persistence-native-summary.json').read_text())
+                self.assertIs(summary['complete'], False)
+                self.assertEqual(len(summary['results']), 6)
+                self.assertTrue(all(row['verdict'] == 'FAIL' for row in summary['results']))
+                self.assertIn('original timeout output' if failure == 'timeout' else 'running 0 tests',
+                              (out / 'mrf-manifest-directory-sync.log').read_text())
+                with self.assertRaises(ValueError): persistence.verify(tools, original, out, 'b' * 40)
+
+    def test_tampered_source_commands_logs_or_scope_cannot_certify_fsync(self):
+        for change in ('candidate', 'attempt', 'collector', 'powerloss', 'complete-cuts', 'duplicate', 'command', 'assertion', 'log', 'inventory'):
+            with tempfile.TemporaryDirectory() as temp, self.subTest(change=change):
+                tools, original, out = self.run_fixture(Path(temp))
+                path = out / 'persistence-native-summary.json'
+                summary = json.loads(path.read_text())
+                if change == 'candidate': summary['candidateCommit'] = 'f' * 40
+                elif change == 'attempt': summary['runAttempt'] = '2'
+                elif change == 'collector': summary['collectorSha256'] = '0' * 64
+                elif change == 'powerloss': summary['physicalPowerLossClaimed'] = True
+                elif change == 'complete-cuts': summary['requiredNativeCoverageComplete'] = True
+                elif change == 'duplicate': summary['results'][0] = copy.deepcopy(summary['results'][1])
+                elif change in ('command', 'assertion'):
+                    row = summary['results'][0]
+                    if change == 'command': row['command'][2] = '--ignored'
+                    else: row['sourceAssertion'] = 'all fsync and powerloss cuts'
+                    (out / (row['regression'] + '.json')).write_text(json.dumps(row))
+                elif change == 'log': (out / 'cas-update-directory-sync.log').write_text('running 0 tests')
+                else: (out / 'runtime-inventory.log').write_text('0 tests')
+                path.write_text(json.dumps(summary))
+                with self.assertRaises(ValueError): persistence.verify(tools, original, out, 'b' * 40)
 
 
 class NativeEvidenceTests(unittest.TestCase):
