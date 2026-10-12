@@ -1273,6 +1273,36 @@ def quota_audit_finalize(request):
             "backupRestorationUsed": True, "productRepairClaimed": False}
 
 
+def journal_rejection_audit_finalize(request):
+    """Finalize an unchanged MRF namespace only when no journal mutation began."""
+    require(set(request) == {"runId", "action", "bucket", "binarySha256", "rejectedFaultId", "expectedSceneSha256", "expectedMrfSha256"},
+            "journal rejection finalization accepts only an exact archived identity")
+    require(request["action"] in {"journal-rejection-audit", "journal-rejection-audit-finalize"},
+            "unsupported journal rejection audit action")
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    require(request["runId"].endswith("-h2") and owner.get("runtimeProfile") == "mrf-crash"
+            and owner.get("bucket") == request["bucket"] and request["binarySha256"] == owner["binarySha256"]
+            and digest(state / "rustfs") == owner["binarySha256"]
+            and request["rejectedFaultId"] == "F07-mrf-checksum-0-0-0",
+            "journal rejection candidate, bucket, runtime or first fault identity differs")
+    for root in roots:
+        with fault.directory(root) as fd, fault.parent(fd, ["quarantine"]) as backup:
+            require(not os.listdir(backup), "journal mutation backup or intent exists; retain namespace")
+    records = mrf_records({"runId": request["runId"], "action": "mrf-records", "quiescent": True})
+    mrf_sha = hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    require(re.fullmatch(r"[0-9a-f]{64}", request.get("expectedMrfSha256", "")) is not None
+            and mrf_sha == request["expectedMrfSha256"], "journal rejection MRF bytes drifted; retain namespace")
+    observed = snapshot({"runId": request["runId"], "action": "snapshot", "quiescent": True})
+    content = {key: observed[key] for key in ("files", "formats")}
+    scene_sha = hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    require(re.fullmatch(r"[0-9a-f]{64}", request.get("expectedSceneSha256", "")) is not None
+            and scene_sha == request["expectedSceneSha256"], "journal rejection scene drifted; retain namespace")
+    result = cleanup(request) if request["action"] == "journal-rejection-audit-finalize" else {"readyToFinalize": True}
+    return {**result, "faultNeverApplied": True, "archivedPreFaultSceneEqual": True,
+            "sceneSha256": scene_sha, "backupRestorationUsed": False, "productRepairClaimed": False}
+
+
 def task_records(request):
     """Read three exact Admin journal names; never mutate system metadata."""
     state, roots, owner = owned(request["runId"])
@@ -1404,6 +1434,8 @@ def main(request):
     actions["task-records"] = task_records
     actions["environment-capabilities"] = environment_capabilities
     actions["quota-audit-finalize"] = quota_audit_finalize
+    actions["journal-rejection-audit-finalize"] = journal_rejection_audit_finalize
+    actions["journal-rejection-audit"] = journal_rejection_audit_finalize
     for action in ("journal-census", "journal-observe", "journal-capture", "journal-apply", "journal-recover"):
         actions[action] = journal_operation
     for action in ('generation-capture', 'generation-install', 'generation-recover'):

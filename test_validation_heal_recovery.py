@@ -3,6 +3,7 @@
 import hashlib
 import copy
 import json
+import sys
 from pathlib import Path
 import tempfile
 import types
@@ -15,6 +16,7 @@ from scripts.validation_heal.recover_environment import recovery_plan, recovery_
 from scripts.validation_heal.capacity import release_quota
 from scripts.validation_heal.healthy import Fleet
 from scripts.validation_heal import recover_environment as recovery
+from scripts.validation_heal import fleet_node, heal_fault
 
 
 class RejectedFaultRecoveryTest(unittest.TestCase):
@@ -53,6 +55,108 @@ class RejectedFaultRecoveryTest(unittest.TestCase):
                 (root / "quarantine" / (request["rejectedFaultId"] + ".intent.json")).write_text("intent")
                 with self.assertRaisesRegex(ValueError, "intent"):
                     audit_finalize(request)
+                cleanup.assert_not_called()
+
+
+class RejectedMrfRecoveryTests(unittest.TestCase):
+    def test_remote_rejection_audit_loads_every_real_snapshot_and_cleanup_backend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fleet = Fleet(["vm000"], Path(directory), "gh-12345-1-h2")
+            def execute(*args, **kwargs):
+                source = kwargs["input"].rsplit("\nmain(", 1)[0]
+                namespace = {"__name__": "__validation_node_contract__"}
+                with patch.dict(sys.modules):
+                    exec(compile(source, "remote-node.py", "exec"), namespace)
+                self.assertTrue({"fault", "mrf", "encryption_runtime", "gate", "quorum_gate_backend", "replacement"} <= set(namespace))
+                return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
+            with patch("scripts.validation_heal.healthy.subprocess.run", side_effect=execute):
+                for action in ("journal-rejection-audit", "journal-rejection-audit-finalize"):
+                    fleet.remote("vm000", action)
+
+    def archive(self, root):
+        case, bucket = "heal.checkpoint-and-mrf-corruption", "rv-heal-0123456789abcdef"
+        base = root / "artifact" / "run" / case
+        folder = base / "evidence" / case / "DB/H2/mrf-checksum"
+        (base / "cases").mkdir(parents=True); (folder / "fixture").mkdir(parents=True)
+        write = lambda p, v: p.write_text(json.dumps(v))
+        candidate = {"source_sha": "a" * 40, "package_sha256": "b" * 64}
+        provenance = {"source_commit": "a" * 40, "candidate_sha256": "b" * 64,
+                      "binary_sha256": "c" * 64, "testing_commit": "d" * 40}
+        write(base / "cases" / (case + ".json"), {"case_id": case, "verdict": "FAIL", "cleanup_status": "FAIL", "provenance": provenance})
+        row = {"topology": "H2", "fixture": "DB", "branch": "mrf-checksum", "verdict": "FAIL", "cleanup": "FAIL",
+            "failure": {"message": "MRF fault lacks an actual committed active owned responsibility on this exact slot"}}
+        write(folder.parents[2] / "healthy-summary.json", {"caseId": case, "cleanup": "FAIL", "complete": False,
+            "canonicalCasePassClaimed": False, "results": [row]})
+        write(folder / "00001-binding.json", {"runId": "gh-12345-1-h2", "bucketPrefix": bucket,
+            "candidateCommit": "a" * 40, "candidatePackageSha256": "b" * 64,
+            "candidateBinarySha256": "c" * 64, "harnessCommit": "d" * 40})
+        scene = {f"vm00{i}": {"quiescent": True, "pid": 0, "binarySha256": "c" * 64, "files": [], "formats": []} for i in range(4)}
+        records = {node: {"readOnly": True, "stable": True, "records": []} for node in scene}
+        for label, value in (("original-partial-write-physical", scene), ("original-physical-failure-scene", scene),
+                             ("original-stopped-MRF-records", records), ("original-MRF-failure-scene", records)):
+            write(folder / ("00002-" + label + ".json"), value)
+        write(folder / "00003-gate-recovery.json", {"node": "vm003", "state": "CLEAR", "originalPermissionsRestored": True})
+        for seq in range(1, 8):
+            request = {"sequence": seq, "runId": "gh-12345-1-h2", "operation": "create_bucket" if seq == 1 else "put_object", "params": {"Bucket": bucket}}
+            path = folder / "fixture" / f"{seq:06d}-request.json"; write(path, request)
+            write(folder / "fixture" / f"{seq:06d}-ack.json", {"sequence": seq, "runId": request["runId"],
+                "requestFile": path.name, "requestSha256": hashlib.sha256(path.read_bytes()).hexdigest(), "operationCheck": "PASS",
+                "observation": {"operation": request["operation"], "params": request["params"], "clientCallInvoked": True,
+                                "resultUnknown": False, "acknowledged": True}})
+        return candidate, folder
+
+    def test_unknown_mutation_drift_or_another_injection_keeps_namespace(self):
+        for change in (None, "unknown", "missing-ack", "digest", "physical", "records", "injection", "earlier-dirty"):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(change=change):
+                root = Path(directory); candidate, folder = self.archive(root)
+                ack_path = folder / "fixture/000007-ack.json"
+                ack = json.loads(ack_path.read_text())
+                if change == "unknown": ack["observation"]["resultUnknown"] = True; ack_path.write_text(json.dumps(ack))
+                elif change == "missing-ack": ack_path.unlink()
+                elif change == "digest": ack["requestSha256"] = "e" * 64; ack_path.write_text(json.dumps(ack))
+                elif change in {"physical", "records"}:
+                    label = "original-physical-failure-scene" if change == "physical" else "original-MRF-failure-scene"
+                    path = next(folder.glob("*-" + label + ".json")); value = json.loads(path.read_text()); value["vm000"]["extra"] = True
+                    if change == "physical": value["vm000"]["files"] = [{"disk": 0, "path": "changed"}]
+                    path.write_text(json.dumps(value))
+                elif change == "injection": (folder / "00004-actual-original-MRF-CRC-injection.json").write_text("{}")
+                elif change == "earlier-dirty":
+                    path = folder.parents[2] / "healthy-summary.json"; value = json.loads(path.read_text())
+                    value["results"].insert(0, {"cleanup": "FAIL"}); path.write_text(json.dumps(value))
+                if change is None:
+                    plan = recovery_plan(root, 12345, candidate)[0]
+                    self.assertEqual(plan["kind"], "rejected-mrf-injection")
+                else:
+                    with self.assertRaises(ValueError): recovery_plan(root, 12345, candidate)
+
+    def test_node_requires_empty_quarantine_and_exact_stopped_scene(self):
+        scene = {"files": [], "formats": []}
+        digest = hashlib.sha256(json.dumps(scene, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory).resolve(); roots = tuple(state / f"disk{i}" for i in range(4))
+            for root in roots: (root / "quarantine").mkdir(parents=True)
+            owner = {"runtimeProfile": "mrf-crash", "bucket": "rv-heal-0123456789abcdef", "binarySha256": "c" * 64}
+            request = {"runId": "gh-12345-1-h2", "action": "journal-rejection-audit-finalize", "bucket": owner["bucket"],
+                "binarySha256": "c" * 64, "expectedSceneSha256": digest, "rejectedFaultId": "F07-mrf-checksum-0-0-0",
+                "expectedMrfSha256": hashlib.sha256(b'{}').hexdigest()}
+            with patch.object(fleet_node, "owned", return_value=(state, roots, owner)), patch.object(fleet_node, "stopped"), \
+                 patch.object(fleet_node, "digest", return_value="c" * 64), patch.object(fleet_node, "fault", heal_fault, create=True), \
+                 patch.object(heal_fault, "mount_id", return_value=1), patch.object(fleet_node, "snapshot", return_value=scene), \
+                 patch.object(fleet_node, "mrf_records", return_value={}), \
+                 patch.object(fleet_node, "cleanup", return_value={"cleanup": "PASS"}) as cleanup:
+                self.assertTrue(fleet_node.journal_rejection_audit_finalize(request)["faultNeverApplied"])
+                cleanup.reset_mock()
+                self.assertTrue(fleet_node.journal_rejection_audit_finalize({**request, "action": "journal-rejection-audit"})["readyToFinalize"])
+                cleanup.assert_not_called()
+                for change in ({"expectedSceneSha256": "e" * 64}, {"expectedMrfSha256": "e" * 64}, {"binarySha256": "e" * 64},
+                               {"rejectedFaultId": "F07-mrf-checksum-0-0-1"}, {"path": "/shared"}):
+                    cleanup.reset_mock()
+                    with self.assertRaises(ValueError): fleet_node.journal_rejection_audit_finalize({**request, **change})
+                    cleanup.assert_not_called()
+                (roots[2] / "quarantine/interrupted.original").write_bytes(b"evidence")
+                cleanup.reset_mock()
+                with self.assertRaisesRegex(ValueError, "backup or intent"):
+                    fleet_node.journal_rejection_audit_finalize(request)
                 cleanup.assert_not_called()
 
 

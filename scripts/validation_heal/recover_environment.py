@@ -138,6 +138,8 @@ def network_recovery_plan(artifact, failed_run, candidate):
 
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
+    if list(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/cases/*.json")):
+        return rejected_mrf_recovery_plan(artifact, failed_run, candidate)
     if list(artifact.glob("*/run/heal.bucket-incarnation-recreation/cases/*.json")):
         return recreation_recovery_plan(artifact, failed_run, candidate)
     if list(artifact.glob("*/run/heal.enospc-inodes-and-quota/cases/heal.enospc-inodes-and-quota.json")):
@@ -189,6 +191,72 @@ def recovery_plan(artifact, failed_run, candidate):
                 sort_keys=True, separators=(",", ":")).encode()).hexdigest()})
     require(plans, "failed artifact has no supported retained environment")
     return plans
+
+
+def rejected_mrf_recovery_plan(artifact, failed_run, candidate):
+    """Finalize only a refused first MRF injection with unchanged original bytes."""
+    case = "heal.checkpoint-and-mrf-corruption"
+    results = list(artifact.glob("*/run/*/cases/*.json"))
+    require(len(results) == 1 and results[0].name == case + ".json", "F07 recovery cannot omit another failed case")
+    result = json.loads(results[0].read_text())
+    provenance = result.get("provenance") or {}
+    require(result.get("case_id") == case and result.get("verdict") == "FAIL" and result.get("cleanup_status") == "FAIL"
+            and provenance.get("source_commit") == candidate["source_sha"]
+            and provenance.get("candidate_sha256") == candidate["package_sha256"], "F07 recovery candidate or result differs")
+    evidence = results[0].parents[1] / "evidence" / case
+    summary = json.loads((evidence / "healthy-summary.json").read_text())
+    rows = summary.get("results") or []
+    require(summary.get("caseId") == case and summary.get("cleanup") == "FAIL"
+            and summary.get("complete") is False and summary.get("canonicalCasePassClaimed") is False
+            and rows and all(row.get("cleanup") == "PASS" for row in rows[:-1])
+            and rows[-1].get("topology") == "H2" and rows[-1].get("fixture") == "DB"
+            and rows[-1].get("branch") == "mrf-checksum" and rows[-1].get("verdict") == "FAIL"
+            and rows[-1].get("cleanup") == "FAIL" and "unresolvedMutation" not in rows[-1]
+            and "MRF fault lacks an actual committed active owned responsibility on this exact slot" in
+                rows[-1].get("failure", {}).get("message", ""), "F07 recovery supports only its first rejected MRF injection")
+    folder = evidence / "DB/H2/mrf-checksum"
+    def one(label):
+        found = list(folder.glob("*-" + label + ".json"))
+        require(len(found) == 1, "F07 recovery lacks one exact " + label)
+        return json.loads(found[0].read_text())
+    binding, before, failure = one("binding"), one("original-partial-write-physical"), one("original-physical-failure-scene")
+    original, retained = one("original-stopped-MRF-records"), one("original-MRF-failure-scene")
+    require(re.fullmatch(rf"gh-{failed_run}-[1-9][0-9]*-h2", binding.get("runId", ""))
+            and binding.get("candidateCommit") == candidate["source_sha"]
+            and binding.get("candidatePackageSha256") == candidate["package_sha256"]
+            and binding.get("candidateBinarySha256") == provenance.get("binary_sha256")
+            and binding.get("harnessCommit") == provenance.get("testing_commit")
+            and len(before) == 4 and set(before) == set(failure) == set(original) == set(retained)
+            and physical_content(before) == physical_content(failure) and original == retained
+            and all(value.get("quiescent") is True and value.get("pid") == 0
+                and value.get("binarySha256") == provenance.get("binary_sha256") for value in failure.values()),
+            "F07 rejected injection changed its candidate, physical scene or original MRF records")
+    nodes, bucket = list(failure), binding.get("bucketPrefix", "")
+    require(all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes)
+            and re.fullmatch(r"rv-heal-[0-9a-f]{16}", bucket), "F07 recovery has invalid owned nodes or bucket")
+    gate = one("gate-recovery")
+    require(gate.get("node") in nodes and gate.get("state") == "CLEAR"
+            and gate.get("originalPermissionsRestored") is True
+            and not list(folder.glob("*-actual-original-MRF-CRC-injection.json"))
+            and not list(folder.glob("*-injected-stopped-MRF-records.json")), "F07 injection or gate recovery is ambiguous")
+    requests, acks = sorted((folder / "fixture").glob("*-request.json")), sorted((folder / "fixture").glob("*-ack.json"))
+    require(len(requests) == len(acks) == 7, "F07 recovery lacks its complete create and six PUT acknowledgements")
+    for seq, (request_path, ack_path) in enumerate(zip(requests, acks), 1):
+        request, ack = json.loads(request_path.read_text()), json.loads(ack_path.read_text())
+        observed = ack.get("observation") or {}
+        require(type(request.get("sequence")) is int and type(ack.get("sequence")) is int
+                and request["sequence"] == ack["sequence"] == seq
+                and request.get("runId") == ack.get("runId") == binding["runId"]
+                and ack.get("requestFile") == request_path.name
+                and ack.get("requestSha256") == hashlib.sha256(request_path.read_bytes()).hexdigest()
+                and observed.get("operation") == request.get("operation") == ("create_bucket" if seq == 1 else "put_object")
+                and observed.get("params") == request.get("params") and request.get("params", {}).get("Bucket") == bucket
+                and observed.get("clientCallInvoked") is True and observed.get("resultUnknown") is False
+                and observed.get("acknowledged") is True and ack.get("operationCheck") == "PASS",
+                "F07 recovery ledger changed identity or contains an unknown mutation")
+    return [{"kind": "rejected-mrf-injection", "runId": binding["runId"], "nodes": nodes, "node": nodes[0],
+             "bucket": bucket, "before": failure, "originalMrf": original,
+             "binarySha256": provenance["binary_sha256"], "rejectedFaultId": "F07-mrf-checksum-0-0-0"}]
 
 
 def recreation_recovery_plan(artifact, failed_run, candidate):
@@ -442,7 +510,27 @@ def main():
         require(recovery_scene_matches(current, plan),
                 "retained fleet drifted from its exact archived scene; no recovery performed")
         fleet.record("retained-service-logs", fleet.remote(plan["node"], "logs"))
-        if plan.get("kind") == "rejected-incarnation-delete":
+        if plan.get("kind") == "rejected-mrf-injection":
+            archived = fleet.record("retained-original-MRF-records", {node: fleet.remote(node,
+                "mrf-records", quiescent=True) for node in plan["nodes"]})
+            require(archived == plan["originalMrf"], "F07 original MRF bytes drifted; retain namespace")
+            for node in plan["nodes"]:
+                gate = fleet.record("audited-gate-state", {"node": node, **fleet.remote(node, "gate-state")})
+                require(gate.get("state") == "CLEAR", "F07 member gate is not clear")
+            require(recovery_scene_matches(fleet.snapshot("physical-immediately-before-finalization", quiescent=True), plan),
+                    "F07 stopped scene changed during evidence export; retain namespace")
+            for action in ("journal-rejection-audit", "journal-rejection-audit-finalize"):
+                for node in plan["nodes"]:
+                    scene = physical_content(plan["before"])[node]
+                    proof = fleet.record("audited-finalization" if action.endswith("finalize") else "audited-no-injection", {"node": node,
+                        **fleet.remote(node, action, bucket=plan["bucket"],
+                            binarySha256=plan["binarySha256"], rejectedFaultId=plan["rejectedFaultId"],
+                            expectedMrfSha256=hashlib.sha256(json.dumps(plan["originalMrf"][node], sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                            expectedSceneSha256=hashlib.sha256(json.dumps(scene, sort_keys=True, separators=(",", ":")).encode()).hexdigest())})
+                    require(proof.get("faultNeverApplied") is True and (proof.get("readyToFinalize") is True if action.endswith("audit") else
+                            proof.get("cleanup") == "PASS" and proof.get("unitStopped") is True and proof.get("rootsRemoved") is True),
+                            "F07 rejected journal namespace audit or finalization failed")
+        elif plan.get("kind") == "rejected-incarnation-delete":
             require(all(value.get("binarySha256") == plan["binarySha256"] for value in current.values()),
                     "retained candidate binary differs from the archived failed scene")
             gate = fleet.record("audited-gate-state", fleet.remote(plan["node"], "gate-state"))
@@ -472,7 +560,7 @@ def main():
         else:
             proof = fleet.record("audited-finalization", fleet.remote(plan["node"], "audit-finalize", **{
                 key: plan[key] for key in ("disk", "rejectedFaultId", "binarySha256", "expectedSceneSha256")}))
-        if plan.get("kind") != "performance-no-fault-applied":
+        if plan.get("kind") not in {"performance-no-fault-applied", "rejected-mrf-injection"}:
             for node in plan["nodes"]:
                 if node != plan["node"]:
                     fleet.record("unchanged-peer-finalization", fleet.remote(node, "cleanup"))
