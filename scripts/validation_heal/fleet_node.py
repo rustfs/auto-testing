@@ -760,6 +760,8 @@ def drive_gate(request):
     stopped(owner)
     if request.get("mode") == "clear": return gate_module().release_gate(state, roots)
     require(quorum_gate_module().checked(state, roots) is None, "single drive gate cannot share a quorum gate")
+    if request.get("scope", "disk") != "disk":
+        return gate_module().apply_gate(state, roots, request.get("disk"), request.get("mode"), scope=request["scope"])
     return gate_module().apply_gate(state, roots, request.get("disk"), request.get("mode"))
 
 

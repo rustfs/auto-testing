@@ -99,6 +99,17 @@ def observe(fleet, label):
     return fleet.record(label, {node: fleet.remote(node, "mrf-records", quiescent=True) for node in fleet.nodes})
 
 
+def validate_member_denial(value, disk):
+    control = value.get("systemMetadataControl") or {}
+    require(value.get("scope") == "bucket" and type(value.get("disk")) is int and value["disk"] == disk
+            and value.get("readProbe", {}).get("errno") == 13 and value.get("errno") == 13
+            and value.get("dacBypassRemoved") is True and value.get("systemMetadataAccessible") is True
+            and control.get("sameServiceIdentity") is True
+            and all(type(control.get(kind, {}).get("errno")) is int and control[kind]["errno"] == 0
+                    for kind in ("read", "write")),
+            "F07 needs exact business read/write denial with accessible candidate system metadata")
+
+
 def run(args, topology, nodes, fixture, candidate):
     require(topology in {"H1", "H2"} and fixture in {"DB", "DV"}, "F07 MRF source fixture changed")
     directory = args.evidence / fixture / topology / "mrf-checksum"
@@ -140,11 +151,11 @@ def run(args, topology, nodes, fixture, candidate):
         target = map_target(before, bucket, entry["key"], "data", 1, entry["versionId"], latest_required=False)
         shard = next(row for row in reversed(target["cohort"]) if row["node"] == nodes[-1])
         fleet.drive_gates.add(shard["node"])
-        fleet.record("actual-partial-write-gate", fleet.remote(shard["node"], "drive-gate", disk=shard["disk"], mode="permission-denied"))
+        fleet.record("actual-partial-write-gate", fleet.remote(shard["node"], "drive-gate", disk=shard["disk"],
+            mode="permission-denied", scope="bucket"))
         fleet.start()
         denial = fleet.record("actual-member-denial", fleet.remote(shard["node"], "drive-gate-probe"))
-        require(denial.get("readProbe", {}).get("errno") == 13 and denial.get("errno") == 13
-                and denial.get("dacBypassRemoved") is True, "F07 MRF fixture has no actual member read/write denial")
+        validate_member_denial(denial, shard["disk"])
         earliest = int(time.time() * 1000) - 5000
         pending = {"operation": "partial-write-durable-ACKs"}
         expected, obligations, _ = mrf.acknowledge(recorder, bucket, "offline-put", expected, fixture=fixture)
@@ -189,21 +200,16 @@ def run(args, topology, nodes, fixture, candidate):
                     **fleet.remote(node, "journal-apply", **params)}))
         retained_corruption(original, observe(fleet, "injected-stopped-MRF-records"), receipts, bucket)
         window = JournalWindow(fleet, "F07-corrupt-MRF-replay", event_targets={"rustfs::heal::mrf"})
-        # An active chmod gate prevents the candidate's disk initialization.
-        # All services are stopped here; re-arm it before startup and activate
-        # it again only after readiness, preserving the original denied member.
-        released = fleet.record("stopped-member-permission-reset", fleet.remote(shard["node"], "drive-gate", mode="clear"))
-        require(released.get("state") == "CLEAR" and released.get("originalPermissionsRestored") is True,
-                "F07 denied member was not restored while stopped")
-        rearmed = fleet.record("stopped-member-gate-rearmed", fleet.remote(shard["node"], "drive-gate",
-            disk=shard["disk"], mode="permission-denied"))
-        require(rearmed.get("state") == "ARMED" and rearmed.get("phase") == "armed"
-                and type(rearmed.get("disk")) is int and rearmed["disk"] == shard["disk"],
+        # Only business data is denied; disk initialization can still read
+        # system metadata. Keep the same gate active through startup so MRF
+        # replay cannot repair the target before the readiness observation.
+        gate = fleet.record("stopped-original-business-gate", fleet.remote(shard["node"], "gate-state"))
+        require(gate.get("scope") == "bucket" and gate.get("mode") == "permission-denied"
+                and gate.get("phase") == "active" and type(gate.get("disk")) is int and gate["disk"] == shard["disk"],
                 "F07 restart gate changed its original denied member")
         fleet.start()
         denied = fleet.record("restarted-original-member-denial", fleet.remote(shard["node"], "drive-gate-probe"))
-        require(denied.get("readProbe", {}).get("errno") == 13 and denied.get("errno") == 13
-                and denied.get("dacBypassRemoved") is True, "F07 restart lost its actual member read/write denial")
+        validate_member_denial(denied, shard["disk"])
         deadline = time.monotonic() + 60
         while True:
             try:

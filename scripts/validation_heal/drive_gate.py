@@ -4,6 +4,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 
@@ -39,6 +40,24 @@ def require(value, message):
     if not value: raise ValueError(message)
 
 
+def gate_folder(state, roots, disk, scope):
+    folder = roots[disk] / "data"
+    if scope == "disk": return folder
+    require(scope == "bucket", "invalid drive gate scope")
+    marker = state / "owner.json"
+    info = marker.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+            and info.st_size < 16384 and info.st_mode & 0o022 == 0, "invalid bucket gate owner marker")
+    owner = json.loads(marker.read_text())
+    require(owner.get("runtimeProfile") == "mrf-crash"
+            and isinstance(owner.get("bucket"), str) and re.fullmatch(r"rv-heal-[0-9a-f]{16}", owner["bucket"]),
+            "bucket gate requires the dedicated owned MRF fixture")
+    info = folder.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700,
+            "bucket gate private data root changed")
+    return folder / owner["bucket"]
+
+
 def checked_gate(state, roots):
     path = state / "drive-gate.json"
     if not path.exists(): return None
@@ -49,22 +68,38 @@ def checked_gate(state, roots):
     require(value.get("schemaVersion") == 1 and value.get("mode") in {"read-only", "permission-denied"}
             and value.get("phase", "active") in {"armed", "active"}
             and type(value.get("disk")) is int and 0 <= value["disk"] < len(roots)
-            and value.get("dataPath") == str(roots[value["disk"]] / "data")
-            and type(value.get("originalMode")) is int and value["originalMode"] == 0o700,
+            and type(value.get("originalMode")) is int,
             "drive gate no longer matches the run-owned data root")
+    scope = value.get("scope", "disk")
+    require(value.get("dataPath") == str(gate_folder(state, roots, value["disk"], scope))
+            and (value["originalMode"] == 0o700 if scope == "disk" else
+                 value["mode"] == "permission-denied" and value["originalMode"] in {0o700, 0o755, 0o777}),
+            "drive gate no longer matches its exact owned scope or original permissions")
     return value
 
 
-def apply_gate(state, roots, disk, mode):
+def apply_gate(state, roots, disk, mode, *, scope="disk"):
     require(type(disk) is int and 0 <= disk < len(roots) and mode in {"read-only", "permission-denied"}, "invalid drive gate")
     require(checked_gate(state, roots) is None, "a drive gate is already active")
-    folder = roots[disk] / "data"
+    folder = gate_folder(state, roots, disk, scope)
     info = folder.lstat()
-    require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700,
-            "expected private run-owned root with original mode 0700")
+    original_mode = stat.S_IMODE(info.st_mode)
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0
+            and (original_mode == 0o700 if scope == "disk" else
+                 mode == "permission-denied" and original_mode in {0o700, 0o755, 0o777}),
+            "expected owned gate directory with supported original permissions")
+    if scope == "bucket":
+        objects = (folder / "objects").lstat()
+        probe = (folder / "objects/0000.bin").lstat()
+        read_target = (folder / "objects/0000.bin/xl.meta").lstat()
+        require(stat.S_ISDIR(objects.st_mode) and objects.st_uid == 0
+                and stat.S_ISDIR(probe.st_mode) and probe.st_uid == 0
+                and stat.S_ISREG(read_target.st_mode) and read_target.st_uid == 0 and read_target.st_nlink == 1,
+                "bucket gate needs the original non-linked fixture metadata")
     value = {"schemaVersion": 1, "disk": disk, "mode": mode, "dataPath": str(folder),
-             "originalMode": 0o700, "device": info.st_dev, "inode": info.st_ino,
+             "originalMode": original_mode, "device": info.st_dev, "inode": info.st_ino,
              "phase": "armed" if mode == "permission-denied" else "active"}
+    if scope == "bucket": value["scope"] = scope
     # Intent precedes chmod/start. Cleanup can restore a partially applied gate.
     fd = os.open(state / "drive-gate.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as stream:
@@ -81,7 +116,7 @@ def activate_gate(state, roots):
     folder = Path(value["dataPath"])
     info = folder.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_dev == value["device"]
-            and info.st_ino == value["inode"] and stat.S_IMODE(info.st_mode) == 0o700,
+            and info.st_ino == value["inode"] and stat.S_IMODE(info.st_mode) == value["originalMode"],
             "armed permission root changed before live injection")
     # Keep the recovery intent before chmod. A partially activated gate remains
     # recoverable from the armed marker and original inode/mode.
@@ -167,16 +202,34 @@ def probe_gate(state, roots, pid):
     observed = json.loads(result.stdout)
     read = None
     if value["mode"] == "permission-denied":
-        # A denied write alone cannot prove a stale member cannot read. Use
-        # the same namespace/identity/capability boundary to open its format.
+        # A denied write alone cannot prove a stale member cannot read.
+        relative = "objects/0000.bin/xl.meta" if value.get("scope") == "bucket" else ".rustfs.sys/format.json"
         read_args = [*args[:-4], "python3", "-c", READ_PROBE_SOURCE,
-                     value["dataPath"] + "/.rustfs.sys/format.json"]
+                     value["dataPath"] + "/" + relative]
         result = subprocess.run(read_args, capture_output=True, text=True, timeout=15)
         require(result.returncode == 0, "service-namespace read probe did not complete")
         read = json.loads(result.stdout)
         validate_probe(read, value["mode"], identity)
-    return {**validate_probe(observed, value["mode"], identity), "disk": value["disk"],
+    control = None
+    if value.get("scope") == "bucket":
+        system = roots[value["disk"]] / "data/.rustfs.sys"
+        info = system.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0, "MRF control root is not an owned non-linked directory")
+        control = {}
+        for label, source, path in (("write", PROBE_SOURCE, system / ".validation-mrf-write-probe"),
+                                    ("read", READ_PROBE_SOURCE, system / "format.json")):
+            result = subprocess.run([*args[:-4], "python3", "-c", source, str(path)],
+                                    capture_output=True, text=True, timeout=15)
+            require(result.returncode == 0, "service-namespace MRF control probe did not complete")
+            witness = json.loads(result.stdout)
+            require(type(witness.get("errno")) is int and witness["errno"] == 0
+                    and witness.get("uid") == identity["uid"] == 0 and witness.get("gid") == identity["gid"] == 0,
+                    "bucket fault also blocked system metadata or changed the MRF probe identity")
+            control[label] = witness
+        control["sameServiceIdentity"] = True
+    return {**validate_probe(observed, value["mode"], identity), "disk": value["disk"], "scope": value.get("scope", "disk"),
             "dataPath": value["dataPath"], "readProbe": read,
+            "systemMetadataControl": control, "systemMetadataAccessible": control is not None,
             "privateMountNamespace": True, "hostMountRemounted": False, "observed": observed}
 
 
