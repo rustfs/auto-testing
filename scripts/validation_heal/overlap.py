@@ -68,13 +68,16 @@ def scope_expected(expected, prefix):
     return selected
 
 
-def counters(current):
+def counters(current, *, cancelled=False):
     value = (current.get("outcome") or {}).get("counters", {})
     for name in ("processed", "healed", "unchanged", "skipped", "failed", "unknown", "attemptFailures"):
         require(type(value.get(name)) is int and value[name] >= 0, "scope omitted typed canonical counters")
-    require(all(value[name] == 0 for name in ("skipped", "failed", "unknown", "attemptFailures"))
+    cancellation_count = sum(receipt.get("disposition", {}).get("state") == "cancelled"
+                             for receipt in (current.get("outcome") or {}).get("objects", []))
+    require(all(value[name] == 0 for name in ("failed", "unknown", "attemptFailures"))
+            and value["skipped"] == (cancellation_count if cancelled else 0)
             and value.get("overflowed") is False
-            and value["processed"] == value["healed"] + value["unchanged"],
+            and value["processed"] == value["healed"] + value["unchanged"] + value["skipped"],
             "scope counters hide failed, unknown or unresolved responsibility")
     return value
 
@@ -96,8 +99,8 @@ def wait_window(probe, fleet, path, token):
         time.sleep(0.05)
 
 
-def monotonic(before, after):
-    left, right = counters(before), counters(after)
+def monotonic(before, after, *, cancelled=False):
+    left, right = counters(before), counters(after, cancelled=cancelled)
     require(all(right[name] >= left[name] for name in ("processed", "healed", "unchanged")),
             "same-token scope counters moved backwards")
 
@@ -116,7 +119,7 @@ def overlap_rejection(observed):
 def scope_proof(current, bucket, expected, damaged, *, cancelled=False, healed=None, replacement=False):
     wanted = wanted_pairs(expected, count=SCOPE_OBJECTS)
     require(damaged and set(damaged) <= set(wanted), "scope repair plan escaped its exact ACK identities")
-    value = counters(current)
+    value = counters(current, cancelled=cancelled)
     outcome = current.get("outcome") or {}
     if cancelled:
         require(current.get("summary") == "stopped" and outcome.get("execution") == {"state": "aborted", "reason": "cancelled"}
@@ -152,39 +155,73 @@ def scope_proof(current, bucket, expected, damaged, *, cancelled=False, healed=N
             "diagnosticObjectsAreCompleteManifest": False, "coverage": outcome["coverage"]}
 
 
-def completed_scope(probe, fleet, path, token, bucket, expected, damaged, *, healed, replacement=False):
+def collect_scope_items(state, bucket, wanted, ledger, *, since=0):
+    """Retain original same-token items before completed-report byte eviction."""
+    next_seq, min_seq = state.get("nextSeq"), state.get("minSeq")
+    require(type(next_seq) is int and type(min_seq) is int and 1 <= min_seq <= next_seq <= SCOPE_OBJECTS + 1,
+            "scope item sequence bounds are missing or invalid")
+    require(next_seq > max(ledger, default=0), "same-token scope item sequence moved backwards")
+    require(min_seq == 1 or state.get("truncated") is True, "scope silently lost an early item sequence")
+    items = state.get("items", [])
+    first = max(since + 1, min_seq)
+    available = max(0, next_seq - first)
+    require(isinstance(items, list) and len(items) <= available
+            and (len(items) == available or state.get("truncated") is True), "scope silently omitted item sequences")
+    for index, item in enumerate(items, first):
+        pair = item.get("object"), public_version_id(item.get("versionId"))
+        require(item.get("bucket") == bucket and pair in wanted
+                and item.get("objectSize") == wanted[pair]["payload"]["size"], "scope item is outside its exact ACK manifest")
+        require(index not in ledger or canonical(ledger[index]) == canonical(item), "same-token scope item changed its original sequence")
+        require(not any(seq != index and (entry.get("object"), public_version_id(entry.get("versionId"))) == pair
+                        for seq, entry in ledger.items()), "scope item duplicated a real object/version")
+        ledger[index] = item
+
+
+def completed_scope(probe, fleet, path, token, bucket, expected, damaged, *, healed, replacement=False,
+                    observations=(), sample_other=None):
     deadline = time.monotonic() + TASK_SECONDS
+    wanted = wanted_pairs(expected, count=SCOPE_OBJECTS)
+    ledger = {}
+    for observation in observations:
+        collect_scope_items(observation, bucket, wanted, ledger)
     while True:
         current = status(probe, fleet, path, token, "overlap-terminal-wait")
+        collect_scope_items(current, bucket, wanted, ledger)
+        if sample_other is not None:
+            sample_other()
         if current.get("summary") != "running":
             break
         counters(current)
         require(time.monotonic() < deadline, "scope exceeded its frozen completion budget")
         time.sleep(0.05)
     proof = scope_proof(current, bucket, expected, damaged, healed=healed, replacement=replacement)
-    # These scopes fit actual item retention. Read every retained suffix even
-    # when the HTTP serializer independently trims an individual response.
-    wanted = wanted_pairs(expected, count=SCOPE_OBJECTS)
-    cursor, seen = 0, set()
-    while cursor < SCOPE_OBJECTS:
+    # The completed-report byte budget can evict a prefix even below the
+    # 1024-item count cap. A complete proof needs the original running items.
+    cursor = 0
+    while cursor + 1 in ledger: cursor += 1
+    first_page = True
+    while first_page or cursor < SCOPE_OBJECTS:
+        first_page = False
         observed = fleet.record("overlap-complete-items", probe.admin(path,
             [("clientToken", token), ("sinceSeq", str(cursor))], b""))
         require(observed.get("httpStatus") == 200 and isinstance(observed.get("response"), dict), "scope cursor failed")
         page = observed["response"]
-        require(page.get("summary") == "finished" and page.get("minSeq") == 1 and page.get("nextSeq") == SCOPE_OBJECTS + 1
+        require(page.get("summary") == "finished" and page.get("nextSeq") == SCOPE_OBJECTS + 1
                 and canonical(page.get("outcome")) == canonical(current["outcome"]), "terminal scope changed, lost items or crossed tokens")
-        items = page.get("items", [])
-        require(isinstance(items, list) and 0 < len(items) <= SCOPE_OBJECTS - cursor
-                and (len(items) == SCOPE_OBJECTS - cursor or page.get("truncated") is True), "scope silently omitted a retained suffix")
-        for item in items:
-            pair = item.get("object"), public_version_id(item.get("versionId"))
-            require(item.get("bucket") == bucket and pair in wanted and pair not in seen
-                    and item.get("objectSize") == wanted[pair]["payload"]["size"], "scope item is duplicate, missing or outside ACKs")
-            seen.add(pair)
-        cursor += len(items)
+        previous = cursor
+        collect_scope_items(page, bucket, wanted, ledger, since=cursor)
+        while cursor + 1 in ledger: cursor += 1
+        require(cursor == SCOPE_OBJECTS or cursor > previous,
+                "scope lost an uncollected early item; a response byte-limit gap cannot certify completeness")
         require(time.monotonic() < deadline, "scope item suffix exceeded completion budget")
+    seen = {(item.get("object"), public_version_id(item.get("versionId"))) for item in ledger.values()}
+    require(set(ledger) == set(range(1, SCOPE_OBJECTS + 1)), "scope sequence ledger is incomplete")
     require(seen == set(wanted), "terminal scope missed a real object/version")
-    return current, {**proof, "completeItemIdentities": len(seen), "retentionGapClaimed": False}
+    evidence = {"path": path, "clientToken": token, "bucket": bucket,
+                "items": [{"seq": seq, "item": ledger[seq]} for seq in sorted(ledger)]}
+    fleet.record("overlap-complete-item-ledger", evidence)
+    return current, {**proof, "completeItemIdentities": len(seen), "retentionGapClaimed": False,
+                     "completeItemLedgerSha256": hashlib.sha256(canonical(evidence).encode()).hexdigest()}
 
 
 def force_accounting(old, new, damaged):
@@ -217,7 +254,8 @@ def observe_branch(branch, probe, fleet, binding, bucket, expected, targets, act
         require(active_window(after), "NOT_OBSERVED: overlap request was not bracketed by the same running task")
         monotonic(before, after)
         proof["runningAfterRequest"] = counters(after)
-        terminal, proof["completeResponsibility"] = completed_scope(probe, fleet, path, old, bucket, primary, damaged, healed=len(damaged))
+        terminal, proof["completeResponsibility"] = completed_scope(probe, fleet, path, old, bucket, primary, damaged,
+            healed=len(damaged), observations=(before, after))
         active.remove((path, old))
     elif branch == "disjoint":
         other_path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/" + PREFIXES[1]
@@ -226,11 +264,15 @@ def observe_branch(branch, probe, fleet, binding, bucket, expected, targets, act
         after = status(probe, fleet, path, old, "original-after-disjoint-start")
         require(active_window(after), "NOT_OBSERVED: original task finished before the disjoint admission was bracketed")
         monotonic(before, after)
-        wait_window(probe, fleet, other_path, new)
+        other_observations = [wait_window(probe, fleet, other_path, new)]
         other = scope_expected(expected, PREFIXES[1])
         other_damaged = {(entry["key"], entry["versionId"]) for entry in targets if entry["key"].startswith(PREFIXES[1])}
-        terminal, proof["completeResponsibility"] = completed_scope(probe, fleet, path, old, bucket, primary, damaged, healed=len(damaged))
-        other_terminal, proof["disjointResponsibility"] = completed_scope(probe, fleet, other_path, new, bucket, other, other_damaged, healed=len(other_damaged))
+        def sample_disjoint():
+            other_observations.append(status(probe, fleet, other_path, new, "overlap-disjoint-parallel-status"))
+        terminal, proof["completeResponsibility"] = completed_scope(probe, fleet, path, old, bucket, primary, damaged,
+            healed=len(damaged), observations=(before, after), sample_other=sample_disjoint)
+        other_terminal, proof["disjointResponsibility"] = completed_scope(probe, fleet, other_path, new, bucket, other, other_damaged,
+            healed=len(other_damaged), observations=other_observations)
         require(proof["completeResponsibility"]["bucketIncarnationId"] == proof["disjointResponsibility"]["bucketIncarnationId"],
                 "disjoint tasks crossed bucket incarnation")
         active.remove((path, old)); active.remove((other_path, new))
@@ -242,7 +284,7 @@ def observe_branch(branch, probe, fleet, binding, bucket, expected, targets, act
         first_old = status(probe, fleet, path, old, "force-old-initial-cancellation")
         require(first_old.get("summary") != "finished", "NOT_OBSERVED: original task completed before forceStart could cancel it")
         initial = scope_proof(first_old, bucket, primary, damaged, cancelled=True)
-        monotonic(before, first_old)
+        monotonic(before, first_old, cancelled=True)
         new_before = wait_window(probe, fleet, path, new)
         retired = fleet.record("force-old-stop", probe.admin(path, [("clientToken", old), ("forceStop", "true")], b""))
         proof["oldStopIsolation"] = validate_unknown_token(retired, old)
@@ -253,7 +295,13 @@ def observe_branch(branch, probe, fleet, binding, bucket, expected, targets, act
         # The old worker can refine its cancelled report while retiring. Wait
         # for both actual workers to drain before freezing final responsibility.
         deadline = time.monotonic() + TASK_SECONDS
-        while status(probe, fleet, path, new, "force-new-drain").get("summary") == "running":
+        new_observations = [new_before, new_after]
+        while True:
+            draining = status(probe, fleet, path, new, "force-new-drain")
+            new_observations.append(draining)
+            if draining.get("summary") != "running":
+                break
+            counters(draining)
             require(time.monotonic() < deadline, "replacement task exceeded completion budget")
             time.sleep(0.05)
         idle_fleet(fleet, binding)
@@ -263,7 +311,7 @@ def observe_branch(branch, probe, fleet, binding, bucket, expected, targets, act
                 and all(settled["canonicalCounters"][name] >= initial["canonicalCounters"][name]
                         for name in ("processed", "healed", "unchanged")), "cancelled refinement changed identity or moved backwards")
         terminal, new_proof = completed_scope(probe, fleet, path, new, bucket, primary, damaged,
-            healed=len(damaged) - settled["canonicalCounters"]["healed"], replacement=True)
+            healed=len(damaged) - settled["canonicalCounters"]["healed"], replacement=True, observations=new_observations)
         proof.update(newTaskId=new, initialCancellation=initial, settledCancellation=settled,
             newRunningBeforeOldStop=counters(new_before), newRunningAfterOldStop=counters(new_after),
             completeResponsibility=new_proof, responsibilityAccounting=force_accounting(settled, new_proof, damaged))

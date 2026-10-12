@@ -131,7 +131,7 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 154 currently dispatchable IDs include all 74 non-Heal cases, 67 automatic Heal executors, and 13 disabled-by-default environment gates. The gates preserve the operator procedures and emit explicit BLOCKED results; they are not automatic live executors or PASS claims. Independent census currently confirms 88 unique complete canonical live PASS cases: 76 on the current candidate source and 12 on the older immutable source. The independently verified Pool tail runs `38110959836` and `38111198632` are included. Native, read-only, recovery and duplicate runs are excluded; the other 70 cases have no complete canonical live PASS claim.
+case evidence. The 154 currently dispatchable IDs include all 74 non-Heal cases, 67 automatic Heal executors, and 13 disabled-by-default environment gates. The gates preserve the operator procedures and emit explicit BLOCKED results; they are not automatic live executors or PASS claims. Independent census currently confirms 89 unique complete canonical live PASS cases: 77 on the current candidate source and 12 on the older immutable source. The independently verified Pool tail runs `38110959836` and `38111198632`, and A03 run `38198122041`, are included. Native, read-only, recovery and duplicate runs are excluded; the other 69 cases have no complete canonical live PASS claim.
 
 All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
@@ -600,13 +600,22 @@ window remains NOT_OBSERVED. forceStart must cancel the old task with partial
 coverage, admit an independent replacement token, and resist old-token STOP.
 Initial and settled cancellation reports are retained; exact old/new repair
 counters, incarnations and diagnostic identities cannot leak or duplicate
-responsibility. All 257 terminal item identities are read, including any
-cropped HTTP suffix; this does not claim a 1024-item retention gap. Three
+responsibility. All 257 original item sequences are retained while running
+and reconciled with the exact terminal outcome and retained suffix. The
+completed-report byte budget can evict an early prefix below the 1024-item
+count cap; an unobserved prefix still fails completeness. Both disjoint tasks
+are sampled concurrently, and replacement drain samples are preserved. Three
 live physical samples after actual all-peer drain must remain unchanged,
 with the same processes. Complete same-role shard bytes, streaming checksums
 and all-peer full S3 manifests remain mandatory before PASS. Local
 scope/error/window/duplicate-repair/item-omission/cleanup-stop negatives
-passed. Full live evidence remains pending.
+passed. Run `38199371461` retained FAIL with clean finalization: H2's first
+three branches exposed the early-prefix accounting gap, H1 force-start had a
+typed cancelled receipt counted as skipped, and H2 force-start contained a
+real unknown receipt. Replaying the original running records verifies all
+three 257-item primary ledgers; H1 cancellation now requires its exact typed
+receipt count, while H2 unknown remains rejected. This diagnostic replay
+does not change the original FAIL or claim a complete new live PASS.
 
 F01 `heal.root-graceful-coordinator-restart` now dispatches both source
 branches on H1/H2 with the same fixed DX physical/S3 oracles. The coordinator

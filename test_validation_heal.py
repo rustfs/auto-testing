@@ -2263,13 +2263,20 @@ class HealOverlapOracleTest(unittest.TestCase):
     def damaged(self):
         return {(self.expected()[index]["key"], "null") for index in overlap.MISSING}
 
-    def state(self, *, cancelled=False, replacement=False, healed=None):
-        total = 100 if cancelled else overlap.SCOPE_OBJECTS
-        repaired = {0, 64} if cancelled else set(overlap.MISSING)
+    def items(self):
+        return [{"bucket": self.bucket, "object": entry["key"], "versionId": "", "objectSize": CURSOR_SIZE}
+                for entry in self.expected()]
+
+    def state(self, *, cancelled=False, replacement=False, healed=None, processed=None, min_seq=1):
+        total = processed if processed is not None else 100 if cancelled else overlap.SCOPE_OBJECTS
+        repaired = {index for index in overlap.MISSING if index < total}
         if replacement: repaired -= {0, 64}
-        return {"summary": "stopped" if cancelled else "finished", "outcome": {
-            "execution": {"state": "aborted", "reason": "cancelled"} if cancelled else {"state": "completed"},
-            "coverage": "partial" if cancelled else "complete", "objectsTruncated": total > 128,
+        return {"summary": "stopped" if cancelled else "running" if processed is not None else "finished",
+            "nextSeq": total + 1, "minSeq": min_seq, "items": self.items()[min_seq - 1:total],
+            "truncated": min_seq > 1, "outcome": {
+            "execution": {"state": "aborted", "reason": "cancelled"} if cancelled else
+                         {"state": "running" if processed is not None else "completed"},
+            "coverage": "partial" if cancelled or processed is not None else "complete", "objectsTruncated": total > 128,
             "objects": [{"identity": {"bucket": self.bucket, "object": self.expected()[index]["key"],
                          "versionId": None, "poolIndex": 0, "setIndex": 0, "bucketIncarnationId": "incarnation"},
                          "disposition": {"state": "repaired" if index in repaired else "verified_healthy"}}
@@ -2320,6 +2327,7 @@ class HealOverlapOracleTest(unittest.TestCase):
 
     def test_terminal_suffix_checks_every_ack_and_never_infers_a_retention_gap(self):
         current = self.state()
+        current.update(items=[], truncated=True)
         pages = []
         for left, right in ((0, 100), (100, 257)):
             pages.append({**copy.deepcopy(current), "nextSeq": 258, "minSeq": 1, "truncated": right < 257,
@@ -2341,6 +2349,131 @@ class HealOverlapOracleTest(unittest.TestCase):
             client.admin = lambda *args: {"httpStatus": 200, "response": page}
             with self.subTest(kind=kind), patch.object(overlap, "status", return_value=current), self.assertRaises(ValueError):
                 overlap.completed_scope(client, fleet, "/scope/", "task", self.bucket, self.expected(), self.damaged(), healed=5)
+
+    def test_saved_running_prefix_completes_a_byte_bounded_terminal_report(self):
+        current = self.state(min_seq=57)
+        client = types.SimpleNamespace(admin=lambda path, query, body: {"httpStatus": 200,
+            "response": {**copy.deepcopy(current), "items": []}})
+        recorded = []
+        fleet = types.SimpleNamespace(record=lambda label, value: recorded.append((label, value)) or value)
+        with patch.object(overlap, "status", return_value=current):
+            _, proof = overlap.completed_scope(client, fleet, "/scope/", "task", self.bucket, self.expected(), self.damaged(),
+                healed=5, observations=(self.state(processed=60),))
+        self.assertEqual(proof["completeItemIdentities"], 257)
+        self.assertFalse(proof["retentionGapClaimed"])
+        ledger = next(value for label, value in recorded if label == "overlap-complete-item-ledger")
+        self.assertEqual((ledger["path"], ledger["clientToken"]), ("/scope/", "task"))
+        self.assertEqual([entry["seq"] for entry in ledger["items"]], list(range(1, 258)))
+        client.admin = lambda *args: {"httpStatus": 200, "response": current}
+        for observations in ((), (self.state(processed=55),)):
+            with self.subTest(prefix=len(observations)), patch.object(overlap, "status", return_value=current), \
+                 self.assertRaisesRegex(ValueError, "uncollected early item"):
+                overlap.completed_scope(client, fleet, "/scope/", "task", self.bucket, self.expected(), self.damaged(),
+                    healed=5, observations=observations)
+
+    def test_item_ledger_rejects_rewritten_sequences_and_cross_scope_identity(self):
+        wanted = overlap.wanted_pairs(self.expected(), count=overlap.SCOPE_OBJECTS)
+        for kind in ("rewrite", "duplicate", "key", "version", "bucket", "size", "bounds", "silent-prefix", "silent-tail"):
+            ledger = {}
+            overlap.collect_scope_items(self.state(processed=60), self.bucket, wanted, ledger)
+            current = self.state()
+            if kind == "rewrite": current["items"][0]["detail"] = "changed"
+            if kind == "duplicate": current["items"][61] = copy.deepcopy(current["items"][0])
+            if kind == "key": current["items"][0]["object"] = "objects/b/0000.bin"
+            if kind == "version": current["items"][0]["versionId"] = "another-version"
+            if kind == "bucket": current["items"][0]["bucket"] = "another-bucket"
+            if kind == "size": current["items"][0]["objectSize"] += 1
+            if kind == "bounds": current["nextSeq"] = 259
+            if kind == "silent-prefix": current = self.state(min_seq=57); current["truncated"] = False
+            if kind == "silent-tail": current["items"].pop()
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                overlap.collect_scope_items(current, self.bucket, wanted, ledger)
+
+    def test_cancelled_skip_requires_the_exact_typed_receipt_and_zero_unknowns(self):
+        current = self.state(cancelled=True)
+        current["outcome"]["objects"][-1]["disposition"]["state"] = "cancelled"
+        current["outcome"]["counters"].update(skipped=1, unchanged=97)
+        self.assertEqual(self.proof(current, cancelled=True)["canonicalCounters"]["skipped"], 1)
+        overlap.monotonic(self.state(processed=23), current, cancelled=True)
+        for kind in ("missing", "unknown", "count", "completed"):
+            changed = copy.deepcopy(current)
+            if kind == "missing": changed["outcome"]["objects"][-1]["disposition"]["state"] = "verified_healthy"
+            if kind == "unknown": changed["outcome"]["counters"]["unknown"] = 1
+            if kind == "count": changed["outcome"]["counters"].update(skipped=2, unchanged=96)
+            if kind == "completed": changed["summary"] = "finished"
+            with self.subTest(kind=kind), self.assertRaises(ValueError): self.proof(changed, cancelled=True)
+        with self.assertRaises(ValueError): overlap.counters(current)
+
+    def test_parallel_scope_is_sampled_during_every_completion_poll(self):
+        current = self.state()
+        client = types.SimpleNamespace(admin=lambda *args: {"httpStatus": 200,
+            "response": {**copy.deepcopy(current), "items": []}})
+        fleet = types.SimpleNamespace(record=lambda label, value: value)
+        peer = unittest.mock.Mock()
+        with patch.object(overlap, "status", side_effect=(self.state(processed=60), current)), patch.object(overlap.time, "sleep"):
+            overlap.completed_scope(client, fleet, "/scope/", "task", self.bucket, self.expected(), self.damaged(),
+                healed=5, sample_other=peer)
+        self.assertEqual(peer.call_count, 2)
+
+    def test_disjoint_and_replacement_keep_observations_bound_to_their_tokens(self):
+        primary = self.expected()
+        other = copy.deepcopy(primary)
+        for entry in other: entry["key"] = entry["key"].replace("objects/a/child/", "objects/b/")
+        targets = [entries[index] for entries in (primary, other) for index in overlap.MISSING]
+        before, after = self.state(processed=23), self.state(processed=40)
+        new_before, new_after = self.state(processed=70), self.state(processed=80)
+        old_final = self.state(cancelled=True)
+        samples = [self.state(processed=90), self.state()]
+        calls = []
+        def complete(probe, fleet, path, token, bucket, expected, damaged, **options):
+            if options.get("sample_other"):
+                options["sample_other"](); options["sample_other"]()
+            calls.append((path, token, list(options["observations"])))
+            state = self.state(replacement=options.get("replacement", False))
+            return state, self.proof(state, healed=options["healed"], replacement=options.get("replacement", False))
+        for branch in ("disjoint", "force-start"):
+            calls.clear()
+            active = []
+            def admit(probe, fleet, path, identities, **options):
+                token = "new" if identities else "old"
+                identities.append((path, token))
+                return token
+            def observe(probe, fleet, path, token, label):
+                if label == "original-after-disjoint-start": return after
+                if label == "overlap-disjoint-parallel-status": return samples[min(len(peer_samples), 1)]
+                if label in {"force-old-initial-cancellation", "force-old-settled"}: return old_final
+                if label == "force-new-after-old-stop": return new_after
+                if label == "force-new-drain": return samples.pop(0)
+                return self.state(replacement=branch == "force-start" and token == "new", cancelled=branch == "force-start" and token == "old")
+            peer_samples = []
+            def record(label, value):
+                if label == "overlap-disjoint-parallel-status": peer_samples.append(value)
+                return value
+            # status() is mocked, so its recording hook is bypassed.
+            def observed(*args):
+                value = observe(*args)
+                if args[-1] == "overlap-disjoint-parallel-status": peer_samples.append(value)
+                return value
+            fleet = types.SimpleNamespace(nodes=["node"], record=record,
+                snapshot=lambda *args: {"node": {"pid": 1, "unit": "unit"}})
+            probe = types.SimpleNamespace(admin=lambda *args: {})
+            samples = [self.state(processed=90), self.state()]
+            with self.subTest(branch=branch), patch.object(overlap, "start", side_effect=admit), \
+                 patch.object(overlap, "wait_window", side_effect=(before, new_before)), \
+                 patch.object(overlap, "status", side_effect=observed), patch.object(overlap, "completed_scope", side_effect=complete), \
+                 patch.object(overlap, "idle_fleet", return_value={}), patch.object(overlap, "validate_unknown_token", return_value={}), \
+                 patch.object(overlap, "physical_content", return_value={}), patch.object(overlap.time, "sleep"):
+                overlap.observe_branch(branch, probe, fleet, {}, self.bucket, primary + other, targets, active, original={})
+            self.assertEqual(active, [])
+            self.assertEqual(calls[-1][1], "new")
+            if branch == "disjoint":
+                self.assertTrue(calls[0][0].endswith("objects/a/"))
+                self.assertTrue(calls[-1][0].endswith("objects/b/"))
+                self.assertEqual(calls[0][2], [before, after])
+                self.assertEqual(calls[-1][2], [new_before] + peer_samples)
+            else:
+                self.assertEqual(calls[-1][2][:2], [new_before, new_after])
+                self.assertEqual(len(calls[-1][2]), 4)
 
     def test_finished_window_and_same_token_counter_rollback_cannot_pass(self):
         self.assertFalse(overlap.active_window(self.state()))
