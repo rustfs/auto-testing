@@ -1,4 +1,4 @@
-"""C11: same-name bucket recreation with one actual stale metadata member."""
+"""C11: same-name bucket recreation with original metadata and journal replay."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -10,6 +10,8 @@ import re
 import secrets
 import signal
 import sys
+import time
+from urllib.parse import quote
 import uuid
 
 try:
@@ -23,7 +25,12 @@ try:
     from .incarnation_native import verify as verify_storage
     from .matrix import select
     from .shards import files, map_target, run_task, verify_cohort
-    from .stop import idle_fleet
+    from . import checkpoint as checkpoints, journal_fault as journal, mrf_replay as mrf
+    from .mrf_records import canonical_uuid, verify_reference as verify_mrf_reference
+    from .persistence import exact_records
+    from .scanner_repair import JournalWindow
+    from .stop import idle_fleet, status
+    from .root_restart import recovery_status
     from .versions import public_version_id, validate_version_receipts, verify_quorum_contract, version_identity
 except ImportError:
     from heal_probe import Probe, compare_inventories, payload, require, save
@@ -36,16 +43,17 @@ except ImportError:
     from incarnation_native import verify as verify_storage
     from matrix import select
     from shards import files, map_target, run_task, verify_cohort
-    from stop import idle_fleet
+    import checkpoint as checkpoints, journal_fault as journal, mrf_replay as mrf
+    from mrf_records import canonical_uuid, verify_reference as verify_mrf_reference
+    from persistence import exact_records
+    from scanner_repair import JournalWindow
+    from stop import idle_fleet, status
+    from root_restart import recovery_status
     from versions import public_version_id, validate_version_receipts, verify_quorum_contract, version_identity
 
 
 CASE_ID = "heal.bucket-incarnation-recreation"
 BRANCHES = ("old-metadata-rejoin", "old-checkpoint-replay", "old-mrf-replay", "native-incarnation-fence")
-BLOCKERS = {
-    "old-checkpoint-replay": "exact old-incarnation runnable checkpoint replay and original terminal evidence are incomplete",
-    "old-mrf-replay": "ACK-bound old-incarnation committed MRF replay and retained responsibility evidence are incomplete",
-}
 SIZE = 5 * 1024**2 + 123
 
 
@@ -294,12 +302,349 @@ def run_metadata_rejoin(args, topology, nodes, candidate):
         if pending is not None:
             result["unresolvedMutation"] = pending
             fleet.record("unresolved-S3-mutation", pending)
-            clean = fleet.cleanup()
+            clean = fleet.cleanup(preserve_namespaces=True)
             result["cleanup"] = "FAIL"
             result["environmentCleanupSucceeded"] = clean
         else:
             result["cleanup"] = "PASS" if fleet.cleanup() else "FAIL"
         fleet.record("incarnation-branch-result", result)
+    return result
+
+
+
+def record_digests(rows):
+    return [{name: row[name] for name in ("disk", "relativePath", "size", "sha256")}
+            for row in rows if row["present"]]
+
+
+def checkpoint_rejection(current, frozen):
+    outcome = current.get("outcome") or {}
+    original = frozen["value"]["admin"]["outcome"]
+    require(current.get("summary") == "stopped" and journal.same_json(current.get("settings"), checkpoints.OPTIONS)
+            and isinstance(current.get("detail"), str) and current["detail"].startswith("stale_bucket_incarnation:")
+            and outcome.get("execution") == {"state": "aborted", "reason": "untraversable"}
+            and outcome.get("coverage") == "partial" and current.get("truncated") is False,
+            "C11 old checkpoint has no explicit original stale-incarnation failure")
+    require(all(journal.same_json(outcome.get(name), original.get(name))
+                for name in ("counters", "objects", "objectsTruncated")),
+            "C11 old checkpoint processed successor work or rewrote original acknowledged progress")
+    return {"originalTaskId": frozen["taskId"], "bucketIncarnationId": frozen["bucketIncarnationId"],
+            "staleIncarnationRejected": True, "originalProgressRetained": True, "successorWorkClaimed": False}
+
+
+def checkpoint_terminal(observed, frozen, current):
+    token = frozen["taskId"]
+    names = journal.names("root", token)
+    records = exact_records(observed, token, "root")
+    require(set(records) == set(names[1:]), "C11 old checkpoint lacks an exact durable terminal/report or is still runnable")
+    owner = frozen["rootAdmission"]
+    require(all((row["node"], row["disk"]) == (owner["node"], owner["disk"]) for row in records.values()),
+            "C11 old checkpoint terminal moved original durable ownership")
+    terminal = journal.decode_json(checkpoints.bytes_of(records[names[1]]))
+    report = journal.decode_json(checkpoints.bytes_of(records[names[2]]))
+    require(type(terminal.get("schema")) is int and terminal["schema"] == 1 and terminal.get("task_id") == token
+            and journal.same_json(terminal.get("heal_type"), owner["value"]["heal_type"])
+            and journal.same_json(terminal.get("options"), owner["value"]["options"])
+            and terminal.get("status") == {"Failed": {"error": current["detail"]}}
+            and type(report.get("schema")) is int and report["schema"] == 1
+            and journal.same_json(report.get("terminal"), terminal)
+            and journal.same_json(report.get("outcome"), current["outcome"]),
+            "C11 old checkpoint durable rejection differs from original token/scope/outcome")
+    return {"originalTaskId": token, "sameOriginalOwner": True, "durableFailureRetained": True}
+
+
+def retained_mrf(checkpoints_by_node, obligations, bindings, successor_incarnation):
+    require(successor_incarnation and all(owner["bucketIncarnationId"] != successor_incarnation
+            for owners in bindings.values() for owner in owners), "C11 successor reused the old MRF incarnation")
+    retained = []
+    for obligation in obligations:
+        wanted = mrf.identity(obligation)
+        for owner in bindings[wanted]:
+            value = checkpoints_by_node[owner["node"]]
+            require(value.get("present") is True and value["owner"] != owner["checkpointOwner"]
+                    and value["sequence"] > owner["sequence"], "C11 old MRF responsibility was lost or not durably reclassified")
+            canonical_uuid(value["owner"])
+            matches = [item for item in value["intents"] if mrf.identity(item) == wanted
+                       and item.get("intentDigest") == owner["intentDigest"]]
+            require(len(matches) == 1, "C11 exact old MRF ACK responsibility disappeared or duplicated")
+            lifecycle = matches[0].get("lifecycle", {})
+            state = lifecycle.get("state", {})
+            require(lifecycle.get("responsibility_id") == owner["responsibilityId"]
+                    and lifecycle.get("source_bucket_incarnation_id") == owner["bucketIncarnationId"]
+                    and lifecycle.get("last_operator_acceptance") is None
+                    and state.get("state") == "bucket_incarnation_changed"
+                    and set(state) == {"state", "source_bucket_incarnation_id", "observed_bucket_incarnation_id", "detected_at_ms"}
+                    and state["source_bucket_incarnation_id"] == owner["bucketIncarnationId"]
+                    and state["observed_bucket_incarnation_id"] == successor_incarnation
+                    and type(state["detected_at_ms"]) is int and 0 < state["detected_at_ms"] <= int(time.time() * 1000) + 5000,
+                    "C11 MRF responsibility was retired, accepted, rebound or lacks durable incarnation-change diagnostics")
+            retained.append({"node": owner["node"], "identity": obligation,
+                "originalCheckpointOwner": owner["checkpointOwner"], "currentCheckpointOwner": value["owner"],
+                "responsibilityId": owner["responsibilityId"], "state": state})
+    return {"retainedResponsibilities": retained, "operatorAcceptanceUsed": False,
+            "oldResponsibilityRetired": False, "successorRepairClaimed": False}
+
+
+def replay_isolation(before, after):
+    require(physical_content(before) == physical_content(after),
+            "C11 old persisted work changed successor/control metadata, shards, integrity or disk formats")
+    return {"allSuccessorAndControlPhysicalBytesUnchanged": True, "formatUnchanged": True}
+
+
+def successor_receipts(current, bucket, successor):
+    successor_incarnations = {row.get("identity", {}).get("bucketIncarnationId")
+                             for row in current.get("outcome", {}).get("objects", [])}
+    require(len(successor_incarnations) == 1 and None not in successor_incarnations,
+            "C11 successor diagnostics mix or omit bucket generations")
+    successor_incarnation = successor_incarnations.pop()
+    # Complete independent manifests cover diagnostics capped at 128 objects.
+    wanted = old_manifest(successor)
+    journal.task_id(successor_incarnation)
+    outcome = current.get("outcome") or {}
+    require(current.get("summary") == "finished" and type(current.get("truncated")) is bool
+            and current["truncated"] is (len(wanted) > 128) and outcome.get("execution") == {"state": "completed"}
+            and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is (len(wanted) > 128)
+            and len(outcome.get("objects", [])) == min(128, len(wanted)),
+            "C11 successor scan lacks truthful bounded diagnostic coverage")
+    counts = {"processed": len(wanted), "healed": 0, "unchanged": len(wanted), "skipped": 0,
+              "failed": 0, "unknown": 0, "attemptFailures": 0, "overflowed": False}
+    require(all(type(outcome.get("counters", {}).get(key)) is type(value)
+                and outcome["counters"][key] == value for key, value in counts.items()),
+            "C11 successor scan counters differ from its complete ACK manifest")
+    seen = set()
+    for row in outcome["objects"]:
+        item = row.get("identity", {})
+        pair = item.get("object"), public_version_id(item.get("versionId"))
+        require(pair in wanted and pair not in seen and item.get("bucket") == bucket
+                and item.get("bucketIncarnationId") == successor_incarnation
+                and type(item.get("poolIndex")) is int and item["poolIndex"] == 0
+                and type(item.get("setIndex")) is int and item["setIndex"] == 0
+                and row.get("disposition", {}).get("state") == ("metadata_healthy" if wanted[pair]["deleteMarker"] else "verified_healthy"),
+                "C11 successor diagnostic changed an ACK, kind, generation or successful disposition")
+        seen.add(pair)
+    return {"bucketIncarnationId": successor_incarnation,
+        "completeIndependentManifestsRequired": True, "boundedDiagnosticsAreCompleteManifest": len(wanted) <= 128}
+
+
+def run_replay(args, topology, nodes, branch, candidate):
+    require(branch in {"old-checkpoint-replay", "old-mrf-replay"}, "unregistered C11 replay branch")
+    family = "checkpoint" if branch == "old-checkpoint-replay" else "mrf"
+    directory = args.evidence / topology / branch
+    directory.mkdir(parents=True)
+    run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile="incarnation-" + family,
+                  resource_profile="cursor" if family == "checkpoint" else "standard")
+    bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+    control = bucket + "-control"
+    fleet.snapshot_buckets = [bucket, control]
+    access, secret = secrets.token_hex(16), secrets.token_hex(24)
+    os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
+    binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,
+        "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat(), "bucketPrefix": bucket,
+        "endpoints": {f"node{index}": f"http://rustfs-node{index}:9000" for index in range(1, len(nodes) + 1)},
+        "defaultEndpoint": "node1", "candidateCommit": candidate["source_sha"], "harnessCommit": args.testing_commit,
+        "candidatePackageSha256": candidate["package_sha256"], "candidateBinarySha256": args.binary_sha,
+        "rcBinarySha256": hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(),
+        "maxInventoryObjects": 512, "maxInventoryBytes": 2 * 1024**3}
+    fleet.record("binding", binding)
+    tool = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
+    verify_quorum_contract(tool, candidate)
+    if family == "mrf": fleet.record("MRF-reviewed-source-contract", verify_mrf_reference(candidate))
+    probe, active, pending = Probe(binding), [], None
+    result = {"topology": topology, "fixture": "DV", "branch": branch, "verdict": "RUNNING", "cleanup": "PENDING",
+              "canonicalCasePassClaimed": False}
+    try:
+        fleet.deploy(args.binary_sha, bucket, access, secret)
+        fleet.record("actual-topology", validate_topology(fleet.snapshot("deployed-topology"), topology))
+        recorder = Recorder(probe, directory / "fixture")
+        pending = {"operation": "seed-old-DV"}
+        old = seed(recorder, bucket, "DV", 80 if family == "checkpoint" else 3, [1024**2 + 123])
+        old_manifest(old)
+        fleet.record("old-ACK-manifest", {"expected": old, **verify_seed(old, probe.inventory(bucket))})
+        pending = None
+        frozen, bindings, obligations, gate_member = None, None, None, None
+        if family == "checkpoint":
+            token = checkpoints.admit(probe, fleet, active)
+            frozen, process_identity = checkpoints.freeze(fleet, token, bucket)
+            frozen = checkpoints.stop_for_fault(fleet, token, bucket, frozen, process_identity)
+            old_incarnation = frozen["bucketIncarnationId"]
+            fleet.record("original-old-incarnation-checkpoint", frozen)
+        else:
+            initial = run_task(probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
+                               option_overrides={"recursive": True})
+            old_incarnation = validate_version_receipts(initial, bucket, old, 2)["bucketIncarnationId"]
+            idle_fleet(fleet, binding)
+            fleet.stop()
+            original = fleet.snapshot("old-before-partial-write-gate", quiescent=True)
+            entry = next(entry for entry in old if not entry["deleteMarker"])
+            target = map_target(original, bucket, entry["key"], "data", 1, entry["versionId"], latest_required=False)
+            shard = next(row for row in reversed(target["cohort"]) if row["node"] == nodes[-1])
+            gate_member = shard["node"], shard["disk"]
+            fleet.drive_gates.add(gate_member[0])
+            fleet.record("old-MRF-member-gate", fleet.remote(gate_member[0], "drive-gate", disk=gate_member[1], mode="permission-denied"))
+            fleet.start()
+            denial = fleet.record("old-MRF-member-denial", fleet.remote(gate_member[0], "drive-gate-probe"))
+            require(denial.get("readProbe", {}).get("errno") == 13 and denial.get("errno") == 13
+                    and denial.get("dacBypassRemoved") is True, "C11 MRF partial write has no actual read/write denial")
+            earliest = int(time.time() * 1000) - 5000
+            pending = {"operation": "old-MRF-partial-write-ACKs"}
+            old, obligations, _ = mrf.acknowledge(recorder, bucket, "offline-put", old)
+            verify_seed(old, probe.inventory(bucket))
+            pending = None
+            deadline = time.monotonic() + mrf.PERSIST_SECONDS
+            while True:
+                try:
+                    bindings = mrf.pending_bindings(mrf.read_checkpoints(fleet, nodes, "C11-old-committed-MRF"), obligations, earliest)
+                    break
+                except ValueError as exc:
+                    if not str(exc).startswith("NOT_OBSERVED:"): raise
+                    require(time.monotonic() < deadline, "C11 old ACK-bound MRF persistence window not observed")
+                    time.sleep(.5)
+            require(all(owner["bucketIncarnationId"] == old_incarnation for owners in bindings.values() for owner in owners),
+                    "C11 MRF ACKs belong to another old generation")
+            fleet.record("original-old-MRF-ACK-bindings", {"obligations": obligations,
+                "bindings": [{"identity": list(key), "owners": value} for key, value in bindings.items()]})
+            fleet.stop()
+            bindings = mrf.pending_bindings(mrf.read_checkpoints(fleet, nodes, "C11-old-MRF-stopped", quiescent=True), obligations, earliest)
+            token = None
+        params = {"family": family, "taskId": token, "bucketIncarnationId": old_incarnation}
+        for node in nodes:
+            if family == "checkpoint":
+                observed = [*fleet.remote(node, "journal-census", family="checkpoint", taskId=token)["records"],
+                            *fleet.remote(node, "journal-census", family="root", taskId=token)["records"]]
+                # The adapter uses disk-major order over both exact families.
+                observed.sort(key=lambda row: (row["disk"], [*journal.names("checkpoint", token), *journal.names("root", token)].index(row["relativePath"])))
+            else:
+                observed = fleet.remote(node, "incarnation-census", **params)["records"]
+            fleet.incarnation_replays.append((node, params.copy()))
+            receipt = fleet.record("archive-and-detach-original-replay", {"node": node, **fleet.remote(
+                node, "incarnation-capture", **params, expectedRecords=record_digests(observed))})
+            require(receipt.get("detached") is True and receipt.get("originalProductBytes") is True
+                    and receipt.get("replacementBytesAccepted") is False, "C11 original durable record detachment is incomplete")
+            fleet.record("C11-transition-runtime", {"node": node, **fleet.remote(node, "incarnation-phase", phase="transition")})
+        if gate_member is not None:
+            fleet.record("C11-old-MRF-member-release", fleet.remote(gate_member[0], "drive-gate", mode="clear"))
+            fleet.drive_gates.remove(gate_member[0])
+        fleet.start()
+        pending = {"operation": "normal-S3-delete-and-successor-recreate"}
+        result["deletedOriginal"] = fleet.record("normal-S3-bucket-deletion", delete_old_bucket(recorder, bucket, old))
+        successor = seed_successor(recorder, bucket, old)
+        controls = seed(recorder, control, "DB", 1, [SIZE])
+        baseline = fleet.record("successor-ACK-bound-S3", probe.inventory(bucket))
+        verify_seed(successor, baseline)
+        fleet.record("successor-config-ACK", config(probe, bucket))
+        pending = None
+        successor_status = run_task(probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
+            option_overrides={"recursive": True})
+        successor_responsibility = successor_receipts(successor_status, bucket, successor)
+        require(successor_responsibility["bucketIncarnationId"] != old_incarnation,
+                "C11 successor generation was not distinct before any original replay")
+        idle_fleet(fleet, binding)
+        fleet.stop()
+        authority = fleet.snapshot("complete-successor-physical-before-original-replay", quiescent=True)
+        successor_physical(authority, authority, bucket, successor, old, (None, None))
+        for node in nodes:
+            receipt = fleet.record("install-exact-original-replay", {"node": node, **fleet.remote(node, "incarnation-install", **params)})
+            require(receipt.get("installed") is True and receipt.get("originalArchiveRetained") is True,
+                    "C11 original record transaction was not completely installed")
+            fleet.record("C11-replay-runtime", {"node": node, **fleet.remote(node, "incarnation-phase", phase="replay")})
+        authority = fleet.snapshot("successor-physical-before-original-replay", quiescent=True)
+        system_before = system_snapshot(fleet, [bucket, control], "successor-system-before-original-replay")
+        window = JournalWindow(fleet, "C11-original-replay", event_targets={"rustfs::heal::manager", "rustfs::heal::task", "rustfs::heal::mrf"})
+        fleet.start()
+        if family == "checkpoint":
+            deadline = time.monotonic() + 180
+            while True:
+                current = recovery_status(probe, fleet, token)
+                if current.get("summary") != "running": break
+                require(time.monotonic() < deadline, "C11 original checkpoint has no bounded terminal")
+                time.sleep(.2)
+            result["originalCheckpointRejection"] = checkpoint_rejection(current, frozen)
+            for endpoint in binding["endpoints"]:
+                peer = status(Probe(binding, endpoint), fleet, checkpoints.PATH, token, "C11-original-rejection-peer")
+                require(journal.same_json(peer.get("outcome"), current.get("outcome"))
+                        and peer.get("summary") == current.get("summary") and peer.get("detail") == current.get("detail"),
+                        "C11 peer lost the original rejected checkpoint outcome")
+            active.remove((checkpoints.PATH, token))
+        else:
+            deadline = time.monotonic() + 180
+            while True:
+                try:
+                    result["retainedOldMrfResponsibility"] = retained_mrf(
+                        mrf.read_checkpoints(fleet, nodes, "C11-old-MRF-replay-retained"), obligations, bindings,
+                        successor_responsibility["bucketIncarnationId"])
+                    break
+                except ValueError as exc:
+                    fleet.record("C11-MRF-rejection-not-yet-observed", {"error": str(exc)})
+                    require(time.monotonic() < deadline, "C11 MRF durable stale-generation diagnostic not observed: " + str(exc))
+                    time.sleep(1)
+            result["originalMrfReplayEvents"] = window.capture()
+        fleet.stop()
+        replay_isolation(authority, fleet.snapshot("successor-physical-after-original-replay-before-reads", quiescent=True))
+        require(system_files(system_before) == system_files(system_snapshot(fleet, [bucket, control], "successor-system-after-original-replay")),
+                "C11 original replay changed successor bucket configuration/incarnation bytes")
+        if family == "checkpoint":
+            result["durableOriginalRejection"] = checkpoint_terminal(checkpoints.records(
+                fleet, token, "C11-durable-original-terminal", quiescent=True, family="root"), frozen, current)
+        fleet.start()
+        responsibility = successor_responsibility
+        if family == "mrf":
+            deadline = time.monotonic() + 180
+            while True:
+                try:
+                    result["retainedOldMrfResponsibility"] = retained_mrf(mrf.read_checkpoints(fleet, nodes, "C11-retained-old-MRF"),
+                        obligations, bindings, responsibility["bucketIncarnationId"])
+                    break
+                except ValueError as exc:
+                    fleet.record("C11-MRF-rejection-not-yet-observed", {"error": str(exc)})
+                    require(time.monotonic() < deadline, "C11 MRF durable stale-generation diagnostic not observed: " + str(exc))
+                    time.sleep(1)
+            result["originalMrfReplayEvents"] = window.capture()
+        idle_fleet(fleet, binding)
+        fleet.stop()
+        final = fleet.snapshot("successor-physical-before-business-reads", quiescent=True)
+        # Persisted old work has no authority to change any surviving successor bytes.
+        replay_isolation(authority, final)
+        cohorts = successor_physical(final, final, bucket, successor, old, (None, None))
+        cohorts.extend(map_target(final, control, entry["key"], "data", 1, entry["versionId"], latest_required=False)
+                       for entry in controls if not entry["deleteMarker"])
+        result["fullShardIntegrity"] = [verify_cohort(fleet, target, "successor-full-shard-integrity") for target in cohorts]
+        fleet.start()
+        for endpoint in binding["endpoints"]:
+            peer = Probe(binding, endpoint)
+            inventory = fleet.record("all-peer-successor-S3", {"endpoint": endpoint, **peer.inventory(bucket)})
+            verify_seed(successor, inventory)
+            compare_inventories(baseline, inventory)
+            verify_seed(controls, fleet.record("all-peer-control-S3", {"endpoint": endpoint, **peer.inventory(control, unversioned_current_tags=True)}))
+            fleet.record("all-peer-successor-config", {"endpoint": endpoint, **config(peer, bucket)})
+            for key, version in old_manifest(old):
+                missing = fleet.record("all-peer-old-incarnation-version", peer.s3("head_object", {"Bucket": bucket, "Key": key, "VersionId": version}))
+                require(missing.get("acknowledged") is False and missing.get("resultUnknown") is False
+                        and missing.get("response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode") == 404,
+                        "C11 original version/marker reappeared in the successor namespace")
+        fleet.stop()
+        replay_isolation(final, fleet.snapshot("successor-after-business-reads", quiescent=True))
+        require(system_files(system_before) == system_files(system_snapshot(fleet, [bucket, control], "successor-system-after-business-reads")),
+                "C11 business reads changed acknowledged successor bucket records")
+        if family == "checkpoint":
+            checkpoint_terminal(checkpoints.records(fleet, token, "C11-retained-terminal-after-business-reads", quiescent=True, family="root"), frozen, current)
+        else:
+            retained_mrf(mrf.read_checkpoints(fleet, nodes, "C11-retained-MRF-after-business-reads", quiescent=True),
+                         obligations, bindings, responsibility["bucketIncarnationId"])
+        result.update(verdict="PASS", checkpointReplayClaimed=family == "checkpoint", mrfReplayClaimed=family == "mrf",
+            successorResponsibility=responsibility, oldBackupRestorationUsed=False, nativeCommitFenceClaimed=False)
+    except (Exception, KeyboardInterrupt) as exc:
+        result.update(verdict="FAIL", failure={"type": type(exc).__name__, "message": str(exc)})
+        try:
+            fleet.stop()
+            fleet.snapshot("original-replay-failure-scene", quiescent=True)
+        except Exception as error: result["failureEvidenceError"] = str(error)
+    finally:
+        clean = fleet.cleanup(preserve_namespaces=pending is not None)
+        result["cleanup"] = "PASS" if clean and pending is None else "FAIL"
+        if pending is not None:
+            result.update(unresolvedMutation=pending, environmentCleanupSucceeded=clean)
+        fleet.record("incarnation-replay-result", result)
     return result
 
 
@@ -335,14 +680,16 @@ def main():
                         "evidenceScope": "independent exact-candidate native storage regression",
                         "nativeProof": storage, "canonicalCasePassClaimed": False}
                 else:
-                    result = {"topology": topology, "fixture": "DV", "branch": branch, "verdict": "BLOCKED", "cleanup": "PASS",
-                        "reason": BLOCKERS[branch], "fleetBranchExecuted": False, "canonicalCasePassClaimed": False}
+                    result = run_replay(args, topology, selected, branch, candidate)
                 results.append(result)
                 if result["cleanup"] != "PASS": return 1
     finally:
+        diagnostic_complete = len(results) == 8 and all(row["verdict"] == (
+            "PREREQUISITE_PASS" if row["branch"] == "native-incarnation-fence" else "PASS") for row in results)
         save(args.evidence / "healthy-summary.json", {"caseId": CASE_ID, "results": results, "complete": False,
+            "diagnosticBranchesPassed": diagnostic_complete,
             "cleanup": "PASS" if results and all(row["cleanup"] == "PASS" for row in results) else "FAIL",
-            "canonicalCasePassClaimed": False, "reason": "old checkpoint/MRF replay remains blocked"})
+            "canonicalCasePassClaimed": False, "reason": "C11 full case review and canonical dispatch remain gated"})
     return 1
 
 

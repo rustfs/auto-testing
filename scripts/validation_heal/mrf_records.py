@@ -44,13 +44,13 @@ def canonical_uuid(value):
 
 
 def verify_reference(candidate):
-    require(candidate.get("source_sha") == REFERENCE["candidateCommit"], "unsupported candidate MRF record/proof contract")
+    require(candidate.get("source_sha") in {REFERENCE["candidateCommit"], "1aa9be87d18cf941e5020f19e8622c26ba4b10ac"}, "unsupported candidate MRF record/proof contract")
     return REFERENCE
 
 
 def read_records(state, roots, owner, checked):
     """Exact allowlist, no directory enumeration, no write descriptor."""
-    require(owner.get("runtimeProfile") in {"durable-mrf", "mrf-crash", "flapping", "queue-pressure"}, "MRF records require the dedicated run-owned runtime")
+    require(owner.get("runtimeProfile") in {"durable-mrf", "mrf-crash", "flapping", "queue-pressure", "incarnation-mrf"}, "MRF records require the dedicated run-owned runtime")
     require(hashlib.sha256((state / "rustfs").read_bytes()).hexdigest() == owner["binarySha256"], "MRF candidate changed")
 
     def collect():

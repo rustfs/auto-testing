@@ -49,6 +49,7 @@ on:
       - test_validation_heal_outcome.py
       - test_validation_heal_persistence.py
       - test_validation_heal_incarnation.py
+      - test_validation_heal_incarnation_replay.py
       - scripts/validation_heal/**
       - docs/validation-heal-*.md
       - rustfs_heal_test.sh
@@ -111,6 +112,7 @@ on:
       - test_validation_heal_outcome.py
       - test_validation_heal_persistence.py
       - test_validation_heal_incarnation.py
+      - test_validation_heal_incarnation_replay.py
       - scripts/validation_heal/**
       - docs/validation-heal-*.md
       - rustfs_heal_test.sh
@@ -152,7 +154,7 @@ jobs:
       - run: python3 -B scripts/validation_heal/matrix.py check
       - run: python3 -B -m unittest -v test_validation_heal_outcome.py
       - run: python3 -B -m unittest -v test_validation_heal_persistence.py
-      - run: python3 -B -m unittest -v test_validation_heal_incarnation.py
+      - run: python3 -B -m unittest -v test_validation_heal_incarnation.py test_validation_heal_incarnation_replay.py
       - run: python3 -B -m unittest -v test_validation_heal_incarnation_native.py
       - run: bash -n scripts/run_validation_case.sh scripts/validation_heal/run_case.sh scripts/validation_oidc/run_case.sh
       - run: bash -n rustfs-storage-test.sh rustfs_pool_expand.sh rustfs-replication-test.sh scripts/validation_pool/run_case.sh scripts/validation_replication/run_case.sh test_validation_scanner_usage.sh

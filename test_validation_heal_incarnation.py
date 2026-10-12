@@ -137,18 +137,41 @@ class IncarnationTests(unittest.TestCase):
                  patch.object(suite, "verify_manager", return_value={"canonicalCasePassClaimed": False}), \
                  patch.object(suite, "verify_storage", return_value={"exactStorageCommitBarrierObserved": True,
                      "canonicalFleetBranchesExecuted": False, "canonicalCasePassClaimed": False}), \
-                 patch.object(suite, "run_metadata_rejoin", side_effect=passed):
+                 patch.object(suite, "run_metadata_rejoin", side_effect=passed), \
+                 patch.object(suite, "run_replay", side_effect=lambda args, topology, nodes, branch, candidate: {
+                     "topology": topology, "fixture": "DV", "branch": branch, "verdict": "PASS", "cleanup": "PASS"}):
                 self.assertEqual(suite.main(), 1)
             result = json.loads((root / "healthy-summary.json").read_text())
             self.assertFalse(result["complete"])
             self.assertFalse(result["canonicalCasePassClaimed"])
+            self.assertTrue(result["diagnosticBranchesPassed"])
             self.assertEqual(len(result["results"]), 8)
-            self.assertEqual(sum(row["verdict"] == "BLOCKED" for row in result["results"]), 4)
+            self.assertEqual(sum(row["verdict"] == "PASS" for row in result["results"]), 6)
             native = [row for row in result['results'] if row['branch'] == 'native-incarnation-fence']
             self.assertEqual(len(native), 2)
             self.assertTrue(all(row['verdict'] == 'PREREQUISITE_PASS' and row['topology'] is None
                                 and not row['fleetBranchExecuted'] for row in native))
             self.assertTrue((root / 'independent-native-storage-commit.json').is_file())
+
+    def test_clean_finalization_cannot_hide_a_failed_replay_branch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); candidate = root / "candidate.json"
+            candidate.write_text(json.dumps({"source_sha": "a" * 40}))
+            args = ["incarnation.py", "--case-id", suite.CASE_ID, "--candidate", str(candidate),
+                "--evidence", str(root), "--rc-bin", str(root / "rc"), "--tool-directory", str(root / "tools"),
+                "--testing-commit", "a" * 40, "--binary-sha", "b" * 64]
+            with patch("sys.argv", args), patch.dict(os.environ, {"GITHUB_RUN_ID": "12345"}), \
+                 patch.object(suite, "verify_manager", return_value={}), patch.object(suite, "verify_storage", return_value={}), \
+                 patch.object(suite, "run_metadata_rejoin", side_effect=lambda args, topology, nodes, candidate: {
+                     "topology": topology, "branch": "old-metadata-rejoin", "verdict": "PASS", "cleanup": "PASS"}), \
+                 patch.object(suite, "run_replay", side_effect=lambda args, topology, nodes, branch, candidate: {
+                     "topology": topology, "branch": branch, "verdict": "FAIL", "cleanup": "PASS"}):
+                self.assertEqual(suite.main(), 1)
+            result = json.loads((root / "healthy-summary.json").read_text())
+            self.assertEqual(result["cleanup"], "PASS")
+            self.assertFalse(result["diagnosticBranchesPassed"])
+            self.assertFalse(result["complete"])
+            self.assertFalse(result["canonicalCasePassClaimed"])
 
     def test_unverified_storage_artifact_refuses_before_fleet_mutation(self):
         with tempfile.TemporaryDirectory() as temp:

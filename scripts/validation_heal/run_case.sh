@@ -20,6 +20,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "${case_id}" in
   heal.admin-healthy-noop|heal.admin-invalid-request|heal.admin-authorization) ;;
+  heal.bucket-incarnation-recreation) driver=incarnation.py ;;
   heal.node-outage-rejoin) driver=node_outage.py ;;
   heal.status-partial-disabled-unknown) driver=status.py ;;
   heal.incremental-cursor-and-truncation) driver=cursor.py ;;
@@ -184,6 +185,11 @@ if [ "${case_rc}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
   verdict=PASS; reason=""
 elif [ "${case_rc}" -eq 0 ]; then
   verdict=INFRA_ERROR; reason="Heal environment finalization failed"
+fi
+if [ "${case_id}" = heal.bucket-incarnation-recreation ] && [ "${cleanup_status}" = PASS ] && \
+   jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
+     "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+  verdict=BLOCKED; reason="C11 diagnostic execution remains outside canonical PASS until every H1/H2 branch is independently audited"
 fi
 args=("${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool
   --result-file "${artifacts}/cases/${case_id}.json" --verdict "${verdict}" --cleanup-status "${cleanup_status}"

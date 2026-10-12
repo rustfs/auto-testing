@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation", "incarnation-checkpoint", "incarnation-mrf"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -154,6 +154,7 @@ class Fleet:
         self.generation_faults = []
         self.orphan_faults = []
         self.journal_faults = []
+        self.incarnation_replays = []
         self.secret_values = set()
         self.frozen_processes = {}
         self.snapshot_buckets = None
@@ -191,7 +192,7 @@ class Fleet:
         if self.runtime_profile in {"bounded-capacity", "journal-bounded"}:
             source += "\nimport types\nbounded_volume_backend = types.ModuleType('bounded_volume')\nexec(" + repr(
                 NODE_SOURCE.with_name("bounded_volume.py").read_text()) + ", bounded_volume_backend.__dict__)\n"
-        if action == "mrf-records" or action.startswith("journal-"):
+        if action == "mrf-records" or action.startswith(("journal-", "incarnation-")):
             source += "\nimport types\nmrf = types.ModuleType('mrf_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("mrf_records.py").read_text()) + ", mrf.__dict__)\n"
         if action == "replacement-records":
@@ -201,12 +202,15 @@ class Fleet:
             source += "\nimport types\ngeneration_backend = types.ModuleType('generation_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("generation_fault.py").read_text()) + ", generation_backend.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
-                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith("journal-"):
+                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith(("journal-", "incarnation-")):
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
-        if action.startswith("journal-"):
+        if action.startswith(("journal-", "incarnation-")):
             source += "\nimport types\njournal_fault_backend = types.ModuleType('journal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("journal_fault.py").read_text()) + ", journal_fault_backend.__dict__)\n"
+        if action.startswith("incarnation-"):
+            source += "\nimport types\nincarnation_replay_backend = types.ModuleType('incarnation_replay')\nexec(" + repr(
+                NODE_SOURCE.with_name("incarnation_replay.py").read_text()) + ", incarnation_replay_backend.__dict__)\n"
         if action.startswith("orphan-"):
             source += "\nimport types\norphan_backend = types.ModuleType('orphan_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("orphan_fault.py").read_text()) + ", orphan_backend.__dict__)\n"
@@ -319,8 +323,24 @@ class Fleet:
                 time.sleep(2)
         require(not pending, "Heal deployment did not make every node ready")
 
-    def cleanup(self):
-        failures = []
+    def cleanup(self, *, preserve_namespaces=False):
+        failures = [{"state": "DIRTY", "namespacesRetained": True,
+                     "error": "unresolved C11 S3 mutation requires retained physical evidence"}] if preserve_namespaces else []
+        if self.incarnation_replays:
+            try:
+                self.stop()
+                for node, params in tuple(self.incarnation_replays):
+                    receipt = self.record("C11-original-replay-evidence-finalization", {"node": node,
+                        **self.remote(node, "incarnation-finalize", **params)})
+                    require(receipt.get("originalEvidenceExported") is True
+                            and receipt.get("namespaceFinalizationAllowed") is True
+                            and receipt.get("backupRescueUsed") is False
+                            and receipt.get("productRepairClaimed") is False,
+                            "C11 original replay evidence was not exported before namespace finalization")
+                    self.incarnation_replays.remove((node, params))
+            except Exception as exc:
+                failures.append({"error": str(exc), "state": "DIRTY", "namespacesRetained": True})
+
         if self.journal_faults:
             try:
                 self.stop()

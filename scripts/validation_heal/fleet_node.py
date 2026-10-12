@@ -33,6 +33,12 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
+    if profile in {"incarnation-checkpoint", "incarnation-mrf"}:
+        logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
+        return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "incarnation-mrf" else "false",
+                "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false", "RUSTFS_HEAL_MAX_CONCURRENT_HEALS": "1",
+                "RUSTFS_HEAL_MAX_CONCURRENT_PER_SET": "1", "RUSTFS_OBS_LOGGER_LEVEL": logging_filter,
+                "RUST_LOG": logging_filter}
     require(profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
     if profile == "queue-pressure":
         logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
@@ -89,6 +95,88 @@ def runtime_config(profile):
                 "RUSTFS_SCANNER_BITROT_CYCLE_SECS": "0", "RUSTFS_SCANNER_DEEP_VERIFY_COOLDOWN_SECS": "0",
                 "RUSTFS_HEAL_OBJECT_SELECT_PROB": "1", "RUSTFS_DATA_USAGE_UPDATE_DIR_CYCLES": "1"}
     return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "offline-replay" else "false"}
+
+
+def runtime_settings(owner):
+    config = runtime_config(owner.get("runtimeProfile", "manual"))
+    if owner.get("incarnationPhase") == "transition":
+        config.update(RUSTFS_HEAL_MRF_ENABLE="false")
+    return config
+
+
+def incarnation_configuration(state, owner):
+    env = checked(state / "service.env", state)
+    info = env.stat()
+    require(info.st_uid == 0 and info.st_nlink == 1 and stat.S_ISREG(info.st_mode) and info.st_size <= 65536,
+            "C11 configuration lost its bounded private ownership")
+    lines = env.read_text().splitlines()
+    require(all("=" in line for line in lines), "C11 configuration has an invalid entry")
+    values = dict(line.split("=", 1) for line in lines)
+    require(len(lines) == len(values) and all(values.get(key) == value for key, value in runtime_settings(owner).items()),
+            "C11 phase configuration drifted or its durable phase commit is incomplete")
+    return values
+
+
+def incarnation_operation(request):
+    require(set(request) <= {"runId", "action", "family", "taskId", "bucketIncarnationId", "expectedRecords", "phase"},
+            "C11 adapter accepts no arbitrary paths, replacement bytes or commands")
+    state, roots, owner = owned(request["runId"])
+    stopped(owner)
+    require(owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf"}
+            and digest(state / "rustfs") == owner["binarySha256"], "C11 replay runtime/candidate changed")
+    backend = globals()["incarnation_replay_backend"]
+    journal, fault = globals()["journal_fault_backend"], fault_module()
+    if request["action"] == "incarnation-phase":
+        require(set(request) == {"runId", "action", "phase"} and request["phase"] in {"transition", "replay"},
+                "C11 phase cannot change arbitrary environment settings")
+        current = owner.get("incarnationPhase", "capture")
+        require((current, request["phase"]) in {("capture", "transition"), ("transition", "replay")},
+                "C11 phase transition cannot refund an earlier replay window")
+        try:
+            with fault.directory(state) as fd:
+                detached = journal.decode_json(fault.read_file(fd, "C11-replay-detached.json", 16384))
+                installed = journal.decode_json(fault.read_file(fd, "C11-replay-installed.json", 16384)) if current == "transition" else None
+            require(isinstance(detached, dict), "C11 phase transaction binding is invalid")
+            params = {key: detached.get(key) for key in ("runId", "family", "taskId", "bucketIncarnationId")}
+            binding = backend.identity(owner, params, journal)
+            require(journal.same_json(detached, binding) and (current == "capture" or journal.same_json(installed, binding)),
+                    "C11 phase transaction changed its original run/candidate/task/incarnation binding")
+            manifest = backend.archived(state, roots, owner, params, journal, fault)
+            records = backend.census(roots, binding, journal, fault)
+            require(all(not row["present"] for row in records) if current == "capture"
+                    else journal.same_json(records, manifest["records"]),
+                    "C11 phase runnable records differ from the completed original transaction")
+        except FileNotFoundError as exc:
+            raise ValueError("C11 phase requires a complete original record transaction") from exc
+        values = incarnation_configuration(state, owner)
+        owner["incarnationPhase"] = request["phase"]
+        replacement = runtime_settings(owner)
+        env = state / "service.env"
+        values.update(replacement)
+        temporary = state / "C11-service.env.new"
+        with fault_module().directory(state) as fd:
+            fault_module().new_file(fd, temporary.name, ("\n".join(f"{key}={value}" for key, value in values.items()) + "\n").encode())
+            os.rename(temporary.name, env.name, src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+        with fault_module().directory(state) as fd:
+            fault_module().new_file(fd, "C11-phase.new", fault_module().encode({"runId": owner["runId"], "phase": request["phase"]}))
+            os.rename("C11-phase.new", "C11-phase.json", src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+        return {"previousPhase": current, "phase": request["phase"], "candidateUnchanged": True,
+                "workerLimit": replacement["RUSTFS_HEAL_MAX_CONCURRENT_HEALS"],
+                "mrfEnabled": replacement["RUSTFS_HEAL_MRF_ENABLE"]}
+    require("phase" not in request, "C11 record operation accepts no runtime override")
+    if request["action"] == "incarnation-census":
+        require(set(request) == {"runId", "action", "family", "taskId", "bucketIncarnationId"},
+                "C11 stopped census accepts only the original binding")
+        return {"readOnly": True, "stable": True, "records": backend.census(
+            roots, backend.identity(owner, request, journal), journal, fault)}
+    methods = {"incarnation-capture": backend.capture, "incarnation-install": backend.install,
+               "incarnation-finalize": backend.finalize}
+    require(request["action"] in methods, "unknown C11 record transaction")
+    if request["action"] == "incarnation-capture":
+        return backend.capture(state, roots, owner, request, journal, fault, globals()["mrf"], checked)
+    return methods[request["action"]](state, roots, owner, request, journal, fault)
 
 
 def require(condition, message):
@@ -297,6 +385,15 @@ def owned(run_id):
     for root in roots:
         marker = checked(root / "owner.json", root)
         require(marker.stat().st_uid == 0 and json.loads(marker.read_text()) == owner, "drive owner differs")
+    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf"}:
+        phase_file = checked(state / "C11-phase.json", state)
+        if phase_file.exists():
+            require(phase_file.stat().st_uid == 0 and phase_file.stat().st_nlink == 1,
+                    "C11 phase marker lost its private root ownership")
+            phase = json.loads(phase_file.read_text())
+            require(set(phase) == {"runId", "phase"} and phase["runId"] == run_id
+                    and phase["phase"] in {"transition", "replay"}, "C11 phase marker differs")
+            owner = {**owner, "incarnationPhase": phase["phase"]}
     return state, roots, owner
 
 
@@ -305,13 +402,15 @@ def start(request):
     stopped(owner)
     command("systemctl", "reset-failed", owner["unit"], check=False)
     require(digest(state / "rustfs") == owner["binarySha256"], "candidate changed before start")
+    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf"}:
+        incarnation_configuration(state, owner)
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
             *(["--property=PrivateMounts=true", "--property=CapabilityBoundingSet=~CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"]
               if owner.get("runtimeProfile") in {"flapping", "queue-pressure"} else []),
-            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "journal-bounded", "durable-mrf", "mrf-crash", "replacement", "replacement-target", "schema-refusal"} else []),
+            *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "journal-bounded", "durable-mrf", "mrf-crash", "replacement", "replacement-target", "schema-refusal", "incarnation-checkpoint", "incarnation-mrf"} else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
             *gate_module().start_properties(gate_module().checked_gate(state, roots)),
@@ -366,7 +465,7 @@ def process_once(request):
     executable = (root / "exe").resolve(strict=True)
     require(executable == state / "rustfs" and digest(executable) == owner["binarySha256"], "signal target is not the owned candidate")
     environment = dict(item.split("=", 1) for item in (root / "environ").read_bytes().decode().split("\0") if "=" in item)
-    settings = {**runtime_config(owner.get("runtimeProfile", "manual")), "RUSTFS_HEAL_TASK_TIMEOUT_SECS": "300"}
+    settings = {**runtime_settings(owner), "RUSTFS_HEAL_TASK_TIMEOUT_SECS": "300"}
     require(all(environment.get(key) == value for key, value in settings.items()), "owned process runtime changed")
     result = {**base, "state": before[0], "startTicks": int(before[19]), "executable": str(executable),
         "mountNamespace": os.readlink(root / "ns/mnt"), "commandSha256": hashlib.sha256((root / "cmdline").read_bytes()).hexdigest(),
@@ -460,7 +559,7 @@ def process_graceful(request):
 
 
 def process_crash(request):
-    require(owned(request["runId"])[2].get("runtimeProfile") in {"replacement", "replacement-target", "root-restart", "journal-bounded", "durable-mrf", "mrf-crash"}
+    require(owned(request["runId"])[2].get("runtimeProfile") in {"replacement", "replacement-target", "root-restart", "journal-bounded", "durable-mrf", "mrf-crash", "incarnation-checkpoint", "incarnation-mrf"}
             and process(request).get("state") == "T", "crash observation requires a paused owned recovery service")
     before = pidfd_signal(request, signal.SIGKILL)
     deadline = time.monotonic() + 30
@@ -848,7 +947,7 @@ def snapshot(request):
                 "running binary differs from candidate")
         environment = dict(value.split("=", 1) for value in Path(f"/proc/{pid}/environ").read_bytes().decode().split("\0")
                            if "=" in value)
-        expected_config = runtime_config(owner.get("runtimeProfile", "manual"))
+        expected_config = runtime_settings(owner)
         require(all(environment.get(key) == value for key, value in expected_config.items()),
                 "bound Heal runtime configuration differs")
     files, formats = [], []
@@ -981,7 +1080,7 @@ def configure_encryption(request):
 def journal_operation(request):
     state, roots, owner = owned(request["runId"])
     require(digest(state / "rustfs") == owner["binarySha256"], "durable-record candidate changed")
-    require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash", "journal-bounded"}, "durable records require the owned recovery runtime")
+    require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash", "journal-bounded", "incarnation-checkpoint", "incarnation-mrf"}, "durable records require the owned recovery runtime")
     require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected", "captureId"},
             "durable-record adapter accepts no arbitrary system paths or commands")
     if owner.get("runtimeProfile") == "journal-bounded":
@@ -1285,6 +1384,8 @@ def main(request):
                "verify-inline": verify_inline, "drive-gate": drive_gate, "drive-gate-probe": drive_gate_probe,
                "drive-gate-activate": drive_gate_activate, "gate-state": drive_gate_state,
                "drive-gate-release-live": drive_gate_release_live, "drive-gate-arm-live": drive_gate_arm_live}
+    for action in ("incarnation-census", "incarnation-capture", "incarnation-install", "incarnation-finalize", "incarnation-phase"):
+        actions[action] = incarnation_operation
     actions["task-records"] = task_records
     actions["environment-capabilities"] = environment_capabilities
     actions["quota-audit-finalize"] = quota_audit_finalize

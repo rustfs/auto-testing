@@ -670,7 +670,7 @@ Topologies: H1,H2. Branches: old-metadata-rejoin, old-checkpoint-replay, old-mrf
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`EVIDENCE_INCARNATION_LIVE_ORCHESTRATION`): 已有 3 项候选版本 incarnation 原生回归通过，但尚缺覆盖旧盘回归、旧 checkpoint/MRF 重放与同名新桶的完整真机编排和证据绑定；原生回归不能替代四个分支的 canonical 验收。
+Blocked reason (`EVIDENCE_INCARNATION_LIVE_ORCHESTRATION`): 已实现 H1/H2 旧元数据重返、真实 checkpoint/resume 回放、ACK 绑定的 committed MRF 回放和精确 native 证据门禁；尚缺全部现场分支的独立审计，诊断执行保持 FAIL/BLOCKED，原生前置通过不能替代 canonical 验收。
 
 1. 建旧 DV 桶并让一盘离线；按 S3 正常列举/删除全部版本和 marker，确认 delete_bucket 成功，禁止直接内部清空绕过删除。
 2. 同名 create_bucket 后写新内容，保存新 incarnation；恢复旧盘并让旧任务/持久 MRF 重放。
