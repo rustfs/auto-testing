@@ -25,6 +25,72 @@ class DurableRecordFaultTests(unittest.TestCase):
     incarnation = "22345678-1234-4234-8234-123456789abc"
     bucket = "rv-heal-0123456789abcdef"
 
+    def test_full_server_checkpoint_fixture_preserves_feature_unified_json_order(self):
+        # Original bytes from candidate 1aa9be87, diagnostic 38261190390/1.
+        raw = (Path(__file__).parent / "testdata/validation/checkpoint-preserve-order.json").read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "af9f1217284fdf9516d111ae8f8cc28b264bec200ba640c5f06c696b2303982b")
+        value = json.loads(raw)
+        bucket = next(iter(value["admin"]["buckets"]))
+        observed = journal.checkpoint_value(raw, value["task_id"], bucket)
+        self.assertEqual(observed["admin"]["outcome"]["counters"]["processed"], 8)
+        for mutate in ("counter", "cursor", "incarnation", "digest"):
+            changed = copy.deepcopy(value)
+            if mutate == "counter": changed["admin"]["outcome"]["counters"]["processed"] = 9
+            elif mutate == "cursor": changed["current_object_index"] += 1
+            elif mutate == "incarnation": changed["admin"]["buckets"][bucket] = self.incarnation
+            else: changed["integrity_digest"] = "A" * 44
+            with self.subTest(mutate=mutate), self.assertRaisesRegex(ValueError, "integrity digest"):
+                journal.checkpoint_value(json.dumps(changed,separators=(",", ":")).encode(), value["task_id"], bucket)
+
+    def test_original_mixed_mrf_payload_retains_only_registered_internal_companions(self):
+        raw = (Path(__file__).parent / "testdata/validation/mrf-mixed-payload.bin").read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "3a6db05b46bb7e3a66a971bb4cc4759b3cd4700d2f31d55f0a19fd023635eb80")
+        intents = mrf.decode_journal(raw)
+        bucket = "rv-heal-084db3ab418d55ba"
+        owned = journal.owned_mrf_intents(intents, bucket)
+        self.assertEqual(len(owned), 3)
+        self.assertEqual(len(intents), 6)
+        request = {"family": "mrf", "kind": "checksum", "relativePath": ".rustfs.sys/.heal-mrf-snapshot.0.bin"}
+        self.assertEqual(journal.transform(raw, request, {"bucket": bucket}, mrf), raw[:-1] + bytes([raw[-1] ^ 1]))
+        for change in ("foreign-business", "iam-key", "system-version", "no-business"):
+            values = copy.deepcopy(intents)
+            business = next(item for item in values if item["bucket"] == bucket)
+            system = next(item for item in values if item["bucket"] == ".rustfs.sys")
+            if change == "foreign-business": business["bucket"] = "foreign"
+            elif change == "iam-key": system["key"] = "config/iam/users/credentials.json"
+            elif change == "system-version": system["versionId"] = self.token
+            else: values = [item for item in values if item["bucket"] != bucket]
+            with self.subTest(change=change), self.assertRaises(ValueError): journal.owned_mrf_intents(values, bucket)
+
+    def test_mrf_adapter_requires_active_original_business_work_on_the_selected_latest_replica(self):
+        raw = (Path(__file__).parent / "testdata/validation/mrf-mixed-payload.bin").read_bytes()
+        bucket = "rv-heal-084db3ab418d55ba"
+        for change in (None, "held", "unbound", "accepted", "other-replica"):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(change=change):
+                root = Path(directory).resolve()
+                intents = mrf.decode_journal(raw)
+                for item in intents:
+                    item["lifecycle"] = {"state": {"state": "active"}, "source_bucket_incarnation_id": self.incarnation,
+                                         "last_operator_acceptance": None}
+                business = next(item for item in intents if item["bucket"] == bucket)
+                if change == "held": business["lifecycle"]["state"] = {"state": "bucket_incarnation_changed"}
+                elif change == "unbound": business["lifecycle"]["source_bucket_incarnation_id"] = None
+                elif change == "accepted": business["lifecycle"]["last_operator_acceptance"] = {"operator": "test"}
+                checkpoint = {"present": True, "intents": intents, "replicas": [{"disk": 0, "slot": 0}]}
+                backend = types.SimpleNamespace(read_records=lambda *a: {}, checkpoint=lambda *a: checkpoint)
+                owner = {"runtimeProfile": "mrf-crash", "bucket": bucket, "binarySha256": "b" * 64}
+                request = {"runId": "gh-12345-1-h2", "action": "journal-apply", "family": "mrf", "taskId": None,
+                    "disk": 0, "relativePath": ".rustfs.sys/.heal-mrf-snapshot.1.bin" if change == "other-replica" else ".rustfs.sys/.heal-mrf-snapshot.0.bin",
+                    "kind": "checksum", "faultId": "F07-mrf-checksum-0-0-0", "expectedBefore": journal.entry(raw)}
+                with patch.object(fleet_node, "owned", return_value=(root, [root], owner)), patch.object(fleet_node, "stopped"), \
+                     patch.object(fleet_node, "digest", return_value="b" * 64), patch.object(fleet_node, "fault_module", return_value=fault), \
+                     patch.dict(fleet_node.__dict__, journal_fault_backend=journal, mrf=backend), \
+                     patch.object(journal, "install", return_value={"applied": True}) as install:
+                    if change is None: self.assertTrue(fleet_node.journal_operation(request)["applied"])
+                    else:
+                        with self.assertRaises(ValueError): fleet_node.journal_operation(request)
+                        install.assert_not_called()
+
     def signed(self, value):
         value = copy.deepcopy(value)
         value["integrity_digest"] = None

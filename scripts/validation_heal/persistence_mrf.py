@@ -164,14 +164,22 @@ def run(args, topology, nodes, fixture, candidate):
                 "F07 MRF ACK responsibility changed the original incarnation")
         fleet.stop()
         original = observe(fleet, "original-stopped-MRF-records")
-        mrf.pending_bindings({node: records.checkpoint(value) for node, value in original.items()}, obligations, earliest)
+        stopped = {node: records.checkpoint(value) for node, value in original.items()}
+        bindings = mrf.pending_bindings(stopped, obligations, earliest)
         fleet.record("original-durable-responsibilities", {"obligations": obligations,
             "bindings": [{"identity": list(key), "owners": value} for key, value in bindings.items()]})
         authorities = fleet.snapshot("original-partial-write-physical", quiescent=True)
         receipts = []
         for node, observed in original.items():
-            for (disk, path), raw in indexed(observed).items():
-                if raw is None or ".heal-mrf-snapshot." not in path: continue
+            if not any(owner["node"] == node for owners in bindings.values() for owner in owners): continue
+            selected = stopped[node]
+            journal.owned_mrf_intents(selected["intents"], bucket)
+            entries = indexed(observed)
+            # One committed replica per process is the corruption target;
+            # every untouched companion/replica remains a retention control.
+            for replica in selected["replicas"][:1]:
+                disk, path = replica["disk"], f".rustfs.sys/.heal-mrf-snapshot.{replica['slot']}.bin"
+                raw = entries[disk, path]
                 require(raw and records.decode_journal(raw), "F07 committed payload has no original responsibility")
                 params = {"family": "mrf", "taskId": None, "disk": disk, "relativePath": path,
                     "faultId": f"F07-mrf-checksum-{nodes.index(node)}-{disk}-{path[-5]}", "kind": "checksum",

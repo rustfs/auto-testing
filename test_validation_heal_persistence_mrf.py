@@ -3,11 +3,14 @@
 import base64
 import copy
 from contextlib import ExitStack
+import hashlib
 import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+import struct
+import zlib
 from unittest.mock import patch
 
 from scripts.validation_heal import journal_fault as journal, persistence_mrf as suite
@@ -82,7 +85,12 @@ class MrfCorruptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
             root = Path(temp); rc = root / "rc"; rc.write_bytes(b"client")
             args = SimpleNamespace(evidence=root, rc_bin=rc, tool_directory=root, testing_commit="a" * 40, binary_sha="b" * 64)
-            original = fixtures.DurableMrfTests()
+            bucket = "rv-heal-" + hashlib.sha256(b"gh-12345-1-h1").hexdigest()[:16]
+            class ScopedFixture(fixtures.DurableMrfTests):
+                def journal(self, **kwargs):
+                    raw = super().journal(**kwargs)[:-4].replace(b"rv-heal-0123456789abcdef", bucket.encode())
+                    return raw + struct.pack("<I", zlib.crc32(raw))
+            original = ScopedFixture()
             expected = [{"key": "object", "versionId": original.version, "deleteMarker": False}]
             captured = []
             class Fleet(suite.Fleet):
@@ -113,7 +121,7 @@ class MrfCorruptionTests(unittest.TestCase):
             stack.enter_context(patch.object(suite.records, "verify_reference", return_value={}))
             stack.enter_context(patch.object(suite.mrf, "acknowledge", return_value=(expected, [original.obligation()], {})))
             stack.enter_context(patch.object(suite.mrf, "read_checkpoints", return_value={}))
-            stack.enter_context(patch.object(suite.mrf, "pending_bindings", return_value={(): [{"bucketIncarnationId": original.incarnation}]}))
+            stack.enter_context(patch.object(suite.mrf, "pending_bindings", return_value={(): [{"node": "node", "bucketIncarnationId": original.incarnation}]}))
             result = suite.run(args, "H1", ["node"], "DV", {"source_sha": "c" * 40, "package_sha256": "d" * 64})
             self.assertEqual((result["verdict"], result["cleanup"]), ("FAIL", "FAIL"))
             self.assertEqual(result["failure"]["type"], "OSError")

@@ -1142,9 +1142,11 @@ def journal_operation(request):
             if request["family"] == "mrf":
                 observed = globals()["mrf"].read_records(state, roots, owner, checked)
                 committed = globals()["mrf"].checkpoint(observed)
-                require(committed.get("present") is True and committed["intents"]
-                        and all(item["bucket"] == owner["bucket"] and item.get("lifecycle", {}).get("state") == {"state": "active"}
-                                for item in committed["intents"])
+                business = module.owned_mrf_intents(committed.get("intents", []), owner["bucket"])
+                require(committed.get("present") is True
+                        and all(item.get("lifecycle", {}).get("state") == {"state": "active"}
+                            and item["lifecycle"].get("source_bucket_incarnation_id")
+                            and item["lifecycle"].get("last_operator_acceptance") is None for item in business)
                         and any(row["disk"] == request["disk"] and request["relativePath"] ==
                                 f".rustfs.sys/.heal-mrf-snapshot.{row['slot']}.bin" for row in committed["replicas"]),
                         "MRF fault lacks an actual committed active owned responsibility on this exact slot")

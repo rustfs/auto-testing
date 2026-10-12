@@ -107,11 +107,28 @@ def checkpoint_value(raw, token, bucket):
                 and len(set(unsigned[field])) == len(unsigned[field]),
                 "checkpoint ledger has an unknown canonical representation")
         unsigned[field].sort()
-    # Candidate serde_json::Value uses sorted object keys and UTF-8 strings.
-    canonical = json.dumps(unsigned, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
-    expected = base64.b64encode(hashlib.sha256(canonical).digest()).decode()
-    require(value.get("integrity_digest") == expected, "original checkpoint has no valid candidate integrity digest")
+    # serde_json::Value sorts keys by default; the full server's unified
+    # preserve_order feature instead retains the serialized struct/map order.
+    # Both builds sort the three ledger arrays before hashing UTF-8 JSON.
+    digests = {base64.b64encode(hashlib.sha256(json.dumps(unsigned, sort_keys=sorted_keys,
+        ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()).digest()).decode()
+        for sorted_keys in (False, True)}
+    require(value.get("integrity_digest") in digests, "original checkpoint has no valid candidate integrity digest")
     return value
+
+
+def owned_mrf_intents(intents, bucket):
+    """Bind owned business work while preserving its known internal companions."""
+    owned = [item for item in intents if item.get("bucket") == bucket]
+    system_keys = {"buckets/.rustfs.sys/.metadata.bin", "buckets/.rustfs.sys/.bucket-incarnation"}
+    require(owned and all(item.get("kind") in {3, 4} and item.get("poolIndex") == 0
+                and item.get("setIndex") == 0 for item in owned)
+            and all(item in owned or item.get("bucket") == ".rustfs.sys" and item.get("kind") == 3
+                and item.get("versionId") == "null" and item.get("poolIndex") == 0 and item.get("setIndex") == 0
+                and (item.get("key") in system_keys or re.fullmatch(r"scanner/durable-dirty-producer-replay/[0-9a-f]{64}\.json",
+                    item.get("key", "")) is not None) for item in intents),
+            "MRF payload includes a foreign or unregistered responsibility")
+    return owned
 
 
 def transform(raw, request, owner, mrf, *, earlier=None):
@@ -165,8 +182,7 @@ def transform(raw, request, owner, mrf, *, earlier=None):
         require(family == "mrf" and kind == "checksum" and re.fullmatch(r"\.heal-mrf-snapshot\.[01]\.bin", path[-1]),
                 "MRF mutation is restricted to the exact actual payload checksum")
         intents = mrf.decode_journal(raw)
-        require(intents and all(item["bucket"] == owner["bucket"] and item["kind"] in {3, 4} for item in intents),
-                "MRF payload includes a foreign or unregistered responsibility")
+        owned_mrf_intents(intents, owner["bucket"])
         # Corrupt a real record CRC without inventing, dropping or retagging ACK identities.
         return raw[:-1] + bytes([raw[-1] ^ 1])
     if kind == "truncate":
