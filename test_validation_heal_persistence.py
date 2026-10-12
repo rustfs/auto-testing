@@ -144,12 +144,13 @@ class PersistenceContractTests(unittest.TestCase):
                  patch.object(persistence, "run_checkpoint_fault", side_effect=passed) as mutate:
                 self.assertEqual(persistence.main(), 1)
             verify.assert_called_once()
-            self.assertEqual(mutate.call_count, 8)
+            self.assertEqual(mutate.call_count, 12)
             self.assertEqual(mrf_mutate.call_count, 4)
             summary = json.loads((root / "healthy-summary.json").read_text())
             self.assertEqual(len(summary["results"]), 24)
             self.assertFalse(summary["complete"])
             self.assertFalse(summary["canonicalCasePassClaimed"])
+            self.assertTrue(summary["diagnosticBranchesPassed"])
             prerequisites = [row for row in summary["results"] if row["branch"] == "native-persist-fence"]
             self.assertEqual(len(prerequisites), 4)
             for row in prerequisites:
@@ -160,9 +161,140 @@ class PersistenceContractTests(unittest.TestCase):
                 self.assertFalse(row["physicalPowerLossClaimed"])
                 self.assertFalse(row["requiredNativeCoverageComplete"])
                 self.assertEqual(row["nativeProof"], proof)
-            self.assertEqual(sum(row["verdict"] == "BLOCKED" for row in summary["results"]), 8)
+            self.assertEqual(sum(row["verdict"] == "BLOCKED" for row in summary["results"]), 4)
+            def failed(*values):
+                row = passed(*values)
+                if row["branch"] == "stale-generation": row["verdict"] = "FAIL"
+                return row
+            failed_directory = root / "failed-diagnostic"; failed_directory.mkdir()
+            failed_args = args.copy(); failed_args[failed_args.index("--evidence") + 1] = str(failed_directory)
+            with patch("sys.argv", failed_args), patch.dict(os.environ, {"GITHUB_RUN_ID": "12345"}), \
+                 patch.object(persistence, "verify_manager", return_value=proof), \
+                 patch.object(persistence, "run_mrf_checksum", side_effect=lambda args, topology, nodes, fixture, candidate: {
+                     "topology": topology, "fixture": fixture, "branch": "mrf-checksum", "verdict": "PASS", "cleanup": "PASS"}), \
+                 patch.object(persistence, "run_checkpoint_fault", side_effect=failed):
+                self.assertEqual(persistence.main(), 1)
+            failed_summary = json.loads((failed_directory / "healthy-summary.json").read_text())
+            self.assertEqual(failed_summary["cleanup"], "PASS")
+            self.assertFalse(failed_summary["diagnosticBranchesPassed"])
+            self.assertFalse(failed_summary["canonicalCasePassClaimed"])
 
-    def interrupted_injection(self, cleanup):
+    def stale(self):
+        observed, value, _ = fixture_source.AdminCheckpointTests().fixture()
+        value["admin"]["outcome"]["counters"].update(healed=0, unchanged=2)
+        observed["node"]["records"][4].update(encoded(value, signed=True))
+        early = checkpoint.owned_checkpoint(observed, TOKEN, BUCKET)
+        early["captureId"] = "F07-earlier-generation"
+        value["checkpoint_time"] += 1; value["current_object_index"] += 1
+        value["admin"]["outcome"]["counters"]["processed"] += 1
+        value["admin"]["outcome"]["counters"]["unchanged"] += 1
+        observed["node"]["records"][4].update(encoded(value, signed=True))
+        later = checkpoint.owned_checkpoint(observed, TOKEN, BUCKET)
+        later["rootAdmission"] = self.fixture()[2]["rootAdmission"]
+        receipt = {"family": "checkpoint", "taskId": TOKEN, "disk": 1,
+            "relativePath": later["checkpoint"]["relativePath"], "kind": "stale-generation",
+            "captureId": early["captureId"], "before": journal.entry(checkpoint.bytes_of(later["checkpoint"])),
+            "injected": journal.entry(checkpoint.bytes_of(early["checkpoint"])),
+            "capturedGeneration": journal.entry(checkpoint.bytes_of(early["checkpoint"])),
+            "applied": True, "originalBackupRetained": True, "productRepairClaimed": False}
+        return early, later, receipt
+
+    def completion_roots(self, frozen, current):
+        roots = self.fixture()[1]
+        terminal = {"schema": 1, "task_id": TOKEN, "heal_type": frozen["rootAdmission"]["value"]["heal_type"],
+            "options": frozen["rootAdmission"]["value"]["options"], "status": "Completed"}
+        roots["node"]["records"][4].update(encoded(terminal))
+        roots["node"]["records"][5].update(encoded({"schema": 1, "terminal": terminal, "outcome": current["outcome"]}))
+        return roots
+
+    def test_stale_valid_generation_is_exact_original_progress_without_cas_or_rejection_claim(self):
+        proof = persistence.stale_receipt(*self.stale())
+        self.assertTrue(proof["exactEarlierProductBytesInstalled"])
+        self.assertFalse(proof["oldCheckpointManagerCasClaimed"])
+        self.assertFalse(proof["staleRecordRejectionClaimed"])
+        for change in ("same-progress", "owner", "capture", "injected", "backup", "already-healed"):
+            early, later, receipt = self.stale()
+            if change == "same-progress": later = copy.deepcopy(early)
+            elif change == "owner": later["disk"] = 2
+            elif change == "capture": receipt["captureId"] = "F07-other"
+            elif change == "injected": receipt["injected"] = receipt["before"]
+            elif change == "backup": receipt["originalBackupRetained"] = False
+            else: early["value"]["admin"]["outcome"]["counters"].update(healed=1, unchanged=1)
+            with self.subTest(change=change), self.assertRaises(ValueError): persistence.stale_receipt(early, later, receipt)
+
+    def test_original_completion_needs_exact_admission_owner_scope_and_report(self):
+        _, frozen, _ = self.stale(); current = self.rescan()[0]
+        proof = persistence.completed_original(self.completion_roots(frozen, current), frozen, current)
+        self.assertTrue(proof["sameOriginalTaskAndPhysicalOwner"])
+        for change in ("runnable", "missing", "moved", "scope", "different-task", "different-report"):
+            roots = self.completion_roots(frozen, current); rows = roots["node"]["records"]
+            if change == "runnable": rows[3].update(encoded(frozen["rootAdmission"]["value"]))
+            elif change == "missing": rows[4] = {key: rows[4][key] for key in ("disk", "relativePath")}; rows[4]["present"] = False
+            elif change == "moved": rows[1] = {**rows[4], "disk": 0}; rows[4] = {key: rows[4][key] for key in ("disk", "relativePath")}; rows[4]["present"] = False
+            elif change == "different-report": rows[5].update(encoded({"schema": 1, "terminal": {}, "outcome": current["outcome"]}))
+            else:
+                value = journal.decode_json(checkpoint.bytes_of(rows[4]))
+                if change == "scope": value["heal_type"] = {"type": "cluster"}
+                else: value["task_id"] = INCARNATION
+                rows[4].update(encoded(value))
+            with self.subTest(change=change), self.assertRaises(ValueError): persistence.completed_original(roots, frozen, current)
+
+    def test_rejected_stale_generation_retains_original_bytes_and_failed_responsibility(self):
+        early, frozen, receipt = self.stale()
+        observed, roots, _, _, current = self.fixture()
+        observed["node"]["records"][4] = copy.deepcopy(early["checkpoint"])
+        proof = persistence.retained_corruption(observed, roots, frozen, receipt, current, earlier=early)
+        self.assertTrue(proof["durableOriginalFailureRetained"])
+        self.assertFalse(proof["originalTaskRepairClaimed"])
+        self.assertFalse(proof["backupRescueUsed"])
+        with self.assertRaises(ValueError): persistence.retained_corruption(observed, roots, frozen, receipt, current)
+
+    def test_successful_replay_cannot_discard_rescue_before_manifest_terminal_and_evidence_agree(self):
+        for change in (None, "read-repair", "late-archive-failure", "rescan-relabels-original"):
+            early, frozen, receipt = self.stale(); current, _, expected, _, _ = self.rescan()
+            roots = self.completion_roots(frozen, current)
+            repaired = {"node": {"files": [{"disk": 1, "path": "bound/part.1", "sha256": "a" * 64}], "formats": []}}
+            events, active = [], [(checkpoint.PATH, TOKEN)]
+            class ReplayFleet:
+                journal_faults, faults = [("node", {"faultId": "F07-stale-generation"})], [("node", {"disk": 1})]
+                def start(self): pass
+                def stop(self): pass
+                def record(self, label, value):
+                    events.append(label)
+                    if change == "late-archive-failure" and label == "complete-original-generation-reconciliation": raise OSError("evidence write failed")
+                    return value
+                def snapshot(self, label, **kwargs):
+                    scene = copy.deepcopy(repaired)
+                    if change == "read-repair" and label == "physical-after-rescan-and-business-reads": scene["node"]["files"] = []
+                    return scene
+            fleet = ReplayFleet()
+            rescan = copy.deepcopy(current); rescan["outcome"]["counters"].update(healed=0, unchanged=257)
+            def run_task(*args, **kwargs):
+                kwargs["admissions"].append({"clientToken": TOKEN if change == "rescan-relabels-original" else INCARNATION})
+                return rescan
+            target = {"node": "node", "disk": 1, "relativePath": "bound/part.1",
+                      "key": expected[-1]["key"], "versionId": "null"}
+            binding = {"endpoints": {"node1": "http://owned"}}
+            with patch.object(persistence, "rescan_outcome", wraps=persistence.rescan_outcome), \
+                 patch.object(persistence.checkpoints, "records", return_value=roots), patch.object(persistence, "idle_fleet"), \
+                 patch.object(persistence, "validate_repaired_physical"), patch.object(persistence, "verify_proof"), \
+                 patch.object(persistence, "run_task", side_effect=run_task), \
+                 patch.object(persistence, "recovery_status", return_value=current), patch.object(persistence, "status", return_value=current), \
+                 patch.object(persistence, "Probe", return_value=SimpleNamespace(inventory=lambda *a, **kw: {})), \
+                 patch.object(persistence, "verify_seed"), patch.object(persistence, "compare_inventories"):
+                args = (fleet, None, binding, expected, {}, repaired, [target], frozen, early, receipt,
+                        {"node": {"files": [], "formats": []}}, current, active)
+                if change is None:
+                    result = persistence.successful_stale_replay(*args)
+                    self.assertFalse(result["canonicalCasePassClaimed"])
+                    self.assertFalse(result["staleRecordRejectionClaimed"])
+                    self.assertIn("complete-original-generation-reconciliation", events)
+                    self.assertFalse(fleet.journal_faults); self.assertFalse(fleet.faults)
+                else:
+                    with self.assertRaises((ValueError, OSError)): persistence.successful_stale_replay(*args)
+                    self.assertTrue(fleet.journal_faults); self.assertTrue(fleet.faults)
+
+    def interrupted_injection(self, cleanup, mutation=None):
         _, _, frozen, _, _ = self.fixture()
         snapshots = {"node": {"files": [], "formats": []}}
         captured = {}
@@ -184,9 +316,10 @@ class PersistenceContractTests(unittest.TestCase):
                     raise OSError("journal injection acknowledgement lost")
                 return {}
 
-            def cleanup(self):
+            def cleanup(self, *, preserve_namespaces=False):
                 captured["cleanupFaults"] = copy.deepcopy(self.faults)
                 captured["cleanupJournals"] = copy.deepcopy(self.journal_faults)
+                captured["preserveNamespaces"] = preserve_namespaces
                 return cleanup
 
         class FixtureProbe:
@@ -205,11 +338,13 @@ class PersistenceContractTests(unittest.TestCase):
                  patch.object(persistence, "Fleet", InterruptedFleet), patch.object(persistence, "Probe", FixtureProbe), \
                  patch.object(persistence, "verify_inspector", return_value={}), \
                  patch.object(persistence, "validate_topology", return_value={}), \
-                 patch.object(persistence, "seed", return_value=expected), \
+                 patch.object(persistence, "seed", return_value=expected,
+                              side_effect=OSError("seed acknowledgement lost") if mutation == "seed" else None), \
                  patch.object(persistence, "verify_seed", return_value={}), \
                  patch.object(persistence, "idle_fleet"), patch.object(persistence, "map_target", return_value=target), \
                  patch.object(persistence, "verify_proof"), patch.object(persistence, "validate_fault"), \
-                 patch.object(persistence.checkpoints, "admit", return_value=TOKEN), \
+                 patch.object(persistence.checkpoints, "admit", return_value=TOKEN,
+                              side_effect=OSError("admission acknowledgement lost") if mutation == "admission" else None), \
                  patch.object(persistence.checkpoints, "freeze", return_value=(frozen, {})), \
                  patch.object(persistence.checkpoints, "stop_for_fault", return_value=frozen):
                 result = persistence.run_checkpoint_fault(args, "H1", ["node"], "DB", "checkpoint-truncate",
@@ -231,6 +366,15 @@ class PersistenceContractTests(unittest.TestCase):
         self.assertEqual((result["verdict"], result["cleanup"]), ("FAIL", "FAIL"))
         self.assertEqual(len(captured["cleanupJournals"]), 1)
         self.assertNotIn("completePhysicalAndS3ManifestsVerified", result)
+
+    def test_unknown_fixture_or_original_admission_preserves_namespace_even_if_cleanup_reports_success(self):
+        for mutation in ("seed", "admission"):
+            with self.subTest(mutation=mutation):
+                result, captured = self.interrupted_injection(True, mutation)
+                self.assertEqual((result["verdict"], result["cleanup"]), ("FAIL", "FAIL"))
+                self.assertTrue(captured["preserveNamespaces"])
+                self.assertIn("unresolvedMutation", result)
+                self.assertNotIn("separateRescan", result)
 
 
 if __name__ == "__main__": unittest.main()

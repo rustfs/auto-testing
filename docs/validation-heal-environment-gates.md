@@ -33,7 +33,7 @@
 | Code | 用例 | Block 原因 | 解锁所需证据 |
 | --- | --- | --- | --- |
 | C11 | `heal.bucket-incarnation-recreation` | H1/H2 旧元数据盘重返、原始 checkpoint/resume 与 committed MRF 重放编排已实现；精确候选的 9 项存储原生回归和 3 项 manager incarnation 前置证据已独立核验。完整现场分支尚无独立审计结果 | 旧/新 incarnation、正常 S3 删除与新 ACK、物理范围和原生 artifact 精确绑定；单分支不提升整例 |
-| F07 | `heal.checkpoint-and-mrf-corruption` | 已实现 H1/H2 checkpoint 截断、未来 schema、committed MRF CRC 故障及独立安全重扫；10 项原生回归作为前置证据。仍缺陈旧代次、写失败与完整 native cut 审核，完整 live 尚未审计 | 真实 durable 记录故障与 publication 证据绑定；现有 interruption hooks 不等于每个 fsync 或断电 |
+| F07 | `heal.checkpoint-and-mrf-corruption` | 已实现 H1/H2 checkpoint 截断、未来 schema、committed MRF CRC 故障及独立安全重扫；10 项原生回归作为前置证据。真实较早代次回放已实现；仍缺写失败与完整 native cut 审核，完整 live 尚未审计 | 真实 durable 记录故障与 publication 证据绑定；现有 interruption hooks 不等于每个 fsync 或断电 |
 | I05 | `heal.lock-timeout-and-caller-abort` | 请求耗时/TCP 断开不能证明服务端锁 owner 与提交顺序 | lock owner、timeout、caller abort 和 stale read-repair 的服务端屏障 |
 | J02 | `heal.outcome-counters-and-error-truth` | 已有 2 项 outcome 原生回归；缺混合 healthy/repaired/failed/deferred/unknown 真机夹具、dry-run 独立任务与完整 manifest 对账 | 每个 disposition、计数和 attemptFailures 对账；不是已证实产品缺少 API |
 

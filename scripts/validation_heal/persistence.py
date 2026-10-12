@@ -45,9 +45,9 @@ except ImportError:
 CASE_ID = "heal.checkpoint-and-mrf-corruption"
 BRANCHES = ("checkpoint-truncate", "mrf-checksum", "future-schema", "stale-generation",
             "journal-write-failure", "native-persist-fence")
-IMPLEMENTED = {"checkpoint-truncate": "truncate", "future-schema": "future-schema"}
+IMPLEMENTED = {"checkpoint-truncate": "truncate", "future-schema": "future-schema",
+               "stale-generation": "stale-generation"}
 BLOCKERS = {
-    "stale-generation": "an actual earlier checkpoint capture exists; complete rollback and durable responsibility reconciliation is still required",
     "journal-write-failure": "the private bounded volume exists; actual checkpoint write refusal, retained ownership and release/rescan orchestration is still required",
 }
 SIZE = 5 * 1024**2 + 123
@@ -95,7 +95,7 @@ def failed_task(current):
             "checkpoint load failure invented object processing or repair")
 
 
-def retained_corruption(observed, roots, frozen, receipt, current):
+def retained_corruption(observed, roots, frozen, receipt, current, *, earlier=None):
     token = frozen["taskId"]
     failed_task(current)
     require(receipt.get("applied") is True and receipt.get("originalBackupRetained") is True
@@ -105,9 +105,11 @@ def retained_corruption(observed, roots, frozen, receipt, current):
             and receipt.get("relativePath") == frozen["checkpoint"]["relativePath"]
             and journal.same_json(receipt.get("before"), journal.entry(checkpoints.bytes_of(frozen["checkpoint"]))),
             "journal injection receipt changed the frozen original task or bytes")
+    if receipt.get("kind") == "stale-generation": stale_receipt(earlier, frozen, receipt)
     require(receipt.get("kind") in IMPLEMENTED.values()
             and receipt.get("injected") == journal.entry(journal.transform(
-                checkpoints.bytes_of(frozen["checkpoint"]), receipt, {"bucket": frozen["bucket"]}, None)),
+                checkpoints.bytes_of(frozen["checkpoint"]), receipt, {"bucket": frozen["bucket"]}, None,
+                earlier=checkpoints.bytes_of(earlier["checkpoint"]) if earlier is not None else None)),
             "journal corruption differs from its reviewed transformation")
     records = exact_records(observed, token, "checkpoint")
     names = journal.names("checkpoint", token)
@@ -180,6 +182,101 @@ def rescan_outcome(current, bucket, expected, repairs, incarnation):
             "boundedDiagnosticsAreCompleteManifest": len(wanted) <= 128, "originalFailedTaskReclassified": False}
 
 
+def stale_receipt(earlier, frozen, receipt):
+    require(isinstance(earlier, dict), "stale rollback has no original earlier generation")
+    checkpoints.after_generation(frozen, earlier)
+    require(earlier["value"]["admin"]["outcome"]["counters"]["healed"] == 0,
+            "NOT_OBSERVED: earlier capture is after the fixture's first actual repair")
+    require(receipt.get("kind") == "stale-generation" and receipt.get("family") == "checkpoint"
+            and receipt.get("taskId") == frozen["taskId"] and type(receipt.get("disk")) is int
+            and receipt["disk"] == frozen["disk"]
+            and receipt.get("relativePath") == frozen["checkpoint"]["relativePath"]
+            and receipt.get("captureId") == earlier["captureId"]
+            and journal.same_json(receipt.get("before"), journal.entry(checkpoints.bytes_of(frozen["checkpoint"])))
+            and journal.same_json(receipt.get("injected"), journal.entry(checkpoints.bytes_of(earlier["checkpoint"])))
+            and journal.same_json(receipt.get("capturedGeneration"), receipt["injected"])
+            and receipt.get("applied") is True and receipt.get("originalBackupRetained") is True
+            and receipt.get("productRepairClaimed") is False,
+            "stale injection changed the original task, physical owner or earlier product bytes")
+    return {"originalTaskId": frozen["taskId"], "exactEarlierProductBytesInstalled": True,
+            "oldCheckpointManagerCasClaimed": False, "staleRecordRejectionClaimed": False}
+
+
+def completed_original(roots, frozen, current):
+    token, owner = frozen["taskId"], frozen["rootAdmission"]
+    records = exact_records(roots, token, "root")
+    names = journal.names("root", token)
+    require(set(records) == set(names[1:]) and all((row["node"], row["disk"]) ==
+            (owner["node"], owner["disk"]) for row in records.values()),
+            "original replay lost its terminal/report owner or retained runnable responsibility")
+    terminal = journal.decode_json(checkpoints.bytes_of(records[names[1]]))
+    report = journal.decode_json(checkpoints.bytes_of(records[names[2]]))
+    require(type(terminal.get("schema")) is int and terminal["schema"] == 1
+            and terminal.get("task_id") == token and terminal.get("status") == "Completed"
+            and journal.same_json(terminal.get("heal_type"), owner["value"]["heal_type"])
+            and journal.same_json(terminal.get("options"), owner["value"]["options"])
+            and type(report.get("schema")) is int and report["schema"] == 1
+            and journal.same_json(report.get("terminal"), terminal)
+            and journal.same_json(report.get("outcome"), current.get("outcome")),
+            "original replay silently retired work or changed its admitted scope/options/outcome")
+    return {"sameOriginalTaskAndPhysicalOwner": True, "durableCompletionMatchesFullManifest": True,
+            "originalResponsibilityRecreated": False, "backupRescueUsed": False}
+
+
+def successful_stale_replay(fleet, probe, binding, expected, baseline, original, targets,
+                            frozen, earlier, receipt, fault_scene, current, active):
+    token, bucket = frozen["taskId"], frozen["bucket"]
+    stale_receipt(earlier, frozen, receipt)
+    indexed = files(fault_scene)
+    missing = [target for target in targets if (target["node"], target["disk"], target["relativePath"]) not in indexed]
+    require(missing, "NOT_OBSERVED: rollback had no remaining actual object repair responsibility")
+    proof = rescan_outcome(current, bucket, expected, {version_identity(target) for target in missing}, frozen["bucketIncarnationId"])
+    proof.pop("originalFailedTaskReclassified")
+    active.remove((checkpoints.PATH, token))
+    idle_fleet(fleet, binding)
+    fleet.stop()
+    roots = checkpoints.records(fleet, token, "completed-original-stale-replay", quiescent=True, family="root")
+    durable = completed_original(roots, frozen, current)
+    healed = fleet.snapshot("original-replay-physical-before-any-rescan-or-GET", quiescent=True)
+    fleet.record("complete-original-replay-physical-proof", validate_repaired_physical(original, healed, targets[0], repair_targets=targets))
+    for target in targets: verify_proof(fleet, target, "original-replay-full-cohort-integrity")
+    fleet.start()
+    admissions = []
+    rescanned = run_task(probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
+        option_overrides={"recursive": True}, admissions=admissions)
+    require(len(admissions) == 1 and admissions[0]["clientToken"] != token,
+            "independent stale-record rescan reused the original responsibility")
+    rescan = rescan_outcome(rescanned, bucket, expected, set(), frozen["bucketIncarnationId"])
+    repeated = recovery_status(probe, fleet, token)
+    require(all(canonical(repeated.get(name)) == canonical(current.get(name)) for name in ("summary", "settings", "outcome", "truncated")),
+            "independent rescan rewrote the original replay result")
+    for endpoint in binding["endpoints"]:
+        peer = Probe(binding, endpoint)
+        same = status(peer, fleet, checkpoints.PATH, token, "same-original-stale-replay-peer")
+        require(all(canonical(same.get(name)) == canonical(current.get(name)) for name in ("summary", "settings", "outcome", "truncated")),
+                "original stale replay token did not converge on every peer")
+        inventory = fleet.record("complete-peer-S3", {"endpoint": endpoint, **peer.inventory(bucket,
+            unversioned_current_tags=expected[0]["versionId"] == "null")})
+        verify_seed(expected, inventory); compare_inventories(baseline, inventory)
+    fleet.stop()
+    require(physical_content(healed) == physical_content(fleet.snapshot("physical-after-rescan-and-business-reads", quiescent=True)),
+            "rescan or business reads repaired work missing from the original replay proof")
+    retained = checkpoints.records(fleet, token, "retained-original-stale-terminal-after-rescan", quiescent=True, family="root")
+    completed_original(retained, frozen, repeated)
+    require(canonical(exact_records(retained, token, "root")) == canonical(exact_records(roots, token, "root")),
+            "rescan or business reads changed original durable completion bytes")
+    fleet.record("complete-original-generation-reconciliation", {"earlier": earlier, "later": frozen,
+        "injection": receipt, "originalCompletion": proof, "durableCompletion": durable, "separateRescan": rescan,
+        "oldRecordResurrectionUsed": False, "canonicalCasePassClaimed": False})
+    # A completed product task may remove its checkpoint. Exact original-byte
+    # evidence and full repair proof precede discarding rescue registrations.
+    fleet.journal_faults.clear()
+    fleet.faults.clear()
+    return {"verdict": "PASS", "originalGenerationReconciliation": proof, "durableOriginalCompletion": durable,
+            "separateRescan": rescan, "staleRecordRejectionClaimed": False,
+            "completePhysicalAndS3ManifestsVerified": True, "canonicalCasePassClaimed": False}
+
+
 def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
     require(branch in IMPLEMENTED, "unimplemented journal branch cannot mutate the fleet")
     directory = args.evidence / fixture / topology / branch
@@ -200,14 +297,16 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
         "maxInventoryObjects": 512, "maxInventoryBytes": 2 * 1024**3}
     fleet.record("binding", binding)
     fleet.record("candidate-bound-inspector", verify_inspector(args.tool_directory, candidate))
-    probe, active = Probe(binding), []
+    probe, active, pending = Probe(binding), [], None
     result = {"topology": topology, "fixture": fixture, "branch": branch, "verdict": "RUNNING", "cleanup": "PENDING"}
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
+        pending = {"operation": "seed-original-checkpoint-fixture"}
         expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, count, [SIZE])
         baseline = fleet.record("ACK-bound-complete-S3", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("complete-ACK-manifest", {"expected": expected, **verify_seed(expected, baseline)})
+        pending = None
         idle_fleet(fleet, binding)
         fleet.stop()
         original = fleet.snapshot("healthy-physical-baseline", quiescent=True)
@@ -227,14 +326,27 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
         fleet.start()
         require(physical_content(prior) == physical_content(fleet.snapshot("before-original-admission")),
                 "ATTRIBUTION_NOT_OBSERVED: background activity changed the original shard faults")
+        pending = {"operation": "admit-original-checkpoint-task"}
         token = checkpoints.admit(probe, fleet, active)
-        frozen, identity = checkpoints.freeze(fleet, token, bucket)
+        pending = None
+        earlier = checkpoints.capture_earlier(fleet, token, bucket, "F07-earlier-generation") if branch == "stale-generation" else None
+        if earlier is not None:
+            require(earlier["value"]["admin"]["outcome"]["counters"]["healed"] == 0,
+                    "NOT_OBSERVED: earlier generation missed the pre-repair capture window")
+        frozen, identity = checkpoints.freeze(fleet, token, bucket, earlier=earlier)
         frozen = checkpoints.stop_for_fault(fleet, token, bucket, frozen, identity)
         params = {"family": "checkpoint", "taskId": token, "disk": frozen["disk"],
             "relativePath": frozen["checkpoint"]["relativePath"], "faultId": "F07-" + branch,
             "kind": IMPLEMENTED[branch], "expectedBefore": journal.entry(checkpoints.bytes_of(frozen["checkpoint"]))}
+        if earlier is not None: params["captureId"] = earlier["captureId"]
         fleet.journal_faults.append((frozen["node"], params))
         receipt = fleet.record("stopped-original-checkpoint-injection", fleet.remote(frozen["node"], "journal-apply", **params))
+        if earlier is not None:
+            fleet.record("original-earlier-generation-injection-proof", stale_receipt(earlier, frozen, receipt))
+            injected = checkpoints.owned_checkpoint(checkpoints.records(fleet, token, "independent-injected-original-generation", quiescent=True), token, bucket)
+            require(checkpoints.bytes_of(injected["checkpoint"]) == checkpoints.bytes_of(earlier["checkpoint"])
+                    and injected["resume"] == frozen["resume"], "stale rollback changed its original companion or actual bytes")
+            fault_scene = fleet.snapshot("physical-at-original-generation-replay-boundary", quiescent=True)
         fleet.start()
         deadline = time.monotonic() + 180
         while True:
@@ -242,13 +354,17 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
             if failed.get("summary") != "running": break
             require(time.monotonic() < deadline, "original corrupt checkpoint task did not produce a bounded diagnostic")
             time.sleep(.2)
+        if earlier is not None and failed.get("summary") == "finished":
+            result.update(successful_stale_replay(fleet, probe, binding, expected, baseline, original, targets,
+                frozen, earlier, receipt, fault_scene, failed, active))
+            return result
         failed_task(failed)
         active.remove((checkpoints.PATH, token))
         idle_fleet(fleet, binding)
         fleet.stop()
         corrupt_scene = checkpoints.records(fleet, token, "original-corrupt-checkpoint", quiescent=True)
         failure_roots = checkpoints.records(fleet, token, "original-durable-failure", quiescent=True, family="root")
-        result["originalFailure"] = retained_corruption(corrupt_scene, failure_roots, frozen, receipt, failed)
+        result["originalFailure"] = retained_corruption(corrupt_scene, failure_roots, frozen, receipt, failed, earlier=earlier)
         before_rescan = fleet.snapshot("failure-scene-before-any-rescan", quiescent=True)
         indexed = files(before_rescan)
         remaining = [target for target in targets if (target["node"], target["disk"], target["relativePath"]) not in indexed]
@@ -293,7 +409,7 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
                 "business reads repaired data that the independent rescan had not proved")
         retained_checkpoint = checkpoints.records(fleet, token, "retained-corrupt-checkpoint-after-rescan", quiescent=True)
         retained_roots = checkpoints.records(fleet, token, "retained-original-failure-after-rescan", quiescent=True, family="root")
-        retained_corruption(retained_checkpoint, retained_roots, frozen, receipt, repeated)
+        retained_corruption(retained_checkpoint, retained_roots, frozen, receipt, repeated, earlier=earlier)
         require(canonical(exact_records(retained_checkpoint, token, "checkpoint")) == canonical(exact_records(corrupt_scene, token, "checkpoint"))
                 and canonical(exact_records(retained_roots, token, "root")) == canonical(exact_records(failure_roots, token, "root")),
                 "separate rescan or business reads changed the original corrupt record or durable failure bytes")
@@ -306,7 +422,9 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
             fleet.snapshot("original-failure-scene", quiescent=True)
         except Exception as error: result["failureEvidenceError"] = str(error)
     finally:
-        result["cleanup"] = "PASS" if fleet.cleanup() else "FAIL"
+        clean = fleet.cleanup(preserve_namespaces=pending is not None)
+        result["cleanup"] = "PASS" if clean and pending is None else "FAIL"
+        if pending is not None: result["unresolvedMutation"] = pending
         fleet.record("checkpoint-branch-result", result)
     return result
 
@@ -356,7 +474,10 @@ def main():
     finally:
         save(args.evidence / "healthy-summary.json", {"caseId": CASE_ID, "results": results, "complete": False,
             "cleanup": "PASS" if results and all(row["cleanup"] == "PASS" for row in results) else "FAIL",
-            "canonicalCasePassClaimed": False, "reason": "stale-generation, journal-write-failure and full native cut coverage remain blocked"})
+            "diagnosticBranchesPassed": len(results) == 24 and all(row["cleanup"] == "PASS" and
+                row["verdict"] == ("BLOCKED" if row["branch"] in BLOCKERS else
+                    "PREREQUISITE_PASS" if row["branch"] == "native-persist-fence" else "PASS") for row in results),
+            "canonicalCasePassClaimed": False, "reason": "journal-write-failure and full native cut coverage remain blocked"})
     return 1
 
 

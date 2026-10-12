@@ -134,7 +134,7 @@ EVIDENCE_BLOCKED_CASES = {
     ),
     "heal.checkpoint-and-mrf-corruption": _native(
         "F07", "EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION",
-        "已实现 H1/H2 checkpoint 截断、未来 schema、ACK 绑定的 committed MRF CRC 故障和独立安全重扫；10 项原生回归仅为前置证据。仍缺陈旧代次、journal 写失败的完整现场流程及所需 fsync/commit 临界点审核，已实现分支尚无完整 live 审计。",
+        "已实现 H1/H2 checkpoint 截断、未来 schema、真实较早代次回放、ACK 绑定的 committed MRF CRC 故障和独立安全重扫；10 项原生回归仅为前置证据。仍缺 journal 写失败的完整现场流程及所需 fsync/commit 临界点审核，已实现分支尚无完整 live 审计。",
         ("durable_checkpoint_mrf_fault", "write_failure_retention", "publication_boundary_evidence_binding", "complete_live_orchestrator"),
     ),
     "heal.lock-timeout-and-caller-abort": _native(
