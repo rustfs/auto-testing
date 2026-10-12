@@ -138,6 +138,8 @@ def network_recovery_plan(artifact, failed_run, candidate):
 
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
+    if list(artifact.glob("*/run/heal.bucket-incarnation-recreation/cases/*.json")):
+        return recreation_recovery_plan(artifact, failed_run, candidate)
     if list(artifact.glob("*/run/heal.enospc-inodes-and-quota/cases/heal.enospc-inodes-and-quota.json")):
         require(not list(artifact.glob("*/run/heal.object-size-boundaries/cases/*.json")), "mixed failed case recovery artifact")
         return quota_recovery_plan(artifact, failed_run, candidate)
@@ -187,6 +189,104 @@ def recovery_plan(artifact, failed_run, candidate):
                 sort_keys=True, separators=(",", ":")).encode()).hexdigest()})
     require(plans, "failed artifact has no supported retained environment")
     return plans
+
+
+def recreation_recovery_plan(artifact, failed_run, candidate):
+    """Archive a stopped C11 fixture after an exact known DeleteBucket refusal."""
+    case = "heal.bucket-incarnation-recreation"
+    paths = list(artifact.glob("*/run/*/cases/*.json"))
+    require(len(paths) == 1 and paths[0].name == case + ".json",
+            "C11 recovery requires one unmixed failed result")
+    result = json.loads(paths[0].read_text())
+    provenance = result.get("provenance") or {}
+    require(result.get("case_id") == case and result.get("verdict") == "FAIL"
+            and result.get("cleanup_status") == "FAIL"
+            and provenance.get("source_commit") == candidate["source_sha"]
+            and provenance.get("candidate_sha256") == candidate["package_sha256"],
+            "C11 failed-result candidate or cleanup differs")
+    evidence = paths[0].parents[1] / f"evidence/{case}"
+    summary = json.loads((evidence / "healthy-summary.json").read_text())
+    rows = summary.get("results", [])
+    require(summary.get("caseId") == case and summary.get("cleanup") == "FAIL"
+            and summary.get("complete") is False and summary.get("canonicalCasePassClaimed") is False
+            and len(rows) == 1 and rows[0].get("topology") == "H1"
+            and rows[0].get("fixture") == "DV" and rows[0].get("branch") == "old-metadata-rejoin"
+            and rows[0].get("verdict") == "FAIL" and rows[0].get("cleanup") == "FAIL"
+            and rows[0].get("failure", {}).get("type") == "RecordedCallError"
+            and rows[0].get("unresolvedMutation") == {"operation": "normal-S3-delete-and-recreate"},
+            "C11 recovery supports only its first known DeleteBucket refusal")
+    folder = evidence / "H1/old-metadata-rejoin"
+    require(len(list(evidence.rglob("*-binding.json"))) == 1,
+            "C11 recovery cannot omit another bound namespace")
+    def one(label):
+        found = list(folder.glob("*-" + label + ".json"))
+        require(len(found) == 1, "C11 recovery lacks one exact " + label)
+        return json.loads(found[0].read_text())
+    binding, scene, old = one("binding"), one("original-recreation-failure-scene"), one("old-ACK-manifest")
+    require(re.fullmatch(rf"gh-{failed_run}-[1-9][0-9]*-h1", binding.get("runId", ""))
+            and binding.get("candidateCommit") == candidate["source_sha"]
+            and binding.get("candidatePackageSha256") == candidate["package_sha256"]
+            and binding.get("candidateBinarySha256") == provenance.get("binary_sha256")
+            and binding.get("harnessCommit") == provenance.get("testing_commit")
+            and len(scene) == 1 and all(value.get("quiescent") is True and value.get("pid") == 0
+                and value.get("binarySha256") == provenance.get("binary_sha256") for value in scene.values()),
+            "C11 archive lost its stopped run/candidate identity")
+    node, bucket = next(iter(scene)), binding.get("bucketPrefix", "")
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node)
+            and re.fullmatch(r"rv-heal-[0-9a-f]{16}", bucket), "C11 archive has invalid owned host/bucket")
+    recovered = one("gate-recovery")
+    require(recovered.get("node") == node and recovered.get("state") == "CLEAR"
+            and recovered.get("originalPermissionsRestored") is True,
+            "C11 physical gate was not already recovered")
+    requests = sorted((folder / "fixture").glob("*-request.json"))
+    acknowledgements = sorted((folder / "fixture").glob("*-ack.json"))
+    require(len(requests) == len(acknowledgements) and len(requests) > 1,
+            "C11 archive has an unacknowledged or missing S3 call")
+    observed = []
+    for sequence, (request_path, ack_path) in enumerate(zip(requests, acknowledgements), 1):
+        request, ack = json.loads(request_path.read_text()), json.loads(ack_path.read_text())
+        observation = ack.get("observation") or {}
+        require(type(request.get("sequence")) is int and type(ack.get("sequence")) is int
+                and request["sequence"] == ack["sequence"] == sequence
+                and request.get("runId") == ack.get("runId") == binding["runId"]
+                and ack.get("requestFile") == request_path.name
+                and ack.get("requestSha256") == hashlib.sha256(request_path.read_bytes()).hexdigest()
+                and observation.get("operation") == request.get("operation")
+                and observation.get("params") == request.get("params")
+                and observation.get("clientCallInvoked") is True
+                and observation.get("resultUnknown") is False,
+                "C11 S3 ledger changed identity/digest or contains an unknown mutation")
+        require(request.get("params", {}).get("Bucket") in {bucket, bucket + "-control"},
+                "C11 S3 call escaped its archived owned buckets")
+        if sequence < len(requests):
+            require(ack.get("operationCheck") == "PASS" and observation.get("acknowledged") is True,
+                    "C11 archive has an earlier rejected S3 operation")
+        observed.append(observation)
+    refusal = observed[-1]
+    response = refusal.get("response") or {}
+    require(rows[0]["failure"].get("message") ==
+                f"unexpected delete_bucket result; inspect ACK {len(requests):06d}, do not silently retry"
+            and refusal.get("operation") == "delete_bucket" and refusal.get("params") == {"Bucket": bucket}
+            and refusal.get("acknowledged") is False
+            and json.loads(acknowledgements[-1].read_text()).get("operationCheck") == "FAIL"
+            and response.get("Error") == {"Code": "InternalError", "Message": "File access denied"}
+            and response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 500,
+            "C11 refusal is uncertain or differs from the audited product error")
+    wanted = {(row["key"], row["versionId"]) for row in old["expected"]}
+    deletes = [(row["params"].get("Key"), row["params"].get("VersionId")) for row in observed[:-1]
+               if row["operation"] == "delete_object" and row["params"]["Bucket"] == bucket]
+    require(wanted and len(wanted) == len(old["expected"]) and len(deletes) >= len(wanted)
+            and len(set(deletes[-len(wanted):])) == len(wanted) and set(deletes[-len(wanted):]) == wanted,
+            "C11 archive lacks every acknowledged original version/marker deletion")
+    require(not list(folder.glob("*-archive-and-detach-original-replay.json"))
+            and not list(folder.glob("*-successor-ACK-bound-S3.json"))
+            and all(row.get("path", "").split("/", 1)[0] in {bucket, bucket + "-control"}
+                    for value in scene.values() for row in value["files"]),
+            "C11 retained scene includes another replay transaction or successor")
+    return [{"kind": "rejected-incarnation-delete", "runId": binding["runId"], "nodes": [node],
+             "node": node, "buckets": [bucket, bucket + "-control"], "before": scene,
+             "binarySha256": provenance["binary_sha256"], "originalProductError": response["Error"],
+             "acknowledgedVersionDeletions": len(wanted), "unknownMutationClaimed": False}]
 
 
 def performance_recovery_plan(artifact, failed_run, candidate):
@@ -342,7 +442,20 @@ def main():
         require(recovery_scene_matches(current, plan),
                 "retained fleet drifted from its exact archived scene; no recovery performed")
         fleet.record("retained-service-logs", fleet.remote(plan["node"], "logs"))
-        if plan.get("kind") == "performance-no-fault-applied":
+        if plan.get("kind") == "rejected-incarnation-delete":
+            require(all(value.get("binarySha256") == plan["binarySha256"] for value in current.values()),
+                    "retained candidate binary differs from the archived failed scene")
+            gate = fleet.record("audited-gate-state", fleet.remote(plan["node"], "gate-state"))
+            require(gate.get("state") == "CLEAR", "C11 gate drifted after archived recovery")
+            system = fleet.record("retained-system-bucket-records", fleet.remote(plan["node"],
+                "bucket-record-snapshot", buckets=plan["buckets"]))
+            require(system.get("credentialsRead") is False, "C11 recovery crossed its credential boundary")
+            require(recovery_scene_matches(fleet.snapshot("physical-immediately-before-finalization", quiescent=True), plan),
+                    "C11 stopped scene changed during its evidence export; retain namespace")
+            proof = fleet.record("audited-finalization", fleet.remote(plan["node"], "cleanup"))
+            require(proof.get("unitStopped") is True and proof.get("rootsRemoved") is True,
+                    "C11 owned namespace finalization was not complete")
+        elif plan.get("kind") == "performance-no-fault-applied":
             for node in plan["nodes"]:
                 proof = fleet.record("audited-finalization", {"node": node,
                     **fleet.remote(node, "cleanup")})

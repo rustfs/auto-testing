@@ -1,6 +1,7 @@
 """A rejected fault ID cannot bypass ownership, intent or physical-scene checks."""
 
 import hashlib
+import copy
 import json
 from pathlib import Path
 import tempfile
@@ -53,6 +54,123 @@ class RejectedFaultRecoveryTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "intent"):
                     audit_finalize(request)
                 cleanup.assert_not_called()
+
+
+class RecreationRecoveryTests(unittest.TestCase):
+    def archive(self, root):
+        case, bucket = "heal.bucket-incarnation-recreation", "rv-heal-0123456789abcdef"
+        base = root / "rustfs-validation-12345-1" / "run" / case
+        folder = base / "evidence" / case / "H1/old-metadata-rejoin"
+        (base / "cases").mkdir(parents=True)
+        (folder / "fixture").mkdir(parents=True)
+        candidate = {"source_sha": "a" * 40, "package_sha256": "b" * 64}
+        provenance = {"source_commit": "a" * 40, "candidate_sha256": "b" * 64,
+                      "binary_sha256": "c" * 64, "testing_commit": "d" * 40}
+        write = lambda path, value: path.write_text(json.dumps(value))
+        write(base / "cases" / (case + ".json"), {"case_id": case, "verdict": "FAIL",
+            "cleanup_status": "FAIL", "provenance": provenance})
+        write(folder.parent.parent / "healthy-summary.json", {"caseId": case, "cleanup": "FAIL",
+            "complete": False, "canonicalCasePassClaimed": False, "results": [{"topology": "H1",
+            "fixture": "DV", "branch": "old-metadata-rejoin", "verdict": "FAIL", "cleanup": "FAIL",
+            "failure": {"type": "RecordedCallError", "message": "unexpected delete_bucket result; inspect ACK 000005, do not silently retry"},
+            "unresolvedMutation": {"operation": "normal-S3-delete-and-recreate"}}]})
+        write(folder / "00001-binding.json", {"runId": "gh-12345-1-h1", "bucketPrefix": bucket,
+            "candidateCommit": "a" * 40, "candidatePackageSha256": "b" * 64,
+            "candidateBinarySha256": "c" * 64, "harnessCommit": "d" * 40})
+        write(folder / "00002-original-recreation-failure-scene.json", {"vm000": {"quiescent": True,
+            "pid": 0, "binarySha256": "c" * 64, "formats": [], "files": [{"disk": 0,
+            "path": bucket + "/objects/key/xl.meta", "size": 1, "sha256": "e" * 64}]}})
+        write(folder / "00003-old-ACK-manifest.json", {"expected": [{"key": "objects/key", "versionId": version}
+            for version in ("old-data", "old-marker")]})
+        write(folder / "00004-gate-recovery.json", {"node": "vm000", "state": "CLEAR", "originalPermissionsRestored": True})
+        calls = [("create_bucket", {"Bucket": bucket}),
+                 ("delete_object", {"Bucket": bucket, "Key": "objects/key", "VersionId": "old-data"}),
+                 ("delete_object", {"Bucket": bucket, "Key": "objects/key", "VersionId": "old-marker"}),
+                 ("list_multipart_uploads", {"Bucket": bucket}), ("delete_bucket", {"Bucket": bucket})]
+        for sequence, (operation, params) in enumerate(calls, 1):
+            request_path = folder / "fixture" / f"{sequence:06d}-request.json"
+            write(request_path, {"sequence": sequence, "runId": "gh-12345-1-h1", "operation": operation, "params": params})
+            write(folder / "fixture" / f"{sequence:06d}-ack.json", {"sequence": sequence, "runId": "gh-12345-1-h1",
+                "requestFile": request_path.name, "requestSha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+                "operationCheck": "FAIL" if sequence == 5 else "PASS", "observation": {"operation": operation,
+                    "params": params, "clientCallInvoked": True, "resultUnknown": False, "acknowledged": sequence != 5,
+                    "response": {"Error": {"Code": "InternalError", "Message": "File access denied"},
+                                 "ResponseMetadata": {"HTTPStatusCode": 500}} if sequence == 5 else {}}})
+        return candidate, folder
+
+    def test_known_refusal_retains_original_failure_without_claiming_product_repair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); candidate, _ = self.archive(root)
+            plan = recovery_plan(root, 12345, candidate)[0]
+            self.assertEqual(plan["kind"], "rejected-incarnation-delete")
+            self.assertEqual(plan["acknowledgedVersionDeletions"], 2)
+            self.assertFalse(plan["unknownMutationClaimed"])
+            self.assertEqual(plan["originalProductError"]["Code"], "InternalError")
+
+    def test_unknown_calls_missing_ack_drifted_digest_and_different_refusal_are_rejected(self):
+        for mutation in ("unknown-final", "unknown-prior", "digest", "missing", "different-error", "foreign-request"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp); candidate, folder = self.archive(root)
+                path = folder / "fixture" / ("000002-ack.json" if mutation == "unknown-prior" else "000005-ack.json")
+                value = json.loads(path.read_text())
+                if mutation.startswith("unknown-"): value["observation"]["resultUnknown"] = True
+                elif mutation == "digest": value["requestSha256"] = "f" * 64
+                elif mutation == "different-error": value["observation"]["response"]["Error"]["Code"] = "BucketNotEmpty"
+                elif mutation == "foreign-request": value["observation"]["params"]["Bucket"] = "unowned"
+                if mutation == "missing": path.unlink()
+                else: path.write_text(json.dumps(value))
+                with self.assertRaises(ValueError): recovery_plan(root, 12345, candidate)
+
+    def test_running_scene_additional_case_or_replay_transaction_cannot_be_finalized(self):
+        for mutation in ("running", "source", "another-case", "replay", "successor", "unrecovered-gate"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp); candidate, folder = self.archive(root)
+                if mutation == "running":
+                    path = folder / "00002-original-recreation-failure-scene.json"
+                    value = json.loads(path.read_text()); value["vm000"]["pid"] = 99; path.write_text(json.dumps(value))
+                elif mutation == "source": candidate["source_sha"] = "f" * 40
+                elif mutation == "another-case":
+                    path = folder.parents[4] / "another/cases/another.json"
+                    path.parent.mkdir(parents=True); path.write_text("{}")
+                elif mutation == "unrecovered-gate":
+                    path = folder / "00004-gate-recovery.json"
+                    value = json.loads(path.read_text()); value["state"] = "ACTIVE"; path.write_text(json.dumps(value))
+                else: (folder / ("00005-" + ("archive-and-detach-original-replay" if mutation == "replay" else "successor-ACK-bound-S3") + ".json")).write_text("{}")
+                with self.assertRaises(ValueError): recovery_plan(root, 12345, candidate)
+
+    def test_finalization_requires_stopped_unchanged_candidate_gate_and_credential_boundary(self):
+        for mutation in (None, "scene-drift", "binary", "gate", "credential"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp); candidate, _ = self.archive(root)
+                plan = recovery_plan(root, 12345, candidate)[0]
+                events = []
+                def snapshot(self, label, **kwargs):
+                    events.append(label)
+                    scene = copy.deepcopy(plan["before"])
+                    if mutation == "scene-drift" and label == "physical-immediately-before-finalization": scene["vm000"]["files"] = []
+                    if mutation == "binary": scene["vm000"]["binarySha256"] = "f" * 64
+                    return scene
+                def remote(self, node, action, **params):
+                    events.append(action)
+                    if action == "namespace-state": return {"state": {"exists": True}, "roots": [{"exists": True}]}
+                    if action == "gate-state": return {"state": "ACTIVE" if mutation == "gate" else "CLEAR"}
+                    if action == "bucket-record-snapshot": return {"credentialsRead": mutation == "credential"}
+                    if action == "cleanup": return {"cleanup": "PASS", "unitStopped": True, "rootsRemoved": True}
+                    return {}
+                candidate_path = root / "candidate.json"; candidate_path.write_text(json.dumps(candidate))
+                argv = ["recover_environment.py", "--failed-run-id", "12345", "--artifact", str(root),
+                        "--candidate", str(candidate_path), "--evidence", str(root / "recovery")]
+                with patch("sys.argv", argv), patch.object(Fleet, "remote", remote), patch.object(Fleet, "snapshot", snapshot), \
+                     patch.dict("os.environ", {"RUSTFS_NODES": "vm000 vm001 vm002 vm003"}):
+                    if mutation is None: recovery.main()
+                    else:
+                        with self.assertRaises(ValueError): recovery.main()
+                if mutation is None:
+                    self.assertLess(events.index("bucket-record-snapshot"), events.index("cleanup"))
+                    summary = json.loads((root / "recovery/recovery-summary.json").read_text())
+                    self.assertFalse(summary["canonicalPassClaimed"])
+                    self.assertFalse(summary["environments"][0]["originalVerdictRewritten"])
+                else: self.assertNotIn("cleanup", events)
 
 
 class QuotaRecoveryTests(unittest.TestCase):
