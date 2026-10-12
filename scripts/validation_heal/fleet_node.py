@@ -1460,4 +1460,10 @@ def main(request):
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
     actions.update({"process": process, "process-metrics": process_metrics, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})
     require(request.get("action") in actions, "unsupported node operation")
-    print(json.dumps(actions[request["action"]](request)))
+    try:
+        result = actions[request["action"]](request)
+    except ValueError as exc:
+        if request["action"] not in {"journal-observe", "journal-capture"} or not str(exc).startswith("NOT_OBSERVED:"):
+            raise
+        result = {"observationUnavailable": str(exc)}
+    print(json.dumps(result))

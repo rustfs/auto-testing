@@ -219,17 +219,37 @@ class AdminCheckpointTests(unittest.TestCase):
             self.assertTrue(stopped['rootContinuity']['budgetNotRefunded'])
         self.assertEqual(fleet.frozen_processes, {})
 
-    def test_root_drift_after_freeze_retains_the_original_paused_process_for_cleanup(self):
+    def test_freeze_precedes_root_observation_to_keep_the_actual_checkpoint_window(self):
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        observed, _, _ = self.fixture(); roots, _ = self.root_fixture()
+        identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50, state='S')
+        actions = []
+        fleet = SimpleNamespace(frozen_processes={}, record=lambda label, value: value)
+        def remote(node, action, **params):
+            actions.append(action)
+            return {**identity, 'state': 'T' if 'process-signal' in actions else 'S'}
+        fleet.remote = remote
+        def records(fleet, token, label, **params):
+            if params.get('family') == 'root':
+                self.assertIn('process-signal', actions)
+                self.assertEqual(label, 'Admin-root-frozen')
+                return roots
+            return observed
+        with patch.object(reader, 'records', side_effect=records):
+            frozen, _ = reader.freeze(fleet, TOKEN, BUCKET)
+        self.assertTrue(frozen['rootAdmission']['originalDurableResponsibility'])
+
+    def test_foreign_root_after_freeze_retains_the_original_paused_process_for_cleanup(self):
         from scripts.validation_heal.fleet_node import PROCESS_FIELDS
         observed, _, _ = self.fixture(); roots, value = self.root_fixture()
         identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50, state='T')
         fleet = SimpleNamespace(frozen_processes={}, record=lambda label, value: value, remote=lambda *args, **kwargs: identity)
         def records(fleet, token, label, **params):
             if label == 'Admin-root-frozen':
-                changed = copy.deepcopy(roots); altered = copy.deepcopy(value); altered['created_at']['secs_since_epoch'] += 1
+                changed = copy.deepcopy(roots); altered = copy.deepcopy(value); altered['task_id'] = INCARNATION
                 changed['node']['records'][3].update(encoded(altered)); return changed
             return roots if params.get('family') == 'root' else observed
-        with patch.object(reader, 'records', side_effect=records), self.assertRaisesRegex(ValueError, 'root admission changed'):
+        with patch.object(reader, 'records', side_effect=records), self.assertRaisesRegex(ValueError, 'original explicit Admin'):
             reader.freeze(fleet, TOKEN, BUCKET)
         self.assertEqual(fleet.frozen_processes, {'node': identity})
 

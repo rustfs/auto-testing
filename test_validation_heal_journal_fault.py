@@ -3,6 +3,8 @@
 import base64
 import copy
 import hashlib
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ import zlib
 from scripts.validation_heal import journal_fault as journal, heal_fault as fault, mrf_records as mrf
 from scripts.validation_heal.healthy import Fleet
 from scripts.validation_heal import fleet_node
+from scripts.validation_heal import healthy
 from scripts.validation_heal.checkpoint import OPTIONS
 
 
@@ -24,6 +27,41 @@ class DurableRecordFaultTests(unittest.TestCase):
     token = "12345678-1234-4234-8234-123456789abc"
     incarnation = "22345678-1234-4234-8234-123456789abc"
     bucket = "rv-heal-0123456789abcdef"
+
+    def test_live_read_race_is_retryable_but_stopped_read_and_path_failures_are_not(self):
+        for message in ('file changed while reading', 'file bind-mount escape', 'expected bounded regular non-hardlinked file'):
+            with self.subTest(message=message), patch.object(journal, 'census', side_effect=ValueError(message)):
+                expected = 'NOT_OBSERVED:' if message == 'file changed while reading' else message
+                with self.assertRaisesRegex(ValueError, expected): journal.stable_census([], {}, fault)
+                with self.assertRaisesRegex(ValueError, message): journal.census([], {}, fault)
+
+    def test_only_live_observation_refusals_survive_the_remote_boundary_as_retryable(self):
+        refusal = 'NOT_OBSERVED: exact durable records changed between the two bounded reads'
+        for action in ('journal-observe', 'journal-capture', 'journal-apply', 'journal-census'):
+            output = io.StringIO()
+            with self.subTest(action=action), patch.object(fleet_node.os, 'geteuid', return_value=0), \
+                 patch.object(fleet_node, 'journal_operation', side_effect=ValueError(refusal)), contextlib.redirect_stdout(output):
+                if action in ('journal-observe', 'journal-capture'):
+                    fleet_node.main({'action': action})
+                    self.assertEqual(json.loads(output.getvalue()), {'observationUnavailable': refusal})
+                else:
+                    with self.assertRaisesRegex(ValueError, 'NOT_OBSERVED:'): fleet_node.main({'action': action})
+        with patch.object(fleet_node.os, 'geteuid', return_value=0), \
+             patch.object(fleet_node, 'journal_operation', side_effect=ValueError('service restarted while observing exact durable records')):
+            with self.assertRaisesRegex(ValueError, 'service restarted'): fleet_node.main({'action': 'journal-observe'})
+        with tempfile.TemporaryDirectory() as temp:
+            fleet = Fleet(['node'], Path(temp), 'gh-12345-1-h1')
+            for action in ('journal-observe', 'journal-capture'):
+                response = types.SimpleNamespace(returncode=0, stdout=json.dumps({'observationUnavailable': refusal}), stderr='')
+                with self.subTest(action=action), patch.object(healthy.subprocess, 'run', return_value=response):
+                    with self.assertRaisesRegex(ValueError, '^NOT_OBSERVED:'): fleet.remote('node', action)
+            for body in ({'observationUnavailable': 'other'}, {'observationUnavailable': refusal, 'records': []}, {'observationUnavailable': None}):
+                response = types.SimpleNamespace(returncode=0, stdout=json.dumps(body), stderr='')
+                with self.subTest(body=body), patch.object(healthy.subprocess, 'run', return_value=response):
+                    with self.assertRaisesRegex(ValueError, 'invalid durable-record'): fleet.remote('node', 'journal-observe')
+            response = types.SimpleNamespace(returncode=1, stdout=json.dumps({'observationUnavailable': refusal}), stderr='failed')
+            with patch.object(healthy.subprocess, 'run', return_value=response):
+                with self.assertRaisesRegex(ValueError, '^Heal node'): fleet.remote('node', 'journal-observe')
 
     def test_full_server_checkpoint_fixture_preserves_feature_unified_json_order(self):
         # Original bytes from candidate 1aa9be87, diagnostic 38261190390/1.

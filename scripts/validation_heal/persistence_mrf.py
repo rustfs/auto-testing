@@ -189,7 +189,21 @@ def run(args, topology, nodes, fixture, candidate):
                     **fleet.remote(node, "journal-apply", **params)}))
         retained_corruption(original, observe(fleet, "injected-stopped-MRF-records"), receipts, bucket)
         window = JournalWindow(fleet, "F07-corrupt-MRF-replay", event_targets={"rustfs::heal::mrf"})
+        # An active chmod gate prevents the candidate's disk initialization.
+        # All services are stopped here; re-arm it before startup and activate
+        # it again only after readiness, preserving the original denied member.
+        released = fleet.record("stopped-member-permission-reset", fleet.remote(shard["node"], "drive-gate", mode="clear"))
+        require(released.get("state") == "CLEAR" and released.get("originalPermissionsRestored") is True,
+                "F07 denied member was not restored while stopped")
+        rearmed = fleet.record("stopped-member-gate-rearmed", fleet.remote(shard["node"], "drive-gate",
+            disk=shard["disk"], mode="permission-denied"))
+        require(rearmed.get("state") == "ARMED" and rearmed.get("phase") == "armed"
+                and type(rearmed.get("disk")) is int and rearmed["disk"] == shard["disk"],
+                "F07 restart gate changed its original denied member")
         fleet.start()
+        denied = fleet.record("restarted-original-member-denial", fleet.remote(shard["node"], "drive-gate-probe"))
+        require(denied.get("readProbe", {}).get("errno") == 13 and denied.get("errno") == 13
+                and denied.get("dacBypassRemoved") is True, "F07 restart lost its actual member read/write denial")
         deadline = time.monotonic() + 60
         while True:
             try:

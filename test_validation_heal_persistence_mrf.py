@@ -82,6 +82,19 @@ class MrfCorruptionTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError): suite.diagnostics({"node": [value]}, nodes)
 
     def test_lost_injection_ack_registers_recovery_before_mutation_and_keeps_namespace(self):
+        self.run_until_corruption_failure('lost-ack')
+
+    def test_corrupt_replay_rearms_the_same_stopped_gate_before_startup(self):
+        actions = self.run_until_corruption_failure('replay')
+        replay = actions[actions.index('journal-apply') + 1:]
+        self.assertEqual(replay[:4], ['clear', 'arm', 'start', 'drive-gate-probe'])
+
+    def test_failed_stopped_permission_reset_keeps_rescue_and_does_not_restart(self):
+        actions = self.run_until_corruption_failure('bad-reset')
+        replay = actions[actions.index('journal-apply') + 1:]
+        self.assertNotIn('start', replay)
+
+    def run_until_corruption_failure(self, phase):
         with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
             root = Path(temp); rc = root / "rc"; rc.write_bytes(b"client")
             args = SimpleNamespace(evidence=root, rc_bin=rc, tool_directory=root, testing_commit="a" * 40, binary_sha="b" * 64)
@@ -92,18 +105,27 @@ class MrfCorruptionTests(unittest.TestCase):
                     return raw + struct.pack("<I", zlib.crc32(raw))
             original = ScopedFixture()
             expected = [{"key": "object", "versionId": original.version, "deleteMarker": False}]
-            captured = []
+            captured, actions = [], []
             class Fleet(suite.Fleet):
                 def deploy(self, *args): self.reserved = list(self.nodes); captured.append(self)
                 def snapshot(self, *args, **kwargs): return {}
-                def start(self): pass
+                def start(self): actions.append('start')
                 def stop(self): pass
                 def remote(self, node, action, **params):
+                    if action == 'drive-gate':
+                        actions.append('clear' if params['mode'] == 'clear' else 'arm')
+                        if params['mode'] == 'clear':
+                            return {'state': 'CLEAR', 'originalPermissionsRestored': phase != 'bad-reset'}
+                        return {'state': 'ARMED', 'phase': 'armed', 'disk': 0}
                     if action == "mrf-records": return original.observed()
-                    if action == "drive-gate-probe": return {"errno": 13, "readProbe": {"errno": 13}, "dacBypassRemoved": True}
+                    if action == "drive-gate-probe":
+                        actions.append(action)
+                        return {"errno": 13, "readProbe": {"errno": 13}, "dacBypassRemoved": True}
                     if action == "journal-apply":
+                        actions.append(action)
                         assert (node, params) in self.journal_faults
-                        raise OSError("SSH acknowledgement lost after original CRC mutation")
+                        if phase == 'lost-ack': raise OSError("SSH acknowledgement lost after original CRC mutation")
+                        return {}
                     if action == "journal-recover": raise ValueError("original transaction state must be audited")
                     if action == "cleanup": raise AssertionError("dirty namespace cannot be deleted")
                     return {}
@@ -122,11 +144,16 @@ class MrfCorruptionTests(unittest.TestCase):
             stack.enter_context(patch.object(suite.mrf, "acknowledge", return_value=(expected, [original.obligation()], {})))
             stack.enter_context(patch.object(suite.mrf, "read_checkpoints", return_value={}))
             stack.enter_context(patch.object(suite.mrf, "pending_bindings", return_value={(): [{"node": "node", "bucketIncarnationId": original.incarnation}]}))
+            if phase != 'lost-ack':
+                stack.enter_context(patch.object(suite, 'retained_corruption', return_value={}))
+                stack.enter_context(patch.object(suite, 'JournalWindow', return_value=SimpleNamespace(capture=lambda: {})))
+                stack.enter_context(patch.object(suite, 'diagnostics', side_effect=OSError('stop after replay readiness proof')))
             result = suite.run(args, "H1", ["node"], "DV", {"source_sha": "c" * 40, "package_sha256": "d" * 64})
             self.assertEqual((result["verdict"], result["cleanup"]), ("FAIL", "FAIL"))
-            self.assertEqual(result["failure"]["type"], "OSError")
+            self.assertEqual(result["failure"]["type"], "ValueError" if phase == 'bad-reset' else "OSError")
             self.assertEqual(len(captured[0].journal_faults), 1)
             self.assertFalse(result["canonicalCasePassClaimed"])
+            return actions
 
 
 if __name__ == "__main__": unittest.main()

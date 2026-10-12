@@ -201,7 +201,6 @@ def freeze(fleet, token, bucket, *, timeout=60, earlier=None):
         try:
             owner = owned_checkpoint(records(fleet, token, "Admin-checkpoint-live"), token, bucket)
             if earlier is not None: after_generation(owner, earlier)
-            root = owned_root_admission(records(fleet, token, "Admin-root-live", family="root"), token)
             break
         except ValueError as exc:
             if not str(exc).startswith("NOT_OBSERVED:"): raise
@@ -219,9 +218,9 @@ def freeze(fleet, token, bucket, *, timeout=60, earlier=None):
     require((current["node"], current["disk"], current["bucketIncarnationId"]) ==
             (owner["node"], owner["disk"], owner["bucketIncarnationId"]), "checkpoint owner changed during freeze")
     if earlier is not None: after_generation(current, earlier)
+    # Reading another live census can outlast the actual checkpoint window.
+    # Validate the runnable root only after freezing its original checkpoint owner.
     frozen_root = owned_root_admission(records(fleet, token, "Admin-root-frozen", family="root"), token)
-    require(all(frozen_root[name] == root[name] for name in ("node", "disk", "relativePath", "size", "sha256")),
-            "original durable root admission changed during its checkpoint freeze")
     return {**current, "rootAdmission": frozen_root}, identity
 
 

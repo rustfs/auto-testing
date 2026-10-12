@@ -72,8 +72,12 @@ def census(roots, request, fault, *, quiescent=True):
 
 
 def stable_census(roots, request, fault):
-    first = census(roots, request, fault, quiescent=False)
-    second = census(roots, request, fault, quiescent=False)
+    try:
+        first = census(roots, request, fault, quiescent=False)
+        second = census(roots, request, fault, quiescent=False)
+    except ValueError as exc:
+        if str(exc) != "file changed while reading": raise
+        raise ValueError("NOT_OBSERVED: exact durable record changed during a bounded read") from exc
     require(first == second, "NOT_OBSERVED: exact durable records changed between the two bounded reads")
     return {**second, "stable": True, "independentReads": 2}
 

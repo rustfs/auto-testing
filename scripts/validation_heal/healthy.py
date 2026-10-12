@@ -240,7 +240,13 @@ class Fleet:
         result = subprocess.run([*self.ssh(node), "sudo -n python3 -"],
                                 input=source, capture_output=True, text=True, timeout=timeout)
         require(result.returncode == 0, f"Heal node {node} {action} failed: {result.stderr[-1200:]}")
-        return json.loads(result.stdout)
+        response = json.loads(result.stdout)
+        if action in {"journal-observe", "journal-capture"} and isinstance(response, dict) and "observationUnavailable" in response:
+            message = response["observationUnavailable"]
+            require(set(response) == {"observationUnavailable"} and isinstance(message, str)
+                    and message.startswith("NOT_OBSERVED:"), "invalid durable-record observation refusal")
+            raise ValueError(message)
+        return response
 
     def snapshot(self, label, *, quiescent=False, metadata_faults=None):
         return self.record(label, {node: self.remote(node, "snapshot", quiescent=quiescent,
