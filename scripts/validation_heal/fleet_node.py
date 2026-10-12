@@ -36,6 +36,7 @@ def runtime_config(profile):
     if profile in {"incarnation-checkpoint", "incarnation-mrf"}:
         logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "incarnation-mrf" else "false",
+                "AUTO_TESTING_C11_PHASE": "capture",
                 "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false", "RUSTFS_HEAL_MAX_CONCURRENT_HEALS": "1",
                 "RUSTFS_HEAL_MAX_CONCURRENT_PER_SET": "1", "RUSTFS_OBS_LOGGER_LEVEL": logging_filter,
                 "RUST_LOG": logging_filter}
@@ -99,6 +100,8 @@ def runtime_config(profile):
 
 def runtime_settings(owner):
     config = runtime_config(owner.get("runtimeProfile", "manual"))
+    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf"}:
+        config["AUTO_TESTING_C11_PHASE"] = owner.get("incarnationPhase", "capture")
     if owner.get("incarnationPhase") == "transition":
         config.update(RUSTFS_HEAL_MRF_ENABLE="false")
     return config

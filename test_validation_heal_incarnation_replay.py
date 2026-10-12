@@ -359,6 +359,27 @@ class RuntimePhaseTests(unittest.TestCase):
             fleet_node.start({"runId": self.owner["runId"]})
         self.assertFalse(any(call.args[0] == "systemd-run" for call in command.call_args_list))
 
+    def test_checkpoint_phase_commit_interruption_refuses_start_even_when_product_knobs_are_unchanged(self):
+        self.owner["runtimeProfile"] = "incarnation-checkpoint"
+        self.binding = backend.identity(self.owner, {"runId": self.owner["runId"], "family": "checkpoint",
+            "taskId": TOKEN, "bucketIncarnationId": INCARNATION}, journal)
+        manifest = {**self.binding, "records": [{"disk": disk, "relativePath": relative, "present": False}
+            for disk in range(4) for relative in backend.paths(self.binding, journal)],
+            "originalProductBytes": True, "replacementBytesAccepted": False}
+        (self.state / "C11-replay.json").write_bytes(fault.encode(manifest))
+        (self.state / "C11-replay-detached.json").write_bytes(fault.encode(self.binding))
+        self.env.write_text("\n".join(f"{key}={value}" for key, value in fleet_node.runtime_settings(self.owner).items()) + "\n")
+        original = fault.new_file
+        def interrupted(fd, name, raw):
+            if name == "C11-phase.new": raise OSError("checkpoint phase interrupted")
+            original(fd, name, raw)
+        with patch.object(fault, "new_file", side_effect=interrupted), self.assertRaises(OSError): self.phase("transition")
+        self.assertIn("RUSTFS_HEAL_MRF_ENABLE=false", self.env.read_text())
+        self.assertIn("AUTO_TESTING_C11_PHASE=transition", self.env.read_text())
+        with patch.object(fleet_node, "command") as command, self.assertRaisesRegex(ValueError, "incomplete"):
+            fleet_node.start({"runId": self.owner["runId"]})
+        self.assertFalse(any(call.args[0] == "systemd-run" for call in command.call_args_list))
+
     def test_substituted_markers_and_archive_refuse_before_changing_runtime(self):
         original = self.env.read_bytes()
         for change in ("runId", "binarySha256", "bucket", "family", "taskId", "bucketIncarnationId", "extra"):
