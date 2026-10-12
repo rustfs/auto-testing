@@ -73,6 +73,31 @@ class DurableRecordFaultTests(unittest.TestCase):
             else: values = [item for item in values if item["bucket"] != bucket]
             with self.subTest(change=change), self.assertRaises(ValueError): journal.owned_mrf_intents(values, bucket)
 
+    def test_future_checkpoint_schema_has_valid_candidate_digest_and_original_scope(self):
+        live = (Path(__file__).parent / "testdata/validation/checkpoint-preserve-order.json").read_bytes()
+        for raw, sort_keys in ((live, False), (self.checkpoint(), True)):
+            original = json.loads(raw)
+            bucket = next(iter(original["admin"]["buckets"]))
+            request = {"family": "checkpoint", "kind": "future-schema", "taskId": original["task_id"],
+                       "relativePath": journal.names("checkpoint", original["task_id"])[0]}
+            with self.subTest(sort_keys=sort_keys):
+                changed = journal.transform(raw, request, {"bucket": bucket}, mrf)
+                future = json.loads(changed)
+                self.assertEqual(future["schema_version"], 9)
+                unsigned = copy.deepcopy(future)
+                unsigned["integrity_digest"] = None
+                for field in ("processed_objects", "failed_objects", "skipped_objects"): unsigned[field].sort()
+                digest = base64.b64encode(hashlib.sha256(json.dumps(unsigned, sort_keys=sort_keys,
+                    ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()).digest()).decode()
+                self.assertEqual(future["integrity_digest"], digest)
+                self.assertNotEqual(future["integrity_digest"], original["integrity_digest"])
+                future.update(schema_version=8, integrity_digest=original["integrity_digest"])
+                self.assertEqual(future, original)
+                # Invalid originals must fail before a fault can re-sign them.
+                original["current_object_index"] += 1
+                with self.assertRaisesRegex(ValueError, "integrity digest"):
+                    journal.transform(json.dumps(original).encode(), request, {"bucket": bucket}, mrf)
+
     def test_mrf_adapter_requires_active_original_business_work_on_the_selected_latest_replica(self):
         raw = (Path(__file__).parent / "testdata/validation/mrf-mixed-payload.bin").read_bytes()
         bucket = "rv-heal-084db3ab418d55ba"

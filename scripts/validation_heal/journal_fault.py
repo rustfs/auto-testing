@@ -92,6 +92,21 @@ def decode_json(raw):
     return value
 
 
+def checkpoint_digest(value, *, sort_keys):
+    unsigned = dict(value)
+    unsigned["integrity_digest"] = None
+    for field in ("processed_objects", "failed_objects", "skipped_objects"):
+        require(isinstance(unsigned.get(field), list) and all(isinstance(item, str) for item in unsigned[field])
+                and len(set(unsigned[field])) == len(unsigned[field]),
+                "checkpoint ledger has an unknown canonical representation")
+        unsigned[field] = sorted(unsigned[field])
+    # serde_json::Value sorts keys by default; the full server's unified
+    # preserve_order feature instead retains the serialized struct/map order.
+    # Both builds sort the three ledger arrays before hashing UTF-8 JSON.
+    return base64.b64encode(hashlib.sha256(json.dumps(unsigned, sort_keys=sort_keys,
+        ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()).digest()).decode()
+
+
 def checkpoint_value(raw, token, bucket):
     value = decode_json(raw)
     require(value.get("task_id") == task_id(token) and type(value.get("schema_version")) is int and value["schema_version"] == 8,
@@ -101,19 +116,7 @@ def checkpoint_value(raw, token, bucket):
     require(admin.get("completed") is False and isinstance(buckets, dict) and set(buckets) == {bucket}
             and isinstance(buckets[bucket], str) and str(uuid.UUID(buckets[bucket])) == buckets[bucket]
             and uuid.UUID(buckets[bucket]).int != 0, "checkpoint has no original owned bucket incarnation")
-    unsigned = decode_json(raw)
-    unsigned["integrity_digest"] = None
-    for field in ("processed_objects", "failed_objects", "skipped_objects"):
-        require(isinstance(unsigned.get(field), list) and all(isinstance(item, str) for item in unsigned[field])
-                and len(set(unsigned[field])) == len(unsigned[field]),
-                "checkpoint ledger has an unknown canonical representation")
-        unsigned[field].sort()
-    # serde_json::Value sorts keys by default; the full server's unified
-    # preserve_order feature instead retains the serialized struct/map order.
-    # Both builds sort the three ledger arrays before hashing UTF-8 JSON.
-    digests = {base64.b64encode(hashlib.sha256(json.dumps(unsigned, sort_keys=sorted_keys,
-        ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()).digest()).decode()
-        for sorted_keys in (False, True)}
+    digests = {checkpoint_digest(value, sort_keys=sorted_keys) for sorted_keys in (False, True)}
     require(value.get("integrity_digest") in digests, "original checkpoint has no valid candidate integrity digest")
     return value
 
@@ -209,8 +212,12 @@ def transform(raw, request, owner, mrf, *, earlier=None):
     if kind == "truncate":
         require(len(raw) > 8, "cannot truncate an empty/unknown record")
         return raw[:len(raw) // 2]
+    # Preserve the candidate's digest representation so an unknown schema is
+    # independently testable without also introducing checksum corruption.
+    sort_keys = value["integrity_digest"] != checkpoint_digest(value, sort_keys=False)
     value["schema_version"] = 9
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+    value["integrity_digest"] = checkpoint_digest(value, sort_keys=sort_keys)
+    return json.dumps(value, sort_keys=sort_keys, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
 
 
 def binding(root_fd, request, owner, fault):
