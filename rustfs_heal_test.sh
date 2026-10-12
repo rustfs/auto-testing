@@ -1041,6 +1041,17 @@ step6_monitor_heal() {
       printf '\033[1;31m[ERROR]\033[0m heal reported failed objects (%s)\n' "${failed_n}" >&2
       printf '%s\n' "--- full heal status JSON ---" >&2
       printf '%s\n' "${body}" >&2
+      # Keep the status snapshot and the per-object entries with the other
+      # artifacts: the stderr dump above scrolls out of view, and without
+      # these files the failed objects' identities and errors are not
+      # recoverable after the run (rustfs/backlog#2618 follow-up, heal
+      # objects_failed=6 on run 38157194577).
+      if [ -n "${LOG_FILE}" ] && [ -d "$(dirname "${LOG_FILE}")" ]; then
+        evdir="$(dirname "${LOG_FILE}")"
+        printf '%s\n' "${body}" > "${evdir}/heal-failed-status.json" 2>/dev/null || true
+        printf '%s\n' "${body}" | jq -c '.items[]? | select(.type == "object")' \
+          > "${evdir}/heal-failed-objects.ndjson" 2>/dev/null || true
+      fi
       die "heal failed (summary=${summary}, objects_failed=${failed_n})"
     fi
 
