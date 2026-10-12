@@ -16,12 +16,13 @@ from test_validation_heal_checkpoint import BUCKET, TOKEN, INCARNATION, encoded
 
 
 class PersistenceContractTests(unittest.TestCase):
-    def fixture(self, kind="truncate"):
+    def fixture(self, kind="truncate", *, admission_options=None, terminal_options=None):
         observed, _, _ = fixture_source.AdminCheckpointTests().fixture()
         frozen = checkpoint.owned_checkpoint(observed, TOKEN, BUCKET)
         root_value = {"schema": 3, "task_id": TOKEN, "heal_type": {
             "type": "erasure_set", "buckets": [], "set_disk_id": "pool_0_set_0", "all_buckets": True},
             "options": {"scan_mode": 2, "recursive": True}}
+        if admission_options is not None: root_value["options"] = copy.deepcopy(admission_options)
         owner = {"node": "node", "disk": 1, "relativePath": journal.names("root", TOKEN)[0],
                  "value": root_value, **encoded(root_value)}
         frozen["rootAdmission"] = owner
@@ -39,6 +40,7 @@ class PersistenceContractTests(unittest.TestCase):
                     skipped=0, failed=0, unknown=0, attemptFailures=0, overflowed=False)}}
         terminal = {"schema": 1, "task_id": TOKEN, "heal_type": root_value["heal_type"],
             "options": root_value["options"], "status": {"Failed": {"error": current["detail"]}}}
+        if terminal_options is not None: terminal["options"] = copy.deepcopy(terminal_options)
         report = {"schema": 1, "terminal": terminal, "outcome": current["outcome"]}
         names = journal.names("root", TOKEN)
         roots = {"node": {"readOnly": True, "quiescent": True, "family": "root", "taskId": TOKEN,
@@ -55,6 +57,65 @@ class PersistenceContractTests(unittest.TestCase):
                 self.assertTrue(proof["durableOriginalFailureRetained"])
                 self.assertFalse(proof["originalTaskRepairClaimed"])
                 self.assertFalse(proof["backupRescueUsed"])
+
+    def recorded_options(self):
+        return json.loads((Path(__file__).parent / "testdata/validation/root-terminal-options.json").read_text())
+
+    def test_candidate_default_timeout_reconciles_original_corruption_and_completion(self):
+        recorded = self.recorded_options()
+        for kind in ("truncate", "future-schema"):
+            data = self.fixture(kind, admission_options=recorded["admissionOptions"],
+                                terminal_options=recorded["terminalOptions"])
+            proof = persistence.retained_corruption(*data)
+            self.assertTrue(proof["durableOriginalFailureRetained"])
+            self.assertFalse(proof["originalTaskRepairClaimed"])
+        roots = self.completion_roots(data[2], data[4])
+        terminal = journal.decode_json(checkpoint.bytes_of(roots["node"]["records"][4]))
+        terminal["options"] = recorded["terminalOptions"]
+        roots["node"]["records"][4].update(encoded(terminal))
+        roots["node"]["records"][5].update(encoded({"schema": 1, "terminal": terminal, "outcome": data[4]["outcome"]}))
+        self.assertTrue(persistence.completed_original(roots, data[2], data[4])["sameOriginalTaskAndPhysicalOwner"])
+
+    def test_default_timeout_never_normalizes_other_options_or_refunds_explicit_budgets(self):
+        recorded = self.recorded_options()
+        for change in ("shorter", "longer", "fractional", "float", "bool", "missing", "unknown-duration-field",
+                       "missing-admission-timeout", "explicit-budget", "consumed-budget", "scope", "nolock", "extra-option"):
+            admitted, terminal = copy.deepcopy(recorded["admissionOptions"]), copy.deepcopy(recorded["terminalOptions"])
+            if change == "shorter": terminal["timeout"]["secs"] = 299
+            elif change == "longer": terminal["timeout"]["secs"] = 301
+            elif change == "fractional": terminal["timeout"]["nanos"] = 1
+            elif change == "float": terminal["timeout"]["secs"] = 300.0
+            elif change == "bool": terminal["timeout"]["nanos"] = False
+            elif change == "missing": terminal.pop("timeout")
+            elif change == "unknown-duration-field": terminal["timeout"]["extra"] = 0
+            elif change == "missing-admission-timeout": admitted.pop("timeout")
+            elif change == "explicit-budget": admitted["timeout"] = {"secs": 120, "nanos": 0}
+            elif change == "consumed-budget": admitted["timeout"] = {"secs": 299, "nanos": 0}
+            elif change == "scope": terminal["pool_index"] = 1
+            elif change == "nolock": terminal["no_lock"] = True
+            else: terminal["extra"] = "foreign"
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                persistence.retained_corruption(*self.fixture(admission_options=admitted, terminal_options=terminal))
+        for timeout in ({"secs": 120, "nanos": 0}, {"secs": 299, "nanos": 17}):
+            options = {**recorded["admissionOptions"], "timeout": timeout}
+            self.assertTrue(persistence.retained_corruption(*self.fixture(
+                admission_options=options, terminal_options=options))["durableOriginalFailureRetained"])
+        for change in ("float", "bool", "task", "scope", "options"):
+            data = self.fixture(admission_options=recorded["admissionOptions"], terminal_options=recorded["terminalOptions"])
+            row = data[1]["node"]["records"][5]
+            report = journal.decode_json(checkpoint.bytes_of(row))
+            if change == "float": report["terminal"]["options"]["timeout"]["secs"] = 300.0
+            elif change == "bool": report["terminal"]["options"]["timeout"]["nanos"] = False
+            elif change == "task": report["terminal"]["task_id"] = INCARNATION
+            elif change == "scope": report["terminal"]["heal_type"]["set_disk_id"] = "pool_0_set_1"
+            else: report["terminal"]["options"]["recursive"] = False
+            row.update(encoded(report))
+            with self.subTest(reportChange=change), self.assertRaises(ValueError): persistence.retained_corruption(*data)
+
+    def test_unreviewed_candidate_options_contract_fails_before_fleet_allocation(self):
+        with patch.object(persistence, "Fleet") as fleet, self.assertRaisesRegex(ValueError, "terminal-options contract"):
+            persistence.run_checkpoint_fault(None, "H1", ["node"], "DB", "checkpoint-truncate", {"source_sha": "f" * 40})
+        fleet.assert_not_called()
 
     def test_missing_rewritten_moved_or_duplicated_corruption_never_passes(self):
         for change in ("missing", "restored", "blocked", "resume", "moved", "duplicate", "partial-census"):
@@ -294,6 +355,28 @@ class PersistenceContractTests(unittest.TestCase):
         terminal["status"] = "Completed"; roots["node"]["records"][4].update(encoded(terminal))
         with self.assertRaises(ValueError): persistence.retained_write_failure(observed, roots, frozen, current, events)
 
+    def test_checkpoint_write_failure_terminal_keeps_the_source_default_and_exact_scope(self):
+        recorded = self.recorded_options()
+        for change in (None, "timeout", "scope", "report"):
+            observed, roots, frozen, current, events = self.write_failure()
+            admission = frozen["rootAdmission"]["value"]
+            admission["options"] = copy.deepcopy(recorded["admissionOptions"])
+            frozen["rootAdmission"].update(**encoded(admission))
+            roots["node"]["records"][3] = {"disk": 1, "relativePath": journal.names("root", TOKEN)[0], "present": False}
+            terminal = {"schema": 1, "task_id": TOKEN, "heal_type": admission["heal_type"],
+                "options": copy.deepcopy(recorded["terminalOptions"]), "status": {"Failed": {"error": current["detail"]}}}
+            if change == "timeout": terminal["options"]["timeout"]["secs"] = 301
+            elif change == "scope": terminal["options"]["set_index"] = 1
+            report = {"schema": 1, "terminal": copy.deepcopy(terminal), "outcome": current["outcome"]}
+            if change == "report": report["terminal"]["options"]["timeout"]["secs"] = 299
+            roots["node"]["records"][4].update(encoded(terminal))
+            roots["node"]["records"][5].update(encoded(report))
+            if change is None:
+                self.assertTrue(persistence.retained_write_failure(observed, roots, frozen, current, events)["originalResponsibilityRetained"])
+            else:
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    persistence.retained_write_failure(observed, roots, frozen, current, events)
+
     def test_write_failure_can_consume_root_timeout_without_refunding_or_changing_intent(self):
         for change in (None, "refunded", "removed", "scope", "retry", "owner"):
             observed, roots, frozen, current, events = self.write_failure()
@@ -460,8 +543,10 @@ class PersistenceContractTests(unittest.TestCase):
 
             def remote(self, node, action, **params):
                 if action == "journal-apply":
+                    if mutation == "runtime": return {}
                     # The node may have committed the fault before the ACK was lost.
                     raise OSError("journal injection acknowledgement lost")
+                if action == "process": return {"settings": {"RUSTFS_HEAL_TASK_TIMEOUT_SECS": "299"}}
                 if action == "bounded-volumes-fill": raise OSError("private journal fill acknowledgement lost")
                 return {}
 
@@ -499,7 +584,7 @@ class PersistenceContractTests(unittest.TestCase):
                  patch.object(persistence.checkpoints, "stop_for_fault", return_value=frozen):
                 result = persistence.run_checkpoint_fault(args, "H1", ["node"], "DB",
                     "journal-write-failure" if mutation == "fill" else "checkpoint-truncate",
-                    {"source_sha": "0" * 40, "package_sha256": "0" * 64})
+                    {"source_sha": "1aa9be87d18cf941e5020f19e8622c26ba4b10ac", "package_sha256": "0" * 64})
         return result, captured
 
     def test_lost_injection_ack_keeps_original_journal_and_shard_rescue_registered(self):
@@ -511,6 +596,15 @@ class PersistenceContractTests(unittest.TestCase):
         self.assertEqual(len(captured["cleanupJournals"]), 1)
         self.assertEqual(captured["cleanupJournals"][0][1]["taskId"], TOKEN)
         self.assertNotIn("separateRescan", result)
+
+    def test_restart_runtime_change_preserves_rescue_and_refuses_terminal_normalization(self):
+        with patch.object(persistence, "recovery_status") as queried:
+            result, captured = self.interrupted_injection(True, "runtime")
+        self.assertEqual((result["verdict"], result["cleanup"]), ("FAIL", "PASS"))
+        self.assertIn("runtime timeout witness", result["failure"]["message"])
+        self.assertEqual(len(captured["cleanupJournals"]), 1)
+        self.assertEqual(len(captured["cleanupFaults"]), 4)
+        queried.assert_not_called()
 
     def test_failed_cleanup_preserves_dirty_result_after_lost_injection_ack(self):
         result, captured = self.interrupted_injection(False)

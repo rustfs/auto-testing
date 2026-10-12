@@ -1,0 +1,34 @@
+{
+  "candidateCommit": "1aa9be87d18cf941e5020f19e8622c26ba4b10ac",
+  "runId": 38277312274,
+  "runAttempt": 1,
+  "admissionRecordSha256": "ff199cf1a3913ce407aaf46fd8bb3c93492975a329e779f26ffb499352a9a291",
+  "terminalRecordSha256": "a9841d9339e3784ea12572569c32e45b58a996325c62dc57a5925ad76271b9c9",
+  "admissionOptions": {
+    "scan_mode": 2,
+    "remove_corrupted": false,
+    "recreate_missing": false,
+    "update_parity": false,
+    "recursive": true,
+    "dry_run": false,
+    "no_lock": false,
+    "timeout": null,
+    "pool_index": 0,
+    "set_index": 0
+  },
+  "terminalOptions": {
+    "scan_mode": 2,
+    "remove_corrupted": false,
+    "recreate_missing": false,
+    "update_parity": false,
+    "recursive": true,
+    "dry_run": false,
+    "no_lock": false,
+    "timeout": {
+      "secs": 300,
+      "nanos": 0
+    },
+    "pool_index": 0,
+    "set_index": 0
+  }
+}

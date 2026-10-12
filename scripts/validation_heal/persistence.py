@@ -24,7 +24,7 @@ try:
     from .matrix import select
     from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical
     from .stop import idle_fleet, status
-    from .root_restart import recovery_status, same_owner
+    from .root_restart import recovery_status, same_owner, TIMEOUT_SECONDS
     from .scanner_repair import JournalWindow
     from .fleet_node import PROCESS_FIELDS
     from .persistence_mrf import run as run_mrf_checksum
@@ -39,7 +39,7 @@ except ImportError:
     from matrix import select
     from shards import files, map_target, run_task, validate_fault, validate_repaired_physical
     from stop import idle_fleet, status
-    from root_restart import recovery_status, same_owner
+    from root_restart import recovery_status, same_owner, TIMEOUT_SECONDS
     from scanner_repair import JournalWindow
     from fleet_node import PROCESS_FIELDS
     from persistence_mrf import run as run_mrf_checksum
@@ -53,6 +53,26 @@ IMPLEMENTED = {"checkpoint-truncate": "truncate", "future-schema": "future-schem
                "stale-generation": "stale-generation"}
 BLOCKERS = {}
 SIZE = 5 * 1024**2 + 123
+TERMINAL_OPTIONS_REFERENCE = {"candidateCommits": (
+    "072b57b37559fbe626aeda8abf61617fdcbdd926", "1aa9be87d18cf941e5020f19e8622c26ba4b10ac"),
+    "sourceFiles": {
+        "crates/heal/src/heal/manager/scheduler.rs": "79ce1f9c278c664231b6a1eca7c521f8e98742fe6d17d8f852368da4e77cc33b",
+        "crates/heal/src/heal/manager.rs": "ba9289942fbbe8ce2632686ae86b9d1be0ae9923420e3b091d67148b4ee02094",
+        "crates/config/src/constants/heal.rs": "82b8614dfa7cc111e694138035e4a84ee23035c719f0286fc0565d7181ca014f"},
+    "runtimeSetting": {"RUSTFS_HEAL_TASK_TIMEOUT_SECS": str(TIMEOUT_SECONDS)},
+    "normalization": "scheduler get_or_insert fills only an explicit null timeout; all other fields stay exact"}
+
+
+def same_terminal_options(admitted, terminal):
+    if not isinstance(admitted, dict) or not isinstance(terminal, dict):
+        return False
+    if journal.same_json(admitted, terminal):
+        return True
+    # The source-bound scheduler fills None from the process-verified fleet
+    # setting. It preserves explicit budgets, including a checkpointed one.
+    if "timeout" not in admitted or admitted["timeout"] is not None:
+        return False
+    return journal.same_json(terminal, {**admitted, "timeout": {"secs": TIMEOUT_SECONDS, "nanos": 0}})
 
 
 def exact_records(observed, token, family, *, allow_frozen=False):
@@ -138,13 +158,13 @@ def retained_corruption(observed, roots, frozen, receipt, current, *, earlier=No
     report = journal.decode_json(checkpoints.bytes_of(root[root_names[2]]))
     require(type(terminal.get("schema")) is int and terminal["schema"] == 1 and terminal.get("task_id") == token
             and journal.same_json(terminal.get("heal_type"), owner["value"]["heal_type"])
-            and journal.same_json(terminal.get("options"), owner["value"]["options"])
+            and same_terminal_options(owner["value"]["options"], terminal.get("options"))
             and isinstance(terminal.get("status"), dict) and set(terminal["status"]) == {"Failed"}
             and isinstance(terminal["status"]["Failed"], dict)
             and isinstance(terminal["status"]["Failed"].get("error"), str)
             and "checkpoint" in terminal["status"]["Failed"]["error"].lower()
             and type(report.get("schema")) is int and report["schema"] == 1
-            and report.get("terminal") == terminal
+            and journal.same_json(report.get("terminal"), terminal)
             and canonical(report.get("outcome")) == canonical(current["outcome"]),
             "original responsibility lost its durable checkpoint failure diagnostic")
     if root_names[0] in root:
@@ -218,7 +238,7 @@ def completed_original(roots, frozen, current):
     require(type(terminal.get("schema")) is int and terminal["schema"] == 1
             and terminal.get("task_id") == token and terminal.get("status") == "Completed"
             and journal.same_json(terminal.get("heal_type"), owner["value"]["heal_type"])
-            and journal.same_json(terminal.get("options"), owner["value"]["options"])
+            and same_terminal_options(owner["value"]["options"], terminal.get("options"))
             and type(report.get("schema")) is int and report["schema"] == 1
             and journal.same_json(report.get("terminal"), terminal)
             and journal.same_json(report.get("outcome"), current.get("outcome")),
@@ -314,7 +334,7 @@ def retained_write_failure(observed, roots, frozen, current, events):
         report = journal.decode_json(checkpoints.bytes_of(root[names[2]]))
         require(type(terminal.get("schema")) is int and terminal["schema"] == 1 and terminal.get("task_id") == token
                 and journal.same_json(terminal.get("heal_type"), original["value"]["heal_type"])
-                and journal.same_json(terminal.get("options"), original["value"]["options"])
+                and same_terminal_options(original["value"]["options"], terminal.get("options"))
                 and terminal.get("status") == {"Failed": {"error": detail}}
                 and type(report.get("schema")) is int and report["schema"] == 1
                 and journal.same_json(report.get("terminal"), terminal)
@@ -450,6 +470,8 @@ def journal_write_failure(fleet, probe, binding, expected, baseline, original, t
 
 def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
     require(branch in IMPLEMENTED or branch == "journal-write-failure", "unimplemented journal branch cannot mutate the fleet")
+    require(candidate.get("source_sha") in TERMINAL_OPTIONS_REFERENCE["candidateCommits"],
+            "unsupported candidate terminal-options contract")
     directory = args.evidence / fixture / topology / branch
     directory.mkdir(parents=True)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
@@ -470,6 +492,8 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
         "maxInventoryObjects": 512, "maxInventoryBytes": 2 * 1024**3}
     fleet.record("binding", binding)
     fleet.record("candidate-bound-inspector", verify_inspector(args.tool_directory, candidate))
+    fleet.record("candidate-terminal-options-contract", {
+        **TERMINAL_OPTIONS_REFERENCE, "candidateCommit": candidate["source_sha"]})
     probe, active, pending = Probe(binding), [], None
     result = {"topology": topology, "fixture": fixture, "branch": branch, "verdict": "RUNNING", "cleanup": "PENDING"}
     def allocate():
@@ -530,6 +554,10 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
                     and injected["resume"] == frozen["resume"], "stale rollback changed its original companion or actual bytes")
             fault_scene = fleet.snapshot("physical-at-original-generation-replay-boundary", quiescent=True)
         fleet.start()
+        for node in fleet.nodes:
+            identity = fleet.record("post-injection-candidate-process", {"node": node, **fleet.remote(node, "process")})
+            require(identity.get("settings", {}).get("RUSTFS_HEAL_TASK_TIMEOUT_SECS") == str(TIMEOUT_SECONDS),
+                    "terminal normalization has no original candidate runtime timeout witness")
         deadline = time.monotonic() + 180
         while True:
             failed = recovery_status(probe, fleet, token)
