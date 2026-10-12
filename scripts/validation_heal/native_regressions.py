@@ -65,6 +65,70 @@ REGRESSIONS = {
         "relatedCases": ["heal.conflicting-subquorum-authority"],
         "limits": "separate native regression; does not certify a live split, overlap or runtime pause"},
 }
+INCARNATION_CANDIDATE = "1aa9be87d18cf941e5020f19e8622c26ba4b10ac"
+INCARNATION_EVENTS = ["final_rename_paused", "caller_aborted_writer_pending",
+                      "repair_drained_writer_acquired", "successor_rejects_obsolete_admission"]
+STORE_PREFIX = "store::heal::tests::"
+INCARNATION_REGRESSIONS = {
+    "incarnation-successor-storage": {
+        "test": STORE_PREFIX + "bucket_incarnation_heal_preserves_successor_shards_and_allows_fresh_repair",
+        "sourceAssertions": ["normal delete/recreate changes the authoritative bucket UUID",
+            "name-only positive control repairs a real missing successor shard",
+            "old-incarnation metadata/path/version/rename/bucket/object mutations are rejected",
+            "obsolete admission publishes no missing shard and leaves healthy metadata byte-identical",
+            "fresh successor admission independently repairs the missing shard"],
+        "fenceKind": "real physical storage incarnation guard decisions",
+        "relatedCases": ["heal.bucket-incarnation-recreation"],
+        "limits": "does not prove fleet checkpoint or MRF replay"},
+    "incarnation-cancelled-owner": {
+        "test": STORE_PREFIX + "bucket_incarnation_heal_owner_survives_cancelled_waiter_and_queued_writer",
+        "sourceAssertions": ["cancelled caller retains the original lifecycle owner",
+            "queued writer remains pending until storage proof drains",
+            "exact incarnation absence proof spans both selected pools without reacquiring behind the writer"],
+        "fenceKind": "deterministic held-owner and queued-writer assertions",
+        "relatedCases": ["heal.bucket-incarnation-recreation"],
+        "limits": "separate owner regression; not a physical final-rename pause"},
+    "incarnation-final-rename": {
+        "test": STORE_PREFIX + "bucket_incarnation_fence_survives_caller_abort_at_real_repair_commit",
+        "sourceAssertions": ["real external exact-version reconstruction pauses before final scope check and rename",
+            "missing target is unpublished at the pause",
+            "caller abort cannot admit the lifecycle writer before repair drains",
+            "the published exact version/data directory passes physical check_parts verification",
+            "healthy metadata remains byte-identical",
+            "normal version/bucket deletion and recreation reject obsolete admission without changing successor metadata"],
+        "fenceKind": "deterministic actual reconstruction/final-rename barrier with emitted assertion milestones",
+        "relatedCases": ["heal.bucket-incarnation-recreation"], "barrierEvents": INCARNATION_EVENTS,
+        "limits": "native storage commit evidence only; not canonical fleet checkpoint/MRF replay"},
+}
+CARGO_LOCK_SHA = "d8f7bc416ba67d19873d34e9389e5aa823b22d7d7552706a5a810cee26f6eda2"
+BUILD_ENV = {'CARGO_BUILD_JOBS': '2', 'CARGO_INCREMENTAL': '0', 'CARGO_PROFILE_RELEASE_DEBUG': '0',
+             'CARGO_PROFILE_RELEASE_STRIP': 'debuginfo'}
+BUILD_COMMAND = ['cargo', 'test', '--locked', '--release', '-p', 'rustfs-ecstore', '--lib', '--no-run', '--message-format=json']
+REVIEWED_CANDIDATES = {
+    CANDIDATE: {'sourceTree': '8071fb0a9e5353eb7d3fa58c8a58c8622473f2bd',
+        'sourceFiles': {SOURCE: SOURCE_SHA}, 'regressions': REGRESSIONS},
+    INCARNATION_CANDIDATE: {'sourceTree': 'd57bcda8b1551727ced7073ddd09f8c97c13485f',
+        'sourceFiles': {
+            SOURCE: 'a375fbf105d2491e1582c65c417509ac3eff23db826db788eb0aeb629e07f6b8',
+            'crates/ecstore/src/store/heal.rs': '5ecf643f43f6f61f5b13f777f68faafba37e58a98eecb8355254f2ea75a1e9b1',
+            'crates/ecstore/src/store/bucket.rs': 'a264de25fc4d3693ed962ea3613055b90f7092d0eb1cc748895030ab8adf1ae3',
+            'crates/ecstore/src/store/bucket_fence.rs': '6f9d97cdd580bbd91f79af5723ff4712065b3d054cb5590db35fc00c79e1f262',
+            'crates/ecstore/src/store/peer.rs': '85636a2536efc9e14fef0e1fe3d11de53093c45df44951b8fd08e4ed1edbf251',
+            'crates/ecstore/src/set_disk/mod.rs': 'd4280fb89752f6198cb5641ea8ed23f5a41a4c87688e10bfce80a548e302e14f'},
+        'regressions': {**REGRESSIONS, **INCARNATION_REGRESSIONS}},
+}
+
+
+def runtime_environment(commit):
+    # Match the candidate's nextest ecstore stack setup for real storage tests.
+    return {'RUST_MIN_STACK': '33554432'} if commit == INCARNATION_CANDIDATE else {}
+
+
+def exact_command(binary, name, commit):
+    # Captured output keeps libtest's result line intact while retaining every
+    # successful test milestone; nocapture interleaves the first milestone.
+    output_flag = '--show-output' if commit == INCARNATION_CANDIDATE else '--nocapture'
+    return [str(binary), name, '--exact', output_flag, '--test-threads=1']
 
 
 def require(value, message):
@@ -95,35 +159,66 @@ def exact_listing(output, name):
 
 def test_result(output, name, code):
     # A successful zero-test filter or an ignored test is not a regression run.
-    require(code == 0 and len(re.findall(r"(?m)^running 1 test\s*$", output)) == 1
-            and re.search(r"(?m)^test " + re.escape(name) + r" \.\.\. ok\s*$", output)
-            and re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored;", output),
+    require(type(code) is int and code == 0
+            and re.findall(r"(?m)^running .*", output) == ['running 1 test']
+            and re.findall(r"(?m)^test (?!result:).*", output) == [f'test {name} ... ok']
+            and len(re.findall(r"(?m)^test result:.*", output)) == 1
+            and re.search(r"(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored;", output),
             "exact native execution did not report one real passing test")
     return {"exactTestExecuted": True, "nativeRegressionPassed": True,
             "fleetPassClaimed": False, "emittedBarrierLogsClaimed": False}
 
 
+def barrier_events(output, spec):
+    events = re.findall(r"(?m)^incarnation_commit_barrier: ([a-z_]+)\s*$", output)
+    require(events == spec.get('barrierEvents', []), "native barrier milestones are absent, duplicated or out of order")
+    return events
+
+
+def verify_manifest(directory):
+    manifest = json.loads((directory / 'native-regressions.json').read_text())
+    contract = REVIEWED_CANDIDATES.get(manifest.get('candidateCommit'))
+    require(contract is not None and manifest.get('schemaVersion') == 1
+            and manifest.get('candidateSourceTree') == contract['sourceTree']
+            and manifest.get('candidateCargoLockSha256') == CARGO_LOCK_SHA
+            and manifest.get('sourceFiles') == contract['sourceFiles']
+            and manifest.get('regressions') == contract['regressions'] and manifest.get('sourceUnmodified') is True
+            and manifest.get('optimized') is True and manifest.get('buildEnvironment') == BUILD_ENV
+            and manifest.get('buildCommand') == BUILD_COMMAND
+            and manifest.get('binaryKind') == 'native-regression-not-released-service'
+            and manifest.get('runtimeEnvironment') == runtime_environment(manifest.get('candidateCommit'))
+            and manifest.get('collectorSha256') == sha(Path(__file__)) and manifest.get('fleetPassClaimed') is False,
+            "native artifact identity or reviewed contract differs")
+    require(manifest.get('binaryName') == 'ecstore-native-tests', "native binary path is not allowlisted")
+    binary = directory / manifest['binaryName']
+    require(binary.is_file() and not binary.is_symlink() and sha(binary) == manifest.get('binarySha256'), "native binary changed")
+    return manifest, binary, contract
+
+
 def build(source, commit, out):
-    require(commit == CANDIDATE and subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip() == commit,
+    contract = REVIEWED_CANDIDATES.get(commit)
+    require(contract is not None and subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip() == commit,
             "native regression contract requires the reviewed immutable candidate checkout")
     require(subprocess.run(['git', '-C', str(source), 'diff', '--quiet']).returncode == 0
             and subprocess.run(['git', '-C', str(source), 'diff', '--cached', '--quiet']).returncode == 0,
             "native source has tracked modifications")
     require(not subprocess.check_output(['git', '-C', str(source), 'ls-files', '--others', '--exclude-standard'], text=True).strip(),
             "native candidate checkout has untracked source/configuration")
-    require(sha(source / SOURCE) == SOURCE_SHA, "native test source hash differs from its reviewed fence assertions")
+    require(subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD^{tree}'], text=True).strip() == contract['sourceTree']
+            and sha(source / 'Cargo.lock') == CARGO_LOCK_SHA
+            and all(sha(source / path) == digest for path, digest in contract['sourceFiles'].items()),
+            "native source/tree/lock differs from its reviewed fence assertions")
     require(not out.exists() and shutil.disk_usage(source).free >= 12 * 1024**3,
             "fresh output and at least 12 GiB build space required")
     out.mkdir(parents=True)
-    save(out / 'native-build-request.json', {'candidateCommit': commit, 'sourceFiles': {SOURCE: SOURCE_SHA},
-        'candidateCargoLockSha256': sha(source / 'Cargo.lock'), 'regressions': REGRESSIONS,
+    save(out / 'native-build-request.json', {'candidateCommit': commit, 'sourceFiles': contract['sourceFiles'],
+        'candidateCargoLockSha256': sha(source / 'Cargo.lock'), 'regressions': contract['regressions'],
         'runId': os.environ.get('GITHUB_RUN_ID'), 'runAttempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
         'fleetPassClaimed': False})
     target = out / 'target'
-    build_env = {'CARGO_BUILD_JOBS': '2', 'CARGO_INCREMENTAL': '0', 'CARGO_PROFILE_RELEASE_DEBUG': '0',
-                 'CARGO_PROFILE_RELEASE_STRIP': 'debuginfo'}
+    build_env = BUILD_ENV
     env = {**os.environ, **build_env, 'CARGO_TARGET_DIR': str(target)}
-    cargo = ['cargo', 'test', '--locked', '--release', '-p', 'rustfs-ecstore', '--lib', '--no-run', '--message-format=json']
+    cargo = BUILD_COMMAND
     # Preserve diagnostics in files; native artifacts never require modifying
     # candidate source or adding a fake fence/event to an existing test.
     with (out / 'cargo.jsonl').open('x') as stdout, (out / 'cargo.stderr').open('x') as stderr:
@@ -149,18 +244,19 @@ def build(source, commit, out):
     listing = subprocess.run([str(binary), '--list'], capture_output=True, text=True, timeout=60)
     (out / 'test-inventory.log').write_text(listing.stdout + listing.stderr)
     require(listing.returncode == 0, "candidate native inventory failed")
-    for spec in REGRESSIONS.values():
+    for spec in contract['regressions'].values():
         exact_listing(listing.stdout, spec['test'])
     manifest = {'schemaVersion': 1, 'candidateCommit': commit, 'candidateSourceTree': subprocess.check_output(
         ['git', '-C', str(source), 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
-        'sourceFiles': {SOURCE: SOURCE_SHA}, 'candidateCargoLockSha256': sha(source / 'Cargo.lock'),
+        'sourceFiles': contract['sourceFiles'], 'candidateCargoLockSha256': sha(source / 'Cargo.lock'),
         'binarySha256': sha(binary), 'binaryName': binary.name, 'binaryKind': 'native-regression-not-released-service',
         'collectorSha256': sha(Path(__file__)), 'testingCommit': os.environ.get('AUTO_TESTING_SHA'),
         'sourceUnmodified': True, 'buildCommand': cargo, 'buildEnvironment': build_env, 'optimized': True, 'buildJobs': 2,
+        'runtimeEnvironment': runtime_environment(commit),
         'toolchain': subprocess.check_output(['rustc', '-vV'], cwd=source, text=True),
         'runId': os.environ.get('GITHUB_RUN_ID'), 'runAttempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
-        'regressions': REGRESSIONS, 'fleetPassClaimed': False,
-        'limits': 'native and fleet evidence are independently scored; emitted fence logs and unmapped critical points remain gaps'}
+        'regressions': contract['regressions'], 'fleetPassClaimed': False,
+        'limits': 'native and fleet evidence are independently scored; only reviewed tests with verified original milestones claim emitted barriers'}
     save(out / 'native-regressions.json', manifest)
     # Remove only the build cache created under this fresh task output after
     # copying and identifying the executable and every build diagnostic.
@@ -169,16 +265,10 @@ def build(source, commit, out):
 
 
 def run(directory, selected, out):
-    manifest = json.loads((directory / 'native-regressions.json').read_text())
-    require(manifest.get('schemaVersion') == 1 and manifest.get('candidateCommit') == CANDIDATE
-            and manifest.get('sourceFiles') == {SOURCE: SOURCE_SHA} and manifest.get('sourceUnmodified') is True
-            and manifest.get('regressions') == REGRESSIONS and manifest.get('optimized') is True
-            and manifest.get('collectorSha256') == sha(Path(__file__)),
-            "native artifact identity or reviewed contract differs")
-    require(manifest.get('binaryName') == 'ecstore-native-tests', "native binary path is not allowlisted")
-    binary = directory / manifest['binaryName']
-    require(binary.is_file() and not binary.is_symlink() and sha(binary) == manifest['binarySha256'], "native binary changed")
-    require(selected and len(selected) == len(set(selected)) and set(selected) <= set(REGRESSIONS), "invalid native selection")
+    manifest, binary, contract = verify_manifest(directory)
+    regressions = contract['regressions']
+    selected = list(regressions) if selected is None else selected
+    require(selected and len(selected) == len(set(selected)) and set(selected) <= set(regressions), "invalid native selection")
     require(not out.exists(), "native evidence directory must be fresh")
     out.mkdir(parents=True)
     listing = subprocess.run([str(binary), '--list'], capture_output=True, text=True, timeout=60)
@@ -186,20 +276,25 @@ def run(directory, selected, out):
     require(listing.returncode == 0, "native runtime inventory failed")
     results = []
     for key in selected:
-        spec = REGRESSIONS[key]
+        spec = regressions[key]
         exact_listing(listing.stdout, spec['test'])
         require(not binary.is_symlink() and sha(binary) == manifest['binarySha256'], "native executable changed before exact execution")
-        args = [str(binary), spec['test'], '--exact', '--nocapture', '--test-threads=1']
+        args = exact_command(binary, spec['test'], manifest['candidateCommit'])
         started = time.monotonic_ns()
         record = {'regression': key, 'test': spec['test'], 'command': args, 'sourceAssertions': spec['sourceAssertions'],
-            'binarySha256': manifest['binarySha256'], 'candidateCommit': CANDIDATE, 'fleetPassClaimed': False,
+            'binarySha256': manifest['binarySha256'], 'candidateCommit': manifest['candidateCommit'], 'fleetPassClaimed': False,
             'emittedBarrierLogsClaimed': False, 'fenceKind': spec['fenceKind'], 'limitations': spec['limits']}
+        record['runtimeEnvironment'] = manifest['runtimeEnvironment']
         try:
-            child = subprocess.run(args, capture_output=True, text=True, timeout=120)
+            child = subprocess.run(args, capture_output=True, text=True, timeout=120,
+                env={**os.environ, **manifest['runtimeEnvironment']})
             output = child.stdout + child.stderr
             (out / (key + '.log')).write_text(output)
             record['exitCode'] = child.returncode
             test_result(output, spec['test'], child.returncode)
+            events = barrier_events(output, spec)
+            if events:
+                record.update(observedBarrierEvents=events, emittedBarrierLogsClaimed=True)
             record['verdict'] = 'PASS'
         except subprocess.TimeoutExpired as error:
             def text_part(value):
@@ -221,6 +316,46 @@ def run(directory, selected, out):
     require(all(row['verdict'] == 'PASS' for row in results), 'native regression failure remains in separate evidence')
 
 
+def verify_evidence(directory, evidence, candidate, run_id, run_attempt, helper_sha):
+    manifest, binary, contract = verify_manifest(directory)
+    require(manifest.get('candidateCommit') == candidate['source_sha'] and manifest.get('runId') == str(run_id)
+            and manifest.get('runAttempt') == str(run_attempt) and manifest.get('testingCommit') == helper_sha
+            and isinstance(helper_sha, str) and re.fullmatch(r'[0-9a-f]{40}', helper_sha),
+            "native evidence belongs to another candidate, run attempt or helper")
+    summary = json.loads((evidence / 'native-summary.json').read_text())
+    rows = summary.get('results', [])
+    regressions = contract['regressions']
+    require(summary.get('complete') is True and summary.get('sourceUnmodified') is True
+            and summary.get('fleetPassClaimed') is False and summary.get('canonicalCasePassClaimed') is False
+            and len(rows) == len(regressions) and {row.get('regression') for row in rows} == set(regressions),
+            "native summary omits or duplicates a required test or claims fleet success")
+    listings = [(directory / 'test-inventory.log').read_text(), (evidence / 'runtime-inventory.log').read_text()]
+    observed = {}
+    for row in rows:
+        key = row['regression']
+        spec = regressions[key]
+        require(row == json.loads((evidence / (key + '.json')).read_text()) and row.get('verdict') == 'PASS'
+                and row.get('candidateCommit') == manifest['candidateCommit'] and row.get('binarySha256') == manifest['binarySha256']
+                and all(row.get(name) == spec[name] for name in ('test', 'sourceAssertions', 'fenceKind'))
+                and row.get('limitations') == spec['limits'] and row.get('fleetPassClaimed') is False,
+                "native result changed exact source, scope or executable identity")
+        command = row.get('command', [])
+        require(len(command) == 5 and Path(command[0]).name == binary.name
+                and command[1:] == exact_command(binary, spec['test'], manifest['candidateCommit'])[1:]
+                and row.get('runtimeEnvironment') == manifest['runtimeEnvironment'],
+                "native result has no exact one-test invocation")
+        for listing in listings: exact_listing(listing, spec['test'])
+        output = (evidence / (key + '.log')).read_text()
+        test_result(output, spec['test'], row.get('exitCode'))
+        events = barrier_events(output, spec)
+        require(row.get('emittedBarrierLogsClaimed') is bool(events)
+                and (row.get('observedBarrierEvents') == events if events else 'observedBarrierEvents' not in row),
+                "native report invented or omitted original barrier evidence")
+        if events: observed[key] = events
+    return {'complete': True, 'candidateCommit': manifest['candidateCommit'], 'binarySha256': manifest['binarySha256'],
+            'exactTests': len(rows), 'observedBarrierEvents': observed, 'fleetPassClaimed': False, 'canonicalCasePassClaimed': False}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -230,13 +365,13 @@ def main():
     compiling.add_argument('--out', type=Path, required=True)
     running = commands.add_parser('run')
     running.add_argument('--directory', type=Path, required=True)
-    running.add_argument('--selection', default=','.join(REGRESSIONS))
+    running.add_argument('--selection')
     running.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     if args.command == 'build':
         build(args.source.resolve(strict=True), args.commit, args.out.resolve())
     else:
-        run(args.directory.resolve(strict=True), args.selection.split(','), args.out.resolve())
+        run(args.directory.resolve(strict=True), args.selection.split(',') if args.selection is not None else None, args.out.resolve())
 
 
 if __name__ == '__main__':

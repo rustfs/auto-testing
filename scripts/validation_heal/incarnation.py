@@ -20,6 +20,7 @@ try:
     from .bucket_metadata import system_snapshot, system_files
     from .inspector import verify as verify_inspector
     from .manager_fixture import verify as verify_manager
+    from .incarnation_native import verify as verify_storage
     from .matrix import select
     from .shards import files, map_target, run_task, verify_cohort
     from .stop import idle_fleet
@@ -32,6 +33,7 @@ except ImportError:
     from bucket_metadata import system_snapshot, system_files
     from inspector import verify as verify_inspector
     from manager_fixture import verify as verify_manager
+    from incarnation_native import verify as verify_storage
     from matrix import select
     from shards import files, map_target, run_task, verify_cohort
     from stop import idle_fleet
@@ -43,7 +45,6 @@ BRANCHES = ("old-metadata-rejoin", "old-checkpoint-replay", "old-mrf-replay", "n
 BLOCKERS = {
     "old-checkpoint-replay": "exact old-incarnation runnable checkpoint replay and original terminal evidence are incomplete",
     "old-mrf-replay": "ACK-bound old-incarnation committed MRF replay and retained responsibility evidence are incomplete",
-    "native-incarnation-fence": "manager incarnation regression prerequisites do not prove the required exact storage commit barrier",
 }
 SIZE = 5 * 1024**2 + 123
 
@@ -315,6 +316,8 @@ def main():
     candidate = json.loads(args.candidate.read_text())
     native = verify_manager(os.environ.get("VALIDATION_HEAL_MANAGER_DIRECTORY", ""), candidate, CASE_ID)
     save(args.evidence / "independent-native-incarnation-prerequisites.json", native)
+    storage = verify_storage(os.environ.get("VALIDATION_HEAL_NATIVE_DIRECTORY", ""), candidate, args.testing_commit)
+    save(args.evidence / "independent-native-storage-commit.json", storage)
     require(re.fullmatch(r"[0-9a-f]{40}", args.testing_commit) and re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)
             and re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", "")), "C11 immutable workflow identities required")
     nodes = os.environ.get("RUSTFS_NODES", "vm000 vm001 vm002 vm003").split()
@@ -324,15 +327,22 @@ def main():
     try:
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes)):
             for branch in BRANCHES:
-                result = run_metadata_rejoin(args, topology, selected, candidate) if branch == "old-metadata-rejoin" else {
-                    "topology": topology, "fixture": "DV", "branch": branch, "verdict": "BLOCKED", "cleanup": "PASS",
-                    "reason": BLOCKERS[branch], "fleetBranchExecuted": False, "canonicalCasePassClaimed": False}
+                if branch == "old-metadata-rejoin":
+                    result = run_metadata_rejoin(args, topology, selected, candidate)
+                elif branch == "native-incarnation-fence":
+                    result = {"requestedTopology": topology, "topology": None, "fixture": "DV", "branch": branch,
+                        "verdict": "PREREQUISITE_PASS", "cleanup": "PASS", "fleetBranchExecuted": False,
+                        "evidenceScope": "independent exact-candidate native storage regression",
+                        "nativeProof": storage, "canonicalCasePassClaimed": False}
+                else:
+                    result = {"topology": topology, "fixture": "DV", "branch": branch, "verdict": "BLOCKED", "cleanup": "PASS",
+                        "reason": BLOCKERS[branch], "fleetBranchExecuted": False, "canonicalCasePassClaimed": False}
                 results.append(result)
                 if result["cleanup"] != "PASS": return 1
     finally:
         save(args.evidence / "healthy-summary.json", {"caseId": CASE_ID, "results": results, "complete": False,
             "cleanup": "PASS" if results and all(row["cleanup"] == "PASS" for row in results) else "FAIL",
-            "canonicalCasePassClaimed": False, "reason": "old checkpoint/MRF replay and exact commit fence remain blocked"})
+            "canonicalCasePassClaimed": False, "reason": "old checkpoint/MRF replay remains blocked"})
     return 1
 
 

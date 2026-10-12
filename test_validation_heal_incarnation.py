@@ -135,13 +135,33 @@ class IncarnationTests(unittest.TestCase):
                 return {"topology": topology, "fixture": "DV", "branch": "old-metadata-rejoin", "verdict": "PASS", "cleanup": "PASS"}
             with patch("sys.argv", args), patch.dict(os.environ, {"GITHUB_RUN_ID": "12345"}), \
                  patch.object(suite, "verify_manager", return_value={"canonicalCasePassClaimed": False}), \
+                 patch.object(suite, "verify_storage", return_value={"exactStorageCommitBarrierObserved": True,
+                     "canonicalFleetBranchesExecuted": False, "canonicalCasePassClaimed": False}), \
                  patch.object(suite, "run_metadata_rejoin", side_effect=passed):
                 self.assertEqual(suite.main(), 1)
             result = json.loads((root / "healthy-summary.json").read_text())
             self.assertFalse(result["complete"])
             self.assertFalse(result["canonicalCasePassClaimed"])
             self.assertEqual(len(result["results"]), 8)
-            self.assertEqual(sum(row["verdict"] == "BLOCKED" for row in result["results"]), 6)
+            self.assertEqual(sum(row["verdict"] == "BLOCKED" for row in result["results"]), 4)
+            native = [row for row in result['results'] if row['branch'] == 'native-incarnation-fence']
+            self.assertEqual(len(native), 2)
+            self.assertTrue(all(row['verdict'] == 'PREREQUISITE_PASS' and row['topology'] is None
+                                and not row['fleetBranchExecuted'] for row in native))
+            self.assertTrue((root / 'independent-native-storage-commit.json').is_file())
+
+    def test_unverified_storage_artifact_refuses_before_fleet_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); candidate = root / 'candidate.json'
+            candidate.write_text(json.dumps({'source_sha': 'a' * 40}))
+            args = ['incarnation.py', '--case-id', suite.CASE_ID, '--candidate', str(candidate),
+                '--evidence', str(root), '--rc-bin', str(root / 'rc'), '--tool-directory', str(root / 'tools'),
+                '--testing-commit', 'a' * 40, '--binary-sha', 'b' * 64]
+            with patch('sys.argv', args), patch.object(suite, 'verify_manager', return_value={}), \
+                 patch.object(suite, 'verify_storage', side_effect=ValueError('unverified artifact')), \
+                 patch.object(suite, 'run_metadata_rejoin') as mutate:
+                with self.assertRaisesRegex(ValueError, 'unverified artifact'): suite.main()
+                mutate.assert_not_called()
 
 
 if __name__ == "__main__": unittest.main()

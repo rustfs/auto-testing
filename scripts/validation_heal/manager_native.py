@@ -32,6 +32,10 @@ REVIEWED_CANDIDATES = {
         "sourceTree": "098d5486f801e689ef30c00e5cedb775f0f1be0d",
         "cargoLockSha256": LOCK_SHA,
     },
+    "1aa9be87d18cf941e5020f19e8622c26ba4b10ac": {
+        "sourceTree": "d57bcda8b1551727ced7073ddd09f8c97c13485f",
+        "cargoLockSha256": LOCK_SHA,
+    },
 }
 SOURCE_FILES = {
     "crates/heal/src/heal/resume/tests.rs": "cea1558f8659f01968a5592af55cd0626f1d309c9fecfa0bee26c36775229900",
