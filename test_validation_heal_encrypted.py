@@ -19,6 +19,24 @@ from test_validation_heal_authorization import binding
 
 
 class EncryptedObjectTests(unittest.TestCase):
+    def test_reviewed_candidate_requires_its_own_inspector_before_fleet_deploy(self):
+        for commit in (*encrypted.REVIEWED_CANDIDATES, "f" * 40):
+            with self.subTest(commit=commit), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                candidate = {"source_sha": commit}
+                (root / "candidate.json").write_text(json.dumps(candidate))
+                args = types.SimpleNamespace(evidence=root, candidate=root / "candidate.json", tool_directory=root / "tools")
+                with patch.dict(os.environ, {"GITHUB_RUN_ID": "12345"}), patch.object(encrypted, "Fleet") as fleet, \
+                        patch.object(encrypted, "verify_inspector", side_effect=ValueError("inspector boundary")) as inspector:
+                    message = "inspector boundary" if commit in encrypted.REVIEWED_CANDIDATES else "unreviewed encrypted"
+                    with self.assertRaisesRegex(ValueError, message):
+                        encrypted.run_branch(args, "H1", ["node1"], "sse-c")
+                    fleet.return_value.deploy.assert_not_called()
+                    if commit in encrypted.REVIEWED_CANDIDATES:
+                        inspector.assert_called_once_with(args.tool_directory, candidate)
+                    else:
+                        inspector.assert_not_called()
+
     def geometry(self):
         before = shard_fixtures.HealShardOracleTest().snapshot()
         key, bucket = "objects/0008.bin", "rv-heal-0123456789abcdef"

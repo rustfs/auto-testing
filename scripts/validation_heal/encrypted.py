@@ -43,6 +43,16 @@ BRANCHES = ("sse-s3", "sse-kms", "sse-c", "encrypted-versioned")
 COUNT = 16
 SIZE = 5 * 1024**2 + 123
 CANDIDATE = "072b57b37559fbe626aeda8abf61617fdcbdd926"
+REVIEWED_CANDIDATES = {
+    CANDIDATE: {},
+    # This source keeps the original storage/KMS geometry and fixes the
+    # customer-key PUT/HEAD/GET response projection without changing the oracle.
+    "16cf19817e0c81e24d0d787a916f734a34517ec5": {
+        "rustfs/src/app/object/put.rs": "01256c2995f04845840d28c8434cdfaca072766f88693a7d8cb8d24ed78463c7",
+        "rustfs/src/app/object/head.rs": "d3ed1e0dcb548dbcf80769fb6ea8e37912e76a59c85ae75628baea36dab542f7",
+        "rustfs/src/app/object/get.rs": "e2ce8101de7e50b4941bb6ecca36440f439cc3212d2be50f79380d212d2ed704",
+    },
+}
 REFERENCE = {"candidateCommit": CANDIDATE, "dependency": "fresh run-owned static AES-256 KMS key on every candidate node",
     "sourceFiles": {
         "crates/kms/src/config.rs": "7931bb4c6757e60ca3e7fdbff4ac56c5fab59d6d6df8756c9d0287ca692a26f9",
@@ -184,9 +194,10 @@ def run_branch(args, topology, nodes, branch):
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory)
     candidate = json.loads(args.candidate.read_text())
-    require(candidate["source_sha"] == CANDIDATE, "unreviewed encrypted geometry/KMS policy contract")
+    require(candidate["source_sha"] in REVIEWED_CANDIDATES, "unreviewed encrypted geometry/KMS policy contract")
     fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
-    fleet.record("encryption-contract", REFERENCE)
+    fleet.record("encryption-contract", {**REFERENCE, "candidateCommit": candidate["source_sha"],
+        "reviewedResponseSourceFiles": REVIEWED_CANDIDATES[candidate["source_sha"]]})
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     key_id, material = "rv-heal-key-" + run_id, base64.b64encode(secrets.token_bytes(32)).decode()
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
