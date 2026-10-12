@@ -2,6 +2,8 @@
 
 import base64
 import copy
+import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -123,6 +125,39 @@ class PersistenceContractTests(unittest.TestCase):
         for branch in persistence.BLOCKERS:
             with self.subTest(branch=branch), self.assertRaisesRegex(ValueError, "cannot mutate"):
                 persistence.run_checkpoint_fault(None, "H1", ["node"], "DB", branch, {})
+
+    def test_native_branch_reuses_exact_evidence_without_claiming_fleet_or_full_case_pass(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); candidate = root / "candidate.json"
+            candidate.write_text(json.dumps({"source_sha": "1aa9be87d18cf941e5020f19e8622c26ba4b10ac"}))
+            args = ["persistence.py", "--case-id", persistence.CASE_ID, "--candidate", str(candidate),
+                "--evidence", str(root), "--rc-bin", str(root / "rc"), "--tool-directory", str(root / "tools"),
+                "--testing-commit", "a" * 40, "--binary-sha", "b" * 64]
+            proof = {"caseId": persistence.CASE_ID, "casePrerequisiteTests": list(range(10)),
+                "canonicalFleetBranchesExecuted": False, "canonicalCasePassClaimed": False}
+            def passed(args, topology, nodes, fixture, branch, candidate):
+                return {"topology": topology, "fixture": fixture, "branch": branch, "verdict": "PASS", "cleanup": "PASS"}
+            with patch("sys.argv", args), patch.dict(os.environ, {"GITHUB_RUN_ID": "12345"}), \
+                 patch.object(persistence, "verify_manager", return_value=proof) as verify, \
+                 patch.object(persistence, "run_checkpoint_fault", side_effect=passed) as mutate:
+                self.assertEqual(persistence.main(), 1)
+            verify.assert_called_once()
+            self.assertEqual(mutate.call_count, 8)
+            summary = json.loads((root / "healthy-summary.json").read_text())
+            self.assertEqual(len(summary["results"]), 24)
+            self.assertFalse(summary["complete"])
+            self.assertFalse(summary["canonicalCasePassClaimed"])
+            prerequisites = [row for row in summary["results"] if row["branch"] == "native-persist-fence"]
+            self.assertEqual(len(prerequisites), 4)
+            for row in prerequisites:
+                self.assertEqual(row["verdict"], "PREREQUISITE_PASS")
+                self.assertIsNone(row["topology"]); self.assertIsNone(row["fixture"])
+                self.assertFalse(row["fleetBranchExecuted"])
+                self.assertFalse(row["individualFsyncHooksClaimed"])
+                self.assertFalse(row["physicalPowerLossClaimed"])
+                self.assertFalse(row["requiredNativeCoverageComplete"])
+                self.assertEqual(row["nativeProof"], proof)
+            self.assertEqual(sum(row["verdict"] == "BLOCKED" for row in summary["results"]), 12)
 
     def interrupted_injection(self, cleanup):
         _, _, frozen, _, _ = self.fixture()
