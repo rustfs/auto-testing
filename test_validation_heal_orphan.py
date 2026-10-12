@@ -258,9 +258,15 @@ class OrphanOracleTests(unittest.TestCase):
                 'execution': {'state': 'completed'}, 'coverage': 'complete', 'objectsTruncated': False,
                 'counters': {'processed': 1, 'healed': 0, 'failed': 0, 'unknown': 0}, 'objects': []}}
         if branch == 'remove-false':
+            status['summary'] = 'stopped'
             status['detail'] = 'Object not found: ' + self.bucket + '/' + orphan.KEY
-            status['outcome']['counters']['failed'] = 1
+            status['outcome']['counters'] = {'processed': 1, 'healed': 0, 'unchanged': 0, 'skipped': 0,
+                'failed': 1, 'unknown': 0, 'attemptFailures': 1, 'overflowed': False}
             status['outcome']['execution']['state'] = 'completed_with_errors'
+            status['outcome']['objects'] = [{'identity': {'kind': 'object', 'bucket': self.bucket, 'object': orphan.KEY,
+                'versionId': None, 'bucketIncarnationId': None, 'poolIndex': status['settings']['pool'],
+                'setIndex': status['settings']['set']}, 'disposition': {'state': 'failed', 'details': 'permanent'},
+                'detail': status['detail']}]
         if branch == 'remove-true-before-grace':
             status['outcome']['objects'] = [{'identity': {'bucket': self.bucket, 'object': orphan.KEY},
                 'disposition': {'state': 'deferred', 'details': {'reason': 'dangling_delete_grace'}}}]
@@ -285,6 +291,28 @@ class OrphanOracleTests(unittest.TestCase):
         self.assertEqual(source['variants'], list(orphan.BRANCHES))
         self.assertEqual(source['contract']['probes']['topology'], 'H1,H2')
         self.assertIn(orphan.CASE_ID, AUTOMATIC_CASES)
+
+    def test_protected_orphan_refusal_requires_original_failed_identity_and_truthful_terminal(self):
+        status = self.status('remove-false')
+        proof = orphan.terminal_safety(status, 'remove-false', self.bucket, status['settings'])
+        self.assertFalse(proof['repairPassClaimed'])
+        for mutation in ('finished', 'running', 'cancelled', 'partial', 'unknown', 'repaired', 'missing', 'wrong-version',
+                         'wrong-key', 'wrong-selector', 'hidden-attempt', 'duplicate'):
+            changed = copy.deepcopy(status)
+            outcome = changed['outcome']
+            if mutation in ('finished', 'running'): changed['summary'] = mutation
+            elif mutation == 'cancelled': outcome['execution'] = {'state': 'aborted', 'reason': 'cancelled'}
+            elif mutation == 'partial': outcome['coverage'] = 'partial'
+            elif mutation == 'unknown': outcome['counters']['unknown'] = 1
+            elif mutation == 'repaired': outcome['objects'][0]['disposition']['state'] = 'repaired'
+            elif mutation == 'missing': outcome['objects'] = []
+            elif mutation == 'wrong-version': outcome['objects'][0]['identity']['versionId'] = str(uuid.UUID(int=9))
+            elif mutation == 'wrong-key': outcome['objects'][0]['identity']['object'] = 'control.bin'
+            elif mutation == 'wrong-selector': outcome['objects'][0]['identity']['setIndex'] = 1
+            elif mutation == 'hidden-attempt': outcome['counters']['attemptFailures'] = 0
+            else: outcome['objects'].append(copy.deepcopy(outcome['objects'][0]))
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                orphan.terminal_safety(changed, 'remove-false', self.bucket, status['settings'])
 
     def test_shared_paths_are_streamed_through_both_exact_ack_version_ids(self):
         mapping = {}

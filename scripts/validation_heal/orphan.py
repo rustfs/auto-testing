@@ -24,7 +24,7 @@ try:
     from .matrix import select
     from .native_regressions import CANDIDATE
     from .shared_fixture import verify as verify_shared
-    from .shards import files, map_target, run_task
+    from .shards import files, map_target, run_task, validate_absent_request
     from .scopes import verify_parts
     from .stop import idle_fleet
 except ImportError:
@@ -36,7 +36,7 @@ except ImportError:
     from matrix import select
     from native_regressions import CANDIDATE
     from shared_fixture import verify as verify_shared
-    from shards import files, map_target, run_task
+    from shards import files, map_target, run_task, validate_absent_request
     from scopes import verify_parts
     from stop import idle_fleet
 
@@ -116,6 +116,8 @@ def physical_safety(before, after, authority, bucket, expected, branch, doomed, 
 
 
 def terminal_safety(status, branch, bucket, options):
+    if branch == 'remove-false':
+        return validate_absent_request(status, bucket, KEY, options)
     require(status.get('summary') == 'finished' and status.get('truncated', False) is False
             and status.get('settings') == options, 'C10 terminal receipt is absent/truncated or changed its request')
     outcome = status.get('outcome') or {}
@@ -123,12 +125,7 @@ def terminal_safety(status, branch, bucket, options):
     require(outcome.get('coverage') == 'complete' and outcome.get('objectsTruncated', False) is False
             and all(type(counters.get(name)) is int and counters[name] >= 0 for name in ('processed', 'healed', 'failed', 'unknown'))
             and counters['unknown'] == 0, 'C10 responsibility is missing, partial or unknown')
-    if branch == 'remove-false':
-        require(outcome.get('execution', {}).get('state') == 'completed_with_errors'
-                and counters['healed'] == 0 and counters['failed'] == 1
-                and 'Object not found: ' + bucket + '/' + KEY in (status.get('detail') or ''),
-                'C10 metadata-less protected orphan lacks its exact not-found refusal')
-    elif branch == 'remove-true-before-grace':
+    if branch == 'remove-true-before-grace':
         deferred = [value for value in outcome.get('objects', [])
                     if value.get('identity', {}).get('bucket') == bucket and value.get('identity', {}).get('object') == KEY
                     and value.get('disposition', {}).get('state') == 'deferred'

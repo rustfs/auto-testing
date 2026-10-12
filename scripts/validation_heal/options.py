@@ -23,7 +23,7 @@ try:
     from .inspector import verify as verify_inspector
     from .matrix import select
     from .heal_fault import bounded_fault_id
-    from .shards import files, map_target, validate_fault, validate_repaired_physical, peer_status_equal
+    from .shards import files, map_target, validate_fault, validate_repaired_physical, peer_status_equal, validate_absent_request
     from .versions import public_version_id
     from .scopes import verify_parts
     from .stop import idle_fleet
@@ -35,7 +35,7 @@ except ImportError:
     from inspector import verify as verify_inspector
     from matrix import select
     from heal_fault import bounded_fault_id
-    from shards import files, map_target, validate_fault, validate_repaired_physical, peer_status_equal
+    from shards import files, map_target, validate_fault, validate_repaired_physical, peer_status_equal, validate_absent_request
     from versions import public_version_id
     from scopes import verify_parts
     from stop import idle_fleet
@@ -236,16 +236,15 @@ def run_request(probe, fleet, path, options, active, *, rejected=False):
 
 def validate_outcome(status, mapped, selected, repaired, options):
     outcome = status.get('outcome') or {}
+    if not selected:
+        buckets = {identity[0] for identity in mapped}
+        require(not repaired and len(buckets) == 1, 'A10 absent prefix changed its physical scope or claimed a repair')
+        proof = validate_absent_request(status, next(iter(buckets)), 'scope/', options)
+        return {**proof, 'exactPrefixNotFound': True, 'selectedACKs': 0, 'repairedACKs': 0}
     require(status.get('summary') == 'finished' and status.get('settings') == options
             and status.get('truncated', False) is False and outcome.get('coverage') == 'complete'
             and outcome.get('objectsTruncated') is False, 'A10 lacks complete original task coverage/settings')
     counters = outcome.get('counters') or {}
-    if not selected:
-        require(not repaired and outcome.get('execution', {}).get('state') == 'completed_with_errors'
-                and counters.get('healed') == 0 and counters.get('failed') == 1 and counters.get('unknown') == 0
-                and 'Object not found: ' in (status.get('detail') or '') and not outcome.get('objects'),
-                'A10 exact absent prefix was repaired, unknown or incorrectly claimed successful')
-        return {'exactPrefixNotFound': True, 'selectedACKs': 0, 'repairedACKs': 0}
     require(repaired <= selected <= set(mapped) and outcome.get('execution', {}).get('state') == 'completed',
             'A10 responsibility escaped the physical scope or failed')
     objects, seen, incarnations = outcome.get('objects'), set(), {}

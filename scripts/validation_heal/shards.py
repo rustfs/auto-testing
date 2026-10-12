@@ -313,11 +313,56 @@ def validate_dry_run_status(status, target, expected):
 def peer_status_equal(coordinator, peer, *, task, peer_task):
     # The candidate renders startTime at response serialization; it is not a
     # persistent task epoch. Bind the actual signed queries to admission instead.
-    return (coordinator.get("summary") == "finished" and peer.get("summary") == "finished"
+    # Convergence also applies to a truthful negative result. The case oracle,
+    # rather than this comparison, decides whether that result is expected.
+    outcome = coordinator.get("outcome") or {}
+    summary = coordinator.get("summary")
+    execution = outcome.get("execution", {}).get("state")
+    terminal = (summary == "finished" and execution == "completed"
+                or summary == "stopped" and execution == "completed_with_errors"
+                and type(outcome.get("counters", {}).get("failed")) is int
+                and outcome["counters"]["failed"] > 0)
+    return (terminal and peer.get("summary") == summary
             and isinstance(task, tuple) and len(task) == 2 and all(task) and task == peer_task
             and canonical(coordinator.get("outcome")) == canonical(peer.get("outcome"))
-            and coordinator.get("outcome", {}).get("coverage") == "complete"
-            and peer.get("truncated", False) is False)
+            and canonical(coordinator.get("settings")) == canonical(peer.get("settings"))
+            and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False
+            and coordinator.get("truncated", False) is False and peer.get("truncated", False) is False)
+
+
+def validate_absent_request(status, bucket, key, options):
+    """Require the exact retained failure of an absent, nonrecursive object."""
+    outcome = status.get("outcome") or {}
+    require(options.get("recursive") is False and status.get("summary") == "stopped"
+            and status.get("settings") == options and status.get("truncated", False) is False
+            and outcome.get("execution", {}).get("state") == "completed_with_errors"
+            and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False,
+            "absent request lacks its complete original failed task/settings")
+    expected = {"processed": 1, "healed": 0, "unchanged": 0, "skipped": 0, "failed": 1,
+                "unknown": 0, "attemptFailures": 1, "overflowed": False}
+    counters = outcome.get("counters") or {}
+    require(all(type(counters.get(name)) is type(value) and counters[name] == value
+                for name, value in expected.items()), "absent request lost or falsely repaired its failure responsibility")
+    objects = outcome.get("objects")
+    require(isinstance(objects, list) and len(objects) == 1, "absent request omitted or duplicated its failed receipt")
+    receipt = objects[0]
+    identity = receipt.get("identity") or {}
+    require(set(identity) == {"kind", "bucket", "object", "versionId", "bucketIncarnationId", "poolIndex", "setIndex"}
+            and identity.get("kind") == "object" and identity.get("bucket") == bucket
+            and identity.get("object") == key
+            and identity.get("versionId") in {None, "", "null", "00000000-0000-0000-0000-000000000000"}
+            and identity.get("bucketIncarnationId") is None
+            and all(type(identity.get(field)) is type(options.get(option))
+                    and identity.get(field) == options.get(option)
+                    for field, option in (("poolIndex", "pool"), ("setIndex", "set")))
+            and receipt.get("disposition") == {"state": "failed", "details": "permanent"},
+            "absent request changed object/version/selector identity or claimed a different disposition")
+    detail = "Object not found: " + bucket + "/" + key
+    require(isinstance(status.get("detail"), str) and status["detail"].endswith(detail)
+            and isinstance(receipt.get("detail"), str) and receipt["detail"].endswith(detail),
+            "absent request did not retain its exact not-found error")
+    return {"failedRequest": {"bucket": bucket, "key": key}, "canonicalCounters": counters,
+            "completeResponsibility": True, "repairPassClaimed": False}
 
 
 def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_overrides=None, admissions=None):

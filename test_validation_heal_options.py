@@ -106,19 +106,35 @@ class OptionsTests(unittest.TestCase):
         receipt.update(poolIndex=0, setIndex=1 - mapped[identity]['setIndex'])
         with self.assertRaises(ValueError): options.validate_outcome(status, mapped, selected, repaired, request)
 
-    def test_exact_missing_prefix_requires_truthful_not_found_and_no_object_receipts(self):
+    def test_exact_missing_prefix_retains_the_requested_failure_instead_of_ack_objects(self):
         baseline, request = options.paired_options('recursive-false')
-        status = {'summary': 'finished', 'settings': request, 'detail': 'Object not found: ' + self.bucket + '/scope/',
+        detail = 'Heal task execution failed: Object not found: ' + self.bucket + '/scope/'
+        status = {'summary': 'stopped', 'settings': request, 'detail': detail,
             'outcome': {'coverage': 'complete', 'objectsTruncated': False, 'execution': {'state': 'completed_with_errors'},
-                        'objects': [], 'counters': {'healed': 0, 'failed': 1, 'unknown': 0}}}
-        options.validate_outcome(status, self.mapped(), set(), set(), request)
-        for kind in ('success', 'repair', 'unknown', 'receipt', 'detail'):
+                        'objects': [{'identity': {'kind': 'object', 'bucket': self.bucket, 'object': 'scope/',
+                            'versionId': None, 'bucketIncarnationId': None, 'poolIndex': None, 'setIndex': None},
+                            'disposition': {'state': 'failed', 'details': 'permanent'}, 'detail': detail}],
+                        'counters': {'processed': 1, 'healed': 0, 'unchanged': 0, 'skipped': 0,
+                                     'failed': 1, 'unknown': 0, 'attemptFailures': 1, 'overflowed': False}}}
+        proof = options.validate_outcome(status, self.mapped(), set(), set(), request)
+        self.assertEqual(proof['selectedACKs'], 0)
+        self.assertFalse(proof['repairPassClaimed'])
+        for kind in ('success', 'legacy-success', 'repair', 'unknown', 'receipt', 'missing-receipt', 'detail',
+                     'wrong-key', 'incarnation', 'selector', 'attempts', 'false-absence', 'missing-identity'):
             changed = copy.deepcopy(status)
             if kind == 'success': changed['outcome']['execution']['state'] = 'completed'
+            elif kind == 'legacy-success': changed['summary'] = 'finished'
             elif kind == 'repair': changed['outcome']['counters']['healed'] = 1
             elif kind == 'unknown': changed['outcome']['counters']['unknown'] = 1
             elif kind == 'receipt': changed['outcome']['objects'] = [{'disposition': {'state': 'unknown'}}]
-            else: changed['detail'] = ''
+            elif kind == 'missing-receipt': changed['outcome']['objects'] = []
+            elif kind == 'detail': changed['detail'] = ''
+            elif kind == 'wrong-key': changed['outcome']['objects'][0]['identity']['object'] = options.KEYS[0]
+            elif kind == 'incarnation': changed['outcome']['objects'][0]['identity']['bucketIncarnationId'] = 'invented'
+            elif kind == 'selector': changed['outcome']['objects'][0]['identity']['poolIndex'] = False
+            elif kind == 'attempts': changed['outcome']['counters']['attemptFailures'] = 0
+            elif kind == 'false-absence': changed['outcome']['objects'][0]['disposition']['state'] = 'authoritatively_absent'
+            else: changed['outcome']['objects'][0]['identity'].pop('bucketIncarnationId')
             with self.assertRaises(ValueError): options.validate_outcome(changed, self.mapped(), set(), set(), request)
 
     def physical_scene(self):

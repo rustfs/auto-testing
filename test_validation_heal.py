@@ -357,6 +357,32 @@ class HealShardOracleTest(unittest.TestCase):
             else: peer["truncated"] = True
             with self.subTest(invalid=invalid): self.assertFalse(peer_status_equal(coordinator, peer, task=task, peer_task=peer_task))
 
+    def test_peer_convergence_retains_expected_failures_without_certifying_repair(self):
+        terminal = HealHealthyOracleTest().receipt("failed")
+        terminal["summary"] = "stopped"
+        terminal["outcome"]["execution"]["state"] = "completed_with_errors"
+        terminal["outcome"]["counters"].update(unchanged=0, failed=1, attemptFailures=1)
+        terminal["settings"] = {"recursive": False, "pool": 0, "set": 0}
+        task = ("/rustfs/admin/v3/heal/fixture/object.bin", "original-token")
+        self.assertTrue(peer_status_equal(terminal, copy.deepcopy(terminal), task=task, peer_task=task))
+        with self.assertRaises(ValueError): validate_healthy(terminal, "fixture", "object.bin", "verified_healthy")
+        for mutation in ("aborted", "running", "finished", "zero-failures", "bool-failures", "settings",
+                         "truncated", "partial", "token"):
+            peer, original = copy.deepcopy(terminal), copy.deepcopy(terminal)
+            peer_task = task
+            if mutation == "aborted": original["outcome"]["execution"] = {"state": "aborted", "reason": "untraversable"}
+            elif mutation == "running": original["outcome"]["execution"]["state"] = "running"
+            elif mutation == "finished": original["summary"] = "finished"
+            elif mutation == "zero-failures": original["outcome"]["counters"]["failed"] = 0
+            elif mutation == "bool-failures": original["outcome"]["counters"]["failed"] = True
+            elif mutation == "settings": peer["settings"]["set"] = 1
+            elif mutation == "truncated": original["truncated"] = True
+            elif mutation == "partial": original["outcome"]["coverage"] = "partial"
+            else: peer_task = (task[0], "replacement-token")
+            if mutation not in {"settings", "token"}: peer = copy.deepcopy(original)
+            with self.subTest(mutation=mutation):
+                self.assertFalse(peer_status_equal(original, peer, task=task, peer_task=peer_task))
+
     def test_target_role_comes_from_metadata_and_actual_format_slot(self):
         before = self.snapshot()
         self.assertEqual(self.target(before)["disk"], 1)
