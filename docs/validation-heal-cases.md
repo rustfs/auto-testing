@@ -1202,7 +1202,7 @@ Topologies: H1,H2. Branches: checkpoint-truncate, mrf-checksum, future-schema, s
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION`): 已有 journal 故障工具和 10 项候选版本持久化原生回归，但尚缺 H1/H2 全六分支编排、写失败诊断、责任保留和安全重扫；现有 publication interruption 证据也不等于每个 fsync 临界点或断电证据。
+Blocked reason (`EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION`): 已实现 H1/H2 checkpoint 截断、未来 schema、ACK 绑定的 committed MRF CRC 故障和独立安全重扫；10 项原生回归仅为前置证据。仍缺陈旧代次、journal 写失败的完整现场流程及所需 fsync/commit 临界点审核，已实现分支尚无完整 live 审计。
 
 1. 先制造并证明真实 durable root/MRF 责任，CHECKPOINT 定位精确本 run task/record，其他系统记录禁止触碰。
 2. 停止测试服务，按 FAULT_FORMAT 对这些已审核记录分别截断、坏校验、未来 schema、旧代次；写失败实例用独占限额故障层，不塞满真实共享盘。

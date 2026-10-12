@@ -25,6 +25,7 @@ try:
     from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical
     from .stop import idle_fleet, status
     from .root_restart import recovery_status
+    from .persistence_mrf import run as run_mrf_checksum
     from .versions import public_version_id, verify_proof, version_identity
 except ImportError:
     import checkpoint as checkpoints, journal_fault as journal
@@ -37,6 +38,7 @@ except ImportError:
     from shards import files, map_target, run_task, validate_fault, validate_repaired_physical
     from stop import idle_fleet, status
     from root_restart import recovery_status
+    from persistence_mrf import run as run_mrf_checksum
     from versions import public_version_id, verify_proof, version_identity
 
 
@@ -45,7 +47,6 @@ BRANCHES = ("checkpoint-truncate", "mrf-checksum", "future-schema", "stale-gener
             "journal-write-failure", "native-persist-fence")
 IMPLEMENTED = {"checkpoint-truncate": "truncate", "future-schema": "future-schema"}
 BLOCKERS = {
-    "mrf-checksum": "H1/H2 ACK-bound committed MRF corruption, retention and replay orchestration is incomplete",
     "stale-generation": "an actual earlier checkpoint capture exists; complete rollback and durable responsibility reconciliation is still required",
     "journal-write-failure": "the private bounded volume exists; actual checkpoint write refusal, retained ownership and release/rescan orchestration is still required",
 }
@@ -337,6 +338,8 @@ def main():
                 for branch in BRANCHES:
                     if branch in IMPLEMENTED:
                         result = run_checkpoint_fault(args, topology, selected, fixture, branch, candidate)
+                    elif branch == "mrf-checksum":
+                        result = run_mrf_checksum(args, topology, selected, fixture, candidate)
                     elif branch == "native-persist-fence":
                         result = {"requestedTopology": topology, "requestedFixture": fixture, "topology": None,
                             "fixture": None, "branch": branch, "verdict": "PREREQUISITE_PASS", "cleanup": "PASS",
@@ -353,7 +356,7 @@ def main():
     finally:
         save(args.evidence / "healthy-summary.json", {"caseId": CASE_ID, "results": results, "complete": False,
             "cleanup": "PASS" if results and all(row["cleanup"] == "PASS" for row in results) else "FAIL",
-            "canonicalCasePassClaimed": False, "reason": "three live branches and full native cut coverage remain blocked; existing native tests are separate prerequisites"})
+            "canonicalCasePassClaimed": False, "reason": "stale-generation, journal-write-failure and full native cut coverage remain blocked"})
     return 1
 
 

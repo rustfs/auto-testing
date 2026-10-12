@@ -139,10 +139,13 @@ class PersistenceContractTests(unittest.TestCase):
                 return {"topology": topology, "fixture": fixture, "branch": branch, "verdict": "PASS", "cleanup": "PASS"}
             with patch("sys.argv", args), patch.dict(os.environ, {"GITHUB_RUN_ID": "12345"}), \
                  patch.object(persistence, "verify_manager", return_value=proof) as verify, \
+                 patch.object(persistence, "run_mrf_checksum", side_effect=lambda args, topology, nodes, fixture, candidate: {
+                     "topology": topology, "fixture": fixture, "branch": "mrf-checksum", "verdict": "PASS", "cleanup": "PASS"}) as mrf_mutate, \
                  patch.object(persistence, "run_checkpoint_fault", side_effect=passed) as mutate:
                 self.assertEqual(persistence.main(), 1)
             verify.assert_called_once()
             self.assertEqual(mutate.call_count, 8)
+            self.assertEqual(mrf_mutate.call_count, 4)
             summary = json.loads((root / "healthy-summary.json").read_text())
             self.assertEqual(len(summary["results"]), 24)
             self.assertFalse(summary["complete"])
@@ -157,7 +160,7 @@ class PersistenceContractTests(unittest.TestCase):
                 self.assertFalse(row["physicalPowerLossClaimed"])
                 self.assertFalse(row["requiredNativeCoverageComplete"])
                 self.assertEqual(row["nativeProof"], proof)
-            self.assertEqual(sum(row["verdict"] == "BLOCKED" for row in summary["results"]), 12)
+            self.assertEqual(sum(row["verdict"] == "BLOCKED" for row in summary["results"]), 8)
 
     def interrupted_injection(self, cleanup):
         _, _, frozen, _, _ = self.fixture()
