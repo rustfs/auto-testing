@@ -178,6 +178,19 @@ def verify_public(probe, fleet, fixtures, pending, label):
         require(actual_pending["uploads"] == pending["uploads"], "full restart lost an exact pending UploadId/part/ETag")
 
 
+def complete_pending_uploads(recorder, fleet, binding, pending):
+    bucket = pending["bucket"]
+    for upload in pending["uploads"]:
+        recorder.call("complete_multipart_upload", {"Bucket": bucket, "Key": upload["key"], "UploadId": upload["uploadId"],
+            "MultipartUpload": {"Parts": [{"PartNumber": item["PartNumber"], "ETag": item["ETag"]} for item in upload["parts"]]}})
+        expected_body = payload(f"{bucket}/{upload['key']}", 5 * 1024**2 + 3)
+        for endpoint in binding["endpoints"]:
+            observed = fleet.record("pending-mpu-content-after-repeat", Probe(binding, endpoint).s3("get_object", {"Bucket": bucket, "Key": upload["key"]}))
+            require(observed.get("acknowledged") is True and observed.get("resultUnknown") is False
+                    and observed.get("payload") == {"size": len(expected_body), "sha256": hashlib.sha256(expected_body).hexdigest()},
+                    "restarted pending MPU parts lost their actual acknowledged bytes")
+
+
 def run_topology(args, nodes):
     directory = args.evidence / "H2"
     directory.mkdir()
@@ -293,14 +306,7 @@ def run_topology(args, nodes):
         fleet.stop()
         require(physical_content(rebuilt) == physical_content(fleet.snapshot("physical-after-repeat-get", quiescent=True)), "repeat full restart or verification changed a user file")
         fleet.start()
-        for upload in pending["uploads"]:
-            recorder.call("complete_multipart_upload", {"Bucket": bucket, "Key": upload["key"], "UploadId": upload["uploadId"],
-                "MultipartUpload": {"Parts": [{"PartNumber": item["PartNumber"], "ETag": item["ETag"]} for item in upload["parts"]]}})
-            expected_body = payload(f"{bucket}/{upload['key']}", 5 * 1024**2 + 3)
-            for endpoint in binding["endpoints"]:
-                observed = fleet.record("pending-mpu-content-after-repeat", Probe(binding, endpoint).s3("get_object", {"Bucket": bucket, "Key": upload["key"]}))
-                require(observed.get("acknowledged") is True and observed.get("resultUnknown") is False
-                        and observed.get("response", {}).get("payload") == {"size": len(expected_body), "sha256": hashlib.sha256(expected_body).hexdigest()}, "restarted pending MPU parts lost their actual acknowledged bytes")
+        complete_pending_uploads(recorder, fleet, binding, pending)
         result["branches"] = {
             BRANCHES[0]: {"verdict": "PASS", "originalTaskId": token, "runningWindow": first["outcome"]["counters"],
                 "beforeInterruptionPhysical": before_partial, "afterAllActualExitsPhysical": after_partial,

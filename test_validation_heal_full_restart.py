@@ -1,10 +1,12 @@
 import copy
+from datetime import datetime, timedelta, timezone
+import io
 import json
 from pathlib import Path
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts.validation_heal import full_restart as restart
 from scripts.validation_heal.matrix import select, AUTOMATIC_CASES
@@ -13,6 +15,45 @@ from scripts.validation_heal.fleet_node import PROCESS_FIELDS, resource_limits, 
 
 class FullRestartTests(unittest.TestCase):
     token = "12345678-1234-4234-8234-123456789abc"
+
+    def test_restarted_mpu_checks_real_streamed_get_receipts_on_every_peer(self):
+        bucket, key = "rv-heal-0123456789abcdef", "pending/parts.bin"
+        binding = {"schemaVersion": 1, "runId": "gh-12345678901-1-h2", "jumpHostOnly": True,
+            "exclusiveHealService": True, "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+            "bucketPrefix": bucket, "endpoints": {f"node{i}": f"http://rustfs-node{i}:9000" for i in range(1, 5)},
+            "defaultEndpoint": "node1", "candidateCommit": "a" * 40, "harnessCommit": "b" * 40,
+            "candidatePackageSha256": "c" * 64, "candidateBinarySha256": "d" * 64, "rcBinarySha256": "e" * 64,
+            "maxInventoryObjects": 2048, "maxInventoryBytes": 2 * 1024**3}
+        pending = {"bucket": bucket, "uploads": [{"key": key, "uploadId": "original-upload",
+            "parts": [{"PartNumber": 1, "ETag": "original-part"}]}]}
+        expected = restart.payload(f"{bucket}/{key}", 5 * 1024**2 + 3)
+        client = Mock()
+        recorder = Mock()
+        fleet = types.SimpleNamespace(record=lambda label, value: value)
+        calls = []
+        bad_endpoint = None
+
+        def streamed(probe):
+            def get_object(**params):
+                self.assertEqual(params, {"Bucket": bucket, "Key": key})
+                calls.append(probe.endpoint_name)
+                body = bytes([expected[0] ^ 1]) + expected[1:] if probe.endpoint_name == bad_endpoint else expected
+                return {"ContentLength": len(body), "Body": io.BytesIO(body),
+                        "ResponseMetadata": {"HTTPStatusCode": 200}}
+            client.get_object.side_effect = get_object
+            return client
+
+        with patch.object(restart.Probe, "s3_client", streamed):
+            restart.complete_pending_uploads(recorder, fleet, binding, pending)
+            self.assertEqual(calls, list(binding["endpoints"]))
+            recorder.call.assert_called_once_with("complete_multipart_upload", {
+                "Bucket": bucket, "Key": key, "UploadId": "original-upload",
+                "MultipartUpload": {"Parts": [{"PartNumber": 1, "ETag": "original-part"}]}})
+            bad_endpoint = "node4"
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "lost their actual acknowledged bytes"):
+                restart.complete_pending_uploads(recorder, fleet, binding, pending)
+            self.assertEqual(calls, list(binding["endpoints"]))
 
     def test_combined_fixture_has_explicit_bounded_physical_census_budget(self):
         # Four roots retain xl.meta, an external part and its integrity
