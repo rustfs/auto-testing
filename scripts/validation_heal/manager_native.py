@@ -19,6 +19,16 @@ except ImportError:
 
 SOURCE_TREE = "8071fb0a9e5353eb7d3fa58c8a58c8622473f2bd"
 LOCK_SHA = "d8f7bc416ba67d19873d34e9389e5aa823b22d7d7552706a5a810cee26f6eda2"
+REVIEWED_CANDIDATES = {
+    native.CANDIDATE: {"sourceTree": SOURCE_TREE, "cargoLockSha256": LOCK_SHA},
+    # The manager, checkpoint, MRF and outcome sources are byte-identical to
+    # the original reviewed candidate; this source adds the validation fixes
+    # elsewhere in the RustFS tree.
+    "16cf19817e0c81e24d0d787a916f734a34517ec5": {
+        "sourceTree": "7edb1a2d02d60323cdfab4173485c33cb06b297a",
+        "cargoLockSha256": LOCK_SHA,
+    },
+}
 SOURCE_FILES = {
     "crates/heal/src/heal/resume/tests.rs": "cea1558f8659f01968a5592af55cd0626f1d309c9fecfa0bee26c36775229900",
     "crates/heal/src/heal/resume/checkpoint.rs": "fe067b39ee406e16517bd665f7f49457daffa05d5d7bc298bd965e927b1381c1",
@@ -92,8 +102,11 @@ def collectors():
 
 def verify_manifest(directory):
     manifest = json.loads((directory / "manager-native.json").read_text())
-    native.require(manifest.get("schemaVersion") == 1 and manifest.get("candidateCommit") == native.CANDIDATE
-        and manifest.get("candidateSourceTree") == SOURCE_TREE and manifest.get("candidateCargoLockSha256") == LOCK_SHA
+    candidate = manifest.get("candidateCommit")
+    contract = REVIEWED_CANDIDATES.get(candidate)
+    native.require(manifest.get("schemaVersion") == 1 and contract is not None
+        and manifest.get("candidateSourceTree") == contract["sourceTree"]
+        and manifest.get("candidateCargoLockSha256") == contract["cargoLockSha256"]
         and manifest.get("sourceFiles") == SOURCE_FILES and manifest.get("collectorSources") == collectors()
         and manifest.get("regressions") == REGRESSIONS and manifest.get("sourceUnmodified") is True
         and manifest.get("optimized") is True and manifest.get("buildEnvironment") == BUILD_ENV
@@ -106,11 +119,12 @@ def verify_manifest(directory):
 
 
 def build(source, commit, out):
-    native.require(commit == native.CANDIDATE and subprocess.check_output(
+    contract = REVIEWED_CANDIDATES.get(commit)
+    native.require(contract is not None and subprocess.check_output(
         ["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip() == commit,
         "manager native tests require the exact reviewed candidate")
-    native.require(subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], text=True).strip() == SOURCE_TREE
-        and native.sha(source / "Cargo.lock") == LOCK_SHA and all(native.sha(source / path) == digest for path, digest in SOURCE_FILES.items()),
+    native.require(subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], text=True).strip() == contract["sourceTree"]
+        and native.sha(source / "Cargo.lock") == contract["cargoLockSha256"] and all(native.sha(source / path) == digest for path, digest in SOURCE_FILES.items()),
         "manager candidate source/tree/lock differs")
     for args in (["diff", "--quiet"], ["diff", "--cached", "--quiet"]):
         native.require(subprocess.run(["git", "-C", str(source), *args]).returncode == 0, "candidate source is modified")
@@ -118,8 +132,8 @@ def build(source, commit, out):
                    "candidate contains untracked source/configuration")
     native.require(not out.exists() and shutil.disk_usage(source).free >= 12 * 1024**3, "fresh output and 12 GiB build space required")
     out.mkdir(parents=True)
-    request = {"schemaVersion": 1, "candidateCommit": commit, "candidateSourceTree": SOURCE_TREE,
-        "candidateCargoLockSha256": LOCK_SHA, "sourceFiles": SOURCE_FILES, "collectorSources": collectors(),
+    request = {"schemaVersion": 1, "candidateCommit": commit, "candidateSourceTree": contract["sourceTree"],
+        "candidateCargoLockSha256": contract["cargoLockSha256"], "sourceFiles": SOURCE_FILES, "collectorSources": collectors(),
         "regressions": REGRESSIONS, "testingCommit": os.environ.get("AUTO_TESTING_SHA"),
         "runId": os.environ.get("GITHUB_RUN_ID"), "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
         "fleetPassClaimed": False, "sourceUnmodified": True, "optimized": True, "buildEnvironment": BUILD_ENV}
@@ -165,7 +179,7 @@ def run(directory, out):
         native.exact_listing(listing.stdout, value["test"])
         verify_manifest(directory)
         command = [str(binary), value["test"], "--exact", "--nocapture", "--test-threads=1"]
-        record = {"regression": key, **value, "candidateCommit": native.CANDIDATE,
+        record = {"regression": key, **value, "candidateCommit": manifest["candidateCommit"],
                   "binarySha256": manifest["binarySha256"], "command": command}
         started = time.monotonic_ns()
         try:
@@ -191,7 +205,8 @@ def run(directory, out):
 
 def verify_evidence(directory, evidence, candidate, run_id, run_attempt, helper_sha):
     manifest, _ = verify_manifest(directory)
-    native.require(candidate["source_sha"] == native.CANDIDATE and manifest.get("runId") == str(run_id)
+    native.require(candidate["source_sha"] == manifest.get("candidateCommit")
+        and manifest.get("candidateCommit") in REVIEWED_CANDIDATES and manifest.get("runId") == str(run_id)
         and manifest.get("runAttempt") == str(run_attempt) and manifest.get("testingCommit") == helper_sha
         and re.fullmatch(r"[0-9a-f]{40}", helper_sha), "manager native evidence belongs to another build attempt")
     summary = json.loads((evidence / "manager-native-summary.json").read_text())
@@ -204,14 +219,14 @@ def verify_evidence(directory, evidence, candidate, run_id, run_attempt, helper_
     for row in rows:
         key = row["regression"]
         native.require(row == json.loads((evidence / (key + ".json")).read_text()) and row.get("verdict") == "PASS"
-            and row.get("binarySha256") == manifest["binarySha256"] and row.get("candidateCommit") == native.CANDIDATE
+            and row.get("binarySha256") == manifest["binarySha256"] and row.get("candidateCommit") == manifest["candidateCommit"]
             and all(row.get(name) == value for name, value in REGRESSIONS[key].items()), "manager result changed exact scope or identity")
         command = row.get("command", [])
         native.require(len(command) == 5 and Path(command[0]).name == manifest["binaryName"]
             and command[1:] == [row["test"], "--exact", "--nocapture", "--test-threads=1"], "manager result lacks exact one-test invocation")
         for listing in listings: native.exact_listing(listing, row["test"])
         native.test_result((evidence / (key + ".log")).read_text(), row["test"], row.get("exitCode"))
-    return {"complete": True, "candidateCommit": native.CANDIDATE, "binarySha256": manifest["binarySha256"],
+    return {"complete": True, "candidateCommit": manifest["candidateCommit"], "binarySha256": manifest["binarySha256"],
             "exactTests": len(rows), "canonicalCasePassClaimed": False, "fleetPassClaimed": False}
 
 
