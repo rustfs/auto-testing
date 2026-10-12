@@ -55,7 +55,7 @@ def indexed(observed):
     return result
 
 
-def retained_corruption(original, current, receipts):
+def retained_corruption(original, current, receipts, bucket):
     require(set(original) == set(current) and len(original) in {1, 4}, "F07 MRF evidence lost a bound physical node")
     expected, changed = {node: indexed(value) for node, value in original.items()}, set()
     require(receipts, "F07 MRF corruption has no actual original payload mutation")
@@ -70,7 +70,7 @@ def retained_corruption(original, current, receipts):
                 and receipt.get("taskId") is None and receipt.get("kind") == "checksum" and receipt.get("applied") is True
                 and receipt.get("originalBackupRetained") is True and receipt.get("productRepairClaimed") is False
                 and journal.same_json(receipt.get("before"), journal.entry(raw)), "F07 MRF mutation lost its original payload binding")
-        corrupt = raw[:-1] + bytes([raw[-1] ^ 1])
+        corrupt = journal.transform(raw, receipt, {"bucket": bucket}, records)
         require(journal.same_json(receipt.get("injected"), journal.entry(corrupt)), "F07 MRF corruption changed bytes outside the actual CRC")
         expected[node][disk, path] = corrupt
         changed.add(identity)
@@ -187,7 +187,7 @@ def run(args, topology, nodes, fixture, candidate):
                 fleet.journal_faults.append((node, params.copy()))
                 receipts.append(fleet.record("actual-original-MRF-CRC-injection", {"node": node,
                     **fleet.remote(node, "journal-apply", **params)}))
-        retained_corruption(original, observe(fleet, "injected-stopped-MRF-records"), receipts)
+        retained_corruption(original, observe(fleet, "injected-stopped-MRF-records"), receipts, bucket)
         window = JournalWindow(fleet, "F07-corrupt-MRF-replay", event_targets={"rustfs::heal::mrf"})
         fleet.start()
         deadline = time.monotonic() + 60
@@ -201,7 +201,7 @@ def run(args, topology, nodes, fixture, candidate):
                 time.sleep(.5)
         fleet.stop()
         result["originalResponsibilityBeforeRescan"] = retained_corruption(
-            original, observe(fleet, "retained-corrupt-MRF-before-rescan"), receipts)
+            original, observe(fleet, "retained-corrupt-MRF-before-rescan"), receipts, bucket)
         require(physical_content(authorities) == physical_content(fleet.snapshot("before-separate-rescan", quiescent=True)),
                 "F07 corrupt MRF replay silently changed original object responsibility")
         fleet.record("release-original-member-gate", fleet.remote(shard["node"], "drive-gate", mode="clear"))
@@ -217,7 +217,7 @@ def run(args, topology, nodes, fixture, candidate):
         repaired = fleet.snapshot("complete-rescan-physical-before-business-reads", quiescent=True)
         cohorts = mrf.replica_census(repaired, bucket, expected, authorities)
         result["fullShardIntegrity"] = [verify_cohort(fleet, cohort, "F07-full-shard-proof") for cohort in cohorts]
-        retained_corruption(original, observe(fleet, "retained-corrupt-MRF-after-rescan"), receipts)
+        retained_corruption(original, observe(fleet, "retained-corrupt-MRF-after-rescan"), receipts, bucket)
         fleet.start()
         for endpoint in binding["endpoints"]:
             inventory = fleet.record("all-peer-S3", {"endpoint": endpoint,
@@ -226,7 +226,7 @@ def run(args, topology, nodes, fixture, candidate):
         fleet.stop()
         require(physical_content(repaired) == physical_content(fleet.snapshot("after-business-reads", quiescent=True)),
                 "F07 business reads repaired work not proved by the separate rescan")
-        result["originalResponsibilityAfterReads"] = retained_corruption(original, observe(fleet, "retained-corrupt-MRF-after-reads"), receipts)
+        result["originalResponsibilityAfterReads"] = retained_corruption(original, observe(fleet, "retained-corrupt-MRF-after-reads"), receipts, bucket)
         result.update(verdict="PASS", originalMrfRepairClaimed=False, completePhysicalAndS3ManifestsVerified=True)
     except (Exception, KeyboardInterrupt) as exc:
         result.update(verdict="FAIL", failure={"type": type(exc).__name__, "message": str(exc)})

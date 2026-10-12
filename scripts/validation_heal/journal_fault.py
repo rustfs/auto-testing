@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import uuid
 
 
@@ -131,6 +132,28 @@ def owned_mrf_intents(intents, bucket):
     return owned
 
 
+def corrupt_owned_mrf_crc(raw, intents, bucket):
+    owned_mrf_intents(intents, bucket)
+    cursor, selected = 0, None
+    for intent in intents:
+        start = cursor
+        _, layout, kind, _, _, has_version = struct.unpack_from("<BBBBQB", raw, cursor)
+        cursor += 13 + (16 if has_version else 0) + (8 if layout in {2, 3} else 0)
+        bucket_size, key_size = struct.unpack_from("<II", raw, cursor)
+        cursor += 8 + bucket_size + key_size
+        if kind == 4:
+            cursor += 64
+            size = struct.unpack_from("<I", raw, cursor)[0]
+            cursor += 4 + size
+        require(hashlib.sha256(raw[start:cursor + 4]).hexdigest() == intent["intentDigest"],
+                "MRF CRC position differs from its decoded original responsibility")
+        if intent["bucket"] == bucket: selected = cursor + 3
+        cursor += 4
+    require(cursor == len(raw) and selected is not None, "MRF CRC target omitted its owned original record")
+    # Preserve every internal companion and all ACK identity fields byte-for-byte.
+    return raw[:selected] + bytes([raw[selected] ^ 1]) + raw[selected + 1:]
+
+
 def transform(raw, request, owner, mrf, *, earlier=None):
     family, kind = request["family"], request.get("kind")
     require(kind in {"truncate", "future-schema", "checksum", "stale-generation"}, "unknown durable-record byte fault")
@@ -182,9 +205,7 @@ def transform(raw, request, owner, mrf, *, earlier=None):
         require(family == "mrf" and kind == "checksum" and re.fullmatch(r"\.heal-mrf-snapshot\.[01]\.bin", path[-1]),
                 "MRF mutation is restricted to the exact actual payload checksum")
         intents = mrf.decode_journal(raw)
-        owned_mrf_intents(intents, owner["bucket"])
-        # Corrupt a real record CRC without inventing, dropping or retagging ACK identities.
-        return raw[:-1] + bytes([raw[-1] ^ 1])
+        return corrupt_owned_mrf_crc(raw, intents, owner["bucket"])
     if kind == "truncate":
         require(len(raw) > 8, "cannot truncate an empty/unknown record")
         return raw[:len(raw) // 2]

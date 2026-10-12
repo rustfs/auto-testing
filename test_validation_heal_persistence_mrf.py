@@ -30,7 +30,7 @@ class MrfCorruptionTests(unittest.TestCase):
                 "originalBackupRetained": True, "productRepairClaimed": False,
                 "before": journal.entry(raw), "injected": journal.entry(corrupted)})
             row.update(journal.entry(corrupted), rawBase64=base64.b64encode(corrupted).decode())
-        return original, current, receipts
+        return original, current, receipts, "rv-heal-0123456789abcdef"
 
     def test_corrupt_crc_keeps_every_manifest_lifecycle_and_unknown_byte(self):
         proof = suite.retained_corruption(*self.fixture())
@@ -42,7 +42,7 @@ class MrfCorruptionTests(unittest.TestCase):
 
     def test_missing_rewritten_restored_rebound_or_extra_record_is_not_retention(self):
         for change in ("missing-payload", "manifest", "lifecycle", "restore", "foreign-path", "partial", "duplicate", "unstable", "absent-bytes"):
-            original, current, receipts = self.fixture()
+            original, current, receipts, bucket = self.fixture()
             rows = current["node"]["records"]
             payload = next(row for row in rows if row["present"] and "snapshot" in row["relativePath"])
             if change in {"missing-payload", "manifest", "lifecycle"}:
@@ -56,11 +56,11 @@ class MrfCorruptionTests(unittest.TestCase):
             elif change == "duplicate": rows[-1] = copy.deepcopy(rows[0])
             elif change == "unstable": current["node"]["stable"] = False
             else: next(row for row in rows if not row["present"])["rawBase64"] = ""
-            with self.subTest(change=change), self.assertRaises(ValueError): suite.retained_corruption(original, current, receipts)
+            with self.subTest(change=change), self.assertRaises(ValueError): suite.retained_corruption(original, current, receipts, bucket)
 
     def test_mutation_receipt_requires_original_bytes_exact_crc_scope_and_backup(self):
         for change in ("no-mutation", "duplicate", "owner", "before", "injected", "kind", "task", "repair", "backup"):
-            original, current, receipts = self.fixture()
+            original, current, receipts, bucket = self.fixture()
             if change == "no-mutation": receipts = []
             elif change == "duplicate": receipts.append(copy.deepcopy(receipts[0]))
             elif change == "owner": receipts[0]["node"] = "other"
@@ -69,7 +69,7 @@ class MrfCorruptionTests(unittest.TestCase):
             elif change == "task": receipts[0]["taskId"] = fixtures.DurableMrfTests.owner
             elif change == "repair": receipts[0]["productRepairClaimed"] = True
             else: receipts[0]["originalBackupRetained"] = False
-            with self.subTest(change=change), self.assertRaises(ValueError): suite.retained_corruption(original, current, receipts)
+            with self.subTest(change=change), self.assertRaises(ValueError): suite.retained_corruption(original, current, receipts, bucket)
 
     def test_original_corruption_diagnostic_is_bound_to_each_mutated_node_and_typed_error(self):
         event = {"target": "rustfs::heal::mrf", "message": "MRF committed replay checkpoint could not be inspected",

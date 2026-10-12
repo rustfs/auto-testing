@@ -52,6 +52,17 @@ class DurableRecordFaultTests(unittest.TestCase):
         self.assertEqual(len(intents), 6)
         request = {"family": "mrf", "kind": "checksum", "relativePath": ".rustfs.sys/.heal-mrf-snapshot.0.bin"}
         self.assertEqual(journal.transform(raw, request, {"bucket": bucket}, mrf), raw[:-1] + bytes([raw[-1] ^ 1]))
+        system_bucket, system_key = b".rustfs.sys", b"buckets/.rustfs.sys/.metadata.bin"
+        body = struct.pack("<BBBBQBIIII", 1, 2, 3, 0, 100, 0, 0, 0, len(system_bucket), len(system_key)) + system_bucket + system_key
+        system = body + struct.pack("<I", zlib.crc32(body))
+        mixed = raw + system
+        changed = journal.transform(mixed, request, {"bucket": bucket}, mrf)
+        self.assertEqual(changed[len(raw):], system)
+        self.assertEqual([index for index, (left, right) in enumerate(zip(mixed, changed)) if left != right], [len(raw) - 1])
+        from test_validation_heal_mrf import DurableMrfTests
+        marker = DurableMrfTests().journal(layout=3, kind=4, key="中文/marker.bin")
+        self.assertEqual(journal.transform(marker, request, {"bucket": self.bucket}, mrf),
+                         marker[:-1] + bytes([marker[-1] ^ 1]))
         for change in ("foreign-business", "iam-key", "system-version", "no-business"):
             values = copy.deepcopy(intents)
             business = next(item for item in values if item["bucket"] == bucket)
