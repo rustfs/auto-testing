@@ -389,7 +389,16 @@ def owned(run_id):
                 "disk identity changed")
     for root in roots:
         marker = checked(root / "owner.json", root)
-        require(marker.stat().st_uid == 0 and json.loads(marker.read_text()) == owner, "drive owner differs")
+        require(marker.stat().st_uid == 0, f"drive owner marker is not root-owned: {root}")
+        observed = json.loads(marker.read_text())
+        if observed != owner:
+            expected_bytes = json.dumps(owner, sort_keys=True, separators=(",", ":")).encode()
+            observed_bytes = json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()
+            raise ValueError(
+                f"drive owner differs at {root}: expected_sha256={hashlib.sha256(expected_bytes).hexdigest()} "
+                f"observed_sha256={hashlib.sha256(observed_bytes).hexdigest()} "
+                f"observed_run_id={observed.get('runId')} observed_bucket={observed.get('bucket')}"
+            )
     if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf"}:
         phase_file = checked(state / "C11-phase.json", state)
         if phase_file.exists():
