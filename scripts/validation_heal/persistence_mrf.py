@@ -261,7 +261,7 @@ def run(args, topology, nodes, fixture, candidate):
         idle_fleet(fleet, binding)
         fleet.stop()
         repaired = fleet.snapshot("complete-rescan-physical-before-business-reads", quiescent=True)
-        cohorts = mrf.replica_census(repaired, bucket, expected, authorities)
+        cohorts = mrf.replica_census(repaired, bucket, expected, authorities, topology=topology)
         result["fullShardIntegrity"] = [verify_cohort(fleet, cohort, "F07-full-shard-proof") for cohort in cohorts]
         retained_corruption(original, observe(fleet, "retained-corrupt-MRF-after-rescan"), receipts, bucket)
         fleet.start()

@@ -1014,6 +1014,30 @@ class HealNodeOutageTest(unittest.TestCase):
             else: changed["node4"]["files"][0]["metadata"]["versions"][0]["role"] = "data"
             with self.subTest(poison=poison), self.assertRaises(ValueError): replica_census(changed, bucket, expected, offline)
 
+    def test_explicit_h1_census_keeps_each_drive_version_and_surviving_shard_checks(self):
+        bucket, expected, h2 = self.snapshot()
+        h1 = {"node1": copy.deepcopy(h2["node1"])}
+        identities = [row["value"]["xl"]["this"] for row in h1["node1"]["formats"]]
+        for row in h1["node1"]["formats"]: row["value"]["xl"]["sets"] = [identities]
+        for row in h1["node1"]["files"]:
+            for version in (row.get("metadata") or {}).get("versions", []):
+                if version["deleted"]: continue
+                version["role"] = "data" if row["disk"] < 2 else "parity"
+                version["erasure"].update(data_blocks=2, parity_blocks=2, distribution=[1, 2, 3, 4])
+        self.assertEqual(len(replica_census(h1, bucket, expected, h1, topology="H1")), 1)
+        with self.assertRaisesRegex(ValueError, "wrong node count"):
+            replica_census(h1, bucket, expected, h1)
+        with self.assertRaisesRegex(ValueError, "wrong node count"):
+            replica_census(h2, bucket, expected, h2, topology="H1")
+        for poison in ("missing-drive", "missing-marker", "changed-survivor", "role-mismatch"):
+            changed = copy.deepcopy(h1)
+            if poison == "missing-drive": changed["node1"]["files"] = [row for row in changed["node1"]["files"] if row["disk"] != 3]
+            elif poison == "missing-marker": changed["node1"]["files"][0]["metadata"]["versions"].pop()
+            elif poison == "changed-survivor": changed["node1"]["files"][1]["sha256"] = "different"
+            else: changed["node1"]["files"][4]["metadata"]["versions"][0]["role"] = "data"
+            with self.subTest(poison=poison), self.assertRaises(ValueError):
+                replica_census(changed, bucket, expected, h1, topology="H1")
+
     def test_candidate_write_quorum_recognition_is_independent_of_read_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

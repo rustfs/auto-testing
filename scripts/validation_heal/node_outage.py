@@ -125,8 +125,8 @@ def workload(recorder, bucket, expected, fixture):
     return manifest
 
 
-def replica_census(snapshot, bucket, expected, offline_snapshot):
-    validate_topology(snapshot, "H2")
+def replica_census(snapshot, bucket, expected, offline_snapshot, *, topology="H2"):
+    validate_topology(snapshot, topology)
     original = files(offline_snapshot)
     wanted = {}
     for entry in expected:
