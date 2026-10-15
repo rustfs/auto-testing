@@ -47,6 +47,13 @@ SOURCE_FILES = {
     "crates/heal/src/heal/erasure_healer/resume_loop_tests/admin_outcome.rs": "f2251a9ab5f2df10a2299cd23bb3231615d946ce95a104002088f06235dde621",
     "crates/heal/src/heal/storage.rs": "52ce6edff5b64b69a0d0c2a425b980984cf927fab79139e33d5ff9c7ad98efe9",
 }
+# Native prerequisites only; fleet executors retain their own candidate gates.
+REVIEWED_CANDIDATES["1c7fc818dd858247c45b39542abd8291b1e6e31b"] = {
+    "sourceTree": "9713c550ce148e1e32004f166a19e3a67eb83434",
+    "cargoLockSha256": "2589b3f5afc54f94419a3e2bfd537c11fae7ae3ee2d2a73ba31c72ee8d8a62be",
+    "sourceFiles": {**SOURCE_FILES,
+        "crates/heal/src/heal/storage.rs": "0e27cc1fbb7b732d211e744f385223bee23844c95ba86918e1765b546c197096"},
+}
 RESUME = "heal::resume::tests::"
 SNAPSHOT = "heal::mrf_queue::snapshot::tests::"
 ROOT = "heal::manager::tests::root_recovery::"
@@ -115,7 +122,7 @@ def verify_manifest(directory):
     native.require(manifest.get("schemaVersion") == 1 and contract is not None
         and manifest.get("candidateSourceTree") == contract["sourceTree"]
         and manifest.get("candidateCargoLockSha256") == contract["cargoLockSha256"]
-        and manifest.get("sourceFiles") == SOURCE_FILES and manifest.get("collectorSources") == collectors()
+        and manifest.get("sourceFiles") == contract.get("sourceFiles", SOURCE_FILES) and manifest.get("collectorSources") == collectors()
         and manifest.get("regressions") == REGRESSIONS and manifest.get("sourceUnmodified") is True
         and manifest.get("optimized") is True and manifest.get("buildEnvironment") == BUILD_ENV
         and manifest.get("binaryName") == "heal-manager-native-tests" and manifest.get("fleetPassClaimed") is False,
@@ -132,7 +139,8 @@ def build(source, commit, out):
         ["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip() == commit,
         "manager native tests require the exact reviewed candidate")
     native.require(subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], text=True).strip() == contract["sourceTree"]
-        and native.sha(source / "Cargo.lock") == contract["cargoLockSha256"] and all(native.sha(source / path) == digest for path, digest in SOURCE_FILES.items()),
+        and native.sha(source / "Cargo.lock") == contract["cargoLockSha256"]
+        and all(native.sha(source / path) == digest for path, digest in contract.get("sourceFiles", SOURCE_FILES).items()),
         "manager candidate source/tree/lock differs")
     for args in (["diff", "--quiet"], ["diff", "--cached", "--quiet"]):
         native.require(subprocess.run(["git", "-C", str(source), *args]).returncode == 0, "candidate source is modified")
@@ -141,7 +149,7 @@ def build(source, commit, out):
     native.require(not out.exists() and shutil.disk_usage(source).free >= 12 * 1024**3, "fresh output and 12 GiB build space required")
     out.mkdir(parents=True)
     request = {"schemaVersion": 1, "candidateCommit": commit, "candidateSourceTree": contract["sourceTree"],
-        "candidateCargoLockSha256": contract["cargoLockSha256"], "sourceFiles": SOURCE_FILES, "collectorSources": collectors(),
+        "candidateCargoLockSha256": contract["cargoLockSha256"], "sourceFiles": contract.get("sourceFiles", SOURCE_FILES), "collectorSources": collectors(),
         "regressions": REGRESSIONS, "testingCommit": os.environ.get("AUTO_TESTING_SHA"),
         "runId": os.environ.get("GITHUB_RUN_ID"), "runAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
         "fleetPassClaimed": False, "sourceUnmodified": True, "optimized": True, "buildEnvironment": BUILD_ENV}

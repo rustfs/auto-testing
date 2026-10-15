@@ -21,7 +21,7 @@ class ManagerNativeEvidenceTests(unittest.TestCase):
         contract = suite.REVIEWED_CANDIDATES[candidate]
         manifest = {"schemaVersion": 1, "candidateCommit": candidate,
             "candidateSourceTree": contract["sourceTree"], "candidateCargoLockSha256": contract["cargoLockSha256"],
-            "sourceFiles": suite.SOURCE_FILES, "collectorSources": suite.collectors(),
+            "sourceFiles": contract.get("sourceFiles", suite.SOURCE_FILES), "collectorSources": suite.collectors(),
             "regressions": suite.REGRESSIONS, "sourceUnmodified": True, "optimized": True,
             "buildEnvironment": suite.BUILD_ENV, "binaryName": binary.name, "binarySha256": digest,
             "fleetPassClaimed": False, "runId": "12345", "runAttempt": "1", "testingCommit": helper}
@@ -73,6 +73,16 @@ class ManagerNativeEvidenceTests(unittest.TestCase):
             path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, "reviewed source"):
                 self.verify(fixture)
+
+    def test_b07_candidate_requires_its_actual_storage_source_and_lock(self):
+        candidate = '1c7fc818dd858247c45b39542abd8291b1e6e31b'
+        for field, old in (('sourceFiles', suite.SOURCE_FILES), ('candidateCargoLockSha256', suite.LOCK_SHA)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                fixture = self.fixture(Path(temporary), candidate)
+                path = fixture[0] / 'manager-native.json'; manifest = json.loads(path.read_text())
+                self.assertNotEqual(manifest[field], old)
+                manifest[field] = old; path.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, 'reviewed source'): self.verify(fixture)
 
     def test_old_result_rows_cannot_certify_new_candidate_manifest(self):
         newer = next(commit for commit in suite.REVIEWED_CANDIDATES if commit != suite.native.CANDIDATE)
