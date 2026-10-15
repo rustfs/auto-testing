@@ -86,6 +86,17 @@ class GraceOracleTest(unittest.TestCase):
         with self.assertRaises(ValueError): self.check(terminal(cleanup=True), 1119.999, True)
         with self.assertRaises(ValueError): self.check(terminal(), 1120)
 
+    def test_source_omits_false_public_truncation_without_losing_canonical_coverage(self):
+        status = terminal(); status.pop('truncated')
+        self.assertEqual(self.check(status)['retryNotBeforeEpoch'], 1120)
+        for value in (None, True, 0, 'false'):
+            with self.subTest(value=value), self.assertRaises(ValueError): self.check({**status, 'truncated': value})
+        for value in (None, True):
+            changed = copy.deepcopy(status)
+            if value is None: changed['outcome'].pop('objectsTruncated')
+            else: changed['outcome']['objectsTruncated'] = value
+            with self.assertRaises(ValueError): self.check(changed)
+
     def test_wrong_truth_and_legacy_counts_cannot_replace_original_responsibility(self):
         for path, values in (
             (('summary',), ['running', 'stopped']), (('truncated',), [True, None]),

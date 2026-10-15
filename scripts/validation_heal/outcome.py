@@ -63,7 +63,7 @@ def reconcile(status, bucket, expected, options, incarnation, *, attempt_failure
             "J02 legacy negative requires a separate protected control")
     failed = sum(entry["state"] == "failed" for entry in expected)
     require(status.get("summary") == ("stopped" if failed else "finished")
-            and status.get("settings") == options and status.get("truncated") is False,
+            and status.get("settings") == options and status.get("truncated", False) is False,
             "J02 task has a wrong terminal, options or incomplete public result")
     outcome = status.get("outcome") or {}
     require(outcome.get("execution", {}).get("state") == ("completed_with_errors" if failed else "completed")
@@ -235,7 +235,7 @@ def readonly_failure(status, bucket, key, options):
     """Freeze the source operation card's unbound permanent key-level failure."""
     outcome = status.get("outcome") or {}
     require(status.get("summary") == "stopped" and status.get("settings") == options
-            and status.get("truncated") is False and outcome.get("execution", {}).get("state") == "completed_with_errors"
+            and status.get("truncated", False) is False and outcome.get("execution", {}).get("state") == "completed_with_errors"
             and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False,
             "J02 readonly task lost its complete permanent terminal failure")
     objects = outcome.get("objects", [])
@@ -259,7 +259,7 @@ def unchanged_token(probe, fleet, admission, status, label):
     response = fleet.record(label, probe.admin(admission["path"], [("clientToken", admission["clientToken"])], b""))
     require(response.get("httpStatus") == 200 and response.get("response", {}).get("summary") == status["summary"]
             and response["response"].get("settings") == status["settings"]
-            and response["response"].get("truncated") is False
+            and response["response"].get("truncated", False) is False
             and canonical(response["response"].get("outcome")) == canonical(status["outcome"]),
             "J02 later work replaced the original readonly failure responsibility")
 
@@ -339,7 +339,7 @@ def opaque_metadata_outcome(status, bucket, key, options, incarnation):
     """An unobserved Unknown must remain unobserved, never successful repair."""
     require(isinstance(incarnation, str) and bool(incarnation)
             and status.get("summary") in {"finished", "stopped"} and status.get("settings") == options
-            and status.get("truncated") is False, "J02 opaque metadata task did not terminate with its exact options")
+            and status.get("truncated", False) is False, "J02 opaque metadata task did not terminate with its exact options")
     outcome = status.get("outcome") or {}
     counters = outcome.get("counters") or {}
     names = ("processed", "healed", "unchanged", "skipped", "failed", "unknown", "attemptFailures")
@@ -581,7 +581,7 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
             [("clientToken", admissions[0]["clientToken"])], b""))
         require(repeated.get("httpStatus") == 200 and repeated.get("response", {}).get("summary") == status["summary"]
                 and repeated["response"].get("settings") == options
-                and repeated["response"].get("truncated") is False
+                and repeated["response"].get("truncated", False) is False
                 and canonical(repeated["response"].get("outcome")) == canonical(status["outcome"]),
                 "J02 rescue overwrote the original failed/deferred/dry-run responsibility")
         unobserved = any(result.get(name, {}).get("verdict") == "NOT_OBSERVED"

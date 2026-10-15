@@ -42,7 +42,7 @@ def grace_outcome(status, bucket, old, current, options, incarnation, observed_a
             and old['versionId'] != current['versionId'] and isinstance(incarnation, str) and incarnation,
             'J02 grace lacks distinct ACK versions, original incarnation or a real observation clock')
     outcome = status.get('outcome') or {}
-    require(status.get('summary') == 'finished' and status.get('settings') == options and status.get('truncated') is False
+    require(status.get('summary') == 'finished' and status.get('settings') == options and status.get('truncated', False) is False
             and outcome.get('execution', {}).get('state') == 'completed' and outcome.get('coverage') == 'complete'
             and outcome.get('objectsTruncated') is False, 'J02 grace task lacks complete original terminal truth')
     wanted = dict(processed=2, healed=1 if cleanup else 0, unchanged=1, skipped=0 if cleanup else 1,

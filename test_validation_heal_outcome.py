@@ -677,4 +677,35 @@ class OriginalOpaqueMetadataTests(unittest.TestCase):
         self.assertLess(events.index('original-opaque-restored-original-bytes'), events.index('original-opaque-restored-full-S3'))
 
 
+class OmittedFalseTruncationTests(unittest.TestCase):
+    def test_original_wire_omission_does_not_relax_canonical_manifest_or_counter_checks(self):
+        mixed = MixedOutcomeTest(); expected, status = mixed.mixed()
+        readonly = ReadonlySourceFlowTests(); opaque = OriginalOpaqueMetadataTests()
+        oracles = [(status, lambda value: mixed.check(expected, value)),
+            (readonly.failure(), lambda value: outcome.readonly_failure(value, readonly.bucket, readonly.key, readonly.options)),
+            (opaque.status(), lambda value: outcome.opaque_metadata_outcome(value, opaque.bucket, opaque.key, opaque.options, 'original-anchor'))]
+        for source, check in oracles:
+            source.pop('truncated'); check(source)
+            for value in (None, True, 0, 'false'):
+                with self.subTest(value=value), self.assertRaises(ValueError): check({**source, 'truncated': value})
+            for field, value in (('objectsTruncated', True), ('coverage', 'partial')):
+                changed = copy.deepcopy(source); changed['outcome'][field] = value
+                with self.assertRaises(ValueError): check(changed)
+            changed = copy.deepcopy(source); changed['outcome'].pop('objectsTruncated')
+            with self.assertRaises(ValueError): check(changed)
+            changed = copy.deepcopy(source); changed['outcome']['objects'].pop()
+            with self.assertRaises(ValueError): check(changed)
+
+    def test_repeated_original_token_accepts_only_omitted_false_or_explicit_false(self):
+        status = ReadonlySourceFlowTests().failure(); status.pop('truncated')
+        response = dict(httpStatus=200, response=copy.deepcopy(status))
+        probe = types.SimpleNamespace(admin=lambda *args: response)
+        fleet = types.SimpleNamespace(record=lambda label, value: value)
+        admission = dict(path='/heal', clientToken='original')
+        outcome.unchanged_token(probe, fleet, admission, status, 'original')
+        for value in (None, True):
+            response['response']['truncated'] = value
+            with self.assertRaises(ValueError): outcome.unchanged_token(probe, fleet, admission, status, 'changed')
+
+
 if __name__ == "__main__": unittest.main()
