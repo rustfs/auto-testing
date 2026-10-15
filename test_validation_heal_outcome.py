@@ -191,8 +191,8 @@ class MixedOutcomeTest(unittest.TestCase):
                  patch.dict(os.environ, {"GITHUB_RUN_ID": "1234", "RUSTFS_NODES": "vm000 vm001 vm002 vm003"}):
                 self.assertEqual(outcome.main(), 1)
             summary = json.loads((args.evidence / "healthy-summary.json").read_text())
-            self.assertEqual(executed.call_count, 16)
-            self.assertEqual(len(summary["results"]), 16)
+            self.assertEqual(executed.call_count, 20)
+            self.assertEqual(len(summary["results"]), 20)
             self.assertFalse(summary["complete"])
             self.assertEqual(summary["cleanup"], "PASS")
             negative = [row for row in summary["results"] if row["branch"] == "unknown-negative"]
@@ -215,8 +215,7 @@ class MixedOutcomeTest(unittest.TestCase):
             self.assertFalse(summary["complete"])
             self.assertFalse(summary["canonicalCasePassClaimed"])
             self.assertEqual(set(summary["sourceAssertionGaps"]), {
-                "original-corrupt-metadata-unknown-negative", "version-specific-grace-deferred-and-new-token-compensation",
-                "readonly-terminal-failure-and-new-token-compensation"})
+                "original-corrupt-metadata-unknown-negative", "version-specific-grace-deferred-and-new-token-compensation"})
 
     def test_dirty_cleanup_stops_before_next_fixture_or_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,6 +398,150 @@ class LegacyPhaseTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
         with tempfile.TemporaryDirectory() as directory, patch("scripts.validation_heal.healthy.subprocess.run", side_effect=execute):
             Fleet(["node"], Path(directory), "gh-12345-1-h1", runtime_profile="outcome-legacy").remote("node", "outcome-legacy-phase")
+
+
+
+class ReadonlySourceFlowTests(unittest.TestCase):
+    bucket = MixedOutcomeTest.bucket
+    key = "objects/0001.bin"
+    options = {**BASE_OPTIONS, "recursive": False}
+
+    def failure(self):
+        return {"summary": "stopped", "settings": self.options, "truncated": False, "outcome": {
+            "execution": {"state": "completed_with_errors"}, "coverage": "complete", "objectsTruncated": False,
+            "counters": {"processed": 1, "healed": 0, "unchanged": 0, "skipped": 0,
+                         "failed": 1, "unknown": 0, "attemptFailures": 1, "overflowed": False},
+            "objects": [{"identity": {"kind": "object", "bucket": self.bucket, "object": self.key,
+                                      "versionId": None, "bucketIncarnationId": None, "poolIndex": 0, "setIndex": 0},
+                         "disposition": {"state": "failed", "details": "permanent"}}]}}
+
+    def test_permanent_terminal_failure_must_not_invent_a_verified_version_or_incarnation(self):
+        status = self.failure()
+        self.assertFalse(outcome.readonly_failure(status, self.bucket, self.key, self.options)["repairClaimed"])
+        for mutation in ("version", "incarnation", "kind", "pool-bool", "attempts", "healed", "unknown", "deferred", "recoverable", "settings"):
+            changed = copy.deepcopy(status); receipt = changed["outcome"]["objects"][0]
+            if mutation == "version": receipt["identity"]["versionId"] = "null"
+            elif mutation == "incarnation": receipt["identity"]["bucketIncarnationId"] = MixedOutcomeTest.incarnation
+            elif mutation == "kind": receipt["identity"]["kind"] = "bucket"
+            elif mutation == "pool-bool": receipt["identity"]["poolIndex"] = False
+            elif mutation == "attempts": changed["outcome"]["counters"]["attemptFailures"] = 0
+            elif mutation == "healed": changed["outcome"]["counters"]["healed"] = 1
+            elif mutation == "unknown": receipt["disposition"] = {"state": "unknown"}
+            elif mutation == "deferred": receipt["disposition"] = {"state": "deferred", "details": {"reason": "deadline"}}
+            elif mutation == "recoverable": receipt["disposition"]["details"] = "retry_exhausted"
+            else: changed["settings"] = {**self.options, "remove": True}
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                outcome.readonly_failure(changed, self.bucket, self.key, self.options)
+
+    def test_lost_readonly_arm_ack_keeps_gate_registered_for_final_cleanup(self):
+        original, bucket, expected = versioned_scene([f"objects/{i:04d}.bin" for i in range(3)])
+        actual_bucket = "rv-heal-" + __import__("hashlib").sha256(b"gh-12345-1-h1").hexdigest()[:16]
+        for scene in original.values():
+            for row in scene["files"]:
+                row["path"] = row["path"].replace(bucket,actual_bucket)
+                if "metadata" in row: row["metadata"]["bucket"] = actual_bucket
+        bucket = actual_bucket
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); rc = root / "rc"; rc.write_bytes(b"test-cli")
+            args = types.SimpleNamespace(evidence=root / "evidence", rc_bin=rc, binary_sha="b" * 64,
+                testing_commit="a" * 40, tool_directory=root / "tools")
+            gates, current, cleanups = set(), copy.deepcopy(original), []
+            def remote(node, action, **params):
+                if action == "apply-fault":
+                    current[node]["files"] = [row for row in current[node]["files"] if row["path"] != params["relativePath"] or row["disk"] != params["disk"]]
+                    return {}
+                if action == "drive-gate":
+                    self.assertIn(node, gates)
+                    raise RuntimeError("lost readonly gate ACK")
+                return {}
+            def cleanup():
+                cleanups.append(set(gates)); return True
+            fleet = types.SimpleNamespace(nodes=["node1"], drive_gates=gates, reserved=["node1"], faults=[], remote=remote,
+                deploy=lambda *args: None, snapshot=lambda *args,**kwargs: copy.deepcopy(current),
+                record=lambda label,value: value, stop=lambda: None, start=lambda: None, cleanup=cleanup)
+            probe = types.SimpleNamespace(inventory=lambda *args,**kwargs: {"bucket":bucket,"entries":expected})
+            with patch.object(outcome,"Fleet",return_value=fleet), patch.object(outcome,"Probe",return_value=probe), \
+                 patch.object(outcome,"Recorder"), patch.object(outcome,"seed",return_value=expected), \
+                 patch.object(outcome,"verify_inspector",return_value={}), patch.object(outcome,"verify_quorum_contract",return_value={}), \
+                 patch.object(outcome,"run_task",return_value={}), patch.object(outcome,"validate_version_receipts",return_value={"bucketIncarnationId":MixedOutcomeTest.incarnation}), \
+                 patch.object(outcome,"idle_fleet"), patch.object(outcome,"validate_fault"), patch.object(outcome,"verify_proof"), \
+                 patch.dict(os.environ,{"GITHUB_RUN_ID":"12345","GITHUB_RUN_ATTEMPT":"1"}):
+                result = outcome.run_branch(args,"H1",["node1"],"DV","readonly-terminal-failure",
+                    {"source_sha":outcome.CANDIDATE,"package_sha256":"c" * 64})
+            self.assertEqual(result["verdict"],"FAIL")
+            self.assertIn("lost readonly gate ACK",result["failure"]["message"])
+            self.assertEqual(result["cleanup"],"PASS")
+            self.assertEqual(cleanups,[{"node1"}])
+
+    def test_readonly_plan_selects_exact_current_version_without_a_below_R_fault(self):
+        original, bucket, expected = versioned_scene([f"objects/{i:04d}.bin" for i in range(3)])
+        plan = outcome.fault_plan(original, bucket, expected, "readonly-terminal-failure")
+        self.assertEqual(len(plan["faults"]), 1)
+        self.assertEqual(plan["repair"]["versionId"], "v2")
+        self.assertTrue(plan["repair"]["logical"]["isLatest"])
+        self.assertEqual(plan["faults"][0], plan["repair"])
+
+    def test_compensation_observes_readonly_failure_then_distinct_new_token_without_replacing_original(self):
+        from scripts.validation_heal.shards import files
+        for variant in (None, "fake-gate", "same-token", "changed-original", "changed-control", "bad-control"):
+            with self.subTest(variant=variant):
+                original, bucket, expected = versioned_scene([f"objects/{i:04d}.bin" for i in range(3)])
+                plan = outcome.fault_plan(original, bucket, expected, "readonly-terminal-failure")
+                target = plan["repair"]; faulted = copy.deepcopy(original)
+                faulted[target["node"]]["files"] = [row for row in faulted[target["node"]]["files"]
+                    if (target["node"], row["disk"], row["path"]) != (target["node"], target["disk"], target["relativePath"])]
+                repaired_scene = copy.deepcopy(original)
+                if variant == "changed-control": repaired_scene["node1"]["files"][0]["sha256"] = "changed"
+                negative = self.failure()
+                positive = {"summary": "finished", "settings": self.options, "truncated": False, "outcome": {
+                    "execution": {"state": "completed"}, "coverage": "complete", "objectsTruncated": False,
+                    "counters": {"processed": 1, "healed": 1, "unchanged": 0, "skipped": 0,
+                                 "failed": 0, "unknown": 0, "attemptFailures": 0, "overflowed": False},
+                    "objects": [{"identity": {"kind": "object", "bucket": bucket, "object": self.key,
+                        "versionId": target["versionId"], "bucketIncarnationId": MixedOutcomeTest.incarnation,
+                        "poolIndex": 0, "setIndex": 0}, "disposition": {"state": "repaired"}}]}}
+                baseline = {"bucket": bucket, "entries": expected}; events = []; queries = []
+                def remote(node, action, **params):
+                    events.append(action)
+                    if action == "drive-gate-probe": return {"disk": target["disk"], "errno": 13 if variant == "fake-gate" else 30,
+                        "name": "EROFS", "sameServiceIdentity": True, "privateMountNamespace": True, "hostMountRemounted": False}
+                    if action == "drive-gate": return {"state": "CLEAR"}
+                    return {"restored": False}
+                def snapshot(label, **kwargs):
+                    events.append(label)
+                    return copy.deepcopy(faulted if label in {"readonly-original-failure-physical", "readonly-released-before-new-token", "readonly-after-gated-control-before-admission"} else repaired_scene)
+                fleet = types.SimpleNamespace(nodes=["node1"], record=lambda label,value: value, remote=remote,
+                    drive_gates={target["node"]}, faults=[], stop=lambda: events.append("stop"), start=lambda: events.append("start"), snapshot=snapshot)
+                def admin(path, query, body):
+                    queries.append(query); result = copy.deepcopy(negative)
+                    if variant == "changed-original" and len(queries) == 2: result["outcome"]["counters"]["failed"] = 0
+                    return {"httpStatus": 200, "response": result}
+                probe = types.SimpleNamespace(admin=admin)
+                def task(probe,fleet,scope,mode,active,**kwargs):
+                    number = len([item for item in events if item == "admit"]); events.append("admit")
+                    if number == 0:
+                        control = copy.deepcopy(positive)
+                        control["outcome"]["counters"].update(healed=0,unchanged=1)
+                        control["outcome"]["objects"][0]["identity"]["object"] = "objects/0000.bin"
+                        control["outcome"]["objects"][0]["disposition"] = {"state":"unknown" if variant == "bad-control" else "verified_healthy"}
+                        return control
+                    kwargs["admissions"].append({"path": "/heal", "clientToken": "old" if number == 1 or variant == "same-token" else "new"})
+                    return negative if number == 1 else positive
+                binding = {"bucketPrefix":bucket,"endpoints":{"node1":"http://unused"}}
+                with patch.object(outcome,"run_task",side_effect=task), patch.object(outcome,"idle_fleet"), \
+                     patch.object(outcome,"verify_proof",side_effect=lambda *args: events.append("bitrot-proof")), \
+                     patch.object(outcome,"Probe",return_value=types.SimpleNamespace(inventory=lambda *args,**kwargs: baseline)):
+                    if variant:
+                        with self.assertRaises(ValueError): outcome.readonly_compensation(probe,fleet,binding,original,faulted,plan,expected,baseline,MixedOutcomeTest.incarnation,[])
+                    else:
+                        value=outcome.readonly_compensation(probe,fleet,binding,original,faulted,plan,expected,baseline,MixedOutcomeTest.incarnation,[])
+                        self.assertFalse(value["sameTokenRecoveryClaimed"])
+                        self.assertTrue(value["originalFailureUnchanged"])
+                        self.assertNotEqual(value["originalToken"],value["compensatingToken"])
+                        self.assertEqual(sum(item == "admit" for item in events),3)
+                        self.assertLess(events.index("readonly-original-failure-physical"),events.index("drive-gate"))
+                        self.assertLess(events.index("readonly-released-before-new-token"),len(events)-1)
+                        self.assertEqual(len(queries),2)
 
 
 if __name__ == "__main__": unittest.main()

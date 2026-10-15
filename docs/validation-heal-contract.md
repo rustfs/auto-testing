@@ -2,7 +2,7 @@
 
 ## 状态与范围
 
-本规范保留源仓库的 84 个 Heal canonical 用例、301 个操作分支及 532 个适用拓扑分支模板。资源要求、公共通过判据和逐项附加断言必须一起满足。
+本规范保留源仓库的 84 个 Heal canonical 用例、302 个操作分支及 534 个适用拓扑分支模板。资源要求、公共通过判据和逐项附加断言必须一起满足。
 
 入口为 `scripts/validation_heal/matrix.py`、[逐例操作卡](validation-heal-cases.md) 和 [执行手册](validation-heal-operations.md)。运行环境是当前 auto-testing 的 Heal 节点；候选及 rc 使用当前 validation lane 的不可变包和实际二进制摘要。源仓库历史 pilot 结果不能计入本次通过数量。
 

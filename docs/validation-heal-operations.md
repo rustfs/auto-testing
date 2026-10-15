@@ -1,6 +1,6 @@
 # Heal 真机执行手册：84 项操作卡的公共命令
 
-此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 301 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
+此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 302 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
 
 公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 60 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
 
@@ -22,7 +22,7 @@ python scripts/validation_heal/matrix.py plan --selection A01,A04,C01,C02,C04,J0
 
 | 工具 | 已实现的职责 | 不代表什么 |
 | --- | --- | --- |
-| `matrix.py` | 84 项/301 分支索引、逐例操作卡、冻结计划、证据完整性审计 | 不自动分配拓扑，不根据文件存在就判 PASS |
+| `matrix.py` | 84 项/302 分支索引、逐例操作卡、冻结计划、证据完整性审计 | 不自动分配拓扑，不根据文件存在就判 PASS |
 | `heal_probe.py` | 带签名/匿名/坏签名的原始 Admin；受限 S3 操作；全版本/标签/内容摘要清单及比较 | HTTP 检查通过不代表 heal 成功；inventory 的 GET 会触发读修复 |
 | `heal_workload.py` | DB/DV/DM/DS/DX 真实夹具；有界并发、同key前台修改串行、请求前及ACK后持久落盘 | 不替用户推导竞态后的最终版本；超时写必须单独解析 |
 | `heal_fault.py` | Linux 描述符相对寻址、mount ID 保护、单文件 missing/bitflip/truncate/zero/header、快照和恢复 | 文件故障不是物理掉盘；不修改系统 metadata；不盲目恢复新代次 |

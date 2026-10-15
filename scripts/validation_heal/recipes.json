@@ -3369,6 +3369,7 @@
         "mixed-healthy-repaired-failed",
         "dry-run",
         "deferred",
+        "readonly-terminal-failure",
         "unknown-negative"
       ],
       "steps": [
@@ -3408,7 +3409,7 @@
         "dispatchable": false,
         "code": "J02",
         "reasonCode": "EVIDENCE_MIXED_OUTCOME_ORCHESTRATION",
-        "reason": "已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral 和真实 SDK legacy Unknown 执行分支及逐对象 manifest/attemptFailures 对账；仍需绑定固定候选的新 inspector、完整串行 live 证据及原始损坏元数据 Unknown、grace Deferred、只读失败/新 token 补偿源流程，故保持禁止 dispatch；本地检查不能作为完整 PASS。",
+        "reason": "已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral、真实 SDK legacy Unknown 和只读永久失败/新 token 补偿执行分支及逐对象 manifest/attemptFailures 对账；仍需完整串行 live 证据及原始损坏元数据 Unknown、grace Deferred/新 token 补偿源流程，故保持禁止 dispatch；本地检查不能作为完整 PASS。",
         "requiredCapabilities": [
           "mixed_outcome_fixture",
           "per_object_canonical_receipts",

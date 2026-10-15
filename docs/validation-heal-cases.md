@@ -1804,11 +1804,11 @@ Source assertions:
 
 ## J02: heal.outcome-counters-and-error-truth
 
-Topologies: H1,H2. Branches: mixed-healthy-repaired-failed, dry-run, deferred, unknown-negative.
+Topologies: H1,H2. Branches: mixed-healthy-repaired-failed, dry-run, deferred, readonly-terminal-failure, unknown-negative.
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`EVIDENCE_MIXED_OUTCOME_ORCHESTRATION`): 已有 2 项候选版本 outcome 原生回归和部分计数校验，但尚缺真实混合 healthy/repaired/failed/deferred/unknown 夹具、dry-run 独立任务、逐对象完整 manifest 与计数/attemptFailures 对账；这是执行器与证据未闭环，并非已证实产品缺少 API。
+Blocked reason (`EVIDENCE_MIXED_OUTCOME_ORCHESTRATION`): 已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral、真实 SDK legacy Unknown 和只读永久失败/新 token 补偿执行分支及逐对象 manifest/attemptFailures 对账；仍需完整串行 live 证据及原始损坏元数据 Unknown、grace Deferred/新 token 补偿源流程，故保持禁止 dispatch；本地检查不能作为完整 PASS。
 
 1. 同批独立key建立健康、可恢复缺片、低于R的不可恢复对象；deferred由冻结的锁/依赖故障产生，dry-run另建任务。
 2. 保存逐对象物理基线和期望disposition，对结果的execution/coverage/counters/object identities做逐项对账。

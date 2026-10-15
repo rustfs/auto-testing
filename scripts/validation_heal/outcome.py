@@ -2,6 +2,7 @@
 """J02: reconcile original mixed-task receipts with ACKs and physical faults."""
 
 import argparse
+import errno
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -21,7 +22,7 @@ try:
     from .manager_fixture import verify as verify_manager
     from .matrix import select
     from .native_regressions import CANDIDATE
-    from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical
+    from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical, validate_repaired_status
     from .stop import idle_fleet
     from .versions import (metadata_target, public_version_id, validate_unrecoverable_get,
         validate_version_receipts, verify_proof, verify_quorum_contract, version_identity)
@@ -34,21 +35,20 @@ except ImportError:
     from manager_fixture import verify as verify_manager
     from matrix import select
     from native_regressions import CANDIDATE
-    from shards import files, map_target, run_task, validate_fault, validate_repaired_physical
+    from shards import files, map_target, run_task, validate_fault, validate_repaired_physical, validate_repaired_status
     from stop import idle_fleet
     from versions import (metadata_target, public_version_id, validate_unrecoverable_get,
         validate_version_receipts, verify_proof, verify_quorum_contract, version_identity)
 
 
 CASE_ID = "heal.outcome-counters-and-error-truth"
-BRANCHES = ("mixed-healthy-repaired-failed", "dry-run", "deferred", "unknown-negative")
+BRANCHES = ("mixed-healthy-repaired-failed", "dry-run", "deferred", "readonly-terminal-failure", "unknown-negative")
 SIZE = 5 * 1024**2 + 123
 # The reviewed immutable candidate makes one attempt and three bucket-object retries.
 FAILED_ATTEMPTS = 4
 SOURCE_ASSERTION_GAPS = (
     "original-corrupt-metadata-unknown-negative",
     "version-specific-grace-deferred-and-new-token-compensation",
-    "readonly-terminal-failure-and-new-token-compensation",
 )
 
 
@@ -181,11 +181,15 @@ def legacy_manifest(original, bucket, expected):
 
 
 def fault_plan(original, bucket, expected, branch):
-    require(branch in BRANCHES[:3], "J02 native negative branch cannot mutate fleet files")
-    repair_entry = next(entry for entry in expected if entry["key"] == "objects/0001.bin" and not entry["deleteMarker"])
+    require(branch in BRANCHES[:4], "J02 unknown diagnostic cannot mutate fleet files")
+    repair_entry = next(entry for entry in expected if entry["key"] == "objects/0001.bin" and not entry["deleteMarker"]
+                        and (branch != "readonly-terminal-failure" or entry["isLatest"]))
     failed_entry = next(entry for entry in expected if entry["key"] == "objects/0002.bin" and not entry["deleteMarker"])
     repair = map_target(original, bucket, repair_entry["key"], "data", 1, repair_entry["versionId"], latest_required=False)
     failed = map_target(original, bucket, failed_entry["key"], "data", 1, failed_entry["versionId"], latest_required=False)
+    if branch == "readonly-terminal-failure":
+        require(repair["logical"]["isLatest"] is True, "J02 readonly target must be the original current ACK version")
+        return {"repair": repair, "faults": [repair], "originalReadonlySourceProcedure": True}
     ordered = sorted(failed["cohort"], key=lambda member: member["index"])
     read_quorum = failed["logical"]["erasure"]["data_blocks"]
     faults = [{**failed, **member} for member in ordered[read_quorum - 1:]]
@@ -229,6 +233,109 @@ def retained_failure_scene(original, faulted, after, plan, branch):
             "oracleViewOnly": True, "fixtureRescueIsProductRepair": False}
 
 
+def readonly_failure(status, bucket, key, options):
+    """Freeze the source operation card's unbound permanent key-level failure."""
+    outcome = status.get("outcome") or {}
+    require(status.get("summary") == "stopped" and status.get("settings") == options
+            and status.get("truncated") is False and outcome.get("execution", {}).get("state") == "completed_with_errors"
+            and outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False,
+            "J02 readonly task lost its complete permanent terminal failure")
+    objects = outcome.get("objects", [])
+    require(len(objects) == 1, "J02 readonly task lost its single key-level responsibility")
+    identity = objects[0].get("identity", {})
+    require(set(identity) == {"kind", "bucket", "object", "versionId", "bucketIncarnationId", "poolIndex", "setIndex"}
+            and identity.get("kind") == "object" and identity.get("bucket") == bucket and identity.get("object") == key
+            and identity.get("versionId") is None and identity.get("bucketIncarnationId") is None
+            and all(type(identity.get(name)) is int and identity[name] == 0 for name in ("poolIndex", "setIndex"))
+            and objects[0].get("disposition") == {"state": "failed", "details": "permanent"},
+            "J02 readonly failure invented a version/incarnation or changed its original failure class")
+    expected = {"processed": 1, "healed": 0, "unchanged": 0, "skipped": 0, "failed": 1,
+                "unknown": 0, "attemptFailures": 1, "overflowed": False}
+    counters = outcome.get("counters", {})
+    require(all(type(counters.get(name)) is type(value) and counters[name] == value for name, value in expected.items()),
+            "J02 readonly failure hid attempts or reported a repair")
+    return {"canonicalCounters": expected, "originalKeyLevelFailurePreserved": True, "repairClaimed": False}
+
+
+def unchanged_token(probe, fleet, admission, status, label):
+    response = fleet.record(label, probe.admin(admission["path"], [("clientToken", admission["clientToken"])], b""))
+    require(response.get("httpStatus") == 200 and response.get("response", {}).get("summary") == status["summary"]
+            and response["response"].get("settings") == status["settings"]
+            and response["response"].get("truncated") is False
+            and canonical(response["response"].get("outcome")) == canonical(status["outcome"]),
+            "J02 later work replaced the original readonly failure responsibility")
+
+
+def readonly_compensation(probe, fleet, binding, original, faulted, plan, expected, baseline, incarnation, active):
+    target = plan["repair"]
+    gate = fleet.record("readonly-actual-process-probe", {"node": target["node"],
+        **fleet.remote(target["node"], "drive-gate-probe")})
+    require(type(gate.get("disk")) is int and gate["disk"] == target["disk"] and type(gate.get("errno")) is int and gate["errno"] == errno.EROFS
+            and gate.get("name") == "EROFS" and gate.get("sameServiceIdentity") is True
+            and gate.get("privateMountNamespace") is True and gate.get("hostMountRemounted") is False,
+            "J02 readonly refusal was not observed in the original candidate namespace")
+    options = {**BASE_OPTIONS, "recursive": False}
+    scope = {"bucket": binding["bucketPrefix"], "key": target["key"]}
+    controls = [entry for entry in expected if entry["key"] != target["key"] and entry["isLatest"] and not entry["deleteMarker"]]
+    require(controls, "J02 readonly task lacks an independently healthy current control")
+    control = controls[0]
+    control_status = run_task(probe, fleet, {"bucket": scope["bucket"], "key": control["key"]}, 2, active,
+        option_overrides=options, status_endpoints=tuple(binding["endpoints"])[1:])
+    fleet.record("readonly-healthy-control-under-gate", control_status)
+    control_proof = validate_version_receipts(control_status, scope["bucket"], [control], 2)
+    require(control_status.get("settings") == options and control_proof["bucketIncarnationId"] == incarnation
+            and control_status["outcome"]["objects"][0]["identity"].get("kind") == "object",
+            "J02 readonly control lost the original incarnation or actual Deep verification")
+    require(physical_content(fleet.snapshot("readonly-after-gated-control-before-admission")) == physical_content(faulted),
+            "J02 healthy control changed a fault or its own original bytes")
+    admissions = []
+    status = run_task(probe, fleet, scope, 2, active, option_overrides=options,
+                      status_endpoints=tuple(binding["endpoints"])[1:], admissions=admissions)
+    fleet.record("readonly-original-terminal-before-release", status)
+    negative = readonly_failure(status, scope["bucket"], scope["key"], options)
+    require(len(admissions) == 1, "J02 readonly task lacks one independent admission")
+    idle_fleet(fleet, binding)
+    fleet.stop()
+    require(physical_content(fleet.snapshot("readonly-original-failure-physical", quiescent=True)) == physical_content(faulted),
+            "J02 readonly task changed its still-unrepaired scene")
+    cleared = fleet.record("readonly-stopped-release", {"node": target["node"],
+        **fleet.remote(target["node"], "drive-gate", mode="clear")})
+    require(cleared.get("state") == "CLEAR", "J02 readonly gate was not released")
+    fleet.drive_gates.remove(target["node"])
+    fleet.start()
+    require(physical_content(fleet.snapshot("readonly-released-before-new-token")) == physical_content(faulted),
+            "J02 release repaired the object before compensating admission")
+    unchanged_token(probe, fleet, admissions[0], status, "readonly-original-token-after-release")
+    next_admissions = []
+    repaired = run_task(probe, fleet, scope, 2, active, option_overrides=options,
+                       status_endpoints=tuple(binding["endpoints"])[1:], admissions=next_admissions)
+    require(len(next_admissions) == 1 and next_admissions[0]["clientToken"] != admissions[0]["clientToken"],
+            "J02 compensation reused the original failed token")
+    fleet.record("readonly-new-token-original-result", repaired)
+    validate_repaired_status(repaired, target)
+    require(repaired.get("settings") == options and repaired["outcome"]["objects"][0]["identity"].get("kind") == "object"
+            and repaired["outcome"]["objects"][0]["identity"].get("bucketIncarnationId") == incarnation,
+            "J02 compensation changed options or the original protected-control incarnation")
+    idle_fleet(fleet, binding)
+    fleet.stop()
+    after = fleet.snapshot("readonly-new-token-physical-before-get", quiescent=True)
+    physical = validate_repaired_physical(original, after, target)
+    verify_proof(fleet, target, "readonly-new-token-full-shard-bitrot-before-get")
+    rescue(fleet)
+    require(physical_content(fleet.snapshot("readonly-after-fixture-rescue", quiescent=True)) == physical_content(after),
+            "J02 fixture rescue changed the product's compensating repair")
+    fleet.start()
+    for endpoint in binding["endpoints"]:
+        inventory = fleet.record("readonly-compensated-all-peer-S3", Probe(binding, endpoint).inventory(
+            binding["bucketPrefix"], unversioned_current_tags=all(entry["versionId"] == "null" for entry in expected)))
+        verify_seed(expected, inventory)
+        compare_inventories(baseline, inventory)
+    unchanged_token(probe, fleet, admissions[0], status, "readonly-original-token-after-compensation")
+    return {"negative": negative, "physical": physical, "originalToken": admissions[0]["clientToken"],
+            "compensatingToken": next_admissions[0]["clientToken"], "sameTokenRecoveryClaimed": False,
+            "originalFailureUnchanged": True, "productRepairByNewToken": True}
+
+
 def run_branch(args, topology, nodes, fixture, branch, candidate):
     directory = args.evidence / fixture / topology / branch
     directory.mkdir(parents=True)
@@ -254,7 +361,7 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         pending = {"operation": "seed", "bucket": bucket}
-        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, 1 if branch == "unknown-negative" else 3, [SIZE])
+        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, 1 if branch == "unknown-negative" else 4 if branch == "readonly-terminal-failure" else 3, [SIZE])
         baseline = fleet.record("ACK-bound-full-S3", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("complete-ACK-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         pending = None
@@ -276,7 +383,7 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
         original = fleet.snapshot("healthy-physical-baseline", quiescent=True)
         plan = legacy_manifest(original, bucket, expected) if branch == "unknown-negative" else fault_plan(original, bucket, expected, branch)
         fleet.record("independent-manifest-and-frozen-fault-plan", plan)
-        for target in (() if branch == "unknown-negative" else (plan["repair"], plan["failed"])):
+        for target in [plan[key] for key in ("repair", "failed") if key in plan]:
             verify_proof(fleet, target, "original-full-cohort-bitrot")
         prior = original
         faulted = original
@@ -286,12 +393,22 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
             receipt = fleet.record("stopped-original-file-fault", {"node": target["node"], **fleet.remote(
                 target["node"], "apply-fault", **params, relativePath=target["relativePath"],
                 expectedSha256=target["sha256"], kind="missing")})
-            faulted = fleet.snapshot("actual-R-minus-one-fault", quiescent=True)
+            faulted = fleet.snapshot("readonly-single-missing-part" if branch == "readonly-terminal-failure" else "actual-R-minus-one-fault", quiescent=True)
             validate_fault(prior, faulted, target, receipt)
             prior = faulted
+        if branch == "readonly-terminal-failure":
+            target = plan["repair"]
+            fleet.drive_gates.add(target["node"])
+            fleet.record("readonly-stopped-gate-arm", {"node": target["node"], **fleet.remote(
+                target["node"], "drive-gate", disk=target["disk"], mode="read-only")})
         fleet.start()
         require(physical_content(faulted) == physical_content(fleet.snapshot("before-original-task")),
                 "J02 attribution window lost: background activity changed a fault before admission")
+        if branch == "readonly-terminal-failure":
+            result["readonly"] = readonly_compensation(probe, fleet, binding, original, faulted, plan,
+                expected, baseline, incarnation, active)
+            result.update(verdict="PASS", fixtureRescueIsProductRepair=False, sameTokenRecoveryClaimed=False)
+            return result
         if branch == "mixed-healthy-repaired-failed":
             for endpoint in binding["endpoints"]:
                 observed = fleet.record("pre-task-failed-version-GET", Probe(binding, endpoint).s3("get_object", {
@@ -324,7 +441,7 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
             validate_repaired_physical(original, restored, plan["repair"])
         else:
             require(physical_content(original) == physical_content(restored), "J02 rescue changed the original ACK generation")
-        for target in (() if branch == "unknown-negative" else (plan["repair"], plan["failed"])):
+        for target in [plan[key] for key in ("repair", "failed") if key in plan]:
             verify_proof(fleet, target, "all-original-shards-after-fixture-rescue")
         fleet.start()
         for endpoint in binding["endpoints"]:
