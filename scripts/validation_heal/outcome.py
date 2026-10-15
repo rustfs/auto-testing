@@ -44,6 +44,7 @@ except ImportError:
 
 
 CASE_ID = "heal.outcome-counters-and-error-truth"
+REVIEWED_CANDIDATES = frozenset({CANDIDATE, "1c7fc818dd858247c45b39542abd8291b1e6e31b"})
 BRANCHES = ("mixed-healthy-repaired-failed", "dry-run", "deferred", "readonly-terminal-failure", "unknown-negative")
 SIZE = 5 * 1024**2 + 123
 # The reviewed immutable candidate makes one attempt and three bucket-object retries.
@@ -622,7 +623,7 @@ def main():
     args = parser.parse_args()
     require(select(CASE_ID)[0]["variants"] == list(BRANCHES), "J02 executor omitted a source branch")
     candidate = json.loads(args.candidate.read_text())
-    require(candidate["source_sha"] == CANDIDATE, "J02 retry/deferral contract is not reviewed for this candidate")
+    require(candidate["source_sha"] in REVIEWED_CANDIDATES, "J02 retry/deferral contract is not reviewed for this candidate")
     native = verify_manager(os.environ.get("VALIDATION_HEAL_MANAGER_DIRECTORY", ""), candidate, CASE_ID)
     save(args.evidence / "independent-native-outcome-guard.json", native)
     require(re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)

@@ -175,16 +175,30 @@ class MixedOutcomeTest(unittest.TestCase):
         with self.assertRaises(RuntimeError): outcome.rescue(fleet)
         self.assertEqual(len(fleet.faults), 1)
 
-    def test_native_prerequisite_rejection_happens_before_fleet_creation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); candidate = root / "candidate.json"
-            candidate.write_text(json.dumps({"source_sha": outcome.CANDIDATE}))
-            args = types.SimpleNamespace(candidate=candidate)
-            with patch.object(outcome.argparse.ArgumentParser, "parse_args", return_value=args), \
-                 patch.object(outcome, "verify_manager", side_effect=ValueError("wrong immutable evidence")), \
-                 patch.object(outcome, "Fleet") as fleet, patch.object(outcome.signal, "signal"):
-                with self.assertRaisesRegex(ValueError, "immutable evidence"): outcome.main()
-            fleet.assert_not_called()
+    def test_each_reviewed_candidate_requires_native_evidence_before_fleet_creation(self):
+        self.assertEqual(outcome.REVIEWED_CANDIDATES,
+            {outcome.CANDIDATE, "1c7fc818dd858247c45b39542abd8291b1e6e31b"})
+        for commit in outcome.REVIEWED_CANDIDATES:
+            with self.subTest(commit=commit), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); candidate = root / "candidate.json"
+                manifest = {"source_sha": commit}; candidate.write_text(json.dumps(manifest))
+                args = types.SimpleNamespace(candidate=candidate)
+                with patch.object(outcome.argparse.ArgumentParser, "parse_args", return_value=args), \
+                     patch.object(outcome, "verify_manager", side_effect=ValueError("wrong immutable evidence")) as native, \
+                     patch.object(outcome, "Fleet") as fleet, patch.object(outcome.signal, "signal"):
+                    with self.assertRaisesRegex(ValueError, "immutable evidence"): outcome.main()
+                native.assert_called_once_with(os.environ.get("VALIDATION_HEAL_MANAGER_DIRECTORY", ""), manifest, outcome.CASE_ID)
+                fleet.assert_not_called()
+
+    def test_unreviewed_candidate_is_rejected_before_native_or_fleet_activity(self):
+        for commit in ("f" * 40, "1aa9be87d18cf941e5020f19e8622c26ba4b10ac", "main"):
+            with self.subTest(commit=commit), tempfile.TemporaryDirectory() as tmp:
+                candidate = Path(tmp) / "candidate.json"; candidate.write_text(json.dumps({"source_sha": commit}))
+                with patch.object(outcome.argparse.ArgumentParser, "parse_args", return_value=types.SimpleNamespace(candidate=candidate)), \
+                     patch.object(outcome, "verify_manager") as native, patch.object(outcome, "Fleet") as fleet, \
+                     patch.object(outcome.signal, "signal"):
+                    with self.assertRaisesRegex(ValueError, "not reviewed"): outcome.main()
+                native.assert_not_called(); fleet.assert_not_called()
 
     def test_unknown_branch_requires_real_executor_for_each_topology_and_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
