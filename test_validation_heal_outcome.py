@@ -108,7 +108,7 @@ class MixedOutcomeTest(unittest.TestCase):
                          "failed": 0, "unknown": 0, "attemptFailures": 1, "overflowed": False},
             "objects": [{"identity": {"kind": "object", "bucket": self.bucket, "object": expected[0]["key"], "versionId": None,
                         "bucketIncarnationId": None, "poolIndex": 0, "setIndex": 0}, "disposition": {
-                        "state": "deferred", "details": {"reason": "transient_existence_check", "retry_not_before": None}}}]}}
+                        "state": "deferred", "details": {"reason": "transient_existence_check", "retryNotBefore": None}}}]}}
         self.check(expected, status, options, 1)
         for field, value in (("bucketIncarnationId", self.incarnation), ("versionId", "null"), ("versionId", "v0")):
             changed = copy.deepcopy(status); changed["outcome"]["objects"][0]["identity"][field] = value
@@ -116,6 +116,14 @@ class MixedOutcomeTest(unittest.TestCase):
         changed = copy.deepcopy(status)
         changed["outcome"]["objects"][0]["disposition"]["details"]["reason"] = "dangling_delete_grace"
         with self.assertRaises(ValueError): self.check(expected, changed, options, 1)
+        for details in ({"reason": "transient_existence_check"},
+                        {"reason": "transient_existence_check", "retry_not_before": None},
+                        {"reason": "transient_existence_check", "retryNotBefore": {"secs_since_epoch": 123, "nanos_since_epoch": 0}},
+                        {"reason": "transient_existence_check", "retryNotBefore": None, "retry_not_before": None}):
+            changed = copy.deepcopy(status)
+            changed["outcome"]["objects"][0]["disposition"]["details"] = details
+            with self.subTest(details=details), self.assertRaises(ValueError):
+                self.check(expected, changed, options, 1)
 
     def test_planner_uses_actual_erasure_geometry_and_preserves_unselected_versions(self):
         scene, bucket, expected = versioned_scene([f"objects/{index:04d}.bin" for index in range(3)])

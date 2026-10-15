@@ -93,8 +93,7 @@ def reconcile(status, bucket, expected, options, incarnation, *, attempt_failure
             # This is one key-level refusal, never a version repair receipt.
             require(expected_entry.get("keyLevelRefusal") is True and pair[1] == "null"
                     and identity.get("versionId") is None and identity.get("bucketIncarnationId") is None
-                    and disposition.get("details", {}).get("reason") == "transient_existence_check"
-                    and disposition["details"].get("retry_not_before") is None,
+                    and disposition.get("details") == {"reason": "transient_existence_check", "retryNotBefore": None},
                     "J02 deferred dependency claimed a version/incarnation or changed its typed reason")
         else:
             require(isinstance(incarnation, str) and incarnation
