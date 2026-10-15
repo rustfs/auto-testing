@@ -1260,7 +1260,14 @@ def namespace_state(request):
             "roots": [{"path": str(root), "exists": root.exists(),
                        "ownerMarker": (root / "owner.json").is_file(), "ownerEvidence": marker_evidence(root),
                        "data": (root / "data").is_dir()} for root in roots],
+            "retained": {"state": checked(state.parent / "retained" / state.name, state.parent).exists(),
+                         "roots": [checked(root.parent.parent / "heal-validation-retained" / root.name,
+                                           root.parent.parent).exists() for root in roots]},
             "inspectionOnly": True, "mutated": False}
+
+
+def retained_scene_operation(request):
+    return globals()["retained_scene_backend"].run(request, globals())
 
 
 def audit_finalize(request):
@@ -1531,6 +1538,8 @@ def main(request):
         actions[action] = incarnation_operation
     actions["task-records"] = task_records
     actions["environment-capabilities"] = environment_capabilities
+    for action in ("retained-scene-audit", "retained-scene-isolate"):
+        actions[action] = retained_scene_operation
     actions["quota-audit-finalize"] = quota_audit_finalize
     actions["journal-rejection-audit-finalize"] = journal_rejection_audit_finalize
     actions["journal-rejection-audit"] = journal_rejection_audit_finalize

@@ -552,6 +552,51 @@ def recovery_scene_matches(current, plan):
     return True
 
 
+def isolate_incomplete_scene(fleet, plan, artifact):
+    """Preserve a drifted fixture; this never restores or finalizes its evidence."""
+    case = "heal.checkpoint-and-mrf-corruption"
+    folders = list(artifact.glob(f"*/run/{case}/evidence/{case}/DB/H2/mrf-checksum"))
+    require(len(folders) == 1, "incomplete fixture lacks its original archive")
+    receipts = [json.loads(path.read_text()) for path in folders[0].glob("*-reserved.json")]
+    require(len(receipts) == len(plan["nodes"]) and {item.get("node") for item in receipts} == set(plan["nodes"]),
+            "incomplete fixture lacks one original reservation per node")
+    owners = {}
+    for item in receipts:
+        owner = item.get("owner") or {}
+        require(item.get("reserved") is True and owner.get("runId") == plan["runId"]
+                and owner.get("bucket") == plan["bucket"] and owner.get("binarySha256") == plan["binarySha256"]
+                and owner.get("runtimeProfile") == "mrf-crash", "incomplete fixture original reservation differs")
+        owners[item["node"]] = owner
+    audits = {}
+    for node in plan["nodes"]:
+        audits[node] = fleet.record("incomplete-scene-preflight", {"node": node,
+            **fleet.remote(node, "retained-scene-audit", expectedOwner=owners[node])})
+        require(audits[node].get("inspectionOnly") is True and audits[node].get("mutated") is False
+                and audits[node].get("credentialContentsRead") is False, "incomplete fixture audit was not read-only")
+    require(any(any(root is None for root in audit["baseline"]["roots"]) for audit in audits.values()),
+            "incomplete-scene isolation requires actual missing roots")
+    # All nodes are frozen and audited before the first rename. Each node keeps
+    # a durable inventory intent and repeats it before every same-device move.
+    for node in plan["nodes"]:
+        proof = fleet.record("incomplete-scene-isolation", {"node": node,
+            **fleet.remote(node, "retained-scene-isolate", expectedOwner=owners[node],
+                           expectedBaseline=audits[node]["baseline"])})
+        require(proof.get("activeNamespaceIsolated") is True and proof.get("originalSceneRestored") is False
+                and proof.get("originalEvidenceComplete") is False and proof.get("backupRestorationUsed") is False
+                and proof.get("canonicalPassClaimed") is False
+                and proof.get("baseline") == audits[node]["baseline"], "incomplete fixture isolation failed")
+    for node in plan["nodes"]:
+        proof = fleet.record("incomplete-scene-post-audit", {"node": node,
+            **fleet.remote(node, "retained-scene-audit", expectedOwner=owners[node])})
+        require(proof.get("activeNamespaceIsolated") is True and proof.get("inspectionOnly") is True
+                and proof.get("mutated") is False and proof.get("baseline") == audits[node]["baseline"],
+                "incomplete fixture changed after isolation")
+    return {"runId": plan["runId"], "cleanup": "ISOLATED", "activeNamespaceIsolated": True,
+            "originalEvidenceComplete": False, "originalSceneRestored": False, "originalVerdictRewritten": False,
+            "missingDisks": {node: [index for index, row in enumerate(audits[node]["baseline"]["roots"]) if row is None]
+                             for node in plan["nodes"]}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--failed-run-id", type=int, required=True)
@@ -587,6 +632,13 @@ def main():
             continue
         states = [fleet.record("namespace-state", {"node": node,
             **fleet.remote(node, "namespace-state")}) for node in plan["nodes"]]
+        has_retained = any(item.get("retained", {}).get("state")
+                           or any(item.get("retained", {}).get("roots", [])) for item in states)
+        all_absent = all(not item["state"]["exists"] and not any(root["exists"] for root in item["roots"]) for item in states)
+        if plan.get("kind") == "advanced-mrf-fixture" and (has_retained or (not all_absent and any(
+                not root["exists"] for item in states for root in item["roots"]))):
+            complete.append({"failedRunId": args.failed_run_id, **isolate_incomplete_scene(fleet, plan, args.artifact)})
+            continue
         if all(not item["state"]["exists"] and not any(root["exists"] for root in item["roots"])
                for item in states):
             for item in states:
@@ -677,7 +729,9 @@ def main():
                     fleet.record("unchanged-peer-finalization", fleet.remote(node, "cleanup"))
         require(proof.get("cleanup") == "PASS", "audited environment finalization failed")
         complete.append({"failedRunId": args.failed_run_id, "runId": plan["runId"], "cleanup": "PASS", "originalVerdictRewritten": False})
-    save(args.evidence / "recovery-summary.json", {"cleanup": "PASS", "environments": complete, "canonicalPassClaimed": False})
+    save(args.evidence / "recovery-summary.json", {
+        "cleanup": "ISOLATED" if any(item["cleanup"] == "ISOLATED" for item in complete) else "PASS",
+        "environments": complete, "canonicalPassClaimed": False})
 
 
 if __name__ == "__main__":

@@ -185,6 +185,9 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
+        if action.startswith("retained-scene-"):
+            source += "\nimport types\nretained_scene_backend = types.ModuleType('retained_scene')\nexec(" + repr(
+                NODE_SOURCE.with_name("retained_scene.py").read_text()) + ", retained_scene_backend.__dict__)\n"
         if action.startswith("network-") or action in {"cleanup", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize", "journal-retained-audit", "journal-retained-audit-finalize"}:
             network_source = NODE_SOURCE.with_name("network_gate.py").read_text()
             source += "\nimport types\nnetwork_gate_backend = types.ModuleType('network_gate')\nexec(" + repr(
