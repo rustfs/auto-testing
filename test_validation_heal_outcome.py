@@ -178,25 +178,26 @@ class MixedOutcomeTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "immutable evidence"): outcome.main()
             fleet.assert_not_called()
 
-    def test_native_only_unknown_branch_keeps_full_case_incomplete(self):
+    def test_unknown_branch_requires_real_executor_for_each_topology_and_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); candidate = root / "candidate.json"
             candidate.write_text(json.dumps({"source_sha": outcome.CANDIDATE}))
             args = types.SimpleNamespace(candidate=candidate, evidence=root / "evidence", binary_sha="a" * 64)
             def branch(args, topology, nodes, fixture, name, candidate):
-                return {"topology": topology, "fixture": fixture, "branch": name, "verdict": "PASS", "cleanup": "PASS"}
+                return {"topology": topology, "fixture": fixture, "branch": name, "verdict": "BLOCKED" if name == "unknown-negative" else "PASS", "cleanup": "PASS"}
             with patch.object(outcome.argparse.ArgumentParser, "parse_args", return_value=args), \
                  patch.object(outcome, "verify_manager", return_value={"canonicalFleetBranchesExecuted": False}), \
-                 patch.object(outcome, "run_branch", side_effect=branch), patch.object(outcome.signal, "signal"), \
+                 patch.object(outcome, "run_branch", side_effect=branch) as executed, patch.object(outcome.signal, "signal"), \
                  patch.dict(os.environ, {"GITHUB_RUN_ID": "1234", "RUSTFS_NODES": "vm000 vm001 vm002 vm003"}):
                 self.assertEqual(outcome.main(), 1)
             summary = json.loads((args.evidence / "healthy-summary.json").read_text())
+            self.assertEqual(executed.call_count, 16)
             self.assertEqual(len(summary["results"]), 16)
             self.assertFalse(summary["complete"])
             self.assertEqual(summary["cleanup"], "PASS")
             negative = [row for row in summary["results"] if row["branch"] == "unknown-negative"]
             self.assertEqual(len(negative), 4)
-            self.assertTrue(all(row["verdict"] == "BLOCKED" and not row["fleetUnknownWindowClaimed"] for row in negative))
+            self.assertTrue(all(row["verdict"] == "BLOCKED" for row in negative))
 
     def test_dirty_cleanup_stops_before_next_fixture_or_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,6 +214,168 @@ class MixedOutcomeTest(unittest.TestCase):
             summary = json.loads((args.evidence / "healthy-summary.json").read_text())
             self.assertFalse(summary["complete"])
             self.assertEqual(summary["cleanup"], "FAIL")
+
+
+
+class LegacyUnknownTests(unittest.TestCase):
+    def physical(self):
+        original, bucket, expected = versioned_scene(["objects/0000.bin", "legacy/0000.bin"])
+        for scene in original.values():
+            for row in scene["files"]:
+                for version in row.get("metadata", {}).get("versions", []):
+                    for part in version["parts"]:
+                        part["integrityDescriptorPresent"] = not row["metadata"]["key"].startswith("legacy/")
+        return original, bucket, expected
+
+    def test_unknown_oracle_requires_independent_complete_physical_legacy_and_protected_control(self):
+        original, bucket, expected = self.physical()
+        plan = outcome.legacy_manifest(original, bucket, expected)
+        incarnation = MixedOutcomeTest.incarnation
+        options = {**BASE_OPTIONS, "recursive": True}
+        receipts = [{"identity": {"kind": "object", "bucket": bucket, "object": row["key"], "versionId": row["versionId"],
+                    "bucketIncarnationId": incarnation, "poolIndex": 0, "setIndex": 0},
+                     "disposition": {"state": row["state"]}} for row in plan["manifest"]]
+        counts = {"processed": 6, "healed": 0, "unchanged": 3, "skipped": 0, "failed": 0,
+                  "unknown": 3, "attemptFailures": 0, "overflowed": False}
+        status = {"summary": "finished", "truncated": False, "settings": options, "objectsHealed": 99,
+                  "outcome": {"execution": {"state": "completed"}, "coverage": "complete", "objectsTruncated": False,
+                              "objects": receipts, "counters": counts}}
+        unknown = [tuple(pair) for pair in plan["unknownIdentities"]]
+        proof = outcome.reconcile(status, bucket, plan["manifest"], options, incarnation, attempt_failures=0, legacy_unknown=unknown)
+        self.assertFalse(proof["unknownIsRepair"])
+        self.assertEqual(proof["canonicalCounters"]["healed"], 0)
+        with self.assertRaises(ValueError): outcome.reconcile(status, bucket, plan["manifest"], options, incarnation, attempt_failures=0)
+        for mutation in ("repaired", "identity", "failed", "incomplete", "unknown-count", "attempt-failure"):
+            changed = copy.deepcopy(status)
+            if mutation == "repaired": changed["outcome"]["objects"][-1]["disposition"]["state"] = "repaired"
+            elif mutation == "identity": changed["outcome"]["objects"][-1]["identity"]["bucketIncarnationId"] = "foreign"
+            elif mutation == "failed": changed["outcome"]["execution"]["state"] = "completed_with_errors"
+            elif mutation == "incomplete": changed["outcome"]["coverage"] = "partial"
+            elif mutation == "unknown-count": changed["outcome"]["counters"]["unknown"] = 0
+            else: changed["outcome"]["counters"]["attemptFailures"] = 1
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                outcome.reconcile(changed, bucket, plan["manifest"], options, incarnation, attempt_failures=0, legacy_unknown=unknown)
+
+    def test_descriptor_missing_true_integer_or_a_missing_cohort_never_creates_unknown_fixture(self):
+        for mutation in ("missing", "protected", "coerced", "missing-member", "no-control"):
+            original, bucket, expected = self.physical()
+            row = next(x for x in original["node1"]["files"] if x.get("metadata", {}).get("key", "").startswith("legacy/"))
+            if mutation == "missing": row["metadata"]["versions"][0]["parts"][0].pop("integrityDescriptorPresent")
+            elif mutation == "protected": row["metadata"]["versions"][0]["parts"][0]["integrityDescriptorPresent"] = True
+            elif mutation == "coerced": row["metadata"]["versions"][0]["parts"][0]["integrityDescriptorPresent"] = 0
+            elif mutation == "missing-member": original["node1"]["files"].remove(row)
+            else: expected = [x for x in expected if x["key"].startswith("legacy/")]
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): outcome.legacy_manifest(original, bucket, expected)
+
+    def test_legacy_append_uses_actual_sdk_calls_after_all_node_write_mode_switches(self):
+        events = []
+        def call(operation, params, body=None):
+            events.append((operation, params))
+            if operation == "put_object": return {"VersionId": str(len(events))}
+            return {"VersionId": str(len(events)), "DeleteMarker": True}
+        probe = types.SimpleNamespace()
+        fleet = types.SimpleNamespace(nodes=["a", "b"], remote=lambda node, action: events.append((action, node)) or {
+                "runId": "gh-12345-1-h1", "binarySha256": "a" * 64, "phase": "legacy", "oneWay": True,
+                "candidateUnchanged": True, "otherRuntimeSettingsUnchanged": True, "credentialsDisclosed": False},
+            record=lambda label, value: value, start=lambda: events.append(("start", None)),
+            snapshot=lambda label: {node: {"backgroundConfig": {"RUSTFS_SHARD_INTEGRITY_WRITE": "false",
+                "RUSTFS_HEAL_MRF_ENABLE": "false", "RUSTFS_SCANNER_ENABLED": "false"}} for node in ("a", "b")})
+        with patch.object(outcome, "Recorder", return_value=types.SimpleNamespace(call=call)):
+            value = outcome.append_legacy_fixture(probe, fleet, Path("/unused"),
+                {"bucketPrefix": MixedOutcomeTest.bucket, "runId": "gh-12345-1-h1", "candidateBinarySha256": "a" * 64},
+                [{"key": "protected-control"}], "DV")
+        self.assertEqual([name for name,_ in events[:3]], ["outcome-legacy-phase", "outcome-legacy-phase", "start"])
+        self.assertEqual(len(value), 8)
+        self.assertEqual(sum(name == "put_object" for name,_ in events), 6)
+        self.assertEqual(sum(name == "delete_object" for name,_ in events), 1)
+        self.assertEqual(sum(row.get("deleteMarker", False) for row in value), 1)
+
+
+class LegacyPhaseTests(unittest.TestCase):
+    def test_one_way_private_configuration_commit_survives_each_completed_write_boundary(self):
+        from scripts.validation_heal import fleet_node as node, heal_fault as fault
+        from test_validation_heal_retained_scene import RetainedSceneTests
+        for cut in (None, "J02-legacy-intent.json", "J02-service.env.new", "J02-phase.new", "rename-service.env", "rename-J02-phase.json"):
+            with self.subTest(cut=cut), tempfile.TemporaryDirectory() as temp:
+                state = Path(temp).resolve(); binary = b"candidate"; (state / "rustfs").write_bytes(binary)
+                owner = {"runId": "gh-12345-1-h1", "unit": "owned.service", "runtimeProfile": "outcome-legacy",
+                         "binarySha256": __import__('hashlib').sha256(binary).hexdigest()}
+                config = {**node.runtime_settings(owner), "RUSTFS_ADDRESS": ":9000", "RUSTFS_SECRET_KEY": "private-must-not-escape"}
+                env = state / "service.env"; env.write_text("".join(f"{key}={value}\n" for key,value in config.items())); env.chmod(0o600)
+                request = {"runId": owner["runId"], "action": "outcome-legacy-phase"}
+                def owned(run):
+                    value = {**owner, "outcomePhase": "legacy"} if (state / "J02-phase.json").exists() else owner
+                    return state, [], value
+                original_stat = os.stat
+                def root_stat(path, *args, **kwargs):
+                    info = original_stat(path, *args, **kwargs)
+                    values = {name: getattr(info,name) for name in dir(info) if name.startswith("st_")}
+                    values["st_uid"] = 0
+                    return types.SimpleNamespace(**values)
+                original = fault.new_file
+                original_rename = os.rename
+                fired = False
+                def write(fd, name, value):
+                    nonlocal fired
+                    original(fd, name, value)
+                    if cut == name and not fired:
+                        fired = True; raise RuntimeError("lost acknowledgement")
+                def rename(source, target, **kwargs):
+                    nonlocal fired
+                    original_rename(source, target, **kwargs)
+                    if cut == "rename-" + target and not fired:
+                        fired = True; raise RuntimeError("lost acknowledgement after rename")
+                with patch.object(node, "owned", side_effect=owned), patch.object(node, "stopped"), \
+                     patch.object(node, "fault_module", return_value=fault), patch.object(fault, "mount_id", return_value=7), \
+                     RetainedSceneTests().root_stats(), patch.object(os, "stat", side_effect=root_stat), \
+                     patch.object(fault, "new_file", side_effect=write), patch.object(os, "rename", side_effect=rename):
+                    if cut:
+                        with self.assertRaises(RuntimeError): node.outcome_legacy_phase(request)
+                        if not (state / "J02-phase.json").exists():
+                            with patch.object(node, "command") as command, self.assertRaisesRegex(ValueError, "incomplete"):
+                                node.start({"runId": owner["runId"], "action": "start"})
+                            self.assertNotIn("systemd-run", [call.args[0] for call in command.call_args_list])
+                    result = node.outcome_legacy_phase(request)
+                    self.assertTrue(result["oneWay"])
+                    self.assertNotIn(config["RUSTFS_SECRET_KEY"], json.dumps(result))
+                    actual = dict(line.split("=",1) for line in env.read_text().splitlines())
+                    self.assertEqual(actual, {**config, "RUSTFS_SHARD_INTEGRITY_WRITE": "false"})
+                    self.assertEqual(node.runtime_settings(owned(owner["runId"])[2])["RUSTFS_SHARD_INTEGRITY_WRITE"], "false")
+                    self.assertTrue(node.outcome_legacy_phase(request)["otherRuntimeSettingsUnchanged"])
+                    env.write_text(env.read_text().replace("private-must-not-escape", "foreign"))
+                    with self.assertRaises(ValueError): node.outcome_legacy_phase(request)
+
+    def test_actual_owned_reader_rejects_uncommitted_or_foreign_phase_markers(self):
+        from scripts.validation_heal import fleet_node as node
+        from test_validation_heal_retained_scene import RetainedSceneTests
+        with tempfile.TemporaryDirectory() as directory:
+            state, roots, scope, request = RetainedSceneTests().scene(directory)
+            owner = {**request["expectedOwner"], "runtimeProfile": "outcome-legacy"}
+            for folder in (*roots, state):
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "owner.json").write_text(json.dumps(owner))
+            phase = state / "J02-phase.json"
+            with RetainedSceneTests().root_stats(), patch.object(node, "paths", return_value=(state, roots)), \
+                 patch.object(node, "mounts", return_value=owner["mounts"]):
+                self.assertNotIn("outcomePhase", node.owned(owner["runId"])[2])
+                phase.write_text(json.dumps({"runId": owner["runId"], "phase": "legacy"}))
+                self.assertEqual(node.owned(owner["runId"])[2]["outcomePhase"], "legacy")
+                for value in ({"runId": owner["runId"], "phase": "protected"},
+                              {"runId": "foreign", "phase": "legacy"},
+                              {"runId": owner["runId"], "phase": "legacy", "extra": True}):
+                    phase.write_text(json.dumps(value))
+                    with self.subTest(value=value), self.assertRaises(ValueError): node.owned(owner["runId"])
+
+    def test_phase_adapter_loads_real_fault_backend(self):
+        from scripts.validation_heal.healthy import Fleet
+        def execute(*args, **kwargs):
+            scope = {"__name__": "__J02_node__"}
+            exec(compile(kwargs["input"].rsplit("\nmain(",1)[0], "J02-remote", "exec"), scope)
+            self.assertTrue(callable(scope["fault"].new_file))
+            self.assertTrue(callable(scope["outcome_legacy_phase"]))
+            return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.validation_heal.healthy.subprocess.run", side_effect=execute):
+            Fleet(["node"], Path(directory), "gh-12345-1-h1", runtime_profile="outcome-legacy").remote("node", "outcome-legacy-phase")
 
 
 if __name__ == "__main__": unittest.main()

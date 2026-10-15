@@ -14,7 +14,7 @@ import sys
 
 try:
     from .heal_probe import Probe, canonical, compare_inventories, require, save
-    from .heal_workload import Recorder, seed, verify_seed
+    from .heal_workload import Recorder, payload, seed, verify_seed
     from .healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from .heal_fault import bounded_fault_id
     from .inspector import verify as verify_inspector
@@ -27,7 +27,7 @@ try:
         validate_version_receipts, verify_proof, verify_quorum_contract, version_identity)
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, require, save
-    from heal_workload import Recorder, seed, verify_seed
+    from heal_workload import Recorder, payload, seed, verify_seed
     from healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from heal_fault import bounded_fault_id
     from inspector import verify as verify_inspector
@@ -47,11 +47,16 @@ SIZE = 5 * 1024**2 + 123
 FAILED_ATTEMPTS = 4
 
 
-def reconcile(status, bucket, expected, options, incarnation, *, attempt_failures):
+def reconcile(status, bucket, expected, options, incarnation, *, attempt_failures, legacy_unknown=()):
     """The manifest describes responsibility; legacy objectsHealed is not evidence."""
     wanted = {version_identity(entry): entry for entry in expected}
     require(wanted and len(wanted) == len(expected), "J02 manifest is empty or duplicates ACK identities")
     require(type(attempt_failures) is int and attempt_failures >= 0, "J02 invalid attempt-failure oracle")
+    legacy_unknown = set(legacy_unknown)
+    require(legacy_unknown <= set(wanted) and legacy_unknown == {pair for pair, entry in wanted.items() if entry["state"] == "unknown"},
+            "J02 unknown responsibility lacks its independently frozen legacy manifest")
+    require(not legacy_unknown or any(entry["state"] in {"verified_healthy", "metadata_healthy"} for entry in expected),
+            "J02 legacy negative requires a separate protected control")
     failed = sum(entry["state"] == "failed" for entry in expected)
     require(status.get("summary") == ("stopped" if failed else "finished")
             and status.get("settings") == options and status.get("truncated") is False,
@@ -74,7 +79,8 @@ def reconcile(status, bucket, expected, options, incarnation, *, attempt_failure
                 "J02 receipt has a foreign/duplicate object, version or erasure set")
         expected_entry = wanted[pair]
         state = expected_entry["state"]
-        require(state in {"repaired", "verified_healthy", "metadata_healthy", "failed", "dry_run_observed", "deferred"},
+        require(state in {"repaired", "verified_healthy", "metadata_healthy", "failed", "dry_run_observed", "deferred"}
+                or state == "unknown" and pair in legacy_unknown,
                 "J02 unknown, skipped or absent work cannot become a successful fixture result")
         disposition = receipt.get("disposition", {})
         require(disposition.get("state") == state, "J02 disposition differs from the frozen physical fault plan")
@@ -90,10 +96,13 @@ def reconcile(status, bucket, expected, options, incarnation, *, attempt_failure
             require(isinstance(incarnation, str) and incarnation
                     and identity.get("bucketIncarnationId") == incarnation,
                     "J02 receipt escaped the original healthy-task bucket incarnation")
+        if state == "unknown":
+            require(disposition == {"state": "unknown"} and receipt.get("detail") is None,
+                    "J02 legacy unknown changed its frozen proofless disposition")
         if state == "failed":
             require(disposition.get("details") == "retry_exhausted", "J02 below-R failure lost bounded retry exhaustion")
         category = {"repaired": "healed", "verified_healthy": "unchanged", "metadata_healthy": "unchanged",
-                    "failed": "failed", "dry_run_observed": "skipped", "deferred": "skipped"}[state]
+                    "failed": "failed", "dry_run_observed": "skipped", "deferred": "skipped", "unknown": "unknown"}[state]
         counters[category] += 1
         observed[pair] = state
     actual_counters = outcome.get("counters", {})
@@ -101,7 +110,68 @@ def reconcile(status, bucket, expected, options, incarnation, *, attempt_failure
                 for name, value in counters.items()), "J02 canonical counters hide retries or differ from complete dispositions")
     return {"originalIncarnation": incarnation, "completeManifestReconciled": True,
             "canonicalCounters": counters, "receipts": len(observed), "legacyObjectsHealedUsedAsRepairEvidence": False,
-            "deferredIsRepair": False, "failedIsRepair": False}
+            "deferredIsRepair": False, "failedIsRepair": False, "unknownIsRepair": False}
+
+
+def append_legacy_fixture(probe, fleet, directory, binding, expected, fixture):
+    """Keep an ACK-bound protected control while writing new real legacy objects."""
+    for node in fleet.nodes:
+        proof = fleet.record("one-way-legacy-write-phase", {"node": node, **fleet.remote(node, "outcome-legacy-phase")})
+        require(proof.get("runId") == binding["runId"] and proof.get("binarySha256") == binding["candidateBinarySha256"]
+                and proof.get("phase") == "legacy" and proof.get("oneWay") is True
+                and proof.get("candidateUnchanged") is True and proof.get("otherRuntimeSettingsUnchanged") is True
+                and proof.get("credentialsDisclosed") is False, "J02 phase acknowledgement differs from its original candidate")
+    fleet.start()
+    running = fleet.snapshot("actual-legacy-writing-processes")
+    require(all(scene.get("backgroundConfig", {}).get("RUSTFS_SHARD_INTEGRITY_WRITE") == "false"
+                and scene["backgroundConfig"].get("RUSTFS_HEAL_MRF_ENABLE") == "false"
+                and scene["backgroundConfig"].get("RUSTFS_SCANNER_ENABLED") == "false" for scene in running.values()),
+            "J02 legacy bytes require actual write-disabled, isolated candidate processes")
+    recorder = Recorder(probe, directory / "legacy-fixture")
+    appended = []
+    for index in range(2):
+        key = f"legacy/{index:04d}.bin"
+        versions = 3 if fixture == "DV" else 1
+        for version in range(versions):
+            body = payload(f"{binding['bucketPrefix']}/{key}/{version}", SIZE)
+            response = recorder.call("put_object", {"Bucket": binding["bucketPrefix"], "Key": key,
+                "ContentType": "application/octet-stream", "Metadata": {"heal-fixture": fixture, "nonce": f"{index}-{version}"},
+                "Tagging": "suite=heal&fixture=" + fixture}, body)
+            require(fixture != "DV" or response.get("VersionId") not in {None, "null"}, "J02 legacy DV PUT lacks an ACK version")
+            appended.append({"key": key, "versionId": response.get("VersionId", "null"), "isLatest": version == versions - 1,
+                "deleteMarker": False, "payload": {"sha256": hashlib.sha256(body).hexdigest(), "size": len(body)}})
+        if fixture == "DV" and index == 0:
+            response = recorder.call("delete_object", {"Bucket": binding["bucketPrefix"], "Key": key})
+            require(response.get("DeleteMarker") is True and response.get("VersionId"), "J02 legacy marker ACK is incomplete")
+            appended[-1]["isLatest"] = False
+            appended.append({"key": key, "versionId": response["VersionId"], "isLatest": True, "deleteMarker": True})
+    return expected + appended
+
+
+def legacy_manifest(original, bucket, expected):
+    """Require a complete physical cohort for every ACK version before admission."""
+    manifest, unknown, evidence = [], [], []
+    for entry in expected:
+        legacy = entry["key"].startswith("legacy/")
+        state = "metadata_healthy" if entry["deleteMarker"] else "unknown" if legacy else "verified_healthy"
+        manifest.append({**entry, "state": state})
+        if entry["deleteMarker"]:
+            continue
+        target = map_target(original, bucket, entry["key"], "data", 1, entry["versionId"], latest_required=False)
+        parts = target["logical"]["parts"]
+        member_parts = [version["parts"] for member in target["cohort"] for version in member["metadata"]["versions"]
+                        if public_version_id(version.get("versionId")) == public_version_id(entry["versionId"])]
+        require(len(member_parts) == len(target["cohort"]) and all(parts and all(type(part.get("integrityDescriptorPresent")) is bool
+                and part["integrityDescriptorPresent"] is (not legacy) for part in parts) for parts in member_parts),
+                "J02 metadata lacks exact protected/legacy part descriptor evidence")
+        require(target["logical"]["size"] == entry["payload"]["size"], "J02 metadata size differs from the ACK")
+        evidence.append({"key": entry["key"], "versionId": entry["versionId"], "legacy": legacy,
+                         "completeCohort": target["cohort"], "parts": parts})
+        if legacy:
+            unknown.append(version_identity(entry))
+    require(unknown and any(not item["legacy"] for item in evidence), "J02 legacy scene lacks an independent protected control")
+    return {"manifest": manifest, "unknownIdentities": unknown, "physicalLegacyEvidence": evidence,
+            "syntheticMetadataWritten": False, "legacyPayloadIntegrityCertified": False}
 
 
 def fault_plan(original, bucket, expected, branch):
@@ -157,7 +227,8 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
     directory = args.evidence / fixture / topology / branch
     directory.mkdir(parents=True)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory)
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory,
+                  runtime_profile="outcome-legacy" if branch == "unknown-negative" else "manual")
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     fleet.snapshot_buckets = [bucket]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
@@ -177,7 +248,7 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         pending = {"operation": "seed", "bucket": bucket}
-        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, 3, [SIZE])
+        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, 1 if branch == "unknown-negative" else 3, [SIZE])
         baseline = fleet.record("ACK-bound-full-S3", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("complete-ACK-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         pending = None
@@ -187,13 +258,23 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
         incarnation = validate_version_receipts(anchor, bucket, expected, 2)["bucketIncarnationId"]
         idle_fleet(fleet, binding)
         fleet.stop()
+        if branch == "unknown-negative":
+            fleet.snapshot("protected-control-before-legacy-writing", quiescent=True)
+            pending = {"operation": "append-real-legacy-fixture", "bucket": bucket}
+            expected = append_legacy_fixture(probe, fleet, directory, binding, expected, fixture)
+            baseline = fleet.record("legacy-ACK-bound-full-S3", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
+            fleet.record("complete-protected-and-legacy-ACK-manifest", {"expected": expected, **verify_seed(expected, baseline)})
+            pending = None
+            idle_fleet(fleet, binding)
+            fleet.stop()
         original = fleet.snapshot("healthy-physical-baseline", quiescent=True)
-        plan = fault_plan(original, bucket, expected, branch)
+        plan = legacy_manifest(original, bucket, expected) if branch == "unknown-negative" else fault_plan(original, bucket, expected, branch)
         fleet.record("independent-manifest-and-frozen-fault-plan", plan)
-        for target in (plan["repair"], plan["failed"]):
+        for target in (() if branch == "unknown-negative" else (plan["repair"], plan["failed"])):
             verify_proof(fleet, target, "original-full-cohort-bitrot")
         prior = original
-        for index, target in enumerate(plan["faults"]):
+        faulted = original
+        for index, target in enumerate(plan.get("faults", [])):
             params = {"disk": target["disk"], "faultId": bounded_fault_id("J02", branch, index)}
             fleet.faults.append((target["node"], params))
             receipt = fleet.record("stopped-original-file-fault", {"node": target["node"], **fleet.remote(
@@ -218,11 +299,17 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
         require(len(admissions) == 1, "J02 original fault task lacks an exact independent admission")
         fleet.record("original-terminal-before-any-rescue", status)
         result["responsibility"] = reconcile(status, bucket, plan["manifest"], options, incarnation,
-            attempt_failures=FAILED_ATTEMPTS if branch == "mixed-healthy-repaired-failed" else 1 if branch == "deferred" else 0)
+            attempt_failures=FAILED_ATTEMPTS if branch == "mixed-healthy-repaired-failed" else 1 if branch == "deferred" else 0,
+            legacy_unknown=tuple(tuple(pair) for pair in plan.get("unknownIdentities", [])))
         idle_fleet(fleet, binding)
         fleet.stop()
         after = fleet.snapshot("original-result-physical-scene", quiescent=True)
-        result["physical"] = retained_failure_scene(original, faulted, after, plan, branch)
+        if branch == "unknown-negative":
+            require(physical_content(original) == physical_content(after), "J02 legacy negative mutated its original physical scene")
+            result["physical"] = {"physicalUnchanged": True, "productRepairClaimed": False,
+                                  "legacyPayloadIntegrityCertified": False}
+        else:
+            result["physical"] = retained_failure_scene(original, faulted, after, plan, branch)
         if branch == "mixed-healthy-repaired-failed":
             verify_proof(fleet, plan["repair"], "actual-repaired-shard-before-rescue-or-GET")
         rescue(fleet)
@@ -231,7 +318,7 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
             validate_repaired_physical(original, restored, plan["repair"])
         else:
             require(physical_content(original) == physical_content(restored), "J02 rescue changed the original ACK generation")
-        for target in (plan["repair"], plan["failed"]):
+        for target in (() if branch == "unknown-negative" else (plan["repair"], plan["failed"])):
             verify_proof(fleet, target, "all-original-shards-after-fixture-rescue")
         fleet.start()
         for endpoint in binding["endpoints"]:
@@ -295,13 +382,7 @@ def main():
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes)):
             for fixture in ("DB", "DV"):
                 for branch in BRANCHES:
-                    if branch == "unknown-negative":
-                        result = {"topology": topology, "fixture": fixture, "branch": branch, "verdict": "BLOCKED", "cleanup": "PASS",
-                            "evidenceKind": "separate-exact-candidate-native-outcome-negative", "native": native,
-                            "reason": "exact candidate native unknown-identity guard is a prerequisite; a reviewed live unknown/lock-deferred fixture is still required",
-                            "fleetUnknownWindowClaimed": False, "productRepairClaimed": False}
-                    else:
-                        result = run_branch(args, topology, selected, fixture, branch, candidate)
+                    result = run_branch(args, topology, selected, fixture, branch, candidate)
                     results.append(result)
                     if result["cleanup"] != "PASS": return 1
     finally:

@@ -40,7 +40,7 @@ def runtime_config(profile):
                 "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false", "RUSTFS_HEAL_MAX_CONCURRENT_HEALS": "1",
                 "RUSTFS_HEAL_MAX_CONCURRENT_PER_SET": "1", "RUSTFS_OBS_LOGGER_LEVEL": logging_filter,
                 "RUST_LOG": logging_filter}
-    require(profile in {"queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"outcome-legacy", "queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
     if profile == "queue-pressure":
         logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true",
@@ -106,20 +106,82 @@ def runtime_settings(owner):
         config["AUTO_TESTING_C11_PHASE"] = owner.get("incarnationPhase", "capture")
     if owner.get("incarnationPhase") == "transition":
         config.update(RUSTFS_HEAL_MRF_ENABLE="false")
+    if owner.get("runtimeProfile") == "outcome-legacy" and owner.get("outcomePhase") == "legacy":
+        config["RUSTFS_SHARD_INTEGRITY_WRITE"] = "false"
     return config
 
 
-def incarnation_configuration(state, owner):
+def runtime_configuration(state, owner):
     env = checked(state / "service.env", state)
     info = env.stat()
     require(info.st_uid == 0 and info.st_nlink == 1 and stat.S_ISREG(info.st_mode) and info.st_size <= 65536,
-            "C11 configuration lost its bounded private ownership")
+            "runtime configuration lost its bounded private ownership")
     lines = env.read_text().splitlines()
-    require(all("=" in line for line in lines), "C11 configuration has an invalid entry")
+    require(all("=" in line for line in lines), "runtime configuration has an invalid entry")
     values = dict(line.split("=", 1) for line in lines)
     require(len(lines) == len(values) and all(values.get(key) == value for key, value in runtime_settings(owner).items()),
-            "C11 phase configuration drifted or its durable phase commit is incomplete")
+            "runtime configuration drifted or its durable phase commit is incomplete")
     return values
+
+
+def outcome_legacy_phase(request):
+    """One-way switch after a separately verified protected control task."""
+    require(set(request) == {"runId", "action"}, "J02 phase accepts no runtime override")
+    state, _, owner = owned(request["runId"])
+    stopped(owner)
+    require(owner.get("runtimeProfile") == "outcome-legacy"
+            and digest(checked(state / "rustfs", state)) == owner["binarySha256"], "J02 runtime or candidate differs")
+    fault = fault_module()
+    binding = {"runId": owner["runId"], "binarySha256": owner["binarySha256"], "phase": "legacy"}
+    with fault.directory(state) as fd:
+        info = os.stat("service.env", dir_fd=fd, follow_symlinks=False)
+        require(info.st_uid == 0 and not info.st_mode & 0o077, "J02 configuration lost its private ownership")
+        raw = fault.read_file(fd, "service.env", 65536)
+        lines = raw.decode().splitlines()
+        require(all("=" in line for line in lines), "J02 private configuration has an invalid entry")
+        values = dict(line.split("=", 1) for line in lines)
+        wanted = runtime_settings({**owner, "outcomePhase": "legacy"})
+        require(len(lines) == len(values) and values.get("RUSTFS_SHARD_INTEGRITY_WRITE") in {"true", "false"}
+                and all(values.get(key) == value for key, value in wanted.items() if key != "RUSTFS_SHARD_INTEGRITY_WRITE"),
+                "J02 configuration changed outside its write-mode switch")
+        values["RUSTFS_SHARD_INTEGRITY_WRITE"] = "false"
+        changed = ("\n".join(f"{key}={value}" for key, value in values.items()) + "\n").encode()
+        changed_sha = hashlib.sha256(changed).hexdigest()
+        try:
+            info = os.stat("J02-legacy-intent.json", dir_fd=fd, follow_symlinks=False)
+            require(info.st_uid == 0 and not info.st_mode & 0o077, "J02 phase intent lost its private ownership")
+            intent = json.loads(fault.read_file(fd, "J02-legacy-intent.json", 16384))
+        except FileNotFoundError:
+            require(owner.get("outcomePhase") is None, "J02 committed phase lacks its original intent")
+            runtime_configuration(state, owner)
+            intent = {**binding, "beforeEnvironmentSha256": hashlib.sha256(raw).hexdigest(),
+                      "legacyEnvironmentSha256": changed_sha}
+            fault.new_file(fd, "J02-legacy-intent.json", fault.encode(intent))
+        require(set(intent) == {*binding, "beforeEnvironmentSha256", "legacyEnvironmentSha256"}
+                and all(intent.get(key) == value for key, value in binding.items())
+                and all(re.fullmatch(r"[0-9a-f]{64}", intent.get(key, "")) for key in
+                        ("beforeEnvironmentSha256", "legacyEnvironmentSha256"))
+                and changed_sha == intent["legacyEnvironmentSha256"]
+                and hashlib.sha256(raw).hexdigest() in {intent["beforeEnvironmentSha256"], intent["legacyEnvironmentSha256"]},
+                "J02 phase configuration or intent differs")
+        require(owner.get("outcomePhase") is None or hashlib.sha256(raw).hexdigest() == intent["legacyEnvironmentSha256"],
+                "J02 committed write mode drifted")
+        if owner.get("outcomePhase") != "legacy":
+            try:
+                fault.new_file(fd, "J02-service.env.new", changed)
+            except FileExistsError:
+                require(fault.read_file(fd, "J02-service.env.new", 65536) == changed, "J02 staged configuration differs")
+            os.rename("J02-service.env.new", "service.env", src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+            phase = fault.encode({"runId": owner["runId"], "phase": "legacy"})
+            try:
+                fault.new_file(fd, "J02-phase.new", phase)
+            except FileExistsError:
+                require(fault.read_file(fd, "J02-phase.new", 16384) == phase, "J02 staged phase differs")
+            os.rename("J02-phase.new", "J02-phase.json", src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+    return {**binding, "oneWay": True, "candidateUnchanged": True, "credentialsDisclosed": False,
+            "otherRuntimeSettingsUnchanged": True}
 
 
 def incarnation_operation(request):
@@ -153,7 +215,7 @@ def incarnation_operation(request):
                     "C11 phase runnable records differ from the completed original transaction")
         except FileNotFoundError as exc:
             raise ValueError("C11 phase requires a complete original record transaction") from exc
-        values = incarnation_configuration(state, owner)
+        values = runtime_configuration(state, owner)
         owner["incarnationPhase"] = request["phase"]
         replacement = runtime_settings(owner)
         env = state / "service.env"
@@ -408,6 +470,15 @@ def owned(run_id):
             require(set(phase) == {"runId", "phase"} and phase["runId"] == run_id
                     and phase["phase"] in {"transition", "replay"}, "C11 phase marker differs")
             owner = {**owner, "incarnationPhase": phase["phase"]}
+    if owner.get("runtimeProfile") == "outcome-legacy":
+        phase_file = checked(state / "J02-phase.json", state)
+        if phase_file.exists():
+            info = phase_file.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+                    and info.st_size <= 16384 and not info.st_mode & 0o022, "J02 phase marker lost private ownership")
+            phase = json.loads(phase_file.read_text())
+            require(phase == {"runId": run_id, "phase": "legacy"}, "J02 phase marker differs")
+            owner = {**owner, "outcomePhase": "legacy"}
     return state, roots, owner
 
 
@@ -416,8 +487,13 @@ def start(request):
     stopped(owner)
     command("systemctl", "reset-failed", owner["unit"], check=False)
     require(digest(state / "rustfs") == owner["binarySha256"], "candidate changed before start")
-    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf"}:
-        incarnation_configuration(state, owner)
+    if owner.get("runtimeProfile") == "outcome-legacy":
+        require(not (state / "J02-legacy-intent.json").exists() or owner.get("outcomePhase") == "legacy",
+                "J02 phase commit is incomplete; service cannot start")
+        if owner.get("outcomePhase") == "legacy":
+            outcome_legacy_phase({"runId": owner["runId"], "action": "outcome-legacy-phase"})
+    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf", "outcome-legacy"}:
+        runtime_configuration(state, owner)
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
@@ -1540,6 +1616,7 @@ def main(request):
     actions["environment-capabilities"] = environment_capabilities
     for action in ("retained-scene-audit", "retained-scene-isolate"):
         actions[action] = retained_scene_operation
+    actions["outcome-legacy-phase"] = outcome_legacy_phase
     actions["quota-audit-finalize"] = quota_audit_finalize
     actions["journal-rejection-audit-finalize"] = journal_rejection_audit_finalize
     actions["journal-rejection-audit"] = journal_rejection_audit_finalize

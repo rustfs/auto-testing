@@ -268,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "erasure": info.erasure, "role": role,
                 "parts": info.parts.iter().map(|part| json!({
                     "number": part.number, "size": part.size, "actualSize": part.actual_size,
-                    "etag": part.etag
+                    "etag": part.etag, "integrityDescriptorPresent": part.integrity.is_some()
                 })).collect::<Vec<_>>()
             }))
         })

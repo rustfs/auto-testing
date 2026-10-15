@@ -344,7 +344,7 @@ class RuntimePhaseTests(unittest.TestCase):
         (self.state / "C11-replay-installed.json").write_bytes(fault.encode(self.binding))
         self.assertEqual(self.phase("replay")["mrfEnabled"], "true")
         self.owner["incarnationPhase"] = "replay"
-        fleet_node.incarnation_configuration(self.state, self.owner)
+        fleet_node.runtime_configuration(self.state, self.owner)
         with self.assertRaisesRegex(ValueError, "refund"): self.phase("transition")
 
     def test_configuration_commit_interruption_refuses_process_start_before_systemd(self):
@@ -394,7 +394,7 @@ class RuntimePhaseTests(unittest.TestCase):
 
     def test_duplicate_config_and_caller_runtime_override_refuse(self):
         with self.env.open("a") as stream: stream.write("RUSTFS_HEAL_MRF_ENABLE=true\n")
-        with self.assertRaises(ValueError): fleet_node.incarnation_configuration(self.state, self.owner)
+        with self.assertRaises(ValueError): fleet_node.runtime_configuration(self.state, self.owner)
         with self.assertRaisesRegex(ValueError, "arbitrary"):
             fleet_node.incarnation_operation({"runId": self.owner["runId"], "action": "incarnation-phase",
                 "phase": "transition", "environment": {"RUSTFS_HEAL_MRF_ENABLE": "false"}})
