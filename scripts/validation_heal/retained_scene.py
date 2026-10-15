@@ -116,7 +116,10 @@ def census(folder, owner, *, state, node):
             mrf = not state and relative in {
                 "data/.rustfs.sys/.heal-mrf-snapshot.0.bin", "data/.rustfs.sys/.heal-mrf-snapshot.1.bin",
                 "data/.rustfs.sys/.heal-mrf-manifest.json"}
-            if (state and relative == "rustfs") or fixture or mrf:
+            backup = (not state and owner.get("runtimeProfile") == "root-restart"
+                      and len(parts) == 2 and parts[0] == "quarantine"
+                      and re.fullmatch(r"F07-shard-[0-3]\.(original|intent\.json|applied\.json)", parts[1]))
+            if (state and relative == "rustfs") or fixture or mrf or backup:
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
                     require(stable(os.fstat(fd)) == stable(info) and info.st_size <= 2 * 1024**3,
@@ -152,7 +155,7 @@ def inspect(request, node):
     require(isinstance(expected, dict) and expected.get("runId") == request["runId"]
             and expected.get("unit") == node["unit"](request["runId"])
             and expected.get("hostname") == node["socket"].gethostname()
-            and expected.get("runtimeProfile") == "mrf-crash", "retained scene archived owner differs")
+            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart"}, "retained scene archived owner differs")
     current = node["mounts"]()
     require(len(current) == len(expected.get("mounts", [])) == 4
             and all(all(actual[key] == old[key] for key in ("target", "source", "fstype", "uuid", "maj:min"))
@@ -193,6 +196,19 @@ def inspect(request, node):
     baseline = {"runId": request["runId"], "ownerSha256": sha(expected), "roots": witnesses[:4], "state": witnesses[4]}
     intent = retained_state.parent / (request["runId"] + ".intent.json")
     node["checked"](intent, state.parent)
+    if expected["runtimeProfile"] == "root-restart":
+        original_sha = request.get("expectedOriginalSceneSha256", "")
+        require(re.fullmatch(r"[0-9a-f]{64}", original_sha) is not None,
+                "restored fixture requires its original physical scene digest")
+        baseline["originalSceneSha256"] = original_sha
+        require("absent" not in locations, "restored fixture cannot omit an original root")
+        if not intent.exists():
+            require(all(location == "active" for location in locations), "unbound retained fixture")
+            scene = node["snapshot"]({"runId": request["runId"], "action": "snapshot", "quiescent": True})
+            require(scene.get("quiescent") is True and type(scene.get("pid")) is int and scene["pid"] == 0
+                    and scene.get("binarySha256") == expected["binarySha256"]
+                    and sha({key: scene[key] for key in ("files", "formats")}) == original_sha,
+                    "restored fixture differs from the original business scene")
     if intent.exists():
         require(encoded(private_json(intent)) == encoded(baseline), "retained scene drifted from its durable isolation intent")
     else:
@@ -201,8 +217,12 @@ def inspect(request, node):
 
 
 def run(request, node):
-    require(set(request) == ({"runId", "action", "expectedOwner", "expectedBaseline"}
-            if request["action"] == "retained-scene-isolate" else {"runId", "action", "expectedOwner"}),
+    fields = {"runId", "action", "expectedOwner"}
+    if request.get("expectedOwner", {}).get("runtimeProfile") == "root-restart":
+        fields.add("expectedOriginalSceneSha256")
+    if request["action"] == "retained-scene-isolate":
+        fields.add("expectedBaseline")
+    require(set(request) == fields,
             "retained scene accepts only its archived owner and frozen inventory")
     require(request["action"] in {"retained-scene-audit", "retained-scene-isolate"}, "invalid retained scene action")
     baseline, locations, state, roots, retained_state, retained_roots, intent = inspect(request, node)

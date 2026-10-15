@@ -12,9 +12,11 @@ import re
 try:
     from .healthy import Fleet, physical_content
     from .heal_probe import require, save
+    from .interrupted_recovery import checkpoint_plan, restore_and_isolate
 except ImportError:
     from healthy import Fleet, physical_content
     from heal_probe import require, save
+    from interrupted_recovery import checkpoint_plan, restore_and_isolate
 
 
 def quota_recovery_plan(artifact, failed_run, candidate):
@@ -140,6 +142,9 @@ def network_recovery_plan(artifact, failed_run, candidate):
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
     if list(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/cases/*.json")):
+        results = list(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/cases/*.json"))
+        if any(json.loads(path.read_text()).get("verdict") == "RUNNING" for path in results):
+            return checkpoint_plan(artifact, failed_run, candidate)
         folder = next(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/evidence/heal.checkpoint-and-mrf-corruption"))
         if list((folder / "DB/H2/mrf-checksum").glob("*-actual-original-MRF-CRC-injection.json")):
             return retained_mrf_recovery_plan(artifact, failed_run, candidate)
@@ -532,7 +537,7 @@ def recovery_scene_matches(current, plan):
     """A retry may contain only the exact original shards already rescued."""
     observed = physical_content(current)
     expected = physical_content(plan.get("failure", plan["before"]))
-    if plan.get("kind") != "owned-quota":
+    if plan.get("kind") not in {"owned-quota", "interrupted-checkpoint-before-admission"}:
         return observed == expected
     original = physical_content(plan["before"])
     if set(observed) != set(expected):
@@ -635,6 +640,10 @@ def main():
         has_retained = any(item.get("retained", {}).get("state")
                            or any(item.get("retained", {}).get("roots", [])) for item in states)
         all_absent = all(not item["state"]["exists"] and not any(root["exists"] for root in item["roots"]) for item in states)
+        if plan.get("kind") == "interrupted-checkpoint-before-admission":
+            complete.append({"failedRunId": args.failed_run_id,
+                             **restore_and_isolate(fleet, plan, states, recovery_scene_matches)})
+            continue
         if plan.get("kind") == "advanced-mrf-fixture" and (has_retained or (not all_absent and any(
                 not root["exists"] for item in states for root in item["roots"]))):
             complete.append({"failedRunId": args.failed_run_id, **isolate_incomplete_scene(fleet, plan, args.artifact)})

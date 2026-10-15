@@ -610,6 +610,8 @@ hf recover --fault-id C02-data-middle --service-quiescent
 
 只恢复同run的备份，原件摘要不符则拒绝；目标如果已经是原始正确字节不重写；如果变成既不是原始也不是注入后字节（可能有新ACK或合法metadata重写），拒绝盲目覆盖，交人工保留现场。恢复工具输出 `physicalRepairPassAllowed=false`；任何 `restoredFromBackup=true` 都不能作为产品补片证据。
 
+For an externally cancelled Functional Chain, `validation_cleanup_run_id` accepts only a completed run on the same workflow branch. F07 recovery supports the bounded H2/DV stale-generation boundary after four missing-part injections and before Admin admission: all 18 earlier branches must have complete cleanup receipts, and all 282 fixture requests must have matching successful SDK acknowledgements. Any additional action, unknown write, lost root or physical drift fails closed. Recovery stops the owned services, restores only the four original part backups, and verifies the complete original business files and disk formats. It then retains every data root and private state directory by the existing non-overwriting, same-filesystem archive protocol, with a durable inventory bound to each node's original business-scene digest. Partial restoration and partial archive moves are retryable. `ISOLATED` releases the active namespace while preserving backups; it never rewrites the original cancelled/RUNNING result, restores old system records, or claims canonical PASS.
+
 强制故障设置第二条恢复通道/超时撤销；本地 finally 不是网络或进程被杀时可靠的唯一恢复办法。退出前枚举本例网络规则、bind层、dm表、测试unit、临时IAM和未完成MPU，逐条撤销并复核。保留失败数据/backup，retention未到期则保留专用资源；记录剩余路径/到期安排。未恢复为 DIRTY/QUARANTINED，不继续下一用例。
 
 每个**实际参数实例**都填写人工结论和证据索引，不只填一个基础case总绿：

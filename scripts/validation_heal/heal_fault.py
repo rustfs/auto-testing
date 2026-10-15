@@ -207,10 +207,14 @@ def apply_fault(root_fd: int, owner: dict, relative: str, fault_id: str, kind: s
         return receipt
 
 
-def recover_fault(root_fd: int, owner: dict, fault_id: str) -> dict:
+def recover_fault(root_fd: int, owner: dict, fault_id: str, *, expected_receipt_sha256: str | None = None) -> dict:
     require(bool(re.fullmatch(r"[A-J][0-9]{2}-[a-z0-9-]{1,48}", fault_id)), "invalid fault ID")
     with parent(root_fd, ["quarantine"]) as backup_fd:
         receipt = json.loads(read_file(backup_fd, fault_id + ".intent.json", 16384))
+        if expected_receipt_sha256 is not None:
+            require(isinstance(expected_receipt_sha256, str) and re.fullmatch(r"[0-9a-f]{64}", expected_receipt_sha256)
+                    and digest(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()) == expected_receipt_sha256,
+                    "recovery intent differs from archived fault receipt")
         require(receipt["runId"] == owner["runId"] and receipt["faultId"] == fault_id
                 and receipt["backup"] == fault_id + ".original", "recovery receipt mismatch")
         parts = target_parts(receipt["relativePath"], owner["bucketPrefix"])

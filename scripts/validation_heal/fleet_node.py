@@ -935,7 +935,8 @@ def recover_fault(request):
     root, owner = fault_root(request)
     module = fault_module()
     with module.directory(root) as fd:
-        return module.recover_fault(fd, module.checked_owner(fd, owner["runId"], recovery=True), request["faultId"])
+        return module.recover_fault(fd, module.checked_owner(fd, owner["runId"], recovery=True), request["faultId"],
+                                    expected_receipt_sha256=request.get("expectedReceiptSha256"))
 
 
 def verify_part(request):
