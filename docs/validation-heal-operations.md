@@ -645,3 +645,9 @@ J06 的自动入口为 `heal.performance-abba`。执行器在部署前冻结三�
 
 
 A02 的自动入口为 `heal.admin-scope-isolation`。H2 的专用 `scope-isolation` runtime 使用当前四节点/十六盘，按盘序交织节点并设置 `RUSTFS_ERASURE_SET_DRIVE_COUNT=8`，要求真实两个 set 各跨全部四个节点。普通执行器仍只接受原单 set。两个桶的完整 ACK/实际物理 set 清单冻结后，root/bucket/prefix/object/pool-set 各自新部署、注入选中与控制故障。完整物理和 streaming 证明必须先于 GET 和控制备份恢复。H1 保留原四盘单 set，明确记录不存在未选 set 的适用边界；不能拿同盘目录冒充第二个 set。未限制选择器的原始 receipt 在该固定候选中允许 null，单独保存实际物理映射，显式 pool/set 则必须严格匹配原始字段。
+
+### J02 original opaque metadata probe
+
+The `unknown-negative` diagnostic includes the source procedure before the supplemental legacy-object diagnostic. A separate acknowledged object first receives an independently healthy Deep receipt. With the owned services stopped, the existing descriptor-relative fault backend flips byte zero of every original `xl.meta` copy: four copies in H1 and sixteen in H2. Each mutation has its own original backup, receipt and complete physical delta; the candidate-bound decoder must refuse every exact damaged copy. No other metadata, part or format may change.
+
+A separate protected prefix is checked during the fault. The original key-level task must retain complete truthful counters and an unresolved disposition, with no invented healthy, repaired, absent, version or incarnation claim. Unknown must be counted within skipped and carry the legacy warning. If the candidate reports another truthful unresolved disposition, record `NOT_OBSERVED`; the legacy diagnostic cannot promote it to PASS. Archive the original terminal result and unchanged complete fault scene before restoring original metadata bytes. Verify the full original physical and SDK inventories and the unchanged original token after restoration. Fixture rescue is never product repair. J02 remains outside canonical dispatch until the separate version-specific grace Deferred/new-token procedure and complete live evidence are available.

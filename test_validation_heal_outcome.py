@@ -215,7 +215,7 @@ class MixedOutcomeTest(unittest.TestCase):
             self.assertFalse(summary["complete"])
             self.assertFalse(summary["canonicalCasePassClaimed"])
             self.assertEqual(set(summary["sourceAssertionGaps"]), {
-                "original-corrupt-metadata-unknown-negative", "version-specific-grace-deferred-and-new-token-compensation"})
+                "version-specific-grace-deferred-and-new-token-compensation"})
 
     def test_dirty_cleanup_stops_before_next_fixture_or_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -542,6 +542,130 @@ class ReadonlySourceFlowTests(unittest.TestCase):
                         self.assertLess(events.index("readonly-original-failure-physical"),events.index("drive-gate"))
                         self.assertLess(events.index("readonly-released-before-new-token"),len(events)-1)
                         self.assertEqual(len(queries),2)
+
+
+
+class OriginalOpaqueMetadataTests(unittest.TestCase):
+    bucket = 'rv-heal-0123456789abcdef'
+    key = 'opaque/source.bin'
+    options = {**outcome.BASE_OPTIONS, 'recursive': False}
+
+    def status(self, state='unknown'):
+        failed = state == 'failed'
+        return {'summary': 'stopped' if failed else 'finished', 'settings': self.options, 'truncated': False,
+            'detail': 'legacy incomplete outcome; unknown is not proof of repair' if state == 'unknown' else None,
+            'outcome': {'execution': {'state': 'completed_with_errors' if failed else 'completed'},
+                'coverage': 'complete', 'objectsTruncated': False,
+                'counters': {'processed': 1, 'healed': 0, 'unchanged': 0, 'skipped': 0 if failed else 1,
+                    'failed': int(failed), 'unknown': int(state == 'unknown'), 'attemptFailures': int(state != 'unknown'), 'overflowed': False},
+                'objects': [{'identity': {'kind': 'object', 'bucket': self.bucket, 'object': self.key,
+                    'versionId': None, 'bucketIncarnationId': None, 'poolIndex': 0, 'setIndex': 0},
+                    'disposition': {'state': state}}]}}
+
+    def test_original_metadata_unknown_observation_and_nonobservation_are_distinct(self):
+        for state in ('unknown', 'deferred', 'failed'):
+            result = outcome.opaque_metadata_outcome(self.status(state), self.bucket, self.key, self.options, "original-anchor")
+            self.assertEqual(result['verdict'], 'PASS' if state == 'unknown' else 'NOT_OBSERVED')
+            self.assertEqual(result['unknownObserved'], state == 'unknown')
+            self.assertFalse(result['canonicalPassClaimed'])
+            self.assertFalse(result['productRepairClaimed'])
+
+    def test_known_original_anchor_is_allowed_without_inventing_a_new_incarnation(self):
+        status = self.status()
+        status["outcome"]["objects"][0]["identity"]["bucketIncarnationId"] = "original-anchor"
+        self.assertTrue(outcome.opaque_metadata_outcome(status, self.bucket, self.key, self.options, "original-anchor")["unknownObserved"])
+
+    def test_false_repair_unknown_counters_or_identity_are_rejected(self):
+        for poison in ('healthy', 'absent', 'repaired', 'unknown-partition', 'boolean-counter', 'overflow', 'omitted',
+                       'wrong-key', 'invented-version', 'invented-incarnation', 'boolean-pool', 'warning', 'running', 'partial', 'execution'):
+            with self.subTest(poison=poison):
+                value = self.status(); body = value['outcome']; obj = body['objects'][0]
+                if poison in ('healthy', 'absent', 'repaired'):
+                    obj['disposition']['state'] = {'healthy': 'verified_healthy', 'absent': 'authoritatively_absent', 'repaired': 'repaired'}[poison]
+                elif poison == 'unknown-partition': body['counters']['skipped'] = 0
+                elif poison == 'boolean-counter': body['counters']['processed'] = True
+                elif poison == 'overflow': body['counters']['overflowed'] = True
+                elif poison == 'omitted': body['objects'] = []
+                elif poison == 'wrong-key': obj['identity']['object'] = 'other'
+                elif poison == 'invented-version': obj['identity']['versionId'] = 'new-version'
+                elif poison == 'invented-incarnation': obj['identity']['bucketIncarnationId'] = 'fabricated'
+                elif poison == 'boolean-pool': obj['identity']['poolIndex'] = False
+                elif poison == 'warning': value['detail'] = None
+                elif poison == 'running': value['summary'] = 'running'
+                elif poison == 'partial': body['coverage'] = 'partial'
+                elif poison == 'execution': body['execution']['state'] = 'completed_with_errors'
+                with self.assertRaises(ValueError):
+                    outcome.opaque_metadata_outcome(value, self.bucket, self.key, self.options, "original-anchor")
+
+    def test_original_probe_mutates_all_four_metadata_copies_and_restores_before_reads(self):
+        original, bucket, entries = versioned_scene([self.key, 'objects/control.bin'])
+        expected = [entry for entry in entries if entry['key'] == 'objects/control.bin']
+        current = copy.deepcopy(original)
+        events, registrations = [], {}
+        active = []
+        status = self.status()
+        fleet = types.SimpleNamespace(nodes=['node1'], faults=[])
+        fleet.start = lambda: events.append('start')
+        fleet.stop = lambda: events.append('stop')
+        def record(label, value):
+            events.append(label); return value
+        fleet.record = record
+        def snapshot(label, **params):
+            events.append(label)
+            if any('metadataError' in row for row in current['node1']['files']):
+                self.assertTrue(params.get('metadata_faults'))
+            return copy.deepcopy(current)
+        fleet.snapshot = snapshot
+        def remote(node, action, **params):
+            events.append(action)
+            if action == 'apply-fault':
+                self.assertEqual(fleet.faults[-1], (node, {'disk': params['disk'], 'faultId': params['faultId']}))
+                self.assertEqual((params['kind'], params['offset']), ('bitflip', 0))
+                self.assertTrue(params['relativePath'].endswith('/opaque/source.bin/xl.meta'))
+                row = next(row for row in current[node]['files'] if row['disk'] == params['disk'] and row['path'] == params['relativePath'])
+                registrations[params['faultId']] = copy.deepcopy(row)
+                before = {key: row[key] for key in ('sha256', 'size')}
+                row['sha256'] = 'corrupt-' + str(row['disk'])
+                row.pop('metadata')
+                row['metadataError'] = {'exactWitnessedFault': True, 'validMetadataClaimed': False}
+                return {'kind': 'bitflip', 'offset': 0, 'relativePath': row['path'], 'before': before,
+                        'fault': {key: row[key] for key in ('sha256', 'size')}}
+            self.assertEqual(action, 'recover-fault')
+            saved = registrations[params['faultId']]
+            row = next(row for row in current[node]['files'] if row['disk'] == saved['disk'] and row['path'] == saved['path'])
+            row.clear(); row.update(copy.deepcopy(saved))
+            return {'physicalRepairPassAllowed': False}
+        fleet.remote = remote
+        def inventory(*args, **kwargs):
+            events.append('business-GET-inventory')
+            self.assertEqual(physical_content(current), physical_content(original))
+            return {'entries': []}
+        probe = types.SimpleNamespace(inventory=inventory, admin=lambda *args: {'httpStatus': 200, 'response': status})
+        def task(probe, fleet, scope, mode, active, **params):
+            events.append('task:' + scope['key'])
+            if 'admissions' in params:
+                params['admissions'].append({'path': '/heal/opaque', 'clientToken': 'original-opaque-token'})
+                return status
+            return {}
+        binding = {'bucketPrefix': bucket, 'endpoints': {'node1': 'http://node1'}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(outcome, 'Recorder') as recorder, \
+             patch.object(outcome, 'Probe', return_value=probe), patch.object(outcome, 'run_task', side_effect=task), \
+             patch.object(outcome, 'validate_version_receipts', return_value={'bucketIncarnationId': 'incarnation'}), \
+             patch.object(outcome, 'verify_seed', return_value={}), patch.object(outcome, 'compare_inventories'), \
+             patch.object(outcome, 'verify_proof'), patch.object(outcome, 'payload', return_value=b'opaque-fixture'), \
+             patch.object(outcome, 'idle_fleet'):
+            recorder.return_value.call.return_value = {'VersionId': 'v2'}
+            updated, baseline, result = outcome.original_opaque_probe(
+                probe, fleet, binding, Path(directory), expected, 'DV', 'incarnation', active)
+        self.assertEqual(result['originalMetadataCopiesCorrupted'], 4)
+        self.assertTrue(result['unknownObserved'])
+        self.assertTrue(result['originalTokenUnchanged'])
+        self.assertEqual(len(updated), len(expected) + 1)
+        self.assertEqual(fleet.faults, [])
+        self.assertEqual(events.count('apply-fault'), 4)
+        self.assertEqual(events.count('recover-fault'), 4)
+        self.assertLess(events.index('original-opaque-terminal-before-rescue'), events.index('recover-fault'))
+        self.assertLess(events.index('original-opaque-restored-original-bytes'), events.index('original-opaque-restored-full-S3'))
 
 
 if __name__ == "__main__": unittest.main()

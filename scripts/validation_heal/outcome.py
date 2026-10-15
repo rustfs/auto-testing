@@ -47,7 +47,6 @@ SIZE = 5 * 1024**2 + 123
 # The reviewed immutable candidate makes one attempt and three bucket-object retries.
 FAILED_ATTEMPTS = 4
 SOURCE_ASSERTION_GAPS = (
-    "original-corrupt-metadata-unknown-negative",
     "version-specific-grace-deferred-and-new-token-compensation",
 )
 
@@ -336,6 +335,127 @@ def readonly_compensation(probe, fleet, binding, original, faulted, plan, expect
             "originalFailureUnchanged": True, "productRepairByNewToken": True}
 
 
+
+def opaque_metadata_outcome(status, bucket, key, options, incarnation):
+    """An unobserved Unknown must remain unobserved, never successful repair."""
+    require(isinstance(incarnation, str) and bool(incarnation)
+            and status.get("summary") in {"finished", "stopped"} and status.get("settings") == options
+            and status.get("truncated") is False, "J02 opaque metadata task did not terminate with its exact options")
+    outcome = status.get("outcome") or {}
+    counters = outcome.get("counters") or {}
+    names = ("processed", "healed", "unchanged", "skipped", "failed", "unknown", "attemptFailures")
+    require(all(type(counters.get(name)) is int and counters[name] >= 0 for name in names)
+            and counters.get("overflowed") is False and counters["processed"] == 1
+            and counters["processed"] == sum(counters[name] for name in ("healed", "unchanged", "skipped", "failed"))
+            and counters["unknown"] <= counters["skipped"]
+            and counters["healed"] == counters["unchanged"] == 0,
+            "J02 opaque metadata counters falsely resolve or omit original responsibility")
+    objects = outcome.get("objects")
+    require(outcome.get("coverage") == "complete" and outcome.get("objectsTruncated") is False
+            and isinstance(objects, list) and len(objects) == 1,
+            "J02 opaque metadata responsibility is incomplete")
+    identity = objects[0].get("identity") or {}
+    state = (objects[0].get("disposition") or {}).get("state")
+    require(identity.get("kind") == "object" and identity.get("bucket") == bucket and identity.get("object") == key
+            and identity.get("versionId") is None and identity.get("bucketIncarnationId") in {None, incarnation}
+            and type(identity.get("poolIndex")) is int and identity["poolIndex"] == 0
+            and type(identity.get("setIndex")) is int and identity["setIndex"] == 0
+            and state in {"unknown", "deferred", "failed"},
+            "J02 opaque metadata invented a healthy, absent or resolved identity")
+    require(counters["unknown"] == (1 if state == "unknown" else 0)
+            and counters["failed"] == (1 if state == "failed" else 0)
+            and counters["skipped"] == (0 if state == "failed" else 1)
+            and outcome.get("execution", {}).get("state") == ("completed_with_errors" if state == "failed" else "completed")
+            and status["summary"] == ("stopped" if state == "failed" else "finished"),
+            "J02 opaque metadata counters or execution disagree with the original disposition")
+    require(state != "unknown" or isinstance(status.get("detail"), str) and bool(status["detail"].strip()),
+            "J02 opaque Unknown lacks the original legacy warning")
+    return {"verdict": "PASS" if state == "unknown" else "NOT_OBSERVED", "unknownObserved": state == "unknown",
+            "originalCorruptMetadataSourceProcedure": True, "originalDisposition": state,
+            "canonicalCounters": counters, "productRepairClaimed": False, "canonicalPassClaimed": False}
+
+
+def original_opaque_probe(probe, fleet, binding, directory, expected, fixture, incarnation, active):
+    """Corrupt every original metadata copy through the existing file-fault path."""
+    bucket, key = binding["bucketPrefix"], "opaque/source.bin"
+    fleet.start()
+    body = payload(bucket + "/" + key, SIZE)
+    response = Recorder(probe, directory / "original-opaque-fixture").call("put_object", {
+        "Bucket": bucket, "Key": key, "ContentType": "application/octet-stream"}, body)
+    version = public_version_id(response.get("VersionId"))
+    require(fixture != "DV" or version != "null", "J02 opaque DV fixture lacks an exact ACK version")
+    entry = {"key": key, "versionId": version, "isLatest": True, "deleteMarker": False,
+             "payload": {"sha256": hashlib.sha256(body).hexdigest(), "size": len(body)}}
+    expected = [*expected, entry]
+    baseline = fleet.record("original-opaque-ACK-full-S3", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
+    fleet.record("original-opaque-complete-ACK-manifest", {"expected": expected, **verify_seed(expected, baseline)})
+    options = {**BASE_OPTIONS, "recursive": False}
+    anchor = run_task(probe, fleet, {"bucket": bucket, "key": key}, 2, active, option_overrides=options,
+                      status_endpoints=tuple(binding["endpoints"])[1:])
+    require(validate_version_receipts(anchor, bucket, [entry], 2)["bucketIncarnationId"] == incarnation,
+            "J02 opaque anchor changed the original incarnation")
+    idle_fleet(fleet, binding); fleet.stop()
+    original = fleet.snapshot("original-opaque-complete-physical", quiescent=True)
+    target = map_target(original, bucket, key, "data", 1, version, latest_required=False)
+    verify_proof(fleet, target, "original-opaque-full-cohort-bitrot")
+    targets = [metadata_target(original, {**target, **member}) for member in target["cohort"]]
+    require(len(targets) == len(fleet.nodes) * 4
+            and len({(row["node"], row["disk"]) for row in targets}) == len(targets),
+            "J02 opaque corruption must cover every original physical metadata copy")
+    fleet.record("original-opaque-metadata-fault-plan", targets)
+    metadata_faults, prior = {}, original
+    for index, row in enumerate(targets):
+        params = {"disk": row["disk"], "faultId": bounded_fault_id("J02", "original-opaque", index)}
+        fleet.faults.append((row["node"], params))
+        receipt = fleet.record("original-opaque-byte-zero-bitflip", {"node": row["node"], **fleet.remote(
+            row["node"], "apply-fault", **params, relativePath=row["relativePath"], expectedSha256=row["sha256"],
+            kind="bitflip", offset=0)})
+        require(receipt.get("kind") == "bitflip" and type(receipt.get("offset")) is int and receipt["offset"] == 0
+                and isinstance(receipt.get("fault"), dict), "J02 opaque injection changed its original byte-zero fault")
+        metadata_faults.setdefault(row["node"], {})[row["relativePath"]] = receipt["fault"]
+        damaged = fleet.snapshot("original-opaque-physical-injection", quiescent=True, metadata_faults=metadata_faults)
+        validate_fault(prior, damaged, row, receipt); prior = damaged
+    damaged_files = files(damaged)
+    require(all(damaged_files[(row["node"], row["disk"], row["relativePath"])].get("metadataError", {})
+                .get("exactWitnessedFault") is True
+                and damaged_files[(row["node"], row["disk"], row["relativePath"])]["metadataError"].get("validMetadataClaimed") is False
+                and "metadata" not in damaged_files[(row["node"], row["disk"], row["relativePath"])] for row in targets),
+            "J02 original opaque fixture retained a readable metadata copy")
+    fleet.start()
+    # A separate protected prefix remains observable during the opaque fault.
+    control = run_task(probe, fleet, {"bucket": bucket, "key": "objects/"}, 2, active,
+        option_overrides={**options, "recursive": True}, status_endpoints=tuple(binding["endpoints"])[1:])
+    require(validate_version_receipts(control, bucket, [item for item in expected if item["key"].startswith("objects/")], 2)
+            ["bucketIncarnationId"] == incarnation, "J02 opaque fault lost its independent healthy control")
+    require(physical_content(fleet.snapshot("original-opaque-before-admission", metadata_faults=metadata_faults)) == physical_content(damaged),
+            "J02 opaque physical fault changed before original admission")
+    admissions = []
+    status = run_task(probe, fleet, {"bucket": bucket, "key": key}, 2, active, option_overrides=options,
+                      status_endpoints=tuple(binding["endpoints"])[1:], admissions=admissions)
+    fleet.record("original-opaque-terminal-before-rescue", status)
+    result = opaque_metadata_outcome(status, bucket, key, options, incarnation)
+    require(len(admissions) == 1, "J02 opaque original admission is ambiguous")
+    idle_fleet(fleet, binding); fleet.stop()
+    require(physical_content(fleet.snapshot("original-opaque-after-task-before-rescue", quiescent=True,
+                                         metadata_faults=metadata_faults)) == physical_content(damaged),
+            "J02 opaque original task changed metadata, payload or control bytes")
+    rescue(fleet)
+    require(physical_content(fleet.snapshot("original-opaque-restored-original-bytes", quiescent=True)) == physical_content(original),
+            "J02 opaque rescue did not restore the exact original metadata generation")
+    fleet.start()
+    for endpoint in binding["endpoints"]:
+        observed = fleet.record("original-opaque-restored-full-S3", Probe(binding, endpoint).inventory(
+            bucket, unversioned_current_tags=fixture == "DB"))
+        verify_seed(expected, observed); compare_inventories(baseline, observed)
+    unchanged_token(probe, fleet, admissions[0], status, "original-opaque-token-after-fixture-rescue")
+    idle_fleet(fleet, binding); fleet.stop()
+    require(physical_content(fleet.snapshot("original-opaque-after-restored-business-reads", quiescent=True)) == physical_content(original),
+            "J02 opaque business reads changed the restored generation")
+    result.update(originalMetadataCopiesCorrupted=len(targets), physicalFaultRetainedBeforeRescue=True,
+                  originalBytesRestored=True, originalTokenUnchanged=True, fixtureRescueIsProductRepair=False)
+    return expected, baseline, result
+
+
 def run_branch(args, topology, nodes, fixture, branch, candidate):
     directory = args.evidence / fixture / topology / branch
     directory.mkdir(parents=True)
@@ -372,6 +492,10 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
         idle_fleet(fleet, binding)
         fleet.stop()
         if branch == "unknown-negative":
+            pending = {"operation": "original-corrupt-metadata-source-probe", "bucket": bucket}
+            expected, baseline, result["originalCorruptMetadataProbe"] = original_opaque_probe(
+                probe, fleet, binding, directory, expected, fixture, incarnation, active)
+            pending = None
             fleet.snapshot("protected-control-before-legacy-writing", quiescent=True)
             pending = {"operation": "append-real-legacy-fixture", "bucket": bucket}
             expected = append_legacy_fixture(probe, fleet, directory, binding, expected, fixture)
@@ -456,7 +580,8 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
                 and repeated["response"].get("truncated") is False
                 and canonical(repeated["response"].get("outcome")) == canonical(status["outcome"]),
                 "J02 rescue overwrote the original failed/deferred/dry-run responsibility")
-        result.update(verdict="PASS", recoveryIsProductRepair=False)
+        result.update(verdict="NOT_OBSERVED" if branch == "unknown-negative"
+                      and not result["originalCorruptMetadataProbe"]["unknownObserved"] else "PASS", recoveryIsProductRepair=False)
     except (Exception, KeyboardInterrupt) as exc:
         result.update(verdict="FAIL", failure={"type": type(exc).__name__, "message": str(exc)})
         if fleet.reserved:
