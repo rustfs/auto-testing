@@ -1190,9 +1190,9 @@ step0_reset() {
         "${RUSTFS_USER}" "${RUSTFS_USER}" "${RUSTFS_USER}"
       # Recreate the volume directories with the service user as owner.
       printf 'for i in 1 2 3 4; do\n'
-      printf '  ${SUDO} rm -rf /data/rustfs${i}/mnmd\n'
+      printf '  ${SUDO} rm -rf /data/rustfs${i}\n'
       printf '  ${SUDO} mkdir -p /data/rustfs${i}/mnmd\n'
-      printf '  ${SUDO} chown -R %s:%s /data/rustfs${i}/mnmd\n' "${RUSTFS_USER}" "${RUSTFS_USER}"
+      printf '  ${SUDO} chown -R %s:%s /data/rustfs${i}\n' "${RUSTFS_USER}" "${RUSTFS_USER}"
       printf 'done\n'
     } | run_remote "${node}"
   done
