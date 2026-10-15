@@ -22,6 +22,7 @@ try:
     from .manager_fixture import verify as verify_manager
     from .matrix import select
     from .native_regressions import CANDIDATE
+    from .outcome_grace import run as original_grace_probe
     from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical, validate_repaired_status
     from .stop import idle_fleet
     from .versions import (metadata_target, public_version_id, validate_unrecoverable_get,
@@ -35,6 +36,7 @@ except ImportError:
     from manager_fixture import verify as verify_manager
     from matrix import select
     from native_regressions import CANDIDATE
+    from outcome_grace import run as original_grace_probe
     from shards import files, map_target, run_task, validate_fault, validate_repaired_physical, validate_repaired_status
     from stop import idle_fleet
     from versions import (metadata_target, public_version_id, validate_unrecoverable_get,
@@ -46,9 +48,7 @@ BRANCHES = ("mixed-healthy-repaired-failed", "dry-run", "deferred", "readonly-te
 SIZE = 5 * 1024**2 + 123
 # The reviewed immutable candidate makes one attempt and three bucket-object retries.
 FAILED_ATTEMPTS = 4
-SOURCE_ASSERTION_GAPS = (
-    "version-specific-grace-deferred-and-new-token-compensation",
-)
+SOURCE_ASSERTION_GAPS = ()
 
 
 def reconcile(status, bucket, expected, options, incarnation, *, attempt_failures, legacy_unknown=()):
@@ -460,7 +460,7 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
     directory.mkdir(parents=True)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory,
-                  runtime_profile="outcome-legacy" if branch == "unknown-negative" else "manual")
+                  runtime_profile="outcome-legacy" if branch == "unknown-negative" else "outcome-grace" if branch == "deferred" else "manual")
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     fleet.snapshot_buckets = [bucket]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
@@ -503,6 +503,11 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
             pending = None
             idle_fleet(fleet, binding)
             fleet.stop()
+        if branch == "deferred":
+            pending = {"operation": "original-version-specific-grace-source-procedure", "bucket": bucket}
+            expected, baseline, result["originalGraceProcedure"] = original_grace_probe(
+                probe, fleet, binding, directory, expected, incarnation, active, unchanged_token)
+            pending = None
         original = fleet.snapshot("healthy-physical-baseline", quiescent=True)
         plan = legacy_manifest(original, bucket, expected) if branch == "unknown-negative" else fault_plan(original, bucket, expected, branch)
         fleet.record("independent-manifest-and-frozen-fault-plan", plan)
@@ -579,8 +584,9 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
                 and repeated["response"].get("truncated") is False
                 and canonical(repeated["response"].get("outcome")) == canonical(status["outcome"]),
                 "J02 rescue overwrote the original failed/deferred/dry-run responsibility")
-        result.update(verdict="NOT_OBSERVED" if branch == "unknown-negative"
-                      and not result["originalCorruptMetadataProbe"]["unknownObserved"] else "PASS", recoveryIsProductRepair=False)
+        unobserved = any(result.get(name, {}).get("verdict") == "NOT_OBSERVED"
+                         for name in ("originalCorruptMetadataProbe", "originalGraceProcedure"))
+        result.update(verdict="NOT_OBSERVED" if unobserved else "PASS", recoveryIsProductRepair=False)
     except (Exception, KeyboardInterrupt) as exc:
         result.update(verdict="FAIL", failure={"type": type(exc).__name__, "message": str(exc)})
         if fleet.reserved:
@@ -638,7 +644,8 @@ def main():
         save(args.evidence / "healthy-summary.json", {"caseId": CASE_ID, "results": results,
             "cleanup": "PASS" if results and all(row["cleanup"] == "PASS" for row in results) else "FAIL",
             "diagnosticBranchesPassed": complete and all(row["verdict"] == row["cleanup"] == "PASS" for row in results),
-            "complete": False, "canonicalCasePassClaimed": False, "sourceAssertionGaps": list(SOURCE_ASSERTION_GAPS)})
+            "complete": False, "canonicalCasePassClaimed": False, "sourceAssertionGaps": list(SOURCE_ASSERTION_GAPS),
+            "canonicalAdmissionEnabled": False, "liveSourceProcedureAcceptancePending": True})
     return 1
 
 

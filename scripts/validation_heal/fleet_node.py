@@ -40,7 +40,7 @@ def runtime_config(profile):
                 "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false", "RUSTFS_HEAL_MAX_CONCURRENT_HEALS": "1",
                 "RUSTFS_HEAL_MAX_CONCURRENT_PER_SET": "1", "RUSTFS_OBS_LOGGER_LEVEL": logging_filter,
                 "RUST_LOG": logging_filter}
-    require(profile in {"outcome-legacy", "queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
+    require(profile in {"outcome-legacy", "outcome-grace", "queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "replacement-target", "schema-refusal", "scope-isolation"}, "unsupported Heal runtime profile")
     if profile == "queue-pressure":
         logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true",
@@ -49,9 +49,9 @@ def runtime_config(profile):
                 "RUSTFS_HEAL_MAX_CONCURRENT_PER_SET": "1", "RUSTFS_HEAL_PAGE_PARALLEL_ENABLE": "false",
                 "RUSTFS_HEAL_OVERLAP_POLICY": "merge", "RUSTFS_HEAL_LOW_PRIORITY_MERGE_ENABLE": "true",
                 "RUSTFS_HEAL_LOW_PRIORITY_DROP_WHEN_FULL": "true", "RUSTFS_HEAL_MRF_REPLAY_BATCH": "1"}
-    if profile in {"orphan-preserve", "orphan-before", "orphan-after"}:
+    if profile in {"orphan-preserve", "orphan-before", "orphan-after", "outcome-grace"}:
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_DANGLING_DELETE_GRACE_SECS":
-                {"orphan-preserve": "0", "orphan-before": "300", "orphan-after": "30"}[profile]}
+                {"orphan-preserve": "0", "orphan-before": "300", "orphan-after": "30", "outcome-grace": "120"}[profile]}
     if profile == "authority-split":
         return {**BACKGROUND_CONFIG, "RUSTFS_STORAGE_CLASS_STANDARD": "EC:1"}
     if profile == "multi-pool":
@@ -615,6 +615,19 @@ def process_metrics(request):
     after = process(request)
     require(all(after.get(name) == before[name] for name in PROCESS_FIELDS), "resource sample crossed a service identity change")
     return result
+
+
+def process_clock(request):
+    require(set(request) == {"runId", "action"}, "process clock accepts no PID, path or clock override")
+    require(owned(request["runId"])[2].get("runtimeProfile") == "outcome-grace", "process clock requires J02 grace runtime")
+    before = process(request)
+    require(type(before.get("pid")) is int and before["pid"] > 1
+            and before["settings"].get("RUSTFS_HEAL_DANGLING_DELETE_GRACE_SECS") == "120",
+            "J02 grace process is absent or has another policy")
+    epoch = time.time()
+    after = process(request)
+    require(all(after.get(name) == before[name] for name in PROCESS_FIELDS), "clock witness crossed a process identity change")
+    return {"identity": before, "nodeEpoch": epoch, "readOnly": True, "clockChanged": False}
 
 
 def process_signal(request):
@@ -1543,10 +1556,13 @@ def generation_operation(request):
 def orphan_operation(request):
     state, roots, owner = owned(request['runId'])
     stopped(owner)
-    require(owner.get('runtimeProfile') in {'orphan-preserve', 'orphan-before', 'orphan-after'}
+    require(owner.get('runtimeProfile') in {'orphan-preserve', 'orphan-before', 'orphan-after', 'outcome-grace'}
             and digest(state / 'rustfs') == owner['binarySha256'], 'C10 runtime/candidate changed')
     fault, generation, backend = fault_module(), globals()['generation_backend'], globals()['orphan_backend']
     action = request['action']
+    require(owner.get('runtimeProfile') != 'outcome-grace' or action in {
+        'orphan-observe', 'orphan-capture', 'orphan-arm', 'orphan-install', 'orphan-recover'},
+        'J02 grace permits only stopped original-object archive/replay/recovery')
     tool = state / 'heal-shared-fixture'
     if action == 'orphan-install-tool':
         require(re.fullmatch(r'[0-9a-f]{64}', request['sha256']), 'C10 encoder digest absent')
@@ -1614,6 +1630,7 @@ def main(request):
     for action in ("incarnation-census", "incarnation-capture", "incarnation-install", "incarnation-finalize", "incarnation-phase"):
         actions[action] = incarnation_operation
     actions["task-records"] = task_records
+    actions["process-clock"] = process_clock
     actions["environment-capabilities"] = environment_capabilities
     for action in ("retained-scene-audit", "retained-scene-isolate"):
         actions[action] = retained_scene_operation

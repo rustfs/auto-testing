@@ -222,8 +222,9 @@ class MixedOutcomeTest(unittest.TestCase):
             self.assertTrue(summary["diagnosticBranchesPassed"])
             self.assertFalse(summary["complete"])
             self.assertFalse(summary["canonicalCasePassClaimed"])
-            self.assertEqual(set(summary["sourceAssertionGaps"]), {
-                "version-specific-grace-deferred-and-new-token-compensation"})
+            self.assertEqual(summary["sourceAssertionGaps"], [])
+            self.assertFalse(summary["canonicalAdmissionEnabled"])
+            self.assertTrue(summary["liveSourceProcedureAcceptancePending"])
 
     def test_dirty_cleanup_stops_before_next_fixture_or_topology(self):
         with tempfile.TemporaryDirectory() as tmp:

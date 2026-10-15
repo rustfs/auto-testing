@@ -1808,12 +1808,14 @@ Topologies: H1,H2. Branches: mixed-healthy-repaired-failed, dry-run, deferred, r
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`EVIDENCE_MIXED_OUTCOME_ORCHESTRATION`): 已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral、真实 SDK legacy Unknown 和只读永久失败/新 token 补偿执行分支及逐对象 manifest/attemptFailures 对账；仍需完整串行 live 证据及原始损坏元数据 Unknown、grace Deferred/新 token 补偿源流程，故保持禁止 dispatch；本地检查不能作为完整 PASS。
+Blocked reason (`EVIDENCE_MIXED_OUTCOME_ORCHESTRATION`): 已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral、真实 SDK legacy Unknown、原始全副本损坏元数据 Unknown、只读永久失败/新 token 补偿及版本级 grace Deferred/新 token 清理执行流程，均按逐对象 manifest/attemptFailures 对账；仍需完整串行 live 证据及独立验收，故保持禁止默认 dispatch 和 canonical admission；本地检查不能作为完整 PASS。
 
 1. 同批独立key建立健康、可恢复缺片、低于R的不可恢复对象；deferred由冻结的锁/依赖故障产生，dry-run另建任务。
 2. 保存逐对象物理基线和期望disposition，对结果的execution/coverage/counters/object identities做逐项对账。
 3. unknown/skipped/completed_with_errors不算修复成功，legacy objectsHealed与canonical healed分开解释；attemptFailures不得被隐藏。
 4. 使用独立完整manifest弥补有界outcome窗口，保持不可修对象的正确失败记录；恢复后另任务修复不覆盖原结果。
+5. grace 分支先用 SDK PUT 建立两个真实版本并验证完整分片；保存一个成员的原对象树后，SDK DELETE 精确历史版本，逐盘验证仅当前版本存在且其逻辑元数据、数据片及控制对象未变。只向原成员回放原对象树；实际候选进程固定 grace=120 秒，不修改元数据年龄或时钟。原任务须在窗口内完成，精确报告旧版 deferred、当前版 verified_healthy 及 retryNotBefore；自然等待过期后原 token 仍不变，新 token 才能清理旧版。清理后先核对全部物理字节等于 DELETE 后权威现场，再跨节点 GET/404 和复查旧 token，最后才做 fixture finalization。错过窗口保留 NOT_OBSERVED；异常保留现场并标 DIRTY；救援仅恢复 DELETE 后权威树，不复活已删除版本。
+6. Manual diagnostic entry: explicitly select heal.outcome-counters-and-error-truth through Functional Chain with the frozen candidate and candidate-bound manager/inspector tools. The default catalog policy stays evidence-blocked; even all passing diagnostic branches retain complete=false, canonicalCasePassClaimed=false and a blocking gate verdict until independent acceptance.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FAULT](validation-heal-operations.md#FAULT) → [LOCK_WINDOW](validation-heal-operations.md#LOCK_WINDOW) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 

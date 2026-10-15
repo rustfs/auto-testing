@@ -14,7 +14,7 @@ def require(value, message):
 
 
 def scope(owner, request):
-    require(owner.get('runtimeProfile') in {'orphan-preserve', 'orphan-before', 'orphan-after'}
+    require(owner.get('runtimeProfile') in {'orphan-preserve', 'orphan-before', 'orphan-after', 'outcome-grace'}
             and request.get('bucket') == owner['bucket'] and request.get('key') == 'orphan.bin',
             'C10 escaped its registered runtime or exact owned object')
     require(type(request.get('disk')) is int and 0 <= request['disk'] < 4, 'C10 original disk absent')

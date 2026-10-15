@@ -144,7 +144,7 @@ EVIDENCE_BLOCKED_CASES = {
     ),
     "heal.outcome-counters-and-error-truth": _native(
         "J02", "EVIDENCE_MIXED_OUTCOME_ORCHESTRATION",
-        "已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral、真实 SDK legacy Unknown 和只读永久失败/新 token 补偿执行分支及逐对象 manifest/attemptFailures 对账；仍需完整串行 live 证据及原始损坏元数据 Unknown、grace Deferred/新 token 补偿源流程，故保持禁止 dispatch；本地检查不能作为完整 PASS。",
+        "已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral、真实 SDK legacy Unknown、原始全副本损坏元数据 Unknown、只读永久失败/新 token 补偿及版本级 grace Deferred/新 token 清理执行流程，均按逐对象 manifest/attemptFailures 对账；仍需完整串行 live 证据及独立验收，故保持禁止默认 dispatch 和 canonical admission；本地检查不能作为完整 PASS。",
         ("mixed_outcome_fixture", "per_object_canonical_receipts", "complete_live_orchestrator", "attempt_failure_visibility"),
     ),
 }

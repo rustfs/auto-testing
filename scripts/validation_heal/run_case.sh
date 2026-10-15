@@ -21,6 +21,7 @@ done
 case "${case_id}" in
   heal.admin-healthy-noop|heal.admin-invalid-request|heal.admin-authorization) ;;
   heal.bucket-incarnation-recreation) driver=incarnation.py ;;
+  heal.outcome-counters-and-error-truth) driver=outcome.py ;;
   heal.checkpoint-and-mrf-corruption) driver=persistence.py ;;
   heal.node-outage-rejoin) driver=node_outage.py ;;
   heal.status-partial-disabled-unknown) driver=status.py ;;
@@ -196,6 +197,12 @@ if [ "${case_id}" = heal.checkpoint-and-mrf-corruption ] && [ "${cleanup_status}
    jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
      "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
   verdict=BLOCKED; reason="F07 diagnostic execution lacks full native cut coverage and independent live audit; partial success cannot certify the canonical case"
+fi
+if [ "${case_id}" = heal.outcome-counters-and-error-truth ] && [ "${cleanup_status}" = PASS ]; then
+  if [ "${case_rc}" -eq 0 ] || jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
+      "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+    verdict=BLOCKED; reason="J02 manual diagnostics require independent acceptance of all original source procedures; canonical admission remains disabled"
+  fi
 fi
 args=("${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool
   --result-file "${artifacts}/cases/${case_id}.json" --verdict "${verdict}" --cleanup-status "${cleanup_status}"
