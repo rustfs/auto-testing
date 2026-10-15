@@ -150,7 +150,7 @@ remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 -p "${SSH_PORT}" "${SSH_USE
 setup_environment() {
   local v
   for v in "${NODES[@]}"; do
-    remote "${v}" "curl -fsSL --retry 3 -o /tmp/rustfs-table.deb '${PACKAGE_URL}' && ${SUDO[*]} dpkg -i --force-confold /tmp/rustfs-table.deb >/dev/null 2>&1 && ${SUDO[*]} mkdir -p /data/rustfs{1..4}/mnmd && ${SUDO[*]} chown -R rustfs:rustfs /data/rustfs{1..4}" || die "install failed on ${v}"
+    remote "${v}" "curl -fsSL --retry 3 -o /tmp/rustfs-table.deb '${PACKAGE_URL}' && ${SUDO[*]} dpkg -i --force-confold /tmp/rustfs-table.deb >/dev/null 2>&1 && ${SUDO[*]} mkdir -p /data/rustfs{1..4}/mnmd && ${SUDO[*]} chown -R rustfs:rustfs /data/rustfs{1..4}/mnmd" || die "install failed on ${v}"
   done
   write_node_config() {
     remote "$1" "${SUDO[*]} tee /etc/default/rustfs >/dev/null <<'CFG'

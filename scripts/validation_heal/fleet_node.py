@@ -1231,12 +1231,36 @@ def namespace_state(request):
     for field in ("LoadState", "ActiveState", "SubState", "MainPID"):
         service[field] = command("systemctl", "show", "-p", field, "--value",
                                  unit(request["runId"]), check=False).stdout.strip()
+    def marker_evidence(folder):
+        path = checked(folder / "owner.json", folder)
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return {"present": False}
+        try:
+            info = os.fstat(descriptor)
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 16384,
+                    "namespace owner is not a bounded non-linked regular file")
+            raw = os.read(descriptor, 16385)
+            after = os.fstat(descriptor)
+            require(len(raw) == info.st_size and (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                    == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+                    "namespace owner changed during inspection")
+            value = json.loads(raw)
+            require(isinstance(value, dict), "namespace owner is not an object")
+            return {"present": True, "size": len(raw), "uid": info.st_uid, "gid": info.st_gid,
+                    "mode": stat.S_IMODE(info.st_mode), "device": info.st_dev, "inode": info.st_ino,
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "canonicalSha256": hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+        finally:
+            os.close(descriptor)
     return {"runId": request["runId"], "service": service,
             "state": {"path": str(state), "exists": state.exists(),
-                      "ownerMarker": (state / "owner.json").is_file()},
+                      "ownerMarker": (state / "owner.json").is_file(), "ownerEvidence": marker_evidence(state)},
             "roots": [{"path": str(root), "exists": root.exists(),
-                       "ownerMarker": (root / "owner.json").is_file(),
-                       "data": (root / "data").is_dir()} for root in roots]}
+                       "ownerMarker": (root / "owner.json").is_file(), "ownerEvidence": marker_evidence(root),
+                       "data": (root / "data").is_dir()} for root in roots],
+            "inspectionOnly": True, "mutated": False}
 
 
 def audit_finalize(request):

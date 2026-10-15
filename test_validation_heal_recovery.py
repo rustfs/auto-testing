@@ -21,6 +21,45 @@ from scripts.validation_heal import recover_environment as recovery
 from scripts.validation_heal import fleet_node, heal_fault
 
 
+class NamespaceOwnerEvidenceTests(unittest.TestCase):
+    def test_read_only_owner_fingerprints_keep_missing_roots_and_hide_owner_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            state = base / "state"; state.mkdir()
+            roots = [base / str(index) for index in range(4)]
+            value = {"runId": "gh-12345-1-h2", "bucket": "rv-heal-0123456789abcdef", "privateValue": "must-not-be-emitted"}
+            raw = json.dumps(value).encode()
+            (state / "owner.json").write_bytes(raw)
+            (roots[3] / "data").mkdir(parents=True)
+            (roots[3] / "owner.json").write_bytes(json.dumps(value, sort_keys=True).encode())
+            before = {(state / "owner.json"): raw, (roots[3] / "owner.json"): (roots[3] / "owner.json").read_bytes()}
+            def command(*args, **kwargs):
+                return types.SimpleNamespace(stdout="0" if "MainPID" in args else "inactive")
+            with patch.object(fleet_node, "paths", return_value=(state, roots)), patch.object(fleet_node, "command", side_effect=command):
+                observed = fleet_node.namespace_state({"runId": value["runId"], "action": "namespace-state"})
+            self.assertTrue(observed["inspectionOnly"])
+            self.assertFalse(observed["mutated"])
+            self.assertEqual([row["ownerEvidence"]["present"] for row in observed["roots"]], [False, False, False, True])
+            expected = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            self.assertEqual(observed["state"]["ownerEvidence"]["canonicalSha256"], expected)
+            self.assertEqual(observed["roots"][3]["ownerEvidence"]["canonicalSha256"], expected)
+            self.assertNotIn(value["privateValue"], json.dumps(observed))
+            for path, raw in before.items(): self.assertEqual(path.read_bytes(), raw)
+            self.assertFalse(any(root.exists() for root in roots[:3]))
+
+    def test_owner_fingerprint_refuses_links_and_oversized_or_non_object_markers(self):
+        for change in ("symlink", "hardlink", "oversized", "non-object"):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(change=change):
+                base = Path(directory).resolve(); state = base / "state"; state.mkdir()
+                marker = state / "owner.json"
+                marker.write_text("[]" if change == "non-object" else "x" * 16385 if change == "oversized" else "{}")
+                if change == "symlink": marker.rename(state / "original"); marker.symlink_to(state / "original")
+                elif change == "hardlink": __import__("os").link(marker, state / "linked")
+                with patch.object(fleet_node, "paths", return_value=(state, [])), \
+                     patch.object(fleet_node, "command", return_value=types.SimpleNamespace(stdout="0")), self.assertRaises(ValueError):
+                    fleet_node.namespace_state({"runId": "gh-12345-1-h2", "action": "namespace-state"})
+
+
 class RejectedFaultRecoveryTest(unittest.TestCase):
     def test_expanded_branches_have_bounded_distinct_fault_ids(self):
         branch = "stripe-minus-exact-plus-s1048575-parity-missing"
