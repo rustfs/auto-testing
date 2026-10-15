@@ -45,6 +45,11 @@ BRANCHES = ("mixed-healthy-repaired-failed", "dry-run", "deferred", "unknown-neg
 SIZE = 5 * 1024**2 + 123
 # The reviewed immutable candidate makes one attempt and three bucket-object retries.
 FAILED_ATTEMPTS = 4
+SOURCE_ASSERTION_GAPS = (
+    "original-corrupt-metadata-unknown-negative",
+    "version-specific-grace-deferred-and-new-token-compensation",
+    "readonly-terminal-failure-and-new-token-compensation",
+)
 
 
 def reconcile(status, bucket, expected, options, incarnation, *, attempt_failures, legacy_unknown=()):
@@ -97,12 +102,13 @@ def reconcile(status, bucket, expected, options, incarnation, *, attempt_failure
                     and identity.get("bucketIncarnationId") == incarnation,
                     "J02 receipt escaped the original healthy-task bucket incarnation")
         if state == "unknown":
+            counters["unknown"] += 1
             require(disposition == {"state": "unknown"} and receipt.get("detail") is None,
                     "J02 legacy unknown changed its frozen proofless disposition")
         if state == "failed":
             require(disposition.get("details") == "retry_exhausted", "J02 below-R failure lost bounded retry exhaustion")
         category = {"repaired": "healed", "verified_healthy": "unchanged", "metadata_healthy": "unchanged",
-                    "failed": "failed", "dry_run_observed": "skipped", "deferred": "skipped", "unknown": "unknown"}[state]
+                    "failed": "failed", "dry_run_observed": "skipped", "deferred": "skipped", "unknown": "skipped"}[state]
         counters[category] += 1
         observed[pair] = state
     actual_counters = outcome.get("counters", {})
@@ -390,8 +396,9 @@ def main():
         complete = {(row["topology"], row["fixture"], row["branch"]) for row in results} == wanted and len(results) == len(wanted)
         save(args.evidence / "healthy-summary.json", {"caseId": CASE_ID, "results": results,
             "cleanup": "PASS" if results and all(row["cleanup"] == "PASS" for row in results) else "FAIL",
-            "complete": complete and all(row["verdict"] == row["cleanup"] == "PASS" for row in results)})
-    return 0 if complete and all(row["verdict"] == row["cleanup"] == "PASS" for row in results) else 1
+            "diagnosticBranchesPassed": complete and all(row["verdict"] == row["cleanup"] == "PASS" for row in results),
+            "complete": False, "canonicalCasePassClaimed": False, "sourceAssertionGaps": list(SOURCE_ASSERTION_GAPS)})
+    return 1
 
 
 if __name__ == "__main__": sys.exit(main())

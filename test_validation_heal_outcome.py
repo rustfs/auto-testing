@@ -199,6 +199,25 @@ class MixedOutcomeTest(unittest.TestCase):
             self.assertEqual(len(negative), 4)
             self.assertTrue(all(row["verdict"] == "BLOCKED" for row in negative))
 
+    def test_all_diagnostic_branches_passing_cannot_omit_original_source_procedures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); candidate = root / "candidate.json"
+            candidate.write_text(json.dumps({"source_sha": outcome.CANDIDATE}))
+            args = types.SimpleNamespace(candidate=candidate, evidence=root / "evidence", binary_sha="a" * 64)
+            def branch(args, topology, nodes, fixture, name, candidate):
+                return {"topology": topology, "fixture": fixture, "branch": name, "verdict": "PASS", "cleanup": "PASS"}
+            with patch.object(outcome.argparse.ArgumentParser, "parse_args", return_value=args), \
+                 patch.object(outcome, "verify_manager", return_value={}), patch.object(outcome, "run_branch", side_effect=branch), \
+                 patch.object(outcome.signal, "signal"), patch.dict(os.environ, {"GITHUB_RUN_ID": "1234"}):
+                self.assertEqual(outcome.main(), 1)
+            summary = json.loads((args.evidence / "healthy-summary.json").read_text())
+            self.assertTrue(summary["diagnosticBranchesPassed"])
+            self.assertFalse(summary["complete"])
+            self.assertFalse(summary["canonicalCasePassClaimed"])
+            self.assertEqual(set(summary["sourceAssertionGaps"]), {
+                "original-corrupt-metadata-unknown-negative", "version-specific-grace-deferred-and-new-token-compensation",
+                "readonly-terminal-failure-and-new-token-compensation"})
+
     def test_dirty_cleanup_stops_before_next_fixture_or_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); candidate = root / "candidate.json"
@@ -235,7 +254,7 @@ class LegacyUnknownTests(unittest.TestCase):
         receipts = [{"identity": {"kind": "object", "bucket": bucket, "object": row["key"], "versionId": row["versionId"],
                     "bucketIncarnationId": incarnation, "poolIndex": 0, "setIndex": 0},
                      "disposition": {"state": row["state"]}} for row in plan["manifest"]]
-        counts = {"processed": 6, "healed": 0, "unchanged": 3, "skipped": 0, "failed": 0,
+        counts = {"processed": 6, "healed": 0, "unchanged": 3, "skipped": 3, "failed": 0,
                   "unknown": 3, "attemptFailures": 0, "overflowed": False}
         status = {"summary": "finished", "truncated": False, "settings": options, "objectsHealed": 99,
                   "outcome": {"execution": {"state": "completed"}, "coverage": "complete", "objectsTruncated": False,
@@ -244,6 +263,10 @@ class LegacyUnknownTests(unittest.TestCase):
         proof = outcome.reconcile(status, bucket, plan["manifest"], options, incarnation, attempt_failures=0, legacy_unknown=unknown)
         self.assertFalse(proof["unknownIsRepair"])
         self.assertEqual(proof["canonicalCounters"]["healed"], 0)
+        counters = proof["canonicalCounters"]
+        self.assertEqual(counters["unknown"], 3)
+        self.assertEqual(counters["skipped"], 3)
+        self.assertEqual(counters["processed"], sum(counters[key] for key in ("healed", "unchanged", "skipped", "failed")))
         with self.assertRaises(ValueError): outcome.reconcile(status, bucket, plan["manifest"], options, incarnation, attempt_failures=0)
         for mutation in ("repaired", "identity", "failed", "incomplete", "unknown-count", "attempt-failure"):
             changed = copy.deepcopy(status)
