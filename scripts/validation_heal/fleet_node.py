@@ -1107,7 +1107,7 @@ def journal_operation(request):
     state, roots, owner = owned(request["runId"])
     require(digest(state / "rustfs") == owner["binarySha256"], "durable-record candidate changed")
     require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash", "journal-bounded", "incarnation-checkpoint", "incarnation-mrf"}, "durable records require the owned recovery runtime")
-    require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected", "captureId"},
+    require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected", "captureId", "mrfIdentity"},
             "durable-record adapter accepts no arbitrary system paths or commands")
     if owner.get("runtimeProfile") == "journal-bounded":
         require(request.get("family") == "checkpoint" or request.get("family") == "root"
@@ -1152,15 +1152,13 @@ def journal_operation(request):
         if request["action"] == "journal-apply":
             if request["family"] == "mrf":
                 observed = globals()["mrf"].read_records(state, roots, owner, checked)
-                committed = globals()["mrf"].checkpoint(observed)
-                business = module.owned_mrf_intents(committed.get("intents", []), owner["bucket"])
-                require(committed.get("present") is True
-                        and all(item.get("lifecycle", {}).get("state") == {"state": "active"}
-                            and item["lifecycle"].get("source_bucket_incarnation_id")
-                            and item["lifecycle"].get("last_operator_acceptance") is None for item in business)
-                        and any(row["disk"] == request["disk"] and request["relativePath"] ==
-                                f".rustfs.sys/.heal-mrf-snapshot.{row['slot']}.bin" for row in committed["replicas"]),
-                        "MRF fault lacks an actual committed active owned responsibility on this exact slot")
+                path = request.get("relativePath", "")
+                match = re.fullmatch(r"\.rustfs.sys/\.heal-mrf-snapshot\.([01])\.bin", path)
+                require(match is not None, "MRF fault escaped its exact committed payload path")
+                committed = globals()["mrf"].checkpoint(observed, replica=(request["disk"], int(match[1])))
+                identity = module.active_mrf_identity(committed, owner["bucket"])
+                require(module.same_json(request.get("mrfIdentity"), identity),
+                        "MRF fault changed its frozen owner, sequence, payload or bucket incarnation")
             return module.install(fd, request, owner, fault, globals()["mrf"])
         return module.recover(fd, request, owner, fault)
 

@@ -181,7 +181,11 @@ def lifecycle(raw, binding):
     return records
 
 
-def checkpoint(observed):
+def checkpoint(observed, *, replica=None):
+    if replica is not None:
+        require(isinstance(replica, tuple) and len(replica) == 2
+                and all(type(item) is int for item in replica)
+                and 0 <= replica[0] < 4 and replica[1] in (0, 1), "invalid exact MRF replica")
     require(observed.get("readOnly") is True and observed.get("stable") is True,
             "NOT_OBSERVED: MRF publication changed throughout its bounded observation")
     rows = observed.get("records")
@@ -202,6 +206,8 @@ def checkpoint(observed):
     committed = []
     for disk in range(4):
         for slot in (0, 1):
+            if replica is not None and (disk, slot) != replica:
+                continue
             prefix = ".rustfs.sys/.heal-mrf-"
             manifest = indexed.get((disk, prefix + f"commit.{slot}.bin"))
             if manifest is None: continue
@@ -219,6 +225,7 @@ def checkpoint(observed):
                     intent["lifecycle"] = records[intent["intentDigest"]]
             committed.append({**binding, "disk": disk, "slot": slot, "intents": intents})
     if not committed:
+        require(replica is None, "exact MRF committed replica is absent")
         require(not indexed, "MRF has uncommitted or orphan record files; absence is not established")
         return {"present": False, "intents": [], "readOnly": True, "allAllowlistedFilesAbsent": True}
     owners = {row["owner"] for row in committed}
@@ -227,4 +234,5 @@ def checkpoint(observed):
     latest = [row for row in committed if row["sequence"] == sequence]
     require(len({row["payloadSha256"] for row in latest}) == 1
             and all(row["intents"] == latest[0]["intents"] for row in latest), "MRF same-sequence committed replicas disagree")
-    return {**latest[0], "present": True, "replicas": [{"disk": row["disk"], "slot": row["slot"]} for row in latest]}
+    return {**latest[0], "present": True, "replicas": [{"disk": row["disk"], "slot": row["slot"]} for row in latest],
+            **({"replicaScoped": True} if replica is not None else {})}

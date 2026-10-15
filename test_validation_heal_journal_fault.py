@@ -136,7 +136,7 @@ class DurableRecordFaultTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "integrity digest"):
                     journal.transform(json.dumps(original).encode(), request, {"bucket": bucket}, mrf)
 
-    def test_mrf_adapter_requires_active_original_business_work_on_the_selected_latest_replica(self):
+    def test_mrf_adapter_requires_active_original_business_work_on_the_exact_frozen_replica(self):
         raw = (Path(__file__).parent / "testdata/validation/mrf-mixed-payload.bin").read_bytes()
         bucket = "rv-heal-084db3ab418d55ba"
         for change in (None, "held", "unbound", "accepted", "other-replica"):
@@ -150,12 +150,18 @@ class DurableRecordFaultTests(unittest.TestCase):
                 if change == "held": business["lifecycle"]["state"] = {"state": "bucket_incarnation_changed"}
                 elif change == "unbound": business["lifecycle"]["source_bucket_incarnation_id"] = None
                 elif change == "accepted": business["lifecycle"]["last_operator_acceptance"] = {"operator": "test"}
-                checkpoint = {"present": True, "intents": intents, "replicas": [{"disk": 0, "slot": 0}]}
-                backend = types.SimpleNamespace(read_records=lambda *a: {}, checkpoint=lambda *a: checkpoint)
+                checkpoint = {"present": True, "intents": intents, "replicas": [{"disk": 0, "slot": 0}],
+                              "owner": self.token, "sequence": 7, "payloadSha256": hashlib.sha256(raw).hexdigest()}
+                def exact_checkpoint(observed, *, replica):
+                    if replica != (0, 0): raise ValueError("exact MRF committed replica is absent")
+                    return checkpoint
+                backend = types.SimpleNamespace(read_records=lambda *a: {}, checkpoint=exact_checkpoint)
                 owner = {"runtimeProfile": "mrf-crash", "bucket": bucket, "binarySha256": "b" * 64}
                 request = {"runId": "gh-12345-1-h2", "action": "journal-apply", "family": "mrf", "taskId": None,
                     "disk": 0, "relativePath": ".rustfs.sys/.heal-mrf-snapshot.1.bin" if change == "other-replica" else ".rustfs.sys/.heal-mrf-snapshot.0.bin",
-                    "kind": "checksum", "faultId": "F07-mrf-checksum-0-0-0", "expectedBefore": journal.entry(raw)}
+                    "kind": "checksum", "faultId": "F07-mrf-checksum-0-0-0", "expectedBefore": journal.entry(raw),
+                    "mrfIdentity": {"owner": self.token, "sequence": 7, "payloadSha256": hashlib.sha256(raw).hexdigest(),
+                                    "bucketIncarnationId": self.incarnation}}
                 with patch.object(fleet_node, "owned", return_value=(root, [root], owner)), patch.object(fleet_node, "stopped"), \
                      patch.object(fleet_node, "digest", return_value="b" * 64), patch.object(fleet_node, "fault_module", return_value=fault), \
                      patch.dict(fleet_node.__dict__, journal_fault_backend=journal, mrf=backend), \

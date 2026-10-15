@@ -97,6 +97,27 @@ class DurableMrfTests(unittest.TestCase):
                             item.clear(); item.update(disk=0, relativePath=".rustfs.sys/.heal-mrf-commit.0.bin", present=False)
                 with self.assertRaises(ValueError): records.checkpoint(bad)
 
+    def test_exact_replica_scope_never_changes_the_global_corruption_refusal(self):
+        original = self.observed()
+        changed = copy.deepcopy(original)
+        row = next(row for row in changed["records"] if row["disk"] == 0 and row["present"] and "snapshot" in row["relativePath"])
+        raw = base64.b64decode(row["rawBase64"])
+        damaged = raw[:-1] + bytes([raw[-1] ^ 1])
+        row.update(size=len(damaged), sha256=hashlib.sha256(damaged).hexdigest(), rawBase64=base64.b64encode(damaged).decode())
+        with self.assertRaises(ValueError): records.checkpoint(changed)
+        with self.assertRaises(ValueError): records.checkpoint(changed, replica=(0, 0))
+        exact = records.checkpoint(changed, replica=(2, 0))
+        self.assertTrue(exact["replicaScoped"])
+        self.assertEqual(exact["replicas"], [{"disk": 2, "slot": 0}])
+        self.assertEqual(exact["payloadSha256"], hashlib.sha256(raw).hexdigest())
+        with self.assertRaises(ValueError): records.checkpoint(changed, replica=(2, 1))
+        for selector in ((True, 0), (0, False), (4, 0), (0, 2), [2, 0], (), (2, 0, 1)):
+            with self.subTest(selector=selector), self.assertRaises(ValueError):
+                records.checkpoint(original, replica=selector)
+        bad_census = copy.deepcopy(changed)
+        bad_census["records"].pop()
+        with self.assertRaises(ValueError): records.checkpoint(bad_census, replica=(2, 0))
+
     def test_manifest_checksum_length_and_nonzero_epoch_are_required(self):
         raw = self.journal()
         self.assertEqual(records.commit(self.manifest(raw), raw)["owner"], self.owner)

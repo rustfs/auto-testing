@@ -139,6 +139,22 @@ def owned_mrf_intents(intents, bucket):
     return owned
 
 
+def active_mrf_identity(committed, bucket):
+    """Bind one original committed payload to its active bucket generation."""
+    business = owned_mrf_intents(committed.get("intents", []), bucket)
+    require(committed.get("present") is True
+            and all(item.get("lifecycle", {}).get("state") == {"state": "active"}
+                    and item["lifecycle"].get("source_bucket_incarnation_id")
+                    and item["lifecycle"].get("last_operator_acceptance") is None for item in business),
+            "MRF fault lacks an actual committed active owned responsibility on this exact slot")
+    incarnations = {item["lifecycle"]["source_bucket_incarnation_id"] for item in business}
+    require(len(incarnations) == 1, "MRF fault mixed bucket incarnations")
+    incarnation = next(iter(incarnations))
+    task_id(incarnation)
+    return {"owner": committed["owner"], "sequence": committed["sequence"],
+            "payloadSha256": committed["payloadSha256"], "bucketIncarnationId": incarnation}
+
+
 def corrupt_owned_mrf_crc(raw, intents, bucket):
     owned_mrf_intents(intents, bucket)
     cursor, selected = 0, None

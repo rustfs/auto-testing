@@ -59,6 +59,7 @@ def corruption_targets(observed, bucket):
     """Cover every committed replay source, including readable older slots."""
     selected = records.checkpoint(observed)
     require(selected.get("present") is True, "F07 MRF owner has no committed replay source")
+    latest_identity = journal.active_mrf_identity(selected, bucket)
     entries, targets = indexed(observed), []
     for disk in range(4):
         for slot in (0, 1):
@@ -68,9 +69,13 @@ def corruption_targets(observed, bucket):
             path = f".rustfs.sys/.heal-mrf-snapshot.{slot}.bin"
             raw = entries[disk, path]
             binding = records.commit(manifest, raw)
-            journal.owned_mrf_intents(records.decode_journal(raw), bucket)
-            require(binding["owner"] == selected["owner"], "F07 MRF replay sources mixed process owners")
-            targets.append({"disk": disk, "relativePath": path, **binding, "before": journal.entry(raw)})
+            exact = records.checkpoint(observed, replica=(disk, slot))
+            identity = journal.active_mrf_identity(exact, bucket)
+            require(identity["owner"] == latest_identity["owner"]
+                    and identity["bucketIncarnationId"] == latest_identity["bucketIncarnationId"],
+                    "F07 MRF replay sources mixed process owners or bucket incarnations")
+            targets.append({"disk": disk, "relativePath": path, **binding,
+                            "mrfIdentity": identity, "before": journal.entry(raw)})
     require(targets, "F07 MRF corruption has no bound replay source")
     return targets
 
@@ -212,7 +217,7 @@ def run(args, topology, nodes, fixture, candidate):
                 disk, path = target["disk"], target["relativePath"]
                 params = {"family": "mrf", "taskId": None, "disk": disk, "relativePath": path,
                     "faultId": f"F07-mrf-checksum-{nodes.index(node)}-{disk}-{path[-5]}", "kind": "checksum",
-                    "expectedBefore": target["before"]}
+                    "expectedBefore": target["before"], "mrfIdentity": target["mrfIdentity"]}
                 fleet.journal_faults.append((node, params.copy()))
                 receipts.append(fleet.record("actual-original-MRF-CRC-injection", {"node": node,
                     **fleet.remote(node, "journal-apply", **params)}))

@@ -15,7 +15,7 @@ import struct
 import zlib
 from unittest.mock import patch
 
-from scripts.validation_heal import journal_fault as journal, persistence_mrf as suite, drive_gate
+from scripts.validation_heal import journal_fault as journal, persistence_mrf as suite, drive_gate, fleet_node, heal_fault
 import test_validation_heal_mrf as fixtures
 
 
@@ -200,6 +200,99 @@ class MrfCorruptionTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 suite.corruption_targets(original, "rv-heal-0123456789abcdef")
             self.assertEqual(original, before)
+
+    def test_preflight_refuses_an_inactive_or_foreign_incarnation_in_any_older_slot(self):
+        bucket = "rv-heal-0123456789abcdef"
+        for change in ("held", "accepted", "unbound", "foreign-incarnation"):
+            original = fixtures.DurableMrfTests().observed()
+            self.add_older_slot(original)
+            row = next(row for row in original["records"] if row["disk"] == 2
+                       and row["relativePath"] == ".rustfs.sys/.heal-mrf-lifecycle.1.bin")
+            raw = base64.b64decode(row["rawBase64"])
+            value = json.loads(raw[49:])
+            record = value["records"][0]
+            if change == "held": record["state"] = {"state": "bucket_incarnation_changed"}
+            elif change == "accepted": record["last_operator_acceptance"] = {"operator": "test"}
+            elif change == "unbound": record["source_bucket_incarnation_id"] = None
+            else: record["source_bucket_incarnation_id"] = "92345678-1234-4234-8234-123456789abc"
+            body = json.dumps(value).encode()
+            raw = b"RFMFLC01\x01" + struct.pack("<Q", len(body)) + hashlib.sha256(body).digest() + body
+            row.update(**journal.entry(raw), rawBase64=base64.b64encode(raw).decode())
+            self.assertEqual(suite.records.checkpoint(original)["sequence"], 7)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                suite.corruption_targets(original, bucket)
+
+    def test_real_node_adapter_corrupts_both_slots_after_another_replica_is_damaged_and_rescues_exact_bytes(self):
+        original = fixtures.DurableMrfTests().observed()
+        self.add_older_slot(original)
+        bucket = "rv-heal-0123456789abcdef"
+        targets = suite.corruption_targets(original, bucket)
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            roots = [state / str(disk) for disk in range(4)]
+            for root in roots:
+                (root / "data/.rustfs.sys").mkdir(parents=True)
+                (root / "quarantine").mkdir()
+            for row in original["records"]:
+                if row["present"]:
+                    (roots[row["disk"]] / "data" / row["relativePath"]).write_bytes(base64.b64decode(row["rawBase64"]))
+            def observed(*args):
+                return {**journal.census(roots, {"family": "mrf", "taskId": None}, heal_fault), "stable": True}
+            owner = {"runId": "gh-12345-1-h2", "runtimeProfile": "mrf-crash", "bucket": bucket, "binarySha256": "b" * 64}
+            backend = SimpleNamespace(read_records=observed, checkpoint=suite.records.checkpoint,
+                                      decode_journal=suite.records.decode_journal)
+            receipts, requests = [], []
+            with patch.object(fleet_node, "owned", return_value=(state, roots, owner)), \
+                 patch.object(fleet_node, "stopped"), patch.object(fleet_node, "digest", return_value="b" * 64), \
+                 patch.object(fleet_node, "fault_module", return_value=heal_fault), \
+                 patch.object(heal_fault, "mount_id", return_value=1), \
+                 patch.dict(fleet_node.__dict__, journal_fault_backend=journal, mrf=backend):
+                for target in targets:
+                    request = {"runId": owner["runId"], "action": "journal-apply", "family": "mrf", "taskId": None,
+                        "disk": target["disk"], "relativePath": target["relativePath"], "kind": "checksum",
+                        "faultId": f"F07-mrf-checksum-0-{target['disk']}-{target['relativePath'][-5]}",
+                        "expectedBefore": target["before"], "mrfIdentity": target["mrfIdentity"]}
+                    receipts.append({"node": "node", **fleet_node.journal_operation(request)})
+                    requests.append(request)
+                    # The global observer still rejects the damaged cohort;
+                    # only the exact untouched target can authorize another fault.
+                    with self.assertRaises(ValueError): suite.records.checkpoint(observed())
+                self.assertEqual(len(receipts), 4)
+                proof = suite.retained_corruption({"node": original}, {"node": observed()}, receipts, bucket)
+                self.assertEqual(proof["corruptedPayloads"], 4)
+                for request in requests:
+                    rescued = fleet_node.journal_operation({**request, "action": "journal-recover"})
+                    self.assertTrue(rescued["backupRetained"])
+                    self.assertFalse(rescued["originalResponsibilityRecreated"])
+                    self.assertFalse(rescued["productRepairClaimed"])
+                self.assertEqual(suite.indexed(observed()), suite.indexed(original))
+                self.assertEqual(suite.records.checkpoint(observed())["sequence"], 7)
+
+    def test_node_adapter_rejects_each_changed_frozen_identity_before_install(self):
+        observed = fixtures.DurableMrfTests().observed()
+        bucket = "rv-heal-0123456789abcdef"
+        target = suite.corruption_targets(observed, bucket)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            owner = {"runtimeProfile": "mrf-crash", "bucket": bucket, "binarySha256": "b" * 64}
+            backend = SimpleNamespace(read_records=lambda *args: observed, checkpoint=suite.records.checkpoint)
+            request = {"runId": "gh-12345-1-h2", "action": "journal-apply", "family": "mrf", "taskId": None,
+                "disk": target["disk"], "relativePath": target["relativePath"], "kind": "checksum",
+                "faultId": "F07-mrf-checksum-0-0-0", "expectedBefore": target["before"]}
+            for field in ("owner", "sequence", "payloadSha256", "bucketIncarnationId", "missing", "extra", "numeric-type"):
+                identity = dict(target["mrfIdentity"])
+                if field == "missing": identity.pop("owner")
+                elif field == "extra": identity["extra"] = True
+                elif field == "numeric-type": identity["sequence"] = float(identity["sequence"])
+                else: identity[field] = 8 if field == "sequence" else "foreign"
+                with self.subTest(field=field), \
+                     patch.object(fleet_node, "owned", return_value=(root, [root], owner)), \
+                     patch.object(fleet_node, "stopped"), patch.object(fleet_node, "digest", return_value="b" * 64), \
+                     patch.object(fleet_node, "fault_module", return_value=heal_fault), \
+                     patch.dict(fleet_node.__dict__, journal_fault_backend=journal, mrf=backend), \
+                     patch.object(journal, "install") as install, self.assertRaises(ValueError):
+                    fleet_node.journal_operation({**request, "mrfIdentity": identity})
+                install.assert_not_called()
 
     def test_corrupt_crc_keeps_every_manifest_lifecycle_and_unknown_byte(self):
         proof = suite.retained_corruption(*self.fixture())
