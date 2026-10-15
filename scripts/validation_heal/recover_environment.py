@@ -13,10 +13,12 @@ try:
     from .healthy import Fleet, physical_content
     from .heal_probe import require, save
     from .interrupted_recovery import checkpoint_plan, restore_and_isolate
+    from .outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace
 except ImportError:
     from healthy import Fleet, physical_content
     from heal_probe import require, save
     from interrupted_recovery import checkpoint_plan, restore_and_isolate
+    from outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace
 
 
 def quota_recovery_plan(artifact, failed_run, candidate):
@@ -141,6 +143,8 @@ def network_recovery_plan(artifact, failed_run, candidate):
 
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
+    if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/cases/*.json")):
+        return acknowledged_grace_plan(artifact, failed_run, candidate)
     if list(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/cases/*.json")):
         results = list(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/cases/*.json"))
         if any(json.loads(path.read_text()).get("verdict") == "RUNNING" for path in results):
@@ -640,6 +644,9 @@ def main():
         has_retained = any(item.get("retained", {}).get("state")
                            or any(item.get("retained", {}).get("roots", [])) for item in states)
         all_absent = all(not item["state"]["exists"] and not any(root["exists"] for root in item["roots"]) for item in states)
+        if plan.get("kind") == "acknowledged-j02-before-replay":
+            complete.append({"failedRunId": args.failed_run_id, **isolate_acknowledged_grace(fleet, plan, states)})
+            continue
         if plan.get("kind") == "interrupted-checkpoint-before-admission":
             complete.append({"failedRunId": args.failed_run_id,
                              **restore_and_isolate(fleet, plan, states, recovery_scene_matches)})

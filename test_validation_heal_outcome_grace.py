@@ -1,6 +1,7 @@
 """Exercise real grace oracles and source-procedure ordering without a live fleet."""
 
 import copy
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -305,6 +306,7 @@ class GraceProtocolTest(unittest.TestCase):
         initial, authority, injected, target, directory = scene(nodes)
         clock = types.SimpleNamespace(now=1000.0, elapsed=0.0)
         events, records, admissions = [], {}, []
+        ack_entries = []
         def sleep(seconds):
             self.assertLessEqual(seconds, 1)
             if mode != 'stalled-clock': clock.now += seconds
@@ -333,7 +335,7 @@ class GraceProtocolTest(unittest.TestCase):
                 return copy.deepcopy(initial if self.phase == 'initial' else authority if self.phase in ('authority', 'clean') else injected)
         fleet = Fleet()
         class Probe:
-            def inventory(self, *args, **kwargs): return {'inventory': True}
+            def inventory(self, *args, **kwargs): return {'bucket': BUCKET, 'entries': copy.deepcopy(ack_entries)}
             def s3(self, operation, params, body=None):
                 self_outer.assertEqual(operation, 'head_object')
                 return dict(acknowledged=True, resultUnknown=False, response=dict(VersionId=params['VersionId'],
@@ -343,9 +345,15 @@ class GraceProtocolTest(unittest.TestCase):
             def __init__(self, *args): self.versions = iter((OLD, CURRENT))
             def call(self, operation, params, body=None):
                 events.append((operation, clock.now))
-                if operation == 'put_object': return dict(VersionId=next(self.versions), ETag='etag')
+                if operation == 'put_object':
+                    version = next(self.versions)
+                    for entry in ack_entries: entry['isLatest'] = False
+                    ack_entries.append(dict(key=grace.KEY, versionId=version, isLatest=True, deleteMarker=False,
+                        payload=dict(size=len(body), sha256=hashlib.sha256(body).hexdigest())))
+                    return dict(VersionId=version, ETag='etag')
                 if operation == 'delete_object':
                     fleet.phase = 'authority'
+                    ack_entries[:] = [entry for entry in ack_entries if entry['versionId'] != OLD]
                     return dict(VersionId=OLD, ResponseMetadata={'HTTPStatusCode': 204})
                 return {}
         tasks = []
@@ -369,7 +377,7 @@ class GraceProtocolTest(unittest.TestCase):
         def recover(*args):
             events.append(('rescue', clock.now)); fleet.phase = 'authority'; fleet.orphan_faults.clear()
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
-            for name, value in {'time': timer, 'Recorder': Recorder, 'verify_seed': lambda *a: {},
+            for name, value in {'time': timer, 'Recorder': Recorder,
                     'run_task': task, 'idle_fleet': lambda *a: None, 'verify_proof': lambda *a: {},
                     'map_target': lambda *a, **kw: {'dataDir': directory}}.items():
                 stack.enter_context(patch.object(grace, name, value))
@@ -410,6 +418,149 @@ class GraceProtocolTest(unittest.TestCase):
             self.assertNotIn('rescue', [event[0] for event in self.events])
             self.assertNotIn('public', [event[0] for event in self.events])
             self.assertEqual(len(self.fleet.orphan_faults), 1)
+
+
+
+
+class GraceRecoveryTest(unittest.TestCase):
+    def fixture(self, root):
+        from scripts.validation_heal import outcome_recovery as recovery
+        keys = ['objects/0000.bin', 'objects/0001.bin', 'objects/0002.bin', grace.KEY]
+        original, bucket, _ = versioned_scene(keys)
+        value = original.pop('node1'); original['vm000'] = value
+        expected = []
+        for key in keys:
+            ids = (OLD, CURRENT) if key == grace.KEY else ('null',)
+            expected += [dict(key=key, versionId=version, isLatest=index == len(ids) - 1,
+                deleteMarker=False, payload=dict(size=100, sha256='d' * 64)) for index, version in enumerate(ids)]
+            for entry in value['files']:
+                if entry['path'] == bucket + '/' + key + '/xl.meta':
+                    entry['metadata']['versions'] = entry['metadata']['versions'][:len(ids)]
+                    for index, version in enumerate(entry['metadata']['versions']):
+                        version.update(versionId=ids[index], isLatest=index == len(ids) - 1)
+        candidate = dict(source_sha=recovery.CANDIDATE, package_sha256='a' * 64)
+        run_id = 'gh-12345-1-h1'; case = outcome.CASE_ID
+        folder = root / 'artifact/run' / case
+        evidence = folder / 'evidence' / case; branch = evidence / 'DB/H1/deferred'
+        branch.mkdir(parents=True); (folder / 'cases').mkdir()
+        def save(path, data): path.write_text(json.dumps(data))
+        save(folder / 'cases' / (case + '.json'), dict(case_id=case, verdict='FAIL', cleanup_status='FAIL',
+            provenance=dict(source_commit=candidate['source_sha'], candidate_sha256='a' * 64,
+                testing_commit='b' * 40, binary_sha256='c' * 64)))
+        rows = [dict(topology='H1', fixture='DB', branch=name, verdict='FAIL', cleanup='PASS')
+                for name in ('mixed-healthy-repaired-failed', 'dry-run')]
+        rows.append(dict(topology='H1', fixture='DB', branch='deferred', verdict='FAIL', cleanup='FAIL',
+            failure=dict(type='FixtureStateMismatch', message='baseline content/version/marker differs from deterministic fixture ACK')))
+        save(evidence / 'healthy-summary.json', dict(caseId=case, results=rows, cleanup='FAIL', complete=False, canonicalCasePassClaimed=False))
+        owner = dict(runId=run_id, bucket=bucket, runtimeProfile='outcome-grace', binarySha256='c' * 64, mounts=[{}] * 4)
+        for index, (label, data) in enumerate((('binding', dict(runId=run_id, bucketPrefix=bucket,
+                harnessCommit='b' * 40, candidateCommit=candidate['source_sha'], candidatePackageSha256='a' * 64,
+                candidateBinarySha256='c' * 64)), ('failure-scene-before-fault-rescue', original),
+                ('reserved', dict(node='vm000', reserved=True, owner=owner)),
+                ('retain-unknown-seed-receipt', dict(state='DIRTY', namespacesRetained=True,
+                    request=dict(operation='original-version-specific-grace-source-procedure', bucket=bucket))),
+                ('complete-ACK-manifest', dict(expected=expected[:3]))), 1):
+            save(branch / (f'{index:05d}-' + label + '.json'), data)
+        for name, operations in (('fixture', ['create_bucket'] + ['put_object'] * 3),
+                                 ('original-grace-fixture', ['put_bucket_versioning', 'put_object', 'put_object'])):
+            ledger = branch / name; ledger.mkdir()
+            for sequence, operation in enumerate(operations, 1):
+                params = {'Bucket': bucket}; payload = None; response = {'ResponseMetadata': {'HTTPStatusCode': 200}}
+                if operation == 'put_object':
+                    entry = expected[sequence - 2 if name == 'fixture' else sequence + 1]
+                    params['Key'] = entry['key']; payload = entry['payload']; response['VersionId'] = entry['versionId']
+                request = dict(sequence=sequence, runId=run_id, operation=operation, params=params)
+                if payload: request['payload'] = payload
+                path = ledger / f'{sequence:06d}-request.json'; save(path, request)
+                save(ledger / f'{sequence:06d}-ack.json', dict(sequence=sequence, runId=run_id,
+                    requestFile=path.name, requestSha256=hashlib.sha256(path.read_bytes()).hexdigest(), operationCheck='PASS',
+                    observation=dict(operation=operation, params=params, payload=payload, response=response,
+                        acknowledged=True, clientCallInvoked=True, resultUnknown=False)))
+        return candidate, branch
+
+    def test_acknowledged_pre_replay_plan_and_poisoned_ledger_boundaries(self):
+        from scripts.validation_heal import outcome_recovery as recovery
+        for poison in (None, 'unknown', 'request-digest', 'extra-delete', 'later-grace', 'foreign-key', 'lost-root', 'another-retained-branch'):
+            with self.subTest(poison=poison), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); candidate, branch = self.fixture(root)
+                path = branch / 'original-grace-fixture/000003-ack.json'
+                ack = json.loads(path.read_text())
+                if poison == 'unknown': ack['observation']['resultUnknown'] = True
+                elif poison == 'request-digest': ack['requestSha256'] = 'e' * 64
+                elif poison == 'foreign-key': ack['observation']['params']['Key'] = 'foreign'
+                path.write_text(json.dumps(ack))
+                if poison == 'extra-delete': (path.parent / '000004-request.json').write_text('{}')
+                elif poison == 'later-grace': (branch / '00100-J02-grace-single-member-old-replay.json').write_text('{}')
+                elif poison == 'lost-root':
+                    path = branch / '00002-failure-scene-before-fault-rescue.json'; scene = json.loads(path.read_text())
+                    scene['vm000']['formats'].pop(); path.write_text(json.dumps(scene))
+                elif poison == 'another-retained-branch':
+                    path = branch.parents[2] / 'healthy-summary.json'; summary = json.loads(path.read_text())
+                    summary['results'][0]['cleanup'] = 'FAIL'; path.write_text(json.dumps(summary))
+                if poison:
+                    with self.assertRaises(ValueError): recovery.acknowledged_grace_plan(root, 12345, candidate)
+                else:
+                    plan = recovery.acknowledged_grace_plan(root, 12345, candidate)[0]
+                    self.assertEqual(plan['nodes'], ['vm000'])
+                    self.assertEqual(plan['owners']['vm000']['runtimeProfile'], 'outcome-grace')
+
+    def test_real_descriptor_archive_requires_complete_scene_and_retries_after_every_move(self):
+        from scripts.validation_heal import retained_scene as retained, outcome_recovery as recovery
+        import test_validation_heal_retained_scene as retained_tests
+        helper = retained_tests.RetainedSceneTests()
+        for lost_after in range(1, 6):
+            with self.subTest(lost_after=lost_after), tempfile.TemporaryDirectory() as temporary:
+                state, roots, node, request = helper.scene(temporary)
+                roots[0].mkdir(parents=True); owner = request['expectedOwner']; owner['runtimeProfile'] = 'outcome-grace'
+                for folder in (*roots, state): (folder / 'owner.json').write_text(json.dumps(owner))
+                snapshot = dict(files=[dict(path='original', sha256='d' * 64)], formats=[{}] * 4,
+                    pid=0, quiescent=True, binarySha256=owner['binarySha256'])
+                node['snapshot'] = lambda value: snapshot
+                request['expectedOriginalSceneSha256'] = recovery.digest({key: snapshot[key] for key in ('files', 'formats')})
+                with helper.root_stats(), patch.object(retained, 'rename_new', side_effect=helper.local_rename):
+                    baseline = retained.run(request, node)['baseline']
+                    change = {**request, 'action': 'retained-scene-isolate', 'expectedBaseline': baseline}
+                    count = 0
+                    def move(source, target):
+                        nonlocal count
+                        helper.local_rename(source, target)
+                        if target.is_dir():
+                            count += 1
+                            if count == lost_after: raise RuntimeError('lost rename ACK')
+                    with patch.object(retained, 'rename_new', side_effect=move), self.assertRaises(RuntimeError): retained.run(change, node)
+                    checked = retained.run(change, node)
+                    self.assertEqual(checked['locations'], ['retained'] * 5)
+                    self.assertEqual(checked['baseline'], baseline)
+                    self.assertFalse(checked['canonicalPassClaimed'])
+                    self.assertFalse(checked['backupRestorationUsed'])
+                    self.assertFalse(checked['credentialContentsRead'])
+                    with self.assertRaises(ValueError): retained.run({**request, 'expectedOriginalSceneSha256': 'e' * 64}, node)
+                    def remote(host, action, **params):
+                        return retained.run(dict(runId=request['runId'], action=action, **params), node)
+                    fleet = types.SimpleNamespace(record=lambda label, value: value, remote=remote)
+                    plan = dict(runId=request['runId'], before={'vm000': snapshot}, owners={'vm000': owner},
+                                originalCaseSha256='d' * 64)
+                    result = recovery.isolate_acknowledged_grace(fleet, plan, [dict(node='vm000',
+                        retained={'state': True, 'roots': [True] * 4})])
+                    self.assertEqual(result['cleanup'], 'ISOLATED')
+                    self.assertFalse(result['originalBusinessFixtureRestored'])
+                    self.assertFalse(result['originalVerdictRewritten'])
+
+    def test_drifted_acknowledged_scene_never_starts_archive(self):
+        from scripts.validation_heal import outcome_recovery as recovery
+        for poison in ('bytes', 'missing-root', 'live-pid'):
+            with self.subTest(poison=poison):
+                before = {'vm000': dict(files=[], formats=[], pid=0, quiescent=True, binarySha256='a' * 64)}
+                current = copy.deepcopy(before)
+                state = dict(node='vm000', state={'exists': True}, roots=[{'exists': True}] * 4, retained={})
+                if poison == 'bytes': current['vm000']['files'] = [{}]
+                elif poison == 'live-pid': current['vm000']['pid'] = 123
+                else: state['roots'] = [{'exists': False}] * 4
+                fleet = types.SimpleNamespace(record=lambda label, value: value,
+                    remote=unittest.mock.Mock(), snapshot=lambda *a, **kw: current)
+                plan = dict(before=before, binarySha256='a' * 64)
+                with self.assertRaises(ValueError): recovery.isolate_acknowledged_grace(fleet, plan, [state])
+                self.assertFalse(any(call.args[1].startswith('retained-scene-') for call in fleet.remote.call_args_list))
 
 
 if __name__ == '__main__': unittest.main()

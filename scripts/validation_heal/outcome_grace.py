@@ -181,7 +181,9 @@ def run(probe, fleet, binding, directory, expected, incarnation, active, preserv
         versions.append(dict(key=KEY, versionId=version, isLatest=True, deleteMarker=False,
             payload={'sha256': hashlib.sha256(body).hexdigest(), 'size': len(body)}, lastModifiedEpoch=epoch))
     old, current = versions
-    seeded = [*expected, old, current]
+    # Server age belongs to the grace witness, not the public S3 manifest.
+    public_versions = [{key: value for key, value in version.items() if key != 'lastModifiedEpoch'} for version in versions]
+    seeded = [*expected, *public_versions]
     fleet.record('J02-grace-initial-ACK-S3', verify_seed(seeded, probe.inventory(bucket)))
     healthy = run_task(probe, fleet, {'bucket': bucket, 'key': KEY}, 2, active,
         option_overrides={'recursive': True}, status_endpoints=tuple(binding['endpoints'])[1:])
@@ -199,7 +201,7 @@ def run(probe, fleet, binding, directory, expected, incarnation, active, preserv
     deleted = recorder.call('delete_object', {'Bucket': bucket, 'Key': KEY, 'VersionId': old['versionId']})
     require(deleted.get('VersionId') == old['versionId'] and deleted.get('DeleteMarker') in {None, False}
             and deleted.get('ResponseMetadata', {}).get('HTTPStatusCode') == 204, 'J02 grace DELETE lacks its exact historical ACK')
-    expected = [*expected, current]
+    expected = [*expected, public_versions[1]]
     baseline = probe.inventory(bucket)
     fleet.record('J02-grace-post-delete-ACK-S3', {'inventory': baseline, **verify_seed(expected, baseline)})
     idle_fleet(fleet, binding); fleet.stop()
