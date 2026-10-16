@@ -508,7 +508,16 @@ def run_branch(args, topology, nodes, fixture, branch, candidate):
             pending = {"operation": "original-version-specific-grace-source-procedure", "bucket": bucket}
             expected, baseline, result["originalGraceProcedure"] = original_grace_probe(
                 probe, fleet, binding, directory, expected, incarnation, active, unchanged_token)
+            source = result["originalGraceProcedure"]
+            require(source.get("originalGraceSourceProcedure") is True and source.get("sourceDiagnosticComplete") is True
+                    and source.get("verdict") in {"PASS", "NOT_OBSERVED"}
+                    and all(source.get(name) is False for name in ("fixtureRescueIsProductRepair", "sameTokenRecoveryClaimed",
+                            "globalClockChanged", "metadataAgeRewritten", "canonicalPassClaimed")),
+                    "J02 original grace procedure has incomplete source evidence")
             pending = None
+            result.update(verdict=source["verdict"], recoveryIsProductRepair=False,
+                          sourceProcedure="heal_status_batch.Batch.deferred")
+            return result
         original = fleet.snapshot("healthy-physical-baseline", quiescent=True)
         plan = legacy_manifest(original, bucket, expected) if branch == "unknown-negative" else fault_plan(original, bucket, expected, branch)
         fleet.record("independent-manifest-and-frozen-fault-plan", plan)

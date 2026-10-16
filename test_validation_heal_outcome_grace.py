@@ -291,6 +291,37 @@ class GraceIntegrationTest(unittest.TestCase):
             self.assertTrue(retained['namespacesRetained'])
             self.assertGreaterEqual(fleet.stop.call_count, 2)
 
+    def test_completed_source_grace_does_not_run_a_second_non_source_fault(self):
+        for verdict in ('PASS', 'NOT_OBSERVED', 'FAIL', 'incomplete'):
+            with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+                root = Path(temporary); rc = root / 'rc'; rc.write_bytes(b'cli')
+                args = types.SimpleNamespace(evidence=root / 'evidence', rc_bin=rc, binary_sha='b' * 64,
+                    testing_commit='a' * 40, tool_directory=root / 'tools')
+                factory = stack.enter_context(patch.object(outcome, 'Fleet')); fleet = factory.return_value
+                fleet.reserved = ['node1']; fleet.record.side_effect = lambda label, value: value
+                fleet.cleanup.return_value = True
+                stack.enter_context(patch.dict(os.environ, GITHUB_RUN_ID='12345', GITHUB_RUN_ATTEMPT='1'))
+                for name in ('Probe', 'Recorder', 'verify_inspector', 'verify_quorum_contract', 'validate_topology',
+                             'verify_seed', 'idle_fleet', 'run_task'):
+                    stack.enter_context(patch.object(outcome, name))
+                stack.enter_context(patch.object(outcome, 'seed', return_value=[]))
+                stack.enter_context(patch.object(outcome, 'validate_version_receipts', return_value={'bucketIncarnationId': INCARNATION}))
+                source = dict(originalGraceSourceProcedure=True, verdict=verdict, sourceDiagnosticComplete=verdict != 'incomplete', fixtureRescueIsProductRepair=False,
+                    sameTokenRecoveryClaimed=False, globalClockChanged=False, metadataAgeRewritten=False, canonicalPassClaimed=False)
+                stack.enter_context(patch.object(outcome, 'original_grace_probe', return_value=([], {}, source)))
+                supplemental = stack.enter_context(patch.object(outcome, 'fault_plan', side_effect=AssertionError('unexpected extra fault')))
+                result = outcome.run_branch(args, 'H1', ['node1'], 'DB', 'deferred',
+                    {'source_sha': outcome.CANDIDATE, 'package_sha256': 'c' * 64})
+                supplemental.assert_not_called()
+                if verdict in ('PASS', 'NOT_OBSERVED'):
+                    self.assertEqual((result['verdict'], result['cleanup']), (verdict, 'PASS'))
+                    self.assertEqual(result['sourceProcedure'], 'heal_status_batch.Batch.deferred')
+                    fleet.cleanup.assert_called_once()
+                else:
+                    self.assertEqual((result['verdict'], result['cleanup']), ('FAIL', 'FAIL'))
+                    fleet.cleanup.assert_not_called()
+                self.assertFalse(any(call.args[0] == 'healthy-physical-baseline' for call in fleet.snapshot.call_args_list))
+
     def test_manual_diagnostic_entry_cannot_certify_canonical_even_if_driver_returns_zero(self):
         root = Path(__file__).resolve().parent
         dry = subprocess.run(['bash', str(root / 'scripts/validation_heal/run_case.sh'), '--validation-case',
