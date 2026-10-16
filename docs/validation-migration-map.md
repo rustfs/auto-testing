@@ -7,6 +7,24 @@ and SHA-256 bind the snapshot to the source catalog. `reuse_candidates` lists co
 it is not a coverage claim. A case's run result remains `unverified` until a
 live run proves each source assertion on the required topology.
 
+## Current acceptance and remaining work
+
+All 158 canonical IDs are retained. Independent complete live acceptance is **102/158**: the prior 101-case census plus B07 `heal.below-read-quorum`, accepted from [run 38727279347/1](https://github.com/rustfs/rustfs/actions/runs/38727279347). Its complete H1/H2 never-versioned/historical matrix, exact candidate/package/tools and cleanup were independently audited; earlier B07 failures remain retained.
+
+| Acceptance state | Cases | Remaining requirement |
+| --- | ---: | --- |
+| Independently accepted complete live PASS | 102 | Preserve original provenance and complete results. |
+| Retained live failures with existing executors | 32 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
+| Required native barriers | 7 | A09 and G01–G06 need exact candidate-bound server lock/version/commit barriers. |
+| Orchestration or evidence blocked | 4 | C11, F07, I05 and J02 need their remaining native or full live evidence closure. |
+| Environment gated, disabled by default | 13 | Control flows, oracles and unmet reasons are implemented; dedicated resource adapters and real execution remain conditional on the required resources. |
+
+The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 43 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass. Fresh candidate-bound full J02 live acceptance is still pending.
+
+The sections below retain earlier implementation and run history. Historical failed or partial results are not promoted by this summary.
+
+## Original reuse assessment
+
 | Source module | Cases | Existing auto-testing code to inspect | Current gap |
 | --- | ---: | --- | --- |
 | Pool lifecycle | 13 | `rustfs_pool_expand.sh` | Current steps combine operations; each validation ID needs its own assertions, object manifest, and result. |
@@ -131,9 +149,9 @@ immutable package URL and SHA-256 from that build attempt, then calls
 executor before touching the fleet and runs the result report with
 `--gate-case`, so a missing, failed, or incomplete selected case fails the
 workflow. Each run uploads its candidate identity, canonical result, and
-case evidence. The 154 currently dispatchable IDs include all 74 non-Heal cases, 67 automatic Heal executors, and 13 disabled-by-default environment gates. The gates preserve the operator procedures and emit explicit BLOCKED results; they are not automatic live executors or PASS claims. Independent census currently confirms 101 unique complete canonical live PASS cases: 85 on source `072b57b37559fbe626aeda8abf61617fdcbdd926`, 12 on the older immutable source, two on source `16cf19817e0c81e24d0d787a916f734a34517ec5`, and two on source `e224eb48e5311cff022b04fd78c97a8572d5c270`. The latest additions are C08 metadata/payload mismatch `38235978152` and E03 read-repair attribution `38237270640`. The independently verified Pool tail runs `38110959836` and `38111198632`, A03 run `38198122041`, C04 run `38203454300`, the completed multipart run `38204339623`, D07 run `38205235080`, D09 run `38205854024`, D10 run `38207381816`, and manual-normal attribution run `38207956101` are included. Native, read-only, recovery and duplicate runs are excluded; the other 57 cases have no complete canonical live PASS claim.
+case evidence. The 154 currently dispatchable IDs include all 74 non-Heal cases, 67 automatic Heal executors, and 13 disabled-by-default environment gates. The gates preserve the operator procedures and emit explicit BLOCKED results; they are not automatic live executors or PASS claims. The preceding census confirmed 101 unique complete canonical live PASS cases: 85 on source `072b57b37559fbe626aeda8abf61617fdcbdd926`, 12 on the older immutable source, two on source `16cf19817e0c81e24d0d787a916f734a34517ec5`, and two on source `e224eb48e5311cff022b04fd78c97a8572d5c270`. Its latest additions were C08 metadata/payload mismatch `38235978152` and E03 read-repair attribution `38237270640`. The independently verified Pool tail runs `38110959836` and `38111198632`, A03 run `38198122041`, C04 run `38203454300`, the completed multipart run `38204339623`, D07 run `38205235080`, D09 run `38205854024`, D10 run `38207381816`, and manual-normal attribution run `38207956101` are included. Native, read-only, recovery and duplicate runs are excluded; B07 run `38727279347` subsequently raises complete acceptance to 102, leaving 56 cases without complete canonical live PASS.
 
-All 84 Heal recipes, 301 operator branches and 532 applicable topology branch
+All 84 Heal recipes, 302 operator branches and 534 applicable topology branch
 templates are preserved under `scripts/validation_heal`, with the public
 contract, operation book, signed probe, ACK-logged workload, guarded file-fault
 tool and source-bound metadata inspector source. `matrix.py plan` binds current
@@ -197,7 +215,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-Four Heal cases remain native/evidence-blocked and outside dispatch: C11, F07, I05 and J02. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
+Four Heal cases remain outside canonical dispatch: C11, F07, I05 and J02. C11/F07/J02 have explicit diagnostic routes that preserve their blocking canonical verdicts; I05 still needs exact server barriers. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
 

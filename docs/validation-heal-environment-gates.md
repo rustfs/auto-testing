@@ -28,14 +28,14 @@
 
 `matrix.py list` 同时输出 `automaticExecutor`、`dispatchable` 和 `executionPolicy`：67 个 Heal 自动执行器、13 个环境门控、4 个证据/执行器阻断。调度覆盖共 80 个 Heal，连同 74 个非 Heal 为 154/158；这不代表 154 个 live PASS。
 
-第二批 4 个用例未进入可执行调度。经核实，C11/F07/J02 已有 candidate-bound 原生回归；这三项主要缺完整真机编排与证据闭环。I05 仍缺精确服务端屏障，增加节点不能解决：
+第二批 4 个用例仍未进入 canonical 调度。C11/F07/J02 已有 candidate-bound 原生回归和显式诊断入口；诊断分支通过仍需完整矩阵和独立审计后才能解除门控。I05 仍缺精确服务端屏障，增加节点不能解决：
 
 | Code | 用例 | Block 原因 | 解锁所需证据 |
 | --- | --- | --- | --- |
 | C11 | `heal.bucket-incarnation-recreation` | H1/H2 旧元数据盘重返、原始 checkpoint/resume 与 committed MRF 重放编排已实现；精确候选的 9 项存储原生回归和 3 项 manager incarnation 前置证据已独立核验。完整现场分支尚无独立审计结果 | 旧/新 incarnation、正常 S3 删除与新 ACK、物理范围和原生 artifact 精确绑定；单分支不提升整例 |
 | F07 | `heal.checkpoint-and-mrf-corruption` | 已实现 H1/H2 checkpoint 截断、未来 schema、committed MRF CRC 故障及独立安全重扫；10 项原生回归作为前置证据。真实较早代次回放与私有限额卷的 journal ENOSPC 已实现；仍缺完整 native cut 审核，完整 live 尚未审计 | 真实 durable 记录故障与 publication 证据绑定；现有 interruption hooks 不等于每个 fsync 或断电 |
 | I05 | `heal.lock-timeout-and-caller-abort` | 请求耗时/TCP 断开不能证明服务端锁 owner 与提交顺序 | lock owner、timeout、caller abort 和 stale read-repair 的服务端屏障 |
-| J02 | `heal.outcome-counters-and-error-truth` | 已有 2 项 outcome 原生回归；缺混合 healthy/repaired/failed/deferred/unknown 真机夹具、dry-run 独立任务与完整 manifest 对账 | 每个 disposition、计数和 attemptFailures 对账；不是已证实产品缺少 API |
+| J02 | `heal.outcome-counters-and-error-truth` | 混合责任、dry-run、原始 grace、只读失败与独立补偿、全元数据损坏及真实 legacy 夹具和 manifest 对账均已实现。原实机观察到整桶重试覆盖首轮 repaired 记录；候选 `7951bb629821246868ee3761b321dd07c06db45c` 已修复并通过 210 项 manager 与 5 项独立进程集成测试，完整新候选实机矩阵仍待验收 | H1/H2 × DB/DV 全分支原始证据；Unknown 必须真实观察；每个 disposition、计数、attemptFailures 与物理故障对账，原失败保持不变 |
 
 I05 和已接入 A09、G01–G06 的精确屏障分支仍受候选包对应、经过审核的 `e2e-test-hooks` 限制。第一批 G07/G08 的 native 分支与 H04 容量锁窗口也保留 BLOCKED；不能用外部请求重试或最终对象正确来声称精确 lock/version/marker/MPU/copy 提交屏障已命中。
 
