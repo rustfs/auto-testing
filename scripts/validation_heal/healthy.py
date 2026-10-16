@@ -185,9 +185,12 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
-        if action.startswith("retained-scene-"):
+        if action.startswith(("retained-scene-", "owner-markers-")):
             source += "\nimport types\nretained_scene_backend = types.ModuleType('retained_scene')\nexec(" + repr(
                 NODE_SOURCE.with_name("retained_scene.py").read_text()) + ", retained_scene_backend.__dict__)\n"
+        if action.startswith("owner-markers-"):
+            source += "\nimport types\nowner_recovery_backend = types.ModuleType('owner_recovery')\nexec(" + repr(
+                NODE_SOURCE.with_name("owner_recovery.py").read_text()) + ", owner_recovery_backend.__dict__)\n"
         if action.startswith("network-") or action in {"cleanup", "quota-audit-finalize", "journal-rejection-audit", "journal-rejection-audit-finalize", "journal-retained-audit", "journal-retained-audit-finalize"}:
             network_source = NODE_SOURCE.with_name("network_gate.py").read_text()
             source += "\nimport types\nnetwork_gate_backend = types.ModuleType('network_gate')\nexec(" + repr(
@@ -205,7 +208,7 @@ class Fleet:
             source += "\nimport types\ngeneration_backend = types.ModuleType('generation_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("generation_fault.py").read_text()) + ", generation_backend.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
-                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure", "outcome-legacy-phase"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith(("journal-", "incarnation-")):
+                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure", "outcome-legacy-phase"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith(("journal-", "incarnation-", "owner-markers-")):
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
         if action.startswith(("journal-", "incarnation-")):

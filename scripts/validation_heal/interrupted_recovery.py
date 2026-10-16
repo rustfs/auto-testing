@@ -178,6 +178,21 @@ def restore_and_isolate(fleet, plan, states, scene_matches):
         require(item["state"]["exists"] and len(item["roots"]) == 4 and all(root["exists"] for root in item["roots"]),
                 "interrupted fixture lost an original root; retain remaining scene")
         active.append(item["node"])
+    if plan.get("kind") == "interrupted-j02-opaque":
+        for node in active:
+            params = dict(expectedOwner=plan["owners"][node], before=plan["before"][node],
+                          faults=[{k: v for k, v in f.items() if k != "node"} for f in plan["faults"] if f["node"] == node])
+            audit = fleet.record("interrupted-owner-markers-audit", {"node": node,
+                **fleet.remote(node, "owner-markers-audit", **params)})
+            require(audit.get("inspectionOnly") is True and audit.get("mutated") is False
+                    and audit.get("canonicalPassClaimed") is False and type(audit.get("markerRecoveryRequired")) is bool,
+                    "interrupted owner-marker audit is incomplete")
+            if audit.get("markerRecoveryRequired") is True:
+                proof = fleet.record("interrupted-owner-markers-recovery", {"node": node,
+                    **fleet.remote(node, "owner-markers-recover", **params,
+                                   expectedAudit={k: v for k, v in audit.items() if k != "node"})})
+                require(proof.get("ownerMetadataRestored") is True and proof.get("businessBytesChanged") is False
+                        and proof.get("canonicalPassClaimed") is False, "interrupted owner-marker recovery differs")
     for node in active:
         fleet.record("interrupted-recovery-stop", {"node": node, **fleet.remote(node, "stop")})
     current = {node: fleet.remote(node, "snapshot", quiescent=True,

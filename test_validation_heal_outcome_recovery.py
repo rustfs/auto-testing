@@ -144,12 +144,18 @@ class OpaqueRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); candidate, _ = self.fixture(root)
             plan = recover_environment.recovery_plan(root, 12345, candidate)[0]
-            current = copy.deepcopy(plan['failure']); events = []
+            current = copy.deepcopy(plan['failure']); events = []; snapshots = 0
             def remote(node, action, **params):
+                nonlocal snapshots
                 events.append(action)
+                if action == 'owner-markers-audit': return dict(markerRecoveryRequired=True, inspectionOnly=True, mutated=False, canonicalPassClaimed=False)
+                if action == 'owner-markers-recover':
+                    self.assertEqual(params['expectedAudit'], dict(markerRecoveryRequired=True, inspectionOnly=True, mutated=False, canonicalPassClaimed=False))
+                    return dict(ownerMetadataRestored=True, businessBytesChanged=False, canonicalPassClaimed=False)
                 if action == 'stop': return {}
                 if action == 'snapshot':
-                    self.assertEqual(params, dict(quiescent=True, **({'metadataFaults': plan['metadataFaults'][node]} if len(events) == 2 else {})))
+                    snapshots += 1
+                    self.assertEqual(params, dict(quiescent=True, **({'metadataFaults': plan['metadataFaults'][node]} if snapshots == 1 else {})))
                     return copy.deepcopy(current[node])
                 if action == 'recover-fault':
                     fault = next(f for f in plan['faults'] if f['faultId'] == params['faultId'])
@@ -165,7 +171,7 @@ class OpaqueRecoveryTests(unittest.TestCase):
             states = [dict(node='vm000', state=dict(exists=True), roots=[dict(exists=True)] * 4)]
             result = interrupted_recovery.restore_and_isolate(fleet, plan, states, recover_environment.recovery_scene_matches)
             self.assertEqual(result['cleanup'], 'ISOLATED'); self.assertFalse(result['canonicalPassClaimed'])
-            self.assertEqual(events[:4], ['stop', 'snapshot', 'recover-fault', 'recover-fault'])
+            self.assertEqual(events[:6], ['owner-markers-audit', 'owner-markers-recover', 'stop', 'snapshot', 'recover-fault', 'recover-fault'])
             self.assertFalse(set(events) & {'start', 'cleanup', 'journal-recover'})
 
     def test_real_opaque_archive_retries_all_moves_and_hashes_fault_backups_without_credentials(self):

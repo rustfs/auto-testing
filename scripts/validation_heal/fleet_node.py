@@ -1634,6 +1634,8 @@ def main(request):
     actions["environment-capabilities"] = environment_capabilities
     for action in ("retained-scene-audit", "retained-scene-isolate"):
         actions[action] = retained_scene_operation
+    for action in ("owner-markers-audit", "owner-markers-recover"):
+        actions[action] = lambda value: globals()["owner_recovery_backend"].run(value, globals())
     actions["outcome-legacy-phase"] = outcome_legacy_phase
     actions["quota-audit-finalize"] = quota_audit_finalize
     actions["journal-rejection-audit-finalize"] = journal_rejection_audit_finalize
