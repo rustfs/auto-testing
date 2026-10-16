@@ -1344,15 +1344,19 @@ def namespace_state(request):
                     "canonicalSha256": hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
         finally:
             os.close(descriptor)
+    retained_states = [checked(state.parent / name / state.name, state.parent).exists()
+                       for name in ("retained", "retained-" + state.name)]
+    retained_roots = [[checked(root.parent.parent / name / root.name, root.parent.parent).exists()
+                       for name in ("heal-validation-retained", "heal-validation-retained-" + root.name)] for root in roots]
+    require(sum(retained_states) <= 1 and all(sum(row) <= 1 for row in retained_roots),
+            "namespace has both shared and per-run retained copies")
     return {"runId": request["runId"], "service": service,
             "state": {"path": str(state), "exists": state.exists(),
                       "ownerMarker": (state / "owner.json").is_file(), "ownerEvidence": marker_evidence(state)},
             "roots": [{"path": str(root), "exists": root.exists(),
                        "ownerMarker": (root / "owner.json").is_file(), "ownerEvidence": marker_evidence(root),
                        "data": (root / "data").is_dir()} for root in roots],
-            "retained": {"state": checked(state.parent / "retained" / state.name, state.parent).exists(),
-                         "roots": [checked(root.parent.parent / "heal-validation-retained" / root.name,
-                                           root.parent.parent).exists() for root in roots]},
+            "retained": {"state": any(retained_states), "roots": [any(row) for row in retained_roots]},
             "inspectionOnly": True, "mutated": False}
 
 

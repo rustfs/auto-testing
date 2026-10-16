@@ -8,7 +8,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from scripts.validation_heal import heal_fault, interrupted_recovery, outcome_recovery, recover_environment, retained_scene
+from scripts.validation_heal import fleet_node, heal_fault, interrupted_recovery, outcome_recovery, recover_environment, retained_scene
 from scripts.validation_heal.healthy import physical_content
 from scripts.validation_heal.shards import map_target
 from scripts.validation_heal.versions import metadata_target
@@ -181,6 +181,12 @@ class OpaqueRecoveryTests(unittest.TestCase):
                 state, roots, node, request = helper.scene(temporary)
                 roots[0].mkdir(parents=True); owner = request['expectedOwner']; owner['runtimeProfile'] = 'outcome-legacy'
                 for folder in (*roots, state): emit(folder / 'owner.json', owner)
+                old_state, old_roots = retained_scene.destinations(state, roots)
+                old_parents = [path.parent for path in (*old_roots, old_state)]
+                for parent in old_parents:
+                    parent.mkdir(mode=0o755, parents=True)
+                    (parent / 'unrelated-scene').write_bytes(b'preserve-shared-parent')
+                preserved = [(p.stat().st_ino, p.stat().st_mode, (p / 'unrelated-scene').read_bytes()) for p in old_parents]
                 fault_id = heal_fault.bounded_fault_id('J02', 'original-opaque', 0)
                 for suffix in ('original', 'intent.json', 'applied.json', 'failed-' + 'a' * 64):
                     (roots[1] / 'quarantine' / (fault_id + '.' + suffix)).write_bytes(b'fault-evidence')
@@ -203,10 +209,22 @@ class OpaqueRecoveryTests(unittest.TestCase):
                             if count == lost_after: raise RuntimeError('lost ACK')
                     change = dict(request, action='retained-scene-isolate', expectedBaseline=baseline)
                     with patch.object(retained_scene, 'rename_new', side_effect=move), self.assertRaises(RuntimeError): retained_scene.run(change, node)
+                    def command(*args, **kw):
+                        return types.SimpleNamespace(stdout='0' if 'MainPID' in args else 'inactive')
+                    with patch.object(fleet_node, 'paths', return_value=(state, roots)), patch.object(fleet_node, 'command', side_effect=command):
+                        observed = fleet_node.namespace_state(dict(runId=request['runId'], action='namespace-state'))
+                    self.assertEqual(observed['retained']['roots'], [i < lost_after for i in range(4)])
+                    self.assertEqual(observed['retained']['state'], lost_after == 5)
                     node['snapshot'] = lambda value: self.fail('partial archive must use durable original digest')
                     result = retained_scene.run(change, node)
                     self.assertEqual(result['locations'], ['retained'] * 5); self.assertEqual(result['baseline'], baseline)
                     self.assertFalse(result['canonicalPassClaimed']); self.assertFalse(result['credentialContentsRead'])
+                    self.assertEqual(result['baseline']['archiveLayout'], 'per-run-parent')
+                    self.assertEqual(len(result['privateArchiveParents']), 5)
+                    self.assertTrue(all(p['exists'] and p['uid'] == 0 and p['mode'] == 0o700 for p in result['privateArchiveParents']))
+                    checked = retained_scene.run(request, node)
+                    self.assertEqual(checked['privateArchiveParents'], result['privateArchiveParents'])
+                    self.assertEqual([(p.stat().st_ino, p.stat().st_mode, (p / 'unrelated-scene').read_bytes()) for p in old_parents], preserved)
 
     def test_real_file_recovery_preserves_corrupt_bytes_and_refuses_later_data(self):
         for drift in (None, 'intent', 'backup', 'target'):
@@ -234,3 +252,25 @@ class OpaqueRecoveryTests(unittest.TestCase):
                     preserved = root / 'quarantine' / (fault_id + '.failed-' + hashlib.sha256(corrupt).hexdigest())
                     self.assertEqual(preserved.read_bytes(), corrupt)
                     self.assertFalse(heal_fault.recover_fault(fd, owner, fault_id, expected_receipt_sha256=receipt_sha)['restoredFromBackup'])
+
+    def test_opaque_archive_refuses_shared_copies_and_namespace_inspection_rejects_both_layouts(self):
+        helper = scene_tests.RetainedSceneTests()
+        for collision in ('root', 'state'):
+            with self.subTest(collision=collision), tempfile.TemporaryDirectory() as temporary:
+                state, roots, node, request = helper.scene(temporary)
+                roots[0].mkdir(parents=True); owner = request['expectedOwner']; owner['runtimeProfile'] = 'outcome-legacy'
+                for folder in (*roots, state): emit(folder / 'owner.json', owner)
+                request['expectedOriginalSceneSha256'] = 'a' * 64
+                shared_state, shared_roots = retained_scene.destinations(state, roots)
+                private_state, private_roots = retained_scene.destinations(state, roots, per_run_parent=True)
+                shared = shared_roots[0] if collision == 'root' else shared_state
+                private = private_roots[0] if collision == 'root' else private_state
+                shared.mkdir(parents=True)
+                with helper.root_stats(), patch.object(retained_scene, 'rename_new') as move, self.assertRaisesRegex(ValueError, 'shared archive already exists'):
+                    retained_scene.run(request, node)
+                move.assert_not_called(); self.assertFalse(private.parent.exists())
+                private.mkdir(parents=True)
+                def command(*args, **kw): return types.SimpleNamespace(stdout='0' if 'MainPID' in args else 'inactive')
+                with patch.object(fleet_node, 'paths', return_value=(state, roots)), patch.object(fleet_node, 'command', side_effect=command), \
+                     self.assertRaisesRegex(ValueError, 'both shared and per-run'):
+                    fleet_node.namespace_state(dict(runId=request['runId'], action='namespace-state'))

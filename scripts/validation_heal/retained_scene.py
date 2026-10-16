@@ -49,7 +49,10 @@ def private_json(path, *, root_owned=True):
         os.close(fd)
 
 
-def destinations(state, roots):
+def destinations(state, roots, *, per_run_parent=False):
+    if per_run_parent:
+        return state.parent / ("retained-" + state.name) / state.name, tuple(
+            root.parent.parent / ("heal-validation-retained-" + root.name) / root.name for root in roots)
     return state.parent / "retained" / state.name, tuple(
         root.parent.parent / "heal-validation-retained" / root.name for root in roots)
 
@@ -153,8 +156,14 @@ def mounted_paths():
 
 def inspect(request, node):
     state, roots = node["paths"](request["runId"])
-    retained_state, retained_roots = destinations(state, roots)
     expected = request["expectedOwner"]
+    per_run = expected.get("runtimeProfile") == "outcome-legacy"
+    retained_state, retained_roots = destinations(state, roots, per_run_parent=per_run)
+    if per_run:
+        old_state, old_roots = destinations(state, roots)
+        require(not any(node["checked"](path, state.parent if index == 4 else node["MOUNTS"][index]).exists()
+                        for index, path in enumerate((*old_roots, old_state))),
+                "J02 shared archive already exists; refusing another retention layout")
     require(isinstance(expected, dict) and expected.get("runId") == request["runId"]
             and expected.get("unit") == node["unit"](request["runId"])
             and expected.get("hostname") == node["socket"].gethostname()
@@ -197,6 +206,8 @@ def inspect(request, node):
                 "retained scene still has a gate or replacement intent")
         witnesses.append(census(folder, expected, state=index == 4, node=node))
     baseline = {"runId": request["runId"], "ownerSha256": sha(expected), "roots": witnesses[:4], "state": witnesses[4]}
+    if per_run:
+        baseline["archiveLayout"] = "per-run-parent"
     intent = retained_state.parent / (request["runId"] + ".intent.json")
     node["checked"](intent, state.parent)
     if expected["runtimeProfile"] in {"root-restart", "outcome-grace", "outcome-legacy"}:
@@ -252,7 +263,15 @@ def run(request, node):
         require(encoded(final[0]) == encoded(baseline) and "active" not in final[1],
                 "retained scene post-rename inventory differs")
         locations = final[1]
-    return {"baseline": baseline, "locations": locations, "originalEvidenceComplete": False,
+    result = {"baseline": baseline, "locations": locations, "originalEvidenceComplete": False,
             "originalSceneRestored": False, "canonicalPassClaimed": False, "backupRestorationUsed": False,
             "credentialContentsRead": False, "inspectionOnly": request["action"] == "retained-scene-audit",
             "mutated": mutated, "activeNamespaceIsolated": "active" not in locations}
+    if request["expectedOwner"].get("runtimeProfile") == "outcome-legacy":
+        result["privateArchiveParents"] = []
+        for target in (*retained_roots, retained_state):
+            info = target.parent.lstat() if target.parent.exists() else None
+            result["privateArchiveParents"].append({"exists": False} if info is None else {
+                "exists": True, "uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode),
+                "device": info.st_dev, "inode": info.st_ino})
+    return result
