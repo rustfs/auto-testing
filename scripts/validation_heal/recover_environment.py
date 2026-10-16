@@ -13,12 +13,12 @@ try:
     from .healthy import Fleet, physical_content
     from .heal_probe import require, save
     from .interrupted_recovery import checkpoint_plan, restore_and_isolate
-    from .outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan
+    from .outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan, acknowledged_legacy_plan
 except ImportError:
     from healthy import Fleet, physical_content
     from heal_probe import require, save
     from interrupted_recovery import checkpoint_plan, restore_and_isolate
-    from outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan
+    from outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan, acknowledged_legacy_plan
 
 
 def quota_recovery_plan(artifact, failed_run, candidate):
@@ -144,6 +144,8 @@ def network_recovery_plan(artifact, failed_run, candidate):
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
     if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/cases/*.json")):
+        if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/evidence/heal.outcome-counters-and-error-truth/DB/H1/unknown-negative/*-one-way-legacy-write-phase.json")):
+            return acknowledged_legacy_plan(artifact, failed_run, candidate)
         if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/evidence/heal.outcome-counters-and-error-truth/DB/H1/unknown-negative/*-original-opaque-byte-zero-bitflip.json")):
             return interrupted_opaque_plan(artifact, failed_run, candidate)
         return acknowledged_grace_plan(artifact, failed_run, candidate)
@@ -657,7 +659,7 @@ def main():
         has_retained = any(item.get("retained", {}).get("state")
                            or any(item.get("retained", {}).get("roots", [])) for item in states)
         all_absent = all(not item["state"]["exists"] and not any(root["exists"] for root in item["roots"]) for item in states)
-        if plan.get("kind") == "acknowledged-j02-before-replay":
+        if plan.get("kind") in {"acknowledged-j02-before-replay", "acknowledged-j02-before-legacy-put"}:
             complete.append({"failedRunId": args.failed_run_id, **isolate_acknowledged_grace(fleet, plan, states)})
             continue
         if plan.get("kind") in {"interrupted-checkpoint-before-admission", "interrupted-j02-opaque"}:

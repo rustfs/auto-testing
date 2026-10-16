@@ -208,7 +208,7 @@ class Fleet:
             source += "\nimport types\ngeneration_backend = types.ModuleType('generation_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("generation_fault.py").read_text()) + ", generation_backend.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
-                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure", "outcome-legacy-phase"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith(("journal-", "incarnation-", "owner-markers-")):
+                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure", "outcome-legacy-phase", "start"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith(("journal-", "incarnation-", "owner-markers-")):
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
         if action.startswith(("journal-", "incarnation-")):
