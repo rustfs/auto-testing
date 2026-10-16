@@ -97,6 +97,20 @@ class ManagerNativeEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exact scope or identity"):
                 self.verify(fixture)
 
+    def test_admin_batch_candidate_rejects_previous_manager_source_proof(self):
+        candidate = "7951bb629821246868ee3761b321dd07c06db45c"
+        previous = suite.REVIEWED_CANDIDATES["1c7fc818dd858247c45b39542abd8291b1e6e31b"]
+        for field, old in (("sourceFiles", previous["sourceFiles"]),
+                           ("candidateSourceTree", previous["sourceTree"])):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                fixture = self.fixture(Path(temp), candidate)
+                path = fixture[0] / "manager-native.json"
+                manifest = json.loads(path.read_text())
+                manifest[field] = old
+                path.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, "reviewed source"):
+                    self.verify(fixture)
+
     def test_wrong_candidate_build_attempt_or_helper_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             fixture = self.fixture(Path(temp))

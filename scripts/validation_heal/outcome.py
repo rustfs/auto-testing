@@ -44,7 +44,8 @@ except ImportError:
 
 
 CASE_ID = "heal.outcome-counters-and-error-truth"
-REVIEWED_CANDIDATES = frozenset({CANDIDATE, "1c7fc818dd858247c45b39542abd8291b1e6e31b"})
+REVIEWED_CANDIDATES = frozenset({CANDIDATE, "1c7fc818dd858247c45b39542abd8291b1e6e31b",
+                                  "7951bb629821246868ee3761b321dd07c06db45c"})
 BRANCHES = ("mixed-healthy-repaired-failed", "dry-run", "deferred", "readonly-terminal-failure", "unknown-negative")
 SIZE = 5 * 1024**2 + 123
 # The reviewed immutable candidate makes one attempt and three bucket-object retries.

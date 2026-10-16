@@ -177,7 +177,8 @@ class MixedOutcomeTest(unittest.TestCase):
 
     def test_each_reviewed_candidate_requires_native_evidence_before_fleet_creation(self):
         self.assertEqual(outcome.REVIEWED_CANDIDATES,
-            {outcome.CANDIDATE, "1c7fc818dd858247c45b39542abd8291b1e6e31b"})
+            {outcome.CANDIDATE, "1c7fc818dd858247c45b39542abd8291b1e6e31b",
+             "7951bb629821246868ee3761b321dd07c06db45c"})
         for commit in outcome.REVIEWED_CANDIDATES:
             with self.subTest(commit=commit), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); candidate = root / "candidate.json"

@@ -54,6 +54,14 @@ REVIEWED_CANDIDATES["1c7fc818dd858247c45b39542abd8291b1e6e31b"] = {
     "sourceFiles": {**SOURCE_FILES,
         "crates/heal/src/heal/storage.rs": "0e27cc1fbb7b732d211e744f385223bee23844c95ba86918e1765b546c197096"},
 }
+REVIEWED_CANDIDATES["7951bb629821246868ee3761b321dd07c06db45c"] = {
+    "sourceTree": "e4d863efff2792c0ab4da0036c04c3e0902aca89",
+    "cargoLockSha256": "2589b3f5afc54f94419a3e2bfd537c11fae7ae3ee2d2a73ba31c72ee8d8a62be",
+    "sourceFiles": {**REVIEWED_CANDIDATES["1c7fc818dd858247c45b39542abd8291b1e6e31b"]["sourceFiles"],
+        "crates/heal/src/heal/manager.rs": "6e41b39d74aedf3b40b6c6a8f7c5de60bf2cb7927d7d76a10745033002dbc00d",
+        "crates/heal/src/heal/manager/tests.rs": "844b84870e85fca4de1c72faf66e4f7a43561d8d6db341db43fd089223ff9a1e",
+        "crates/heal/tests/shard_identity_receipt_test.rs": "51ffe71b57efceb03ef40aa2333e235c5515149c89b64df0553dbe26b331db32"},
+}
 RESUME = "heal::resume::tests::"
 SNAPSHOT = "heal::mrf_queue::snapshot::tests::"
 ROOT = "heal::manager::tests::root_recovery::"
