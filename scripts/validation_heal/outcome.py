@@ -412,7 +412,7 @@ def original_opaque_probe(probe, fleet, binding, directory, expected, fixture, i
             kind="bitflip", offset=0)})
         require(receipt.get("kind") == "bitflip" and type(receipt.get("offset")) is int and receipt["offset"] == 0
                 and isinstance(receipt.get("fault"), dict), "J02 opaque injection changed its original byte-zero fault")
-        metadata_faults.setdefault(row["node"], {})[row["relativePath"]] = receipt["fault"]
+        metadata_faults.setdefault(row["node"], {})[f"{row['disk']}:{row['relativePath']}"] = receipt["fault"]
         damaged = fleet.snapshot("original-opaque-physical-injection", quiescent=True, metadata_faults=metadata_faults)
         validate_fault(prior, damaged, row, receipt); prior = damaged
     damaged_files = files(damaged)

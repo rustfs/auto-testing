@@ -637,6 +637,13 @@ class OriginalOpaqueMetadataTests(unittest.TestCase):
             events.append(label)
             if any('metadataError' in row for row in current['node1']['files']):
                 self.assertTrue(params.get('metadata_faults'))
+                from scripts.validation_heal import fleet_node
+                with patch.object(fleet_node, 'command', return_value=types.SimpleNamespace(returncode=1, stderr='Error: FileCorrupt\n')):
+                    for row in current['node1']['files']:
+                        if 'metadataError' in row:
+                            witness = fleet_node.inspect_metadata(Path('/inspector'), Path('/xl.meta'), bucket, self.key,
+                                row, params['metadata_faults']['node1'])
+                            self.assertTrue(witness['metadataError']['exactWitnessedFault'])
             return copy.deepcopy(current)
         fleet.snapshot = snapshot
         def remote(node, action, **params):

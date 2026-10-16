@@ -119,7 +119,10 @@ def census(folder, owner, *, state, node):
             backup = (not state and owner.get("runtimeProfile") == "root-restart"
                       and len(parts) == 2 and parts[0] == "quarantine"
                       and re.fullmatch(r"F07-shard-[0-3]\.(original|intent\.json|applied\.json)", parts[1]))
-            if (state and relative == "rustfs") or fixture or mrf or backup:
+            opaque_backup = (not state and owner.get("runtimeProfile") == "outcome-legacy"
+                             and len(parts) == 2 and parts[0] == "quarantine"
+                             and re.fullmatch(r"J02-[0-9a-f]{32}\.(original|intent\.json|applied\.json|failed-[0-9a-f]{64})", parts[1]))
+            if (state and relative == "rustfs") or fixture or mrf or backup or opaque_backup:
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
                     require(stable(os.fstat(fd)) == stable(info) and info.st_size <= 2 * 1024**3,
@@ -155,7 +158,7 @@ def inspect(request, node):
     require(isinstance(expected, dict) and expected.get("runId") == request["runId"]
             and expected.get("unit") == node["unit"](request["runId"])
             and expected.get("hostname") == node["socket"].gethostname()
-            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart", "outcome-grace"}, "retained scene archived owner differs")
+            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart", "outcome-grace", "outcome-legacy"}, "retained scene archived owner differs")
     current = node["mounts"]()
     require(len(current) == len(expected.get("mounts", [])) == 4
             and all(all(actual[key] == old[key] for key in ("target", "source", "fstype", "uuid", "maj:min"))
@@ -196,7 +199,7 @@ def inspect(request, node):
     baseline = {"runId": request["runId"], "ownerSha256": sha(expected), "roots": witnesses[:4], "state": witnesses[4]}
     intent = retained_state.parent / (request["runId"] + ".intent.json")
     node["checked"](intent, state.parent)
-    if expected["runtimeProfile"] in {"root-restart", "outcome-grace"}:
+    if expected["runtimeProfile"] in {"root-restart", "outcome-grace", "outcome-legacy"}:
         original_sha = request.get("expectedOriginalSceneSha256", "")
         require(re.fullmatch(r"[0-9a-f]{64}", original_sha) is not None,
                 "restored fixture requires its original physical scene digest")
@@ -218,7 +221,7 @@ def inspect(request, node):
 
 def run(request, node):
     fields = {"runId", "action", "expectedOwner"}
-    if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace"}:
+    if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace", "outcome-legacy"}:
         fields.add("expectedOriginalSceneSha256")
     if request["action"] == "retained-scene-isolate":
         fields.add("expectedBaseline")

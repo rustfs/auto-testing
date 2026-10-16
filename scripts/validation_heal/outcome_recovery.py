@@ -1,5 +1,6 @@
-"""Preserve the fully acknowledged J02 fixture that failed before grace replay."""
+"""Restore and retain exactly archived J02 failures before negative task admission."""
 
+import copy
 import hashlib
 import json
 import re
@@ -10,15 +11,19 @@ try:
     from .heal_probe import require
     from .native_regressions import CANDIDATE
     from .orphan import KEY, references
-    from .shards import files, map_target
-    from .versions import public_version_id
+    from .shards import files, map_target, validate_fault
+    from .heal_fault import bounded_fault_id
+    from .heal_workload import verify_seed
+    from .versions import public_version_id, metadata_target
 except ImportError:
     from healthy import physical_content, validate_topology
     from heal_probe import require
     from native_regressions import CANDIDATE
     from orphan import KEY, references
-    from shards import files, map_target
-    from versions import public_version_id
+    from shards import files, map_target, validate_fault
+    from heal_fault import bounded_fault_id
+    from heal_workload import verify_seed
+    from versions import public_version_id, metadata_target
 
 
 def digest(value):
@@ -145,3 +150,118 @@ def isolate_acknowledged_grace(fleet, plan, states):
     return dict(runId=plan['runId'], cleanup='ISOLATED', activeNamespaceIsolated=True, backupRestorationUsed=False,
         originalSceneRestored=False, originalBusinessFixtureRestored=False, canonicalPassClaimed=False,
         originalVerdictRewritten=False, originalCaseSha256=plan['originalCaseSha256'])
+
+
+def interrupted_opaque_plan(artifact, failed_run, candidate):
+    case = 'heal.outcome-counters-and-error-truth'
+    paths = list(artifact.glob('*/run/*/cases/*.json'))
+    require(len(paths) == 1 and paths[0].name == case + '.json', 'opaque recovery requires one unmixed J02 result')
+    raw = paths[0].read_bytes(); result = json.loads(raw); provenance = result.get('provenance') or {}
+    require(result.get('case_id') == case and result.get('verdict') == result.get('cleanup_status') == 'FAIL'
+            and candidate.get('source_sha') == provenance.get('source_commit') == CANDIDATE
+            and candidate.get('package_sha256') == provenance.get('candidate_sha256'), 'opaque recovery candidate differs')
+    evidence = paths[0].parents[1] / 'evidence' / case
+    summary = json.loads((evidence / 'healthy-summary.json').read_text()); rows = summary.get('results') or []
+    require(summary.get('caseId') == case and summary.get('cleanup') == 'FAIL' and summary.get('complete') is False
+            and summary.get('canonicalCasePassClaimed') is False and len(rows) == 5
+            and [(r.get('topology'), r.get('fixture'), r.get('branch')) for r in rows] == [
+                ('H1', 'DB', branch) for branch in ('mixed-healthy-repaired-failed', 'dry-run', 'deferred',
+                                                  'readonly-terminal-failure', 'unknown-negative')]
+            and all(r.get('cleanup') == 'PASS' for r in rows[:-1]) and rows[-1].get('cleanup') == 'FAIL'
+            and rows[-1].get('verdict') == 'FAIL' and rows[-1].get('failure', {}).get('type') == 'ValueError'
+            and rows[-1]['failure']['message'].startswith('Heal node vm000 snapshot failed:')
+            and rows[-1]['failure']['message'].endswith('ValueError: metadata decoder failed outside an exact witnessed file fault\n'),
+            'opaque recovery only supports its second-file witness refusal before task admission')
+    folder = evidence / 'DB/H1/unknown-negative'
+    records = sorted(folder.glob('*.json'))
+    require({p.name for p in folder.iterdir() if p.is_dir()} == {'fixture', 'original-opaque-fixture'},
+            'opaque recovery contains another task or mutation directory')
+    labels = ['binding', 'inspector-build', 'preflight', 'integrity-fleet-attestation', 'reserved', 'inspector-upload',
+        'started', 'deployed-topology', 'topology-proof', 'ACK-bound-full-S3', 'complete-ACK-manifest', 'trigger',
+        'control', 'control-repeat', 'control-repeat', 'task-exit-background', 'quiescent', 'started',
+        'original-opaque-ACK-full-S3', 'original-opaque-complete-ACK-manifest', 'trigger', 'control',
+        'control-repeat', 'control-repeat', 'task-exit-background', 'quiescent', 'original-opaque-complete-physical',
+        *(['original-opaque-full-cohort-bitrot'] * 4), 'original-opaque-metadata-fault-plan',
+                'original-opaque-byte-zero-bitflip', 'original-opaque-physical-injection', 'original-opaque-byte-zero-bitflip',
+                'failure-scene-error', 'quiescent', 'retain-unknown-seed-receipt', 'branch-result']
+    require([p.name for p in records] == [f'{index:05d}-{label}.json' for index, label in enumerate(labels, 1)]
+            and set(folder.iterdir()) == set(records) | {folder / name for name in ('fixture', 'original-opaque-fixture')},
+            'opaque recovery has a later task, mutation or unknown boundary')
+    def one(label):
+        found = [p for p in records if p.name[6:-5] == label]
+        require(len(found) == 1, 'opaque recovery lacks exact ' + label)
+        return json.loads(found[0].read_text())
+    binding, original, reservation = one('binding'), one('original-opaque-complete-physical'), one('reserved')
+    run_id, bucket = binding.get('runId', ''), binding.get('bucketPrefix', '')
+    require(re.fullmatch(rf'gh-{failed_run}-[1-9][0-9]*-h1', run_id) is not None
+            and re.fullmatch(r'rv-heal-[0-9a-f]{16}', bucket) is not None and set(original) == {'vm000'}
+            and binding.get('candidateCommit') == candidate['source_sha']
+            and binding.get('candidatePackageSha256') == candidate['package_sha256']
+            and binding.get('candidateBinarySha256') == provenance.get('binary_sha256')
+            and binding.get('harnessCommit') == provenance.get('testing_commit'), 'opaque archived ownership differs')
+    owner = reservation.get('owner') or {}
+    require(reservation.get('node') == 'vm000' and reservation.get('reserved') is True
+            and owner.get('runId') == run_id and owner.get('bucket') == bucket
+            and owner.get('runtimeProfile') == 'outcome-legacy' and len(owner.get('mounts', [])) == 4
+            and owner.get('binarySha256') == binding['candidateBinarySha256']
+            and original['vm000'].get('quiescent') is True and type(original['vm000'].get('pid')) is int
+            and original['vm000']['pid'] == 0 and original['vm000'].get('binarySha256') == binding['candidateBinarySha256'],
+            'opaque original reservation or stopped candidate differs')
+    require(one('retain-unknown-seed-receipt') == dict(state='DIRTY', namespacesRetained=True,
+        request=dict(operation='original-corrupt-metadata-source-probe', bucket=bucket)), 'opaque pending source boundary differs')
+    wanted = one('original-opaque-complete-ACK-manifest')['expected']
+    require(len(wanted) == 2 and {e['key'] for e in wanted} == {'objects/0000.bin', 'opaque/source.bin'}
+            and all(e['versionId'] == 'null' for e in wanted), 'opaque source ACK manifest differs')
+    verify_seed(wanted, one('original-opaque-ACK-full-S3'))
+    for name, operations in (('fixture', ('create_bucket', 'put_object')), ('original-opaque-fixture', ('put_object',))):
+        requests = sorted((folder / name).glob('*-request.json')); acks = sorted((folder / name).glob('*-ack.json'))
+        require(len(requests) == len(acks) == len(operations)
+                and set((folder / name).iterdir()) == set(requests + acks), 'opaque original SDK ledger is incomplete')
+        for sequence, (request_path, ack_path, operation) in enumerate(zip(requests, acks, operations, strict=True), 1):
+            request, ack = json.loads(request_path.read_text()), json.loads(ack_path.read_text()); observed = ack.get('observation') or {}
+            require(type(request.get('sequence')) is int and type(ack.get('sequence')) is int
+                    and request['sequence'] == ack['sequence'] == sequence and request.get('runId') == ack.get('runId') == run_id
+                    and ack.get('requestFile') == request_path.name
+                    and ack.get('requestSha256') == hashlib.sha256(request_path.read_bytes()).hexdigest()
+                    and observed.get('operation') == request.get('operation') == operation
+                    and observed.get('params') == request.get('params') and request['params'].get('Bucket') == bucket
+                    and ack.get('operationCheck') == 'PASS' and observed.get('acknowledged') is True
+                    and observed.get('clientCallInvoked') is True and observed.get('resultUnknown') is False
+                    and observed.get('response', {}).get('ResponseMetadata', {}).get('HTTPStatusCode') == 200,
+                    'opaque original mutation is unknown or rebound')
+            if operation == 'put_object':
+                key = 'opaque/source.bin' if name == 'original-opaque-fixture' else 'objects/0000.bin'
+                expected = next(e for e in wanted if e['key'] == key)
+                require(request['params'].get('Key') == key and request.get('payload') == observed.get('payload') == expected['payload']
+                        and public_version_id(observed['response'].get('VersionId')) == expected['versionId'], 'opaque original PUT differs from ACK')
+    validate_topology(original, 'H1')
+    target = map_target(original, bucket, 'opaque/source.bin', 'data', 1, 'null', latest_required=False)
+    targets = [metadata_target(original, {**target, **member}) for member in target['cohort']]
+    require(one('original-opaque-metadata-fault-plan') == targets and len(targets) == 4, 'opaque original target plan differs')
+    receipts = [json.loads(p.read_text()) for p in records if p.name[6:-5] == 'original-opaque-byte-zero-bitflip']
+    first = one('original-opaque-physical-injection'); validate_fault(original, first, targets[0], receipts[0])
+    first_error = files(first)[('vm000', targets[0]['disk'], targets[0]['relativePath'])].get('metadataError') or {}
+    require(first_error.get('exactWitnessedFault') is True and first_error.get('validMetadataClaimed') is False,
+            'opaque first metadata corruption lacks its exact decoder witness')
+    failure, faults, witnesses = copy.deepcopy(original), [], {'vm000': {}}
+    for index, (receipt, selected) in enumerate(zip(receipts, targets[:2], strict=True)):
+        fault_id = bounded_fault_id('J02', 'original-opaque', index)
+        require(receipt.get('node') == selected['node'] == 'vm000' and receipt.get('runId') == run_id
+                and receipt.get('faultId') == fault_id and receipt.get('kind') == 'bitflip'
+                and type(receipt.get('offset')) is int and receipt['offset'] == 0
+                and receipt.get('relativePath') == selected['relativePath'] and receipt.get('backup') == fault_id + '.original'
+                and receipt.get('before') == {'sha256': selected['sha256'], 'size': selected['size']}
+                and receipt.get('requiresQuiescentService') is True and receipt.get('backend') == 'logical-file-fault'
+                and receipt.get('fault', {}).get('size') == selected['size']
+                and re.fullmatch(r'[0-9a-f]{64}', receipt.get('fault', {}).get('sha256', '')) is not None,
+                'opaque injected fault differs from the original planned file')
+        changed = copy.deepcopy(failure)
+        entry = next(e for e in changed['vm000']['files'] if e['disk'] == selected['disk'] and e['path'] == selected['relativePath'])
+        entry.pop('metadata'); entry.update(receipt['fault'], metadataError=first_error)
+        validate_fault(failure, changed, selected, receipt); failure = changed
+        faults.append(dict(node='vm000', disk=selected['disk'], faultId=fault_id,
+                           receipt={k:v for k,v in receipt.items() if k != 'node'}))
+        witnesses['vm000'][f"{selected['disk']}:{selected['relativePath']}"] = receipt['fault']
+    return [dict(kind='interrupted-j02-opaque', runId=run_id, nodes=['vm000'], owners={'vm000': owner}, before=original,
+        failure=failure, faults=faults, metadataFaults=witnesses, buckets=[bucket], binarySha256=binding['candidateBinarySha256'],
+        originalCaseSha256=hashlib.sha256(raw).hexdigest())]

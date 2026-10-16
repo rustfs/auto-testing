@@ -13,12 +13,12 @@ try:
     from .healthy import Fleet, physical_content
     from .heal_probe import require, save
     from .interrupted_recovery import checkpoint_plan, restore_and_isolate
-    from .outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace
+    from .outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan
 except ImportError:
     from healthy import Fleet, physical_content
     from heal_probe import require, save
     from interrupted_recovery import checkpoint_plan, restore_and_isolate
-    from outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace
+    from outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan
 
 
 def quota_recovery_plan(artifact, failed_run, candidate):
@@ -144,6 +144,8 @@ def network_recovery_plan(artifact, failed_run, candidate):
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
     if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/cases/*.json")):
+        if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/evidence/heal.outcome-counters-and-error-truth/DB/H1/unknown-negative/*-original-opaque-byte-zero-bitflip.json")):
+            return interrupted_opaque_plan(artifact, failed_run, candidate)
         return acknowledged_grace_plan(artifact, failed_run, candidate)
     if list(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/cases/*.json")):
         results = list(artifact.glob("*/run/heal.checkpoint-and-mrf-corruption/cases/*.json"))
@@ -541,6 +543,17 @@ def recovery_scene_matches(current, plan):
     """A retry may contain only the exact original shards already rescued."""
     observed = physical_content(current)
     expected = physical_content(plan.get("failure", plan["before"]))
+    if plan.get("kind") == "interrupted-j02-opaque":
+        if set(observed) != set(expected): return False
+        original = physical_content(plan["before"])
+        for node, scene in observed.items():
+            if scene["formats"] != expected[node]["formats"]: return False
+            current = {(entry["disk"], entry["path"]): entry for entry in scene["files"]}
+            failed = {(entry["disk"], entry["path"]): entry for entry in expected[node]["files"]}
+            before = {(entry["disk"], entry["path"]): entry for entry in original[node]["files"]}
+            if len(current) != len(scene["files"]) or set(current) != set(failed) or set(before) != set(failed): return False
+            if any(value != failed[key] and value != before[key] for key, value in current.items()): return False
+        return True
     if plan.get("kind") not in {"owned-quota", "interrupted-checkpoint-before-admission"}:
         return observed == expected
     original = physical_content(plan["before"])
@@ -647,7 +660,7 @@ def main():
         if plan.get("kind") == "acknowledged-j02-before-replay":
             complete.append({"failedRunId": args.failed_run_id, **isolate_acknowledged_grace(fleet, plan, states)})
             continue
-        if plan.get("kind") == "interrupted-checkpoint-before-admission":
+        if plan.get("kind") in {"interrupted-checkpoint-before-admission", "interrupted-j02-opaque"}:
             complete.append({"failedRunId": args.failed_run_id,
                              **restore_and_isolate(fleet, plan, states, recovery_scene_matches)})
             continue

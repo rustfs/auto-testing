@@ -168,7 +168,8 @@ def checkpoint_plan(artifact, failed_run, candidate):
 
 def restore_and_isolate(fleet, plan, states, scene_matches):
     """Preserve all backups and bytes, including when recovery is interrupted."""
-    require(len(states) == 4 and {item["node"] for item in states} == set(plan["nodes"]), "interrupted current fleet differs")
+    require(len(states) == len(plan["nodes"]) and len(states) in {1, 4}
+            and {item["node"] for item in states} == set(plan["nodes"]), "interrupted current fleet differs")
     active = []
     for item in states:
         retained = item.get("retained") or {}
@@ -179,7 +180,8 @@ def restore_and_isolate(fleet, plan, states, scene_matches):
         active.append(item["node"])
     for node in active:
         fleet.record("interrupted-recovery-stop", {"node": node, **fleet.remote(node, "stop")})
-    current = {node: fleet.remote(node, "snapshot", quiescent=True) for node in active}
+    current = {node: fleet.remote(node, "snapshot", quiescent=True,
+        **({"metadataFaults": plan["metadataFaults"][node]} if plan.get("metadataFaults") else {})) for node in active}
     fleet.record("interrupted-current-physical", current)
     if active:
         subset = {**plan, "before": {n: plan["before"][n] for n in active},
