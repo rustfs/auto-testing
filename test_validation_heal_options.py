@@ -18,7 +18,8 @@ class OptionsTests(unittest.TestCase):
         rows = [(options.KEYS[0], 'null', 0, False), (options.KEYS[0], 'historic', 0, False),
                 (options.KEYS[1], 'child', 1, False), (options.KEYS[2], 'control', 1, False),
                 (options.KEYS[-1], 'marker', 0, True)]
-        return {(self.bucket, key, version): {'poolIndex': 0, 'setIndex': number, 'deleteMarker': marker}
+        return {(self.bucket, key, version): {'poolIndex': 0, 'setIndex': number, 'deleteMarker': marker,
+                                            'isLatest': version != 'historic'}
                 for key, version, number, marker in rows}
 
     def status(self, branch='selector-valid'):
@@ -71,6 +72,50 @@ class OptionsTests(unittest.TestCase):
         self.assertEqual(proof['selectedACKs'], 3)
         self.assertEqual(proof['repairedACKs'], 1)
         self.assertIn((self.bucket, options.KEYS[-1], 'marker'), selected)
+
+    def test_exact_object_request_selects_only_the_acknowledged_current_version(self):
+        mapped = self.mapped()
+        for branch in ('recreate', 'update-parity', 'read-repair'):
+            for request in options.paired_options(branch):
+                with self.subTest(branch=branch, request=request):
+                    selected = options.selection(branch, request, mapped)
+                    self.assertEqual(selected, {(self.bucket, options.KEYS[0], 'null')})
+        self.assertIn((self.bucket, options.KEYS[0], 'historic'),
+                      options.selection('recursive-true', {'recursive': True}, mapped))
+
+    def test_exact_object_scope_rejects_missing_or_ambiguous_current_ack(self):
+        for kind in ('missing', 'duplicate', 'untyped'):
+            mapped = self.mapped()
+            if kind == 'missing': mapped[(self.bucket, options.KEYS[0], 'null')]['isLatest'] = False
+            elif kind == 'duplicate': mapped[(self.bucket, options.KEYS[0], 'historic')]['isLatest'] = True
+            else: mapped[(self.bucket, options.KEYS[0], 'null')]['isLatest'] = 1
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'current ACK'):
+                options.selection('recreate', options.paired_options('recreate')[0], mapped)
+
+    def test_exact_object_fault_targets_current_ack_before_remote_mutation(self):
+        mapped = self.mapped()
+        mapped.pop((self.bucket, options.KEYS[-1], 'marker'))
+        mapped[(self.bucket, options.KEYS[3], 'other')] = {
+            'poolIndex': 0, 'setIndex': 0, 'deleteMarker': False, 'isLatest': True}
+        # A historical generation appears first, as it does in the real PUT ledger.
+        current = (self.bucket, options.KEYS[0], 'null')
+        historical = (self.bucket, options.KEYS[0], 'historic')
+        mapped = {historical: mapped[historical], **{k: v for k, v in mapped.items() if k != historical}}
+        for number, (identity, target) in enumerate(mapped.items()):
+            target.update(bucket=identity[0], key=identity[1], versionId=identity[2], node='vm000', disk=0,
+                          relativePath='generation-' + str(number), sha256='sha-' + identity[2], size=128,
+                          cohort=[{'role': 'data'}, {'role': 'parity'}])
+        snapshots = types.SimpleNamespace(stop=lambda: None, snapshot=lambda *a, **k: {}, faults=[],
+                                         record=lambda label, value: value)
+        snapshots.remote = unittest.mock.Mock(side_effect=RuntimeError('remote mutation boundary'))
+        with patch.object(options, 'seed_fixture', return_value=[]), patch.object(options, 'verify_seed'), \
+                patch.object(options, 'map_fixture', return_value=mapped), patch.object(options, 'verify_parts'):
+            probe = types.SimpleNamespace(inventory=lambda *a, **k: {})
+            with self.assertRaisesRegex(RuntimeError, 'remote mutation boundary'):
+                options.scope_probe(snapshots, probe, {}, None, self.bucket, 'H1', 'DV', 'recreate',
+                                    options.paired_options('recreate')[0], [])
+        self.assertEqual(snapshots.remote.call_args.kwargs['relativePath'], mapped[current]['relativePath'])
+        self.assertEqual(snapshots.remote.call_args.kwargs['expectedSha256'], mapped[current]['sha256'])
 
     def test_complete_oracle_rejects_lost_versions_wrong_scopes_markers_and_false_counters(self):
         for kind in ('version', 'missing', 'duplicate', 'unknown', 'scope', 'null-scope', 'bool-scope',

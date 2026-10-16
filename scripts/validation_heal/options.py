@@ -180,6 +180,7 @@ def map_fixture(snapshot, bucket, expected, topology, *, multi_set=True):
         else:
             mapped[identity] = {**map_target(snapshot, bucket, entry['key'], 'data', 1, entry['versionId'],
                 latest_required=entry['isLatest'], multi_set=topology == 'H2' and multi_set, set_index=set_index), 'deleteMarker': False}
+        mapped[identity]['isLatest'] = entry['isLatest']
     if topology == 'H2' and multi_set:
         require({target['setIndex'] for target in mapped.values()} == {0, 1}, 'A10 fixture did not populate both actual sets')
     require(len(mapped) == len(expected), 'A10 physical mapping omitted an ACK')
@@ -192,7 +193,11 @@ def selection(branch, options, mapped):
     if branch.startswith('selector-'):
         return {identity for identity, target in mapped.items() if options['pool'] is None
                 or (target['poolIndex'], target['setIndex']) == (options['pool'], options['set'])}
-    return {identity for identity in mapped if identity[1] == KEYS[0]}
+    # An exact object request has no versionId and resolves the current ACK.
+    current = {identity for identity, target in mapped.items()
+               if identity[1] == KEYS[0] and target.get('isLatest') is True}
+    require(len(current) == 1, 'A10 exact object request lacks one unambiguous current ACK')
+    return current
 
 
 def request_path(branch, bucket):
@@ -319,8 +324,10 @@ def scope_probe(fleet, probe, binding, recorder, bucket, topology, fixture, bran
     verify_parts(fleet, data, 'A10-all-original-streaming')
     selected = selection(branch, options, mapped)
     targets = []
+    current_object_request = not branch.startswith(('recursive-', 'selector-'))
     for index, key in enumerate(KEYS[:4]):
-        identity = next(identity for identity in data if identity[1] == key)
+        identity = next(identity for identity in data if identity[1] == key
+                        and (not current_object_request or key != KEYS[0] or identity in selected))
         target = data[identity]
         role = 'parity' if index % 2 or branch == 'update-parity' and index == 0 else 'data'
         member = next(row for row in target['cohort'] if row['role'] == role)
