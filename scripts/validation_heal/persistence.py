@@ -179,8 +179,10 @@ def rescan_outcome(current, bucket, expected, repairs, incarnation):
     wanted = {version_identity(entry): entry for entry in expected}
     require(wanted and len(wanted) == len(expected) and repairs <= set(wanted), "rescan manifest duplicated or escaped ACKs")
     outcome = current.get("outcome") or {}
+    # HealTaskStatusPayload omits a false legacy truncation flag. Canonical
+    # receipt truncation remains explicit and independently reconciled below.
     require(current.get("summary") == "finished" and outcome.get("execution") == {"state": "completed"}
-            and current.get("settings") == checkpoints.OPTIONS and type(current.get("truncated")) is bool
+            and current.get("settings") == checkpoints.OPTIONS and type(current.get("truncated", False)) is bool
             and outcome.get("coverage") == "complete"
             and outcome.get("objectsTruncated") is (len(wanted) > 128), "safe rescan lacks complete truthful coverage")
     counts = {"processed": len(wanted), "healed": len(repairs), "unchanged": len(wanted) - len(repairs),

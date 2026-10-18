@@ -182,6 +182,20 @@ class PersistenceContractTests(unittest.TestCase):
             else: outcome["objectsTruncated"] = False
             with self.subTest(change=change), self.assertRaises(ValueError): persistence.rescan_outcome(*data)
 
+    def test_rescan_accepts_omitted_false_legacy_truncation_without_defaulting_invalid_values(self):
+        data = self.rescan()
+        del data[0]['truncated']
+        before = copy.deepcopy(data[0])
+        proof = persistence.rescan_outcome(*data)
+        self.assertTrue(proof['completeIndependentManifestsRequired'])
+        self.assertEqual(data[0], before)
+        self.assertTrue(data[0]['outcome']['objectsTruncated'])
+        for value in (None, 0, 1, 'false', []):
+            invalid = self.rescan()
+            invalid[0]['truncated'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'truthful coverage'):
+                persistence.rescan_outcome(*invalid)
+
     def test_incomplete_branches_never_enter_fleet_mutation(self):
         for branch in ("unknown", "native-persist-fence"):
             with self.subTest(branch=branch), self.assertRaisesRegex(ValueError, "cannot mutate"):

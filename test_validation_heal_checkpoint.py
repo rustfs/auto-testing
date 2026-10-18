@@ -112,26 +112,32 @@ class AdminCheckpointTests(unittest.TestCase):
     def test_earlier_capture_requires_original_bytes_bound_to_process_and_physical_owner(self):
         observed, _, _ = self.fixture()
         owner = reader.owned_checkpoint(observed, TOKEN, BUCKET)
-        identity = {"binarySha256": "a" * 64}
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        identity = {name: name for name in PROCESS_FIELDS}
+        identity.update(pid=50, state="S", binarySha256="a" * 64)
         receipt = {"processBound": True, "originalProductBytes": True, "productMetadataMutated": False,
             "runId": "gh-12345-1-h1", "family": "checkpoint", "taskId": TOKEN, "disk": 1,
             "relativePath": owner["checkpoint"]["relativePath"], "faultId": "F07-early", "binarySha256": "a" * 64,
             "captured": journal.entry(reader.bytes_of(owner["checkpoint"]))}
         requests = []
-        fleet = SimpleNamespace(run_id=receipt["runId"], record=lambda label, value: value,
+        fleet = SimpleNamespace(run_id=receipt["runId"], frozen_processes={"node": identity}, record=lambda label, value: value,
             remote=lambda node, action, **params: requests.append((node, action, params)) or
                 (identity if action == "process" else receipt))
-        with patch.object(reader, "records", return_value=observed):
+        with patch.object(reader, "freeze", return_value=(owner, identity)):
             result = reader.capture_earlier(fleet, TOKEN, BUCKET, "F07-early")
             self.assertEqual(result["captureId"], "F07-early")
-            self.assertEqual(requests[-1], ("node", "journal-capture", {
+            self.assertEqual(requests[0], ("node", "journal-capture", {
                 "family": "checkpoint", "taskId": TOKEN, "disk": 1, "relativePath": receipt["relativePath"],
                 "faultId": "F07-early", "expectedBefore": receipt["captured"], "expected": identity}))
+            self.assertEqual([request[1] for request in requests], ['journal-capture', 'process-signal', 'process'])
+            self.assertEqual(fleet.frozen_processes, {})
             for key, value in [("processBound", False), ("productMetadataMutated", True), ("disk", True),
                                ("binarySha256", "b" * 64), ("captured", {"size": 3, "sha256": "a" * 64})]:
+                fleet.frozen_processes["node"] = identity
                 original = receipt[key]; receipt[key] = value
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     reader.capture_earlier(fleet, TOKEN, BUCKET, "F07-early")
+                self.assertEqual(fleet.frozen_processes, {"node": identity})
                 receipt[key] = original
 
     def test_stale_boundary_requires_actual_newer_progress_in_the_same_original_responsibility(self):
@@ -201,8 +207,9 @@ class AdminCheckpointTests(unittest.TestCase):
         observed, _, _ = self.fixture(); roots, _ = self.root_fixture()
         root = reader.owned_root_admission(roots, TOKEN)
         identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50, state='S')
+        observed['node'].update(processIdentity=identity, processBound=True, stable=True, independentReads=2)
         actions = []
-        fleet = SimpleNamespace(frozen_processes={}, record=lambda label, value: value, stop=lambda: actions.append('stop'))
+        fleet = SimpleNamespace(nodes=['node'], frozen_processes={}, record=lambda label, value: value, stop=lambda: actions.append('stop'))
         def remote(node, action, **params):
             actions.append(action)
             if action == 'process': return {**identity, 'state': 'T' if 'process-signal' in actions else 'S'}
@@ -223,8 +230,9 @@ class AdminCheckpointTests(unittest.TestCase):
         from scripts.validation_heal.fleet_node import PROCESS_FIELDS
         observed, _, _ = self.fixture(); roots, _ = self.root_fixture()
         identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50, state='S')
+        observed['node'].update(processIdentity=identity, processBound=True, stable=True, independentReads=2)
         actions = []
-        fleet = SimpleNamespace(frozen_processes={}, record=lambda label, value: value)
+        fleet = SimpleNamespace(nodes=['node'], frozen_processes={}, record=lambda label, value: value)
         def remote(node, action, **params):
             actions.append(action)
             return {**identity, 'state': 'T' if 'process-signal' in actions else 'S'}
@@ -243,7 +251,8 @@ class AdminCheckpointTests(unittest.TestCase):
         from scripts.validation_heal.fleet_node import PROCESS_FIELDS
         observed, _, _ = self.fixture(); roots, value = self.root_fixture()
         identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50, state='T')
-        fleet = SimpleNamespace(frozen_processes={}, record=lambda label, value: value, remote=lambda *args, **kwargs: identity)
+        observed['node'].update(processIdentity=identity, processBound=True, stable=True, independentReads=2)
+        fleet = SimpleNamespace(nodes=['node'], frozen_processes={}, record=lambda label, value: value, remote=lambda *args, **kwargs: identity)
         def records(fleet, token, label, **params):
             if label == 'Admin-root-frozen':
                 changed = copy.deepcopy(roots); altered = copy.deepcopy(value); altered['task_id'] = INCARNATION
@@ -252,6 +261,73 @@ class AdminCheckpointTests(unittest.TestCase):
         with patch.object(reader, 'records', side_effect=records), self.assertRaisesRegex(ValueError, 'original explicit Admin'):
             reader.freeze(fleet, TOKEN, BUCKET)
         self.assertEqual(fleet.frozen_processes, {'node': identity})
+
+    def test_owner_is_frozen_before_observing_other_nodes_or_refreshing_its_process(self):
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        observed, _, _ = self.fixture(); roots, _ = self.root_fixture()
+        identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50)
+        observed['node'].update(processIdentity=identity, processBound=True, stable=True, independentReads=2)
+        fleet = SimpleNamespace(nodes=['node', 'peer1', 'peer2', 'peer3'], frozen_processes={},
+                                record=lambda label, value: value)
+        actions = []
+        def remote(node, action, **params):
+            if action == 'process': self.assertIn('process-signal', actions)
+            actions.append(action)
+            return {**identity, 'state': 'T'}
+        fleet.remote = remote
+        def all_nodes(value):
+            full = copy.deepcopy(value)
+            for peer in fleet.nodes[1:]:
+                full[peer] = copy.deepcopy(value['node'])
+                full[peer]['records'] = [{'disk': r['disk'], 'relativePath': r['relativePath'], 'present': False}
+                                        for r in full[peer]['records']]
+            return full
+        def records(fleet, token, label, **params):
+            if label == 'Admin-checkpoint-live':
+                self.assertEqual(params.get('nodes'), ('node',))
+                return observed
+            self.assertIn('process-signal', actions)
+            self.assertNotIn('nodes', params)
+            return all_nodes(roots if params.get('family') == 'root' else observed)
+        with patch.object(reader, 'records', side_effect=records):
+            frozen, birth = reader.freeze(fleet, TOKEN, BUCKET)
+        self.assertEqual(birth, identity)
+        self.assertTrue(frozen['rootAdmission']['originalDurableResponsibility'])
+
+    def test_full_census_after_early_freeze_still_rejects_a_second_physical_owner(self):
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        observed, _, _ = self.fixture()
+        identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50)
+        observed['node'].update(processIdentity=identity, processBound=True, stable=True, independentReads=2)
+        fleet = SimpleNamespace(nodes=['node', 'peer1', 'peer2', 'peer3'], frozen_processes={},
+            record=lambda label, value: value, remote=lambda *args, **params: {**identity, 'state': 'T'})
+        def records(fleet, token, label, **params):
+            if label == 'Admin-checkpoint-live': return observed
+            full = {node: copy.deepcopy(observed['node']) for node in fleet.nodes}
+            return full
+        with patch.object(reader, 'records', side_effect=records), self.assertRaises(ValueError):
+            reader.freeze(fleet, TOKEN, BUCKET)
+        self.assertEqual(fleet.frozen_processes, {'node': identity})
+
+    def test_unbound_census_birth_never_signals_a_process(self):
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        for change in ('missing-birth', 'missing-field', 'boolean-pid', 'unstable', 'unbound'):
+            observed, _, _ = self.fixture()
+            identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50)
+            observed['node'].update(processIdentity=identity, processBound=True, stable=True, independentReads=2)
+            if change == 'missing-birth': observed['node'].pop('processIdentity')
+            elif change == 'missing-field': identity.pop('startTicks')
+            elif change == 'boolean-pid': identity['pid'] = True
+            elif change == 'unstable': observed['node']['stable'] = False
+            else: observed['node']['processBound'] = False
+            actions = []
+            fleet = SimpleNamespace(nodes=['node'], frozen_processes={}, record=lambda label, value: value,
+                                    remote=lambda *a, **k: actions.append(a))
+            with patch.object(reader, 'records', return_value=observed), self.subTest(change=change), \
+                    self.assertRaises(ValueError):
+                reader.freeze(fleet, TOKEN, BUCKET)
+            self.assertEqual(actions, [])
+            self.assertEqual(fleet.frozen_processes, {})
 
 
 if __name__ == "__main__": unittest.main()
