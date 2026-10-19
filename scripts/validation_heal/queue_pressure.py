@@ -233,6 +233,7 @@ def run_topology(args, topology, nodes, **unused):
     fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     fleet.record("MRF-contract", verify_reference(candidate))
     prefix = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+    fleet.snapshot_buckets = [prefix, *[f"{prefix}-queue-{index}" for index in range(len(COUNTS))], prefix + "-durable"]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
     binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,

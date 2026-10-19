@@ -2250,3 +2250,20 @@ pass (nine platform skips). Fresh candidate-bound H1/H2 execution and independen
 acceptance remain required; the original C02/C03 failures and canonical
 104/158 count are unchanged. I03's inspector and replay remain pinned to the
 separately reviewed `536a0a13b7a428a557dbe20d03faf72808da4abd` helper.
+
+
+I04 physical-scope correction (2026-10-19): original run `38119569421/1`
+recorded successful 769/129/129/129-object queue manifests on both H1 and H2,
+but its physical baselines contain zero business files on every node. The exact
+original helper calls `Fleet.snapshot` without a bucket list, selecting only the
+unseeded primary owner bucket instead of its four queue buckets and durable
+control bucket. All six baseline, fault, attribution, pre-GET, post-GET and
+failure snapshots now explicitly include the primary prefix and those five
+owned buckets through the existing frozen fleet binding and bounded scope validator. No queue admission,
+resource limit, MRF retention/retirement, fairness, physical comparison, candidate
+source or cleanup oracle changes. Runtime regression tests execute the actual
+H1/H2 caller and `Fleet.snapshot` adapter; the previous caller fails. All 13
+focused checks and the 832-test Heal suite pass (nine platform skips). The
+original FAIL remains unchanged; later pressure behavior and complete fresh
+candidate-bound H1/H2 execution remain unproven. Canonical acceptance stays
+104/158, and I03 still uses its separate frozen helper.
