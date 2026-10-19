@@ -270,20 +270,20 @@ def release(state, owner, *, expired=False):
         require(not table_present(table), 'network table has no ownership intent; preserve namespace')
         return {'state': 'CLEAR', 'gateWasAbsent': True}
     expired = expired or (state / EXPIRY).exists()
-    if expired:
-        for suffix in ('.timer', '.service'):
-            unit_name = value['timer'] + suffix
-            load_state = command('systemctl', 'show', unit_name, '-p', 'LoadState', '--value').strip()
-            require(load_state in {'not-found', 'loaded'}, 'expired network unit identity is unknown')
-            active_state = command('systemctl', 'show', unit_name, '-p', 'ActiveState', '--value').strip()
-            if load_state != 'not-found' and active_state not in {'inactive', 'failed', 'unknown'}:
-                command('systemctl', 'stop', unit_name)
-            require(command('systemctl', 'show', unit_name, '-p', 'ActiveState', '--value').strip()
-                    in {'inactive', 'failed', 'unknown'}, 'expired network unit remains active')
     # Stop the expiry worker before inspecting/deleting, avoiding a concurrent
-    # deletion. A TTL worker does not stop its own unit.
-    if not expired:
-        command('systemctl', 'stop', value['timer'] + '.timer', value['timer'] + '.service')
+    # deletion. An armed timer need not have loaded its service yet.
+    for suffix in ('.timer', '.service'):
+        unit_name = value['timer'] + suffix
+        load_state = command('systemctl', 'show', unit_name, '-p', 'LoadState', '--value').strip()
+        require(load_state in {'not-found', 'loaded'}, 'network expiry unit identity is unknown')
+        require(expired or suffix != '.timer' or load_state == 'loaded',
+                'network expiry timer disappeared before release')
+        active_state = command('systemctl', 'show', unit_name, '-p', 'ActiveState', '--value').strip()
+        if load_state == 'loaded' and active_state not in {'inactive', 'failed', 'unknown'}:
+            command('systemctl', 'stop', unit_name)
+        allowed = {'inactive', 'failed', 'unknown'} if expired or load_state == 'not-found' else {'inactive', 'failed'}
+        require(command('systemctl', 'show', unit_name, '-p', 'ActiveState', '--value').strip() in allowed,
+                'network expiry unit remains active')
     counters = []
     if table_present(value['table']):
         counters = validate_table(json.loads(command('nft', '-j', 'list', 'table', 'inet', value['table'])),
@@ -300,9 +300,6 @@ def release(state, owner, *, expired=False):
         (state / MARKER).unlink()
         (state / SCRIPT).unlink()
     else:
-        for suffix in ('.timer', '.service'):
-            require(command('systemctl', 'show', value['timer'] + suffix, '-p', 'ActiveState', '--value').strip() in {'inactive', 'failed'},
-                    'network expiry unit remains active')
         (state / MARKER).unlink()
         (state / SCRIPT).unlink()
     return receipt

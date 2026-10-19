@@ -240,6 +240,71 @@ class NetworkExpiryTests(unittest.TestCase):
                 gate.activate(Path(folder), self.owner)
             self.assertTrue(all(call.args[0] != 'nft' for call in command.call_args_list))
 
+    def release_fixture(self, state, *, service_loaded=False, timer_loaded=True, stop_fails=False):
+        value, _ = self.prepare(state)
+        states = {'.timer': 'active' if timer_loaded else 'inactive', '.service': 'active' if service_loaded else 'inactive'}
+        calls = []
+        def command(*args, input=None):
+            calls.append(args)
+            if args[:2] == ('systemctl', 'show'):
+                suffix = '.timer' if args[2].endswith('.timer') else '.service'
+                loaded = timer_loaded if suffix == '.timer' else service_loaded
+                if 'LoadState' in args: return 'loaded' if loaded else 'not-found'
+                return states[suffix]
+            if args[:2] == ('systemctl', 'stop'):
+                for unit in args[2:]:
+                    suffix = '.timer' if unit.endswith('.timer') else '.service'
+                    if suffix == '.service' and not service_loaded:
+                        raise ValueError('systemctl network operation failed: Unit expiry.service not loaded')
+                    if stop_fails: raise ValueError('systemctl network operation failed: stop refused')
+                    states[suffix] = 'inactive'
+            return ''
+        return value, command, calls
+
+    def test_release_stops_timer_when_its_service_has_never_been_loaded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            value, command, calls = self.release_fixture(state)
+            with patch.object(gate, 'read_marker', return_value=value), patch.object(gate, 'command', side_effect=command), patch.object(gate, 'table_present', return_value=False):
+                result = gate.release(state, self.owner)
+            self.assertEqual(result['rulesRemaining'], 0)
+            self.assertFalse(result['expiryTriggered'])
+            self.assertIn(('systemctl', 'stop', value['timer'] + '.timer'), calls)
+            self.assertFalse(any(value['timer'] + '.service' in args for args in calls if args[:2] == ('systemctl', 'stop')))
+            self.assertFalse((state / gate.MARKER).exists())
+
+    def test_release_stops_an_active_worker_after_stopping_its_timer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            value, command, calls = self.release_fixture(state, service_loaded=True)
+            with patch.object(gate, 'read_marker', return_value=value), patch.object(gate, 'command', side_effect=command), patch.object(gate, 'table_present', return_value=False):
+                gate.release(state, self.owner)
+            stops = [args[2:] for args in calls if args[:2] == ('systemctl', 'stop')]
+            self.assertEqual(stops, [(value['timer'] + '.timer',), (value['timer'] + '.service',)])
+
+    def test_missing_normal_timer_or_failed_stop_preserves_intent_and_rules(self):
+        for config in ({'timer_loaded': False}, {'stop_fails': True}):
+            with self.subTest(config=config), tempfile.TemporaryDirectory() as folder:
+                state = Path(folder)
+                value, command, calls = self.release_fixture(state, **config)
+                with patch.object(gate, 'read_marker', return_value=value), patch.object(gate, 'command', side_effect=command), patch.object(gate, 'table_present', return_value=True), self.assertRaises(ValueError):
+                    gate.release(state, self.owner)
+                self.assertTrue((state / gate.MARKER).exists())
+                self.assertFalse(any(args[:4] == ('nft', '-j', '-f', '-') for args in calls))
+
+    def test_explicit_recovery_accepts_unloaded_timer_and_stops_any_remaining_worker(self):
+        for service_loaded in (False, True):
+            with self.subTest(service_loaded=service_loaded), tempfile.TemporaryDirectory() as folder:
+                state = Path(folder)
+                value, command, calls = self.release_fixture(state, timer_loaded=False, service_loaded=service_loaded)
+                with patch.object(gate, 'read_marker', return_value=value), patch.object(gate, 'command', side_effect=command), patch.object(gate, 'table_present', return_value=False):
+                    result = gate.release(state, self.owner, expired=True)
+                self.assertTrue(result['expiryTriggered'])
+                self.assertEqual(result['rulesRemaining'], 0)
+                self.assertTrue((state / gate.EXPIRY).is_file())
+                self.assertFalse((state / gate.MARKER).exists())
+                self.assertFalse(any(value['timer'] + '.timer' in args for args in calls if args[:2] == ('systemctl', 'stop')))
+
     def test_foreign_rule_blocks_cleanup_instead_of_deleting_the_table(self):
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder)
@@ -249,6 +314,8 @@ class NetworkExpiryTests(unittest.TestCase):
                           'comment': 'foreign', 'expr': [{'accept': None}]}}]}
             def command(*args, input=None):
                 if args[:4] == ('nft', '-j', 'list', 'table'): return json.dumps(broken)
+                if 'LoadState' in args: return 'loaded'
+                if 'ActiveState' in args: return 'inactive'
                 return ''
             with patch.object(gate, 'read_marker', return_value=value), patch.object(gate, 'table_present', return_value=True), \
                     patch.object(gate, 'command', side_effect=command) as observed, self.assertRaises(ValueError):
