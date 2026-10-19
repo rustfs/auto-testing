@@ -2039,7 +2039,7 @@ Original failures and original reports remain unchanged.
 | Fixture | Implementation and evidence | Remaining acceptance work |
 | --- | --- | --- |
 | DV | Reuses auto-test `seed(DV)` and `suspend_fixture`: four keys with three distinct non-null data versions each; real suspended overwrites, null marker creation/removal ACKs; retained live/null marker identities; current and historical markers. Versioning returns to Enabled before partition. The fault targets a retained null data version. Every selected key version participates in GET, negative Heal and complete recursive recovery. All 15 retained data versions receive full physical shard checks; markers receive exact S3 refusal/header checks. HEAD preserves version identity, length, ETag, Last-Modified and metadata. | This expanded fixture still needs a new live run and independent evidence acceptance. It does not claim a partition while the bucket remains Suspended. |
-| DB | Existing network objects are external single-part objects of approximately 5 MiB. | Add the frozen zero/one, 4 KiB, actual inline/EC/MPU boundary matrix and physical shape witnesses. External-only controls do not establish DB coverage. |
+| DB | Adds a separate never-versioned run-owned bucket with the default 128 controls. The exact candidate size contract and actual EC:8 process/object geometry calibrate zero/one, 4 KiB, inline, EC block and source-bound 5-MiB MPU minimum minus/exact/plus sizes. All 128 controls require decoded full-set shape witnesses; every distinct size has partition GET, physical checksum/no-part and Range evidence. Original/fault/rejoin/repaired snapshots explicitly include both primary and DB buckets. All peers must preserve complete inventories and stable original HEADs. | Fresh live execution and independent acceptance remain required. The MPU-size controls are single PUT objects; they do not claim completed multipart protocol coverage, which remains part of DL. |
 | DL | Existing partition workload serially probes exact-version GET, unique negative PUT and Heal, followed by explicit write resolution and peer inventories. | Add bounded concurrent PUT/GET/HEAD/LIST/COPY/DELETE, version and MPU operations, with per-request durable ACKs, increasing per-key nonce and resolution of unknown outcomes. Serial PUT/GET is insufficient. |
 
 The expanded DV fixture stays within the existing 128-identity/512-MiB
@@ -2047,3 +2047,15 @@ inventory limits. Network expiry remains 1,200 seconds; partition task deadlines
 request retry policy, quorum error mapping and complete-version receipt checks
 are preserved. Source fixture completeness must be checked separately from a
 raw five-branch PASS before accepting I03 as a migrated canonical PASS.
+
+
+I03 DB implementation detail (2026-10-19): the existing `boundary_sizes`
+helper accepts the explicit EC:8 calibration only when every live process
+confirms the exact storage class and the decoded object has eight data and
+eight parity members. Default callers keep their original environment guard.
+The reviewed multipart minimum is bound to the fixed candidate's full
+`set_disk/mod.rs` digest. Current candidate/prior physical calibration yields
+15 distinct sizes and 200,127,457 payload bytes for 128 controls, within the
+existing 512-MiB budget. This read-only preparation is not fresh DB live evidence.
+The existing node-side snapshot bucket guard continues to require the primary
+bucket and allows only its owned suffixes; no broader host path is introduced.

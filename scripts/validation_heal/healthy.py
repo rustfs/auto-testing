@@ -254,9 +254,10 @@ class Fleet:
             raise ValueError(message)
         return response
 
-    def snapshot(self, label, *, quiescent=False, metadata_faults=None):
+    def snapshot(self, label, *, quiescent=False, metadata_faults=None, buckets=None):
         return self.record(label, {node: self.remote(node, "snapshot", quiescent=quiescent,
-            metadataFaults=(metadata_faults or {}).get(node, {})) for node in self.nodes})
+            metadataFaults=(metadata_faults or {}).get(node, {}),
+            **({"buckets": buckets} if buckets is not None else {})) for node in self.nodes})
 
     def stop(self):
         with ThreadPoolExecutor(max_workers=len(self.nodes)) as executor:

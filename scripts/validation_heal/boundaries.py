@@ -32,12 +32,16 @@ def verify_size_contract(manifest, candidate):
     return contract
 
 
-def boundary_sizes(contract, target, processes):
+def boundary_sizes(contract, target, processes, *, standard_class=None):
+    require(standard_class in {None, "EC:8"}, "unreviewed boundary storage class")
     require(processes and all(entry.get("storageClassEnvironment") == {
-                "RUSTFS_STORAGE_CLASS_INLINE_BLOCK": None, "RUSTFS_STORAGE_CLASS_STANDARD": None}
-            for entry in processes.values()), "default size policy requires actual process environment confirmation")
+                "RUSTFS_STORAGE_CLASS_INLINE_BLOCK": None, "RUSTFS_STORAGE_CLASS_STANDARD": standard_class}
+            for entry in processes.values()), "size policy requires actual process environment confirmation")
     geometry = target["logical"]["erasure"]
     data, block = geometry["data_blocks"], geometry["block_size"]
+    require(standard_class is None or data == geometry.get("parity_blocks") == 8
+            and len(geometry.get("distribution", [])) == 16,
+            "EC:8 boundary calibration requires the actual balanced sixteen-member object")
     require(type(data) is int and data > 0 and type(block) is int and 4097 < block < 12 * 1024**2
             and target["logical"]["usesLegacyChecksum"] is False,
             "observed size calibration needs bounded current-codec EC geometry")

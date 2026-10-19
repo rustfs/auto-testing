@@ -29,6 +29,7 @@ try:
     from .stop import idle_fleet
     from .network_gate import TTL_SECONDS
     from .scanner_repair import JournalWindow
+    from .network_fixtures import db_parameters, seed_db, map_db, prove_db, verify_db
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require, save
     from heal_workload import Recorder, RecordedCallError, seed, verify_seed
@@ -43,6 +44,7 @@ except ImportError:
     from stop import idle_fleet
     from network_gate import TTL_SECONDS
     from scanner_repair import JournalWindow
+    from network_fixtures import db_parameters, seed_db, map_db, prove_db, verify_db
 
 
 CASE_ID = 'heal.network-partition-and-lock-quorum'
@@ -53,7 +55,7 @@ REFERENCE = {'candidateCommit': LOCK_REFERENCE['candidateCommit'], 'lock': LOCK_
     'network': {'servicePort': 9000, 'managementPort': 22, 'ttlSeconds': TTL_SECONDS,
         'rules': 'one owned nft table per host; exact peer IPv4 and TCP source/destination port',
         'mutation': 'all expiry timers armed before the first atomic table transaction'},
-    'load': {'fixtureObjects': 4, 'versionsPerObject': 3, 'retainedNullVersions': 4,
+    'load': {'fixtureObjects': 4, 'versionsPerObject': 3, 'retainedNullVersions': 4, 'DBObjects': 128,
         'currentAndHistoricalMarkers': True, 'partitionVersioning': 'Enabled after witnessed Suspended/null operations',
         'partitionPUTs': 2, 'recoveredPUTs': 1,
         'automaticRetries': 0, 'negativeTaskDeadlineSeconds': 330},
@@ -412,6 +414,27 @@ def partition_get(probe, fleet, params):
     return observed, diagnostics
 
 
+def partition_db(probe, fleet, bucket, representatives, side, plan, contract):
+    results = []
+    for row in representatives:
+        entry = row['expected']
+        observed, diagnostics = partition_get(probe, fleet, {
+            'Bucket': bucket, 'Key': entry['key'], 'VersionId': entry['versionId']})
+        read_quorum = row['target']['logical']['erasure']['data_blocks']
+        readable = side['lockClients'] >= plan['sharedLockQuorum'] and side['metadataAuthorities'] >= read_quorum
+        if readable:
+            require(observed.get('acknowledged') is True and observed.get('resultUnknown') is False
+                    and observed.get('response', {}).get('ResponseMetadata', {}).get('HTTPStatusCode') == 200
+                    and observed.get('payload') == entry['payload'],
+                    'R-capable partition lost an acknowledged DB boundary control')
+        else:
+            validate_unrecoverable_get(observed, negative_get_contract(contract, side, plan))
+        require(diagnostics['complete'], 'DB boundary GET diagnostics are incomplete')
+        results.append({'key': entry['key'], 'shape': row['shape'], 'size': entry['payload']['size'],
+            'readQuorum': read_quorum, 'availableSources': side['metadataAuthorities'], 'readable': readable})
+    return results
+
+
 def run_branch(args, nodes, branch):
     directory = args.evidence / 'H2' / branch
     directory.mkdir(parents=True)
@@ -431,34 +454,46 @@ def run_branch(args, nodes, branch):
         'maxInventoryBytes': 512 * 1024**2}
     fleet.record('binding', binding)
     fleet.record('network-source-contract', reference)
-    contract = verify_quorum_contract(fleet.record('inspector-build', verify_inspector(args.tool_directory, candidate)), candidate)
+    manifest = fleet.record('inspector-build', verify_inspector(args.tool_directory, candidate))
+    contract = verify_quorum_contract(manifest, candidate)
     result = {'topology': 'H2', 'branch': branch, 'verdict': 'RUNNING', 'cleanup': 'PENDING'}
     probe, active, recovery_active, rows = Probe(binding), [], [], []
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         recorder = Recorder(probe, directory / 'fixture')
         expected = seed_versions(recorder, fleet, bucket)
+        key_versions = [entry for entry in expected if entry['key'] == 'objects/0001.bin']
+        selected = next(entry for entry in key_versions if not entry['deleteMarker'] and entry['versionId'] == 'null')
+        calibration = fleet.snapshot('DB-size-calibration-live')
+        calibration_target = map_target(calibration, bucket, selected['key'], 'data', 1, selected['versionId'])
+        db_plan = fleet.record('DB-source-size-plan', db_parameters(manifest, candidate, calibration_target, calibration))
+        db_bucket = bucket + '-db'
+        db_expected = seed_db(Recorder(probe, directory / 'DB-fixture'), db_bucket, db_plan)
+        db_baseline = fleet.record('DB-S3-baseline', probe.inventory(db_bucket, unversioned_current_tags=True))
+        fleet.record('DB-ACK-manifest', {'expected': db_expected, **verify_seed(db_expected, db_baseline)})
+        db_heads = version_heads(probe, fleet, db_bucket, db_expected, 'DB-original-HEAD')
         baseline = fleet.record('all-version-S3-baseline', probe.inventory(bucket))
         fleet.record('exact-ACK-manifest', {'expected': expected, **verify_seed(expected, baseline)})
         original_heads = version_heads(probe, fleet, bucket, expected, 'original-version-HEAD')
         for key in sorted({entry['key'] for entry in expected if entry['deleteMarker']}):
             verify_markers(probe, fleet, bucket, key, expected)
         fleet.stop()
-        original = fleet.snapshot('physical-baseline', quiescent=True)
+        physical_buckets = [bucket, db_bucket]
+        original = fleet.snapshot('physical-baseline', quiescent=True, buckets=physical_buckets)
         validate_topology(original, 'H2')
-        key_versions = [entry for entry in expected if entry['key'] == 'objects/0001.bin']
-        selected = next(entry for entry in key_versions if not entry['deleteMarker'] and entry['versionId'] == 'null')
         target = map_target(original, bucket, selected['key'], 'data', 1, selected['versionId'], latest_required=False)
         target = {**target, **next(row for row in target['cohort'] if row['node'] == nodes[3])}
         cohorts = [map_target(original, bucket, entry['key'], 'data', 1, entry['versionId'], latest_required=False)
                    for entry in expected if not entry['deleteMarker']]
+        db_representatives, db_witnesses = map_db(original, db_bucket, db_expected, db_plan)
+        fleet.record('DB-all128-physical-shapes', {'objects': db_witnesses, 'allBoundariesObserved': True})
         plan = fleet.record('actual-partition-quorum-plan', plan_for(original, target, branch))
         params = {'disk': target['disk'], 'faultId': 'I03-missing-target'}
         registration = target['node'], params
         fleet.faults.append(registration)
         receipt = fleet.record('exact-missing-target', fleet.remote(target['node'], 'apply-fault', **params,
             relativePath=target['relativePath'], kind='missing', expectedSha256=target['sha256']))
-        faulted = fleet.snapshot('physical-exact-fault', quiescent=True)
+        faulted = fleet.snapshot('physical-exact-fault', quiescent=True, buckets=physical_buckets)
         validate_fault(original, faulted, target, receipt)
         for node, disks in plan['gates'].items():
             fleet.quorum_gates.add(node)
@@ -506,6 +541,8 @@ def run_branch(args, nodes, branch):
                 require(diagnostics['complete'], 'partition GET diagnostics are incomplete; inspect retained raw response')
             row = unique_put(local_probe, directory, bucket, 'partition/' + endpoint + '.bin', rows)
             row['negativeProof'] = negative_put(row['observed'])
+            result.setdefault('DB-partition-controls', {})[endpoint] = partition_db(
+                local_probe, fleet, db_bucket, db_representatives, side, plan, contract)
             result.setdefault('partitionTasks', {})[endpoint] = negative_heal(local_probe, fleet, bucket, key_versions, target, active)
             status = fleet.record('partition-raw-background', local_probe.admin('/rustfs/admin/v3/background-heal/status', [], b''))
             require(status.get('httpStatus') == 200 and isinstance(status.get('response'), dict), 'partition background status unavailable')
@@ -513,7 +550,7 @@ def run_branch(args, nodes, branch):
         result['networkAfter'] = witness('all-directed-peer-probes-after')
         fleet.record('partition-process-resource-observations', {node: fleet.remote(node, 'process-metrics') for node in nodes})
         fleet.stop()
-        scene = fleet.snapshot('negative-scene-before-release', quiescent=True)
+        scene = fleet.snapshot('negative-scene-before-release', quiescent=True, buckets=physical_buckets)
         require(physical_content(faulted) == physical_content(project(scene, bucket, [row['key'] for row in rows])),
                 'partition writes/Heal changed an original version, control or damaged target')
         for node in nodes:
@@ -523,14 +560,15 @@ def run_branch(args, nodes, branch):
             fleet.record('release-owned-W-gate', fleet.remote(node, 'quorum-gate', mode='clear'))
             fleet.quorum_gates.remove(node)
         fleet.start()
-        require(physical_content(scene) == physical_content(fleet.snapshot('all-peer-return-before-independent-repair')),
+        require(physical_content(scene) == physical_content(fleet.snapshot('all-peer-return-before-independent-repair', buckets=physical_buckets)),
                 'network recovery repaired a target before the independent product task')
         result['recoveryResponsibility'] = recover_versions(probe, fleet, binding, bucket, key_versions, selected, recovery_active)
         idle_fleet(fleet, binding)
         fleet.stop()
-        after = fleet.snapshot('physical-rebuilt-before-any-recovered-GET', quiescent=True)
+        after = fleet.snapshot('physical-rebuilt-before-any-recovered-GET', quiescent=True, buckets=physical_buckets)
         result['physical'] = validate_repaired_physical(original, project(after, bucket, [row['key'] for row in rows]), target)
         result['streaming'] = [verify_cohort(fleet, cohort, 'every-original-version-streaming') for cohort in cohorts]
+        result['DB-physical'] = prove_db(fleet, db_representatives)
         fleet.faults.remove(registration)
         fleet.start()
         result['writeResolution'] = resolve_writes(fleet, binding, bucket, rows)
@@ -555,6 +593,10 @@ def run_branch(args, nodes, branch):
             compare_inventories(inventories[0], inventory)
         result['markers'] = [verify_markers(probe, fleet, bucket, key, expected)
             for key in sorted({entry['key'] for entry in expected if entry['deleteMarker']})]
+        result['DB-final'] = verify_db(probe, fleet, db_bucket, db_expected, db_baseline, db_representatives, db_plan)
+        for endpoint in binding['endpoints']:
+            require(version_heads(Probe(binding, endpoint), fleet, db_bucket, db_expected, 'DB-final-HEAD') == db_heads,
+                    'network recovery changed an acknowledged DB HEAD or Last-Modified')
         require(all(row['properties'].get('Metadata') == {'heal-fixture': 'I03', 'nonce': released['key']}
                     and row['tags'] == [{'Key': 'fixture', 'Value': 'I03'}, {'Key': 'suite', 'Value': 'heal'}]
                     for inventory in inventories for row in inventory['entries'] if row['key'] == released['key']),
