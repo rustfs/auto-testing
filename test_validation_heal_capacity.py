@@ -101,6 +101,32 @@ class CapacityContractTests(unittest.TestCase):
             with self.assertRaises(ValueError): volume.release_filler(folder)
             self.assertEqual(unexpected.read_bytes(), b"preserve")
 
+    def test_block_fill_consumes_small_tail_after_large_write_enospc(self):
+        tail = SimpleNamespace(f_bfree=1, f_ffree=900, f_frsize=4096)
+        full = SimpleNamespace(f_bfree=0, f_ffree=900, f_frsize=4096)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory); (folder / 'padding').mkdir()
+            with patch.object(volume.os, 'open', return_value=7), patch.object(volume.os, 'close'), \
+                    patch.object(volume.os, 'write', side_effect=[1024**2, OSError(errno.ENOSPC, 'large allocation'),
+                        4096, OSError(errno.ENOSPC, 'full')]) as write, patch.object(volume.os, 'fsync'), \
+                    patch.object(volume.os, 'statvfs', side_effect=[tail, full, full]):
+                result = volume.fill(folder, capacity.BRANCHES[0])
+            self.assertEqual(result['allocatedFillerBytes'], 1024**2 + 4096)
+            self.assertEqual(result['freeBlocks'], 0)
+            self.assertEqual(result['actualErrno'], errno.ENOSPC)
+            self.assertEqual(len(write.call_args_list[2].args[1]), 4096)
+
+    def test_minimum_block_refusal_with_free_blocks_never_claims_full_exhaustion(self):
+        tail = SimpleNamespace(f_bfree=1, f_ffree=900, f_frsize=4096)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory); (folder / 'padding').mkdir()
+            with patch.object(volume.os, 'open', return_value=7), patch.object(volume.os, 'close'), \
+                    patch.object(volume.os, 'write', side_effect=OSError(errno.ENOSPC, 'refused')) as write, \
+                    patch.object(volume.os, 'statvfs', return_value=tail), \
+                    self.assertRaisesRegex(ValueError, 'minimum-block fill left 1 free blocks'):
+                volume.fill(folder, capacity.BRANCHES[0])
+            self.assertEqual(write.call_count, 2)
+
     def test_loop_detach_binding_requires_the_exact_backing_inode_and_device(self):
         row = {"name": "/dev/loop7", "back-file": "/owned/image", "back-ino": 31,
                "back-maj:min": f"{os.major(2049)}:{os.minor(2049)}"}

@@ -63,6 +63,19 @@ TERMINAL_OPTIONS_REFERENCE = {"candidateCommits": (
     "normalization": "scheduler get_or_insert fills only an explicit null timeout; all other fields stay exact"}
 
 
+def checkpoint_fixture(branch, fixture):
+    require(branch in {*IMPLEMENTED, "journal-write-failure"} and fixture in {"DB", "DV"},
+            "unreviewed checkpoint fixture")
+    if branch == "journal-write-failure":
+        # Keep all data and inodes inside the four fixed 128 MiB filesystems.
+        return (169 if fixture == "DB" else 36), 1024**2 + 123
+    if branch == "stale-generation":
+        # More real healthy responsibilities keep both durable generations
+        # observable without changing task deadlines or synthesizing records.
+        return (511 if fixture == "DB" else 144), 2 * 1024**2 + 123
+    return (257 if fixture == "DB" else 80), SIZE
+
+
 def same_terminal_options(admitted, terminal):
     if not isinstance(admitted, dict) or not isinstance(terminal, dict):
         return False
@@ -484,7 +497,7 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
     fleet.snapshot_buckets = [bucket]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
-    count = (129 if fixture == "DB" else 24) if bounded else (257 if fixture == "DB" else 80)
+    count, object_size = checkpoint_fixture(branch, fixture)
     binding = {"schemaVersion": 1, "runId": run_id, "jumpHostOnly": True, "exclusiveHealService": True,
         "leaseExpiresAt": (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat(), "bucketPrefix": bucket,
         "endpoints": {f"node{index}": f"http://rustfs-node{index}:9000" for index in range(1, len(nodes) + 1)},
@@ -507,8 +520,7 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
         else: fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         pending = {"operation": "seed-original-checkpoint-fixture"}
-        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, count,
-                        [256 * 1024 + 123] if bounded else [SIZE])
+        expected = seed(Recorder(probe, directory / "fixture"), bucket, fixture, count, [object_size])
         baseline = fleet.record("ACK-bound-complete-S3", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("complete-ACK-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         pending = None

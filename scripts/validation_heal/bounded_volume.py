@@ -194,15 +194,26 @@ def fill(folder, branch):
     deadline, written, count = time.monotonic() + 60, 0, 0
     if branch == "bounded-volume-enospc":
         fd = os.open(padding / "blocks.bin", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        chunk = 1024**2
         try:
             while True:
                 require(time.monotonic() < deadline and written < IMAGE_BYTES, "bounded block fill exceeded its budget")
                 try:
-                    written += os.write(fd, b"\0" * min(1024**2, IMAGE_BYTES - written))
+                    requested = min(chunk, IMAGE_BYTES - written)
+                    actual = os.write(fd, b"\0" * requested)
+                    require(0 < actual <= requested, "bounded block fill made no valid byte progress")
+                    written += actual
                     os.fsync(fd)
                 except OSError as error:
                     require(error.errno == errno.ENOSPC, "bounded fill reached an unrelated IO error")
-                    break
+                    info = os.statvfs(folder)
+                    if info.f_bfree == 0:
+                        break
+                    require(type(info.f_frsize) is int and 0 < info.f_frsize < chunk,
+                            f"bounded minimum-block fill left {info.f_bfree} free blocks")
+                    # A large allocation can fail while smaller tail blocks
+                    # remain. The final zero-block and candidate probes stay mandatory.
+                    chunk = info.f_frsize
         finally:
             os.close(fd)
     else:

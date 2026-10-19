@@ -16,6 +16,24 @@ from test_validation_heal_checkpoint import BUCKET, TOKEN, INCARNATION, encoded
 
 
 class PersistenceContractTests(unittest.TestCase):
+    def test_observation_fixtures_fit_existing_inventory_inode_and_volume_limits(self):
+        from scripts.validation_heal import bounded_volume
+        for fixture in ('DB', 'DV'):
+            for branch in (*persistence.IMPLEMENTED, 'journal-write-failure'):
+                count, size = persistence.checkpoint_fixture(branch, fixture)
+                data = count * (3 if fixture == 'DV' else 1)
+                entries = data + ((count + 1) // 2 if fixture == 'DV' else 0)
+                self.assertGreater(count, 4)
+                self.assertGreater(size, 1024**2)
+                self.assertLessEqual(entries, 512)
+                self.assertLess(data * size, 2 * 1024**3)
+                if branch == 'journal-write-failure':
+                    # Conservatively allow per-version integrity and metadata,
+                    # object directories, and 128 system/working inodes.
+                    self.assertLess(3 * data + 2 * count + 128, bounded_volume.MAX_INODES)
+                    self.assertLess(data * ((size + 1) // 2 + 16384) + 16 * 1024**2,
+                                    bounded_volume.IMAGE_BYTES)
+
     def fixture(self, kind="truncate", *, admission_options=None, terminal_options=None):
         observed, _, _ = fixture_source.AdminCheckpointTests().fixture()
         frozen = checkpoint.owned_checkpoint(observed, TOKEN, BUCKET)
