@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
@@ -51,6 +52,28 @@ LOCK_REFERENCE = {"candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926",
         "crates/ecstore/src/set_disk/ops/locking.rs": "44d50605c5538adf8fc6f25034e426011d0087b37e895f8246c79cbd711b2a42",
         "crates/ecstore/src/set_disk/ops/heal.rs": "767c468b780cf5f4e863b078f46c63440549e75d88b6b43bb59ed83c3b4a47b2",
         "crates/lock/src/distributed_lock.rs": "657796708fdc5f826f896147b74a9366dae875fd6b69e4b253994966ed5f6e37"}}
+
+
+LOCK_REFERENCES = {
+    LOCK_REFERENCE["candidateCommit"]: LOCK_REFERENCE,
+    "1c7fc818dd858247c45b39542abd8291b1e6e31b": {
+        **LOCK_REFERENCE,
+        "candidateCommit": "1c7fc818dd858247c45b39542abd8291b1e6e31b",
+        "rpcControlChannelPolicy": "class-aware control channel; audience and replay-scope authentication retained; live admission remains required",
+        "sourceFiles": {
+            **LOCK_REFERENCE["sourceFiles"],
+            "crates/ecstore/src/runtime/sources.rs": "fad5d30e9f76a71c41a4dd5cfa816d3ea49b0fa082ab111118e2ee5a6f8fcc90",
+            "crates/ecstore/src/set_disk/ops/heal.rs": "fc576119f455848ce279772ffca6d2943cb9f909968cae367860a9887d3e020e",
+            "crates/ecstore/src/cluster/rpc/remote_locker.rs": "506a16274efc0ac7dd2ffa4e2faf2b2a057deacfb8fb9480f4785768628b9cbf",
+            "crates/ecstore/src/cluster/rpc/client.rs": "b37e4107e898a3467520c8516608c8eaaa0c1d56a2eac82d11982eb483396291"},
+    },
+}
+
+
+def lock_reference(candidate_commit):
+    require(isinstance(candidate_commit, str) and candidate_commit in LOCK_REFERENCES,
+            "lock policy is not reviewed for this candidate")
+    return copy.deepcopy(LOCK_REFERENCES[candidate_commit])
 
 
 def seed_fixtures(recorder, bucket):
@@ -158,7 +181,7 @@ def run_topology(args, topology, nodes):
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory)
     candidate = json.loads(args.candidate.read_text())
-    require(candidate["source_sha"] == LOCK_REFERENCE["candidateCommit"], "B06 lock policy is not reviewed for this candidate")
+    locks = lock_reference(candidate["source_sha"])
     contract = verify_quorum_contract(fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate)), candidate)
     require(contract.get("writeQuorumRule") == "data-plus-one-if-equal-parity", "B06 write policy is not recognized")
     require(list(BRANCHES) == select(CASE_ID)[0]["variants"], "B06 executor omitted a source branch")
@@ -173,7 +196,7 @@ def run_topology(args, topology, nodes):
         "rcBinarySha256": hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(),
         "maxInventoryObjects": 512, "maxInventoryBytes": 512 * 1024**2}
     fleet.record("binding", binding)
-    fleet.record("quorum-source-contract", {"payloadAndWrite": contract, "locks": LOCK_REFERENCE})
+    fleet.record("quorum-source-contract", {"payloadAndWrite": contract, "locks": locks})
     probe, active, admissions = Probe(binding), [], []
     result = {"topology": topology, "fixture": "DB", "verdict": "RUNNING", "branches": {}, "cleanup": "PENDING"}
     try:

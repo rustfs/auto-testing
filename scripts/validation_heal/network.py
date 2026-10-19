@@ -23,7 +23,8 @@ try:
     from .matrix import select
     from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
     from .versions import public_version_id, validate_version_receipts, verify_quorum_contract, validate_unrecoverable_get
-    from .write_quorum import expected_reads, resolve_put, negative_put, LOCK_REFERENCE, STORAGE_REFERENCE
+    from .write_quorum import expected_reads, resolve_put, negative_put, STORAGE_REFERENCE
+    from .quorum_boundary import LOCK_REFERENCE, lock_reference
     from .stop import idle_fleet
     from .network_gate import TTL_SECONDS
 except ImportError:
@@ -34,7 +35,8 @@ except ImportError:
     from matrix import select
     from shards import files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
     from versions import public_version_id, validate_version_receipts, verify_quorum_contract, validate_unrecoverable_get
-    from write_quorum import expected_reads, resolve_put, negative_put, LOCK_REFERENCE, STORAGE_REFERENCE
+    from write_quorum import expected_reads, resolve_put, negative_put, STORAGE_REFERENCE
+    from quorum_boundary import LOCK_REFERENCE, lock_reference
     from stop import idle_fleet
     from network_gate import TTL_SECONDS
 
@@ -50,6 +52,22 @@ REFERENCE = {'candidateCommit': LOCK_REFERENCE['candidateCommit'], 'lock': LOCK_
     'load': {'fixtureObjects': 4, 'versionsPerObject': 2, 'partitionPUTs': 2, 'recoveredPUTs': 1,
         'automaticRetries': 0, 'negativeTaskDeadlineSeconds': 330},
     'writePolicy': 'three-peer groups retain R but use independent private gates to measure W-1; two-peer groups lose W and exclusive lock quorum'}
+
+
+# Storage geometry is reviewed independently of the namespace lock policy.
+STORAGE_REFERENCES = {
+    STORAGE_REFERENCE['candidateCommit']: STORAGE_REFERENCE,
+    '1c7fc818dd858247c45b39542abd8291b1e6e31b': {
+        **STORAGE_REFERENCE, 'candidateCommit': '1c7fc818dd858247c45b39542abd8291b1e6e31b'},
+}
+
+
+def source_reference(candidate_commit):
+    require(isinstance(candidate_commit, str) and candidate_commit in STORAGE_REFERENCES,
+            'network storage policy is not reviewed for this candidate')
+    return {**copy.deepcopy(REFERENCE), 'candidateCommit': candidate_commit,
+            'lock': lock_reference(candidate_commit),
+            'storage': copy.deepcopy(STORAGE_REFERENCES[candidate_commit])}
 
 
 def plan_for(snapshot, target, branch):
@@ -250,7 +268,7 @@ def run_branch(args, nodes, branch):
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-h2"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile='lock-quorum')
     candidate = json.loads(args.candidate.read_text())
-    require(candidate['source_sha'] == REFERENCE['candidateCommit'], 'network lock policy is not reviewed for this candidate')
+    reference = source_reference(candidate['source_sha'])
     bucket = 'rv-heal-' + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
@@ -262,7 +280,7 @@ def run_branch(args, nodes, branch):
         'rcBinarySha256': hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(), 'maxInventoryObjects': 128,
         'maxInventoryBytes': 512 * 1024**2}
     fleet.record('binding', binding)
-    fleet.record('network-source-contract', REFERENCE)
+    fleet.record('network-source-contract', reference)
     contract = verify_quorum_contract(fleet.record('inspector-build', verify_inspector(args.tool_directory, candidate)), candidate)
     result = {'topology': 'H2', 'branch': branch, 'verdict': 'RUNNING', 'cleanup': 'PENDING'}
     probe, active, recovery_active, rows = Probe(binding), [], [], []

@@ -356,6 +356,8 @@ Source assertions:
 
 Topologies: H1,H2. Branches: exact-r-read, exact-r-heal-write-limited, restored-w.
 
+执行器仅接受经逐文件和锁策略复核的 `072b57b37559fbe626aeda8abf61617fdcbdd926` 与 GET quorum 修复候选 `1c7fc818dd858247c45b39542abd8291b1e6e31b`。记录所选候选的精确锁契约；inspector 必须同时匹配候选及当前 helper 源码摘要，未知候选在部署前拒绝。below-R GET 仍必须为候选冻结的 `503/SlowDownRead`，旧 `500/InternalError` 失败记录保留；支持新候选不等于新的 live 验收。
+
 1. 记录读取 R、修复写 W、锁 quorum 的来源；选择同一版本保留恰好 R 个权威片，其他片隔离。
 2. 第一次请求 GET 验证读取边界并记录 read-repair 干扰；用第二个相同形态新对象执行只手工 deep heal。
 3. 如果只有 R 但写/锁 quorum 不足，要求拒绝持久化成功；若拓扑中该组合不可实现，在运行前声明精确原因并选满足条件的拓扑，不伪造离线数。
@@ -1715,6 +1717,8 @@ Source assertions:
 ## I03: heal.network-partition-and-lock-quorum
 
 Topologies: H2. Branches: minority-partition, read-boundary, write-boundary, lock-boundary, rejoin.
+
+候选支持与 B06 相同，但 storageclass 与锁策略分别按精确候选绑定。`1c7fc81` 的锁客户端范围、quorum 阈值及 EC:8 配置已复核；其 RPC 控制通道工厂有变化，必须重新取得真实双向网络探针、admission、partial coverage 和 rejoin 证据，不能由源码等价或 B07 通过推定本例通过。B08 的候选范围保持独立。
 
 1. H2 先冻结实际节点/slot/对象R/W和锁quorum，NETWORK规则只匹配本例服务端口并带run ID、超时恢复。
 2. 构造少数派及边界分区，双端探针证实隔离；SSH、跳板机和其他服务端口保持连通。
