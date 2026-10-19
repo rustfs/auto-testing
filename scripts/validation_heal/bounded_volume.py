@@ -109,6 +109,37 @@ def mounted(row):
     return entry
 
 
+def configure_block_exhaustion(row):
+    # ext4's internal reserve is separate from mkfs -m 0. Only this newly
+    # created, UUID/backing-inode-bound loop may expose that reserve to padding.
+    entry = mounted(row)
+    require(entry is not None and re.fullmatch(r"/dev/loop[0-9]+", entry["source"]),
+            "block exhaustion requires its exact mounted private loop")
+    source = entry["source"]
+    knob = Path("/sys/fs/ext4") / Path(source).name / "reserved_clusters"
+    fd = os.open(knob, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0,
+                "private ext4 reserve control is not root-owned sysfs data")
+        raw = os.read(fd, 64)
+        require(re.fullmatch(rb"[0-9]{1,20}\n", raw) is not None,
+                "private ext4 reserve is not a bounded cluster count")
+        before = int(raw)
+        require(before <= IMAGE_BYTES // 1024 and mounted(row) == entry,
+                "private ext4 mount changed before configuring its reserve")
+        os.lseek(fd, 0, os.SEEK_SET)
+        require(os.write(fd, b"0\n") == 2, "private ext4 reserve write was incomplete")
+        os.lseek(fd, 0, os.SEEK_SET)
+        require(os.read(fd, 64) == b"0\n" and mounted(row) == entry,
+                "private ext4 reserve or mount differs after configuration")
+    finally:
+        os.close(fd)
+    return {"disk": row["disk"], "uuid": row["uuid"], "source": source,
+            "reservedClustersBefore": before, "reservedClustersAfter": 0,
+            "sharedFilesystemModified": False}
+
+
 def create(state, roots, owner, branch):
     require(owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"} and read(state, roots, owner) is None
             and branch in {"bounded-volume-enospc", "bounded-inode-exhaustion"}, "invalid bounded capacity allocation")
@@ -128,6 +159,7 @@ def create(state, roots, owner, branch):
         stream.flush()
         os.fsync(stream.fileno())
     (state / "bounded").mkdir(mode=0o700)
+    reserve_configuration = []
     for row in value["volumes"]:
         image = Path(row["image"])
         descriptor = os.open(image, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -146,13 +178,16 @@ def create(state, roots, owner, branch):
         folder.mkdir(mode=0o700)
         command("mount", "-t", "ext4", "-o", "nodev,nosuid,noexec", loop, str(folder))
         mounted(row)
+        if branch == "bounded-volume-enospc":
+            reserve_configuration.append(configure_block_exhaustion(row))
         folder.chmod(0o700)
         for name in ("data", "quarantine", "padding"):
             (folder / name).mkdir(mode=0o700)
         info = os.statvfs(folder)
         require(info.f_blocks * info.f_frsize <= IMAGE_BYTES and 0 < info.f_files <= MAX_INODES,
                 "actual bounded filesystem exceeds registered block/inode limits")
-    return {**value, "hostSharedMountRemounted": False, "allocatedBytesPerNode": len(roots) * IMAGE_BYTES,
+    return {**value, "ext4ReservedClusterConfiguration": reserve_configuration,
+            "hostSharedMountRemounted": False, "allocatedBytesPerNode": len(roots) * IMAGE_BYTES,
             "independentPhysicalDriveCountIncreased": False}
 
 
@@ -194,7 +229,7 @@ def fill(folder, branch):
     deadline, written, count = time.monotonic() + 60, 0, 0
     if branch == "bounded-volume-enospc":
         fd = os.open(padding / "blocks.bin", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        chunk = 1024**2
+        chunk, file_written = 1024**2, 0
         try:
             while True:
                 require(time.monotonic() < deadline and written < IMAGE_BYTES, "bounded block fill exceeded its budget")
@@ -203,19 +238,31 @@ def fill(folder, branch):
                     actual = os.write(fd, b"\0" * requested)
                     require(0 < actual <= requested, "bounded block fill made no valid byte progress")
                     written += actual
+                    file_written += actual
                     os.fsync(fd)
                 except OSError as error:
                     require(error.errno == errno.ENOSPC, "bounded fill reached an unrelated IO error")
                     info = os.statvfs(folder)
                     if info.f_bfree == 0:
                         break
-                    require(type(info.f_frsize) is int and 0 < info.f_frsize < chunk,
+                    require(type(info.f_frsize) is int and 0 < info.f_frsize <= chunk,
+                            "bounded fill has no valid minimum allocation unit")
+                    if info.f_frsize < chunk:
+                        chunk = info.f_frsize
+                        continue
+                    # A separate private inode may allocate a final block that
+                    # the current file cannot extend into. Never retry an empty
+                    # inode or exceed the fixture's 128 padding-inode budget.
+                    require(file_written > 0 and count < IMAGE_BYTES // 1024**2 - 1,
                             f"bounded minimum-block fill left {info.f_bfree} free blocks")
-                    # A large allocation can fail while smaller tail blocks
-                    # remain. The final zero-block and candidate probes stay mandatory.
-                    chunk = info.f_frsize
+                    os.close(fd)
+                    fd = None
+                    fd = os.open(padding / f"inode-{count:04d}", os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                    count += 1
+                    file_written = 0
         finally:
-            os.close(fd)
+            if fd is not None:
+                os.close(fd)
     else:
         require(branch == "bounded-inode-exhaustion", "unreviewed bounded fill mode")
         while True:

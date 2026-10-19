@@ -116,6 +116,55 @@ class CapacityContractTests(unittest.TestCase):
             self.assertEqual(result['actualErrno'], errno.ENOSPC)
             self.assertEqual(len(write.call_args_list[2].args[1]), 4096)
 
+    def test_same_file_tail_refusal_uses_a_separate_owned_file(self):
+        tail = SimpleNamespace(f_bfree=1, f_ffree=900, f_frsize=4096)
+        full = SimpleNamespace(f_bfree=0, f_ffree=900, f_frsize=4096)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory); (folder / 'padding').mkdir()
+            with patch.object(volume.os, 'open', side_effect=[7, 8]) as opened, \
+                    patch.object(volume.os, 'close') as close, patch.object(volume.os, 'fsync'), \
+                    patch.object(volume.os, 'write', side_effect=[1024**2,
+                        OSError(errno.ENOSPC, 'large'), OSError(errno.ENOSPC, 'same inode allocation'),
+                        4096, OSError(errno.ENOSPC, 'full')]), \
+                    patch.object(volume.os, 'statvfs', side_effect=[tail, tail, full, full]):
+                result = volume.fill(folder, capacity.BRANCHES[0])
+            self.assertEqual(result['freeBlocks'], 0)
+            self.assertEqual(result['allocatedFillerBytes'], 1024**2 + 4096)
+            self.assertEqual(result['allocatedFillerInodes'], 1)
+            self.assertEqual(opened.call_args_list[1].args, (folder / 'padding' / 'inode-0000',
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
+            self.assertEqual([call.args[0] for call in close.call_args_list], [7, 8])
+
+    def test_separate_tail_file_cannot_loop_without_progress_or_claim_remaining_blocks(self):
+        tail = SimpleNamespace(f_bfree=1, f_ffree=900, f_frsize=4096)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory); (folder / 'padding').mkdir()
+            with patch.object(volume.os, 'open', side_effect=[7, 8]) as opened, \
+                    patch.object(volume.os, 'close') as close, patch.object(volume.os, 'fsync'), \
+                    patch.object(volume.os, 'write', side_effect=[1024**2] +
+                        [OSError(errno.ENOSPC, 'refused')] * 3), \
+                    patch.object(volume.os, 'statvfs', return_value=tail), \
+                    self.assertRaisesRegex(ValueError, 'minimum-block fill left 1 free blocks'):
+                volume.fill(folder, capacity.BRANCHES[0])
+            self.assertEqual(opened.call_count, 2)
+            self.assertEqual([call.args[0] for call in close.call_args_list], [7, 8])
+
+    def test_block_tail_never_exceeds_the_128_total_padding_inode_budget(self):
+        tail = SimpleNamespace(f_bfree=1, f_ffree=900, f_frsize=4096)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory); (folder / 'padding').mkdir()
+            refused = OSError(errno.ENOSPC, 'same inode allocation')
+            with patch.object(volume.os, 'open', side_effect=range(7, 136)) as opened, \
+                    patch.object(volume.os, 'close') as close, patch.object(volume.os, 'fsync'), \
+                    patch.object(volume.os, 'write', side_effect=[1024**2, refused, refused] +
+                        [v for _ in range(127) for v in (4096, refused)]), \
+                    patch.object(volume.os, 'statvfs', return_value=tail), \
+                    self.assertRaisesRegex(ValueError, 'minimum-block fill left 1 free blocks'):
+                volume.fill(folder, capacity.BRANCHES[0])
+            self.assertEqual(opened.call_count, 128)
+            self.assertEqual(close.call_count, 128)
+            self.assertEqual(opened.call_args.args[0].name, 'inode-0126')
+
     def test_minimum_block_refusal_with_free_blocks_never_claims_full_exhaustion(self):
         tail = SimpleNamespace(f_bfree=1, f_ffree=900, f_frsize=4096)
         with tempfile.TemporaryDirectory() as directory:
@@ -253,15 +302,59 @@ class CapacityContractTests(unittest.TestCase):
                  patch.object(volume, "regular", return_value=SimpleNamespace(st_size=100)), \
                  patch.object(volume, "loop_for", return_value="/dev/loop7"), \
                  patch.object(volume, "mounted", return_value={"verified": True}), \
+                 patch.object(volume, "configure_block_exhaustion", return_value={"reservedClustersAfter": 0}) as reserve, \
                  patch.object(volume.os, "posix_fallocate", create=True) as allocate, \
                  patch.object(volume.os, "statvfs", return_value=SimpleNamespace(f_blocks=32768, f_frsize=4096, f_files=1024)), \
                  patch.object(volume.shutil, "disk_usage", return_value=SimpleNamespace(free=10 * 1024**3)):
                 result = volume.create(state, roots, owner, capacity.BRANCHES[0])
             self.assertEqual(allocate.call_count, 4)
+            self.assertEqual(reserve.call_count, 4)
+            self.assertEqual(len(result["ext4ReservedClusterConfiguration"]), 4)
             self.assertTrue(all(call.args[1:] == (0, volume.IMAGE_BYTES) for call in allocate.call_args_list))
             self.assertEqual(sum(args[0] == "mkfs.ext4" for args in calls), 4)
             self.assertFalse(result["hostSharedMountRemounted"])
             self.assertFalse(result["independentPhysicalDriveCountIncreased"])
+
+    def test_private_ext4_reserve_configuration_requires_exact_mount_and_readback(self):
+        row = {"disk": 1, "uuid": "owned-uuid"}
+        entry = {"source": "/dev/loop7", "uuid": row["uuid"]}
+        for change in ('valid', 'already-zero', 'unmounted', 'shared-device', 'changed-before',
+                       'changed-after', 'malformed', 'oversize', 'foreign-owner', 'symlink-type',
+                       'short-write', 'wrong-readback'):
+            mounts = [entry, entry, entry]
+            reads = [b'655\n', b'0\n']
+            mode, uid, written = 0o100644, 0, 2
+            if change == 'already-zero': reads[0] = b'0\n'
+            elif change == 'unmounted': mounts[0] = None
+            elif change == 'shared-device': mounts[0] = {**entry, 'source': '/dev/sda1'}
+            elif change == 'changed-before': mounts[1] = {**entry, 'uuid': 'foreign'}
+            elif change == 'changed-after': mounts[2] = None
+            elif change == 'malformed': reads[0] = b'655x\n'
+            elif change == 'oversize': reads[0] = b'9999999999\n'
+            elif change == 'foreign-owner': uid = 1000
+            elif change == 'symlink-type': mode = 0o120777
+            elif change == 'short-write': written = 1
+            elif change == 'wrong-readback': reads[1] = b'655\n'
+            with self.subTest(change=change), patch.object(volume, 'mounted', side_effect=mounts), \
+                    patch.object(volume.os, 'open', return_value=7) as opened, \
+                    patch.object(volume.os, 'fstat', return_value=SimpleNamespace(st_mode=mode, st_uid=uid)), \
+                    patch.object(volume.os, 'read', side_effect=reads), patch.object(volume.os, 'lseek'), \
+                    patch.object(volume.os, 'write', return_value=written) as write, \
+                    patch.object(volume.os, 'close') as close:
+                if change in {'valid', 'already-zero'}:
+                    result = volume.configure_block_exhaustion(row)
+                    self.assertEqual(result['reservedClustersBefore'], int(reads[0]))
+                    self.assertEqual(result['reservedClustersAfter'], 0)
+                    self.assertFalse(result['sharedFilesystemModified'])
+                    self.assertEqual(opened.call_args.args, (Path('/sys/fs/ext4/loop7/reserved_clusters'),
+                                                            os.O_RDWR | os.O_NOFOLLOW))
+                    write.assert_called_once_with(7, b'0\n')
+                else:
+                    with self.assertRaises(ValueError): volume.configure_block_exhaustion(row)
+                    if change not in {'changed-after', 'short-write', 'wrong-readback'}:
+                        write.assert_not_called()
+                if opened.called: close.assert_called_once_with(7)
+                else: close.assert_not_called()
 
     def test_registered_quota_probe_signs_and_preserves_the_exact_request(self):
         class Response(BytesIO):

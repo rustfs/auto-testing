@@ -201,8 +201,8 @@ def freeze(fleet, token, bucket, *, timeout=60, earlier=None):
     while True:
         owner = None
         for candidate in fleet.nodes:
-            observed = records(fleet, token, "Admin-checkpoint-live", nodes=(candidate,))
             try:
+                observed = records(fleet, token, "Admin-checkpoint-live", nodes=(candidate,))
                 owner = owned_checkpoint(observed, token, bucket)
                 if earlier is not None: after_generation(owner, earlier)
             except ValueError as exc:

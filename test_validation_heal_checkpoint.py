@@ -294,6 +294,37 @@ class AdminCheckpointTests(unittest.TestCase):
         self.assertEqual(birth, identity)
         self.assertTrue(frozen['rootAdmission']['originalDurableResponsibility'])
 
+    def test_live_record_drift_is_retried_inside_the_original_observation_budget(self):
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        observed, _, _ = self.fixture(); roots, _ = self.root_fixture()
+        identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50)
+        observed['node'].update(processIdentity=identity, processBound=True, stable=True, independentReads=2)
+        fleet = SimpleNamespace(nodes=['node'], frozen_processes={}, record=lambda label, value: value,
+            remote=lambda *a, **k: {**identity, 'state': 'T'})
+        calls = []
+        def records(fleet, token, label, **params):
+            calls.append(label)
+            if len(calls) == 1:
+                raise ValueError('NOT_OBSERVED: exact durable records changed between the two bounded reads')
+            return roots if params.get('family') == 'root' else observed
+        with patch.object(reader, 'records', side_effect=records), patch.object(reader.time, 'sleep'):
+            frozen, birth = reader.freeze(fleet, TOKEN, BUCKET)
+        self.assertEqual(calls.count('Admin-checkpoint-live'), 2)
+        self.assertEqual(birth, identity)
+        self.assertTrue(frozen['rootAdmission']['originalDurableResponsibility'])
+
+    def test_record_drift_timeout_and_non_observation_errors_do_not_signal(self):
+        for message in ('NOT_OBSERVED: exact durable record changed during a bounded read',
+                        'foreign process birth', 'checkpoint digest is invalid'):
+            events = []
+            fleet = SimpleNamespace(nodes=['node'], frozen_processes={}, record=lambda label, value: value,
+                remote=lambda *a, **k: events.append(a))
+            with self.subTest(message=message), patch.object(reader, 'records', side_effect=ValueError(message)), \
+                    patch.object(reader.time, 'monotonic', side_effect=[0, 61]), self.assertRaises(ValueError):
+                reader.freeze(fleet, TOKEN, BUCKET)
+            self.assertEqual(events, [])
+            self.assertEqual(fleet.frozen_processes, {})
+
     def test_full_census_after_early_freeze_still_rejects_a_second_physical_owner(self):
         from scripts.validation_heal.fleet_node import PROCESS_FIELDS
         observed, _, _ = self.fixture()
