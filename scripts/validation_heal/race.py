@@ -29,6 +29,7 @@ try:
     from .shards import files, map_target, validate_repaired_physical
     from .cursor import validate_missing_batch, verify_part_manifest
     from .versions import public_version_id
+    from .race_native_evidence import verify as verify_native
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require, save
     from heal_workload import Recorder, verify_seed
@@ -39,6 +40,7 @@ except ImportError:
     from shards import files, map_target, validate_repaired_physical
     from cursor import validate_missing_batch, verify_part_manifest
     from versions import public_version_id
+    from race_native_evidence import verify as verify_native
 
 
 CASE_IDS = ("heal.race-unversioned-overwrite", "heal.race-versioned-put", "heal.race-version-delete", "heal.race-markers-and-batch-delete", "heal.race-multipart-complete-abort", "heal.race-copy-and-metadata-update")
@@ -73,6 +75,37 @@ REFERENCE = {
     "effective": {**BASE_OPTIONS, "recursive": True, "nolock": False, "pool": None, "set": None},
     "nativeFence": "pinned release has no reviewed e2e-test-hooks artifact or exact Admin commit/cleanup barrier",
 }
+NATIVE_CANDIDATE = '6afdec9fe1b0b88007f2e5b445c19bf73d51d3ca'
+NATIVE_REFERENCE = {
+    'candidateCommit': NATIVE_CANDIDATE,
+    'sourceFiles': {
+        'rustfs/src/admin/handlers/heal.rs': '6187d9331555ea8421e0d4fe1449d310dd31d0c48f4e57ff43365701d3c6621b',
+        'crates/heal/src/heal/channel.rs': 'b806939f7101c88ec0746b1b377f25ee5e88cc4871527bd348c7ee5f3f7f195d'},
+    'requested': {**BASE_OPTIONS, 'recursive': True, 'nolock': False, 'pool': None, 'set': None},
+    'effective': {**BASE_OPTIONS, 'recursive': True, 'nolock': False, 'pool': None, 'set': None},
+    'nativeFence': 'exact-source real Heal during committed overwrite cleanup plus stale read-repair final rename',
+}
+
+
+def source_contract(candidate, case_id):
+    require(case_id in CASE_IDS, 'unregistered race case')
+    if candidate.get('source_sha') == REFERENCE['candidateCommit']:
+        return REFERENCE
+    require(candidate.get('source_sha') == NATIVE_CANDIDATE
+            and case_id == 'heal.race-unversioned-overwrite', 'race candidate/case contract is not reviewed')
+    return NATIVE_REFERENCE
+
+
+def native_preflight(candidate, testing_commit, case_id, directory):
+    reference = source_contract(candidate, case_id)
+    if reference is REFERENCE:
+        return None
+    require(bool(directory), 'G01 requires exact-source native proof before any fleet mutation')
+    proof = verify_native(directory, candidate, testing_commit, case_id)
+    require(proof['requiredRegressionLabels'] == ['committed-overwrite-cleanup', 'stale-read-repair-final-rename']
+            and proof['requiredNativeSubsetPassed'] is True and proof['wholeCasePassClaimed'] is False,
+            'G01 native commit/cleanup group is incomplete')
+    return proof
 
 
 class WindowNotObserved(ValueError):
@@ -140,20 +173,20 @@ class RaceRecorder(Recorder):
         return result
 
 
-def settings(observed):
+def settings(observed, reference=REFERENCE):
     require(observed.get("httpStatus") == 200 and isinstance(observed.get("response"), dict),
             "G01/G03 status has an unknown or failed HTTP response")
     value = observed["response"]
     require(value.get("summary") in {"running", "finished"}, "G01/G03 original task disappeared, stopped or failed")
     # Canonical JSON distinguishes bool/int and preserves raw null selectors.
-    require(canonical(value.get("settings")) == canonical(REFERENCE["effective"]),
+    require(canonical(value.get("settings")) == canonical(reference["effective"]),
             "G01/G03 Admin nolock was not safely normalized or changed unrelated options")
     return value["settings"]
 
 
-def sample_overlap(ack, observed, path, token):
+def sample_overlap(ack, observed, path, token, reference=REFERENCE):
     foreground = ack.get("observation") or {}
-    settings(observed)
+    settings(observed, reference)
     value = observed["response"]
     a, z = foreground.get("callStartedMonotonicNs"), foreground.get("callFinishedMonotonicNs")
     b, c = observed.get("callStartedMonotonicNs"), observed.get("callFinishedMonotonicNs")
@@ -593,16 +626,16 @@ def terminal_proof(status, bucket, before, final):
             "counters": counters, "exactRaceEnumerationClaimed": False}
 
 
-def observe(probe, fleet, path, token):
+def observe(probe, fleet, path, token, reference=REFERENCE):
     value = fleet.record("original-token-status", probe.admin(path, [("clientToken", token)], b""))
-    settings(value)
+    settings(value, reference)
     return value
 
 
-def wait_running(probe, fleet, path, token, total):
+def wait_running(probe, fleet, path, token, total, reference=REFERENCE):
     deadline = time.monotonic() + 30
     while True:
-        observed = observe(probe, fleet, path, token)
+        observed = observe(probe, fleet, path, token, reference)
         value = observed["response"]
         processed = (value.get("outcome") or {}).get("counters", {}).get("processed")
         if value["summary"] == "finished":
@@ -613,10 +646,10 @@ def wait_running(probe, fleet, path, token, total):
         time.sleep(.05)
 
 
-def wait_terminal(probe, fleet, path, token):
+def wait_terminal(probe, fleet, path, token, reference=REFERENCE):
     deadline = time.monotonic() + 240
     while True:
-        current = observe(probe, fleet, path, token)
+        current = observe(probe, fleet, path, token, reference)
         if current["response"]["summary"] == "finished": return current["response"]
         require(time.monotonic() < deadline, "G01/G03 original task exceeded its terminal budget")
         time.sleep(.2)
@@ -655,7 +688,7 @@ def foreground(recorder, plan):
     return responses, {"uploadIds": upload_ids, "partEtags": part_etags}
 
 
-def race(recorder, plan, probe, fleet, path, token):
+def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE):
     samples = []
     # Only the worker mutates Recorder state. All Fleet.record writes run on
     # the controller, so evidence sequence allocation never races.
@@ -685,7 +718,7 @@ def race(recorder, plan, probe, fleet, path, token):
         deadline = time.monotonic() + 120
         try:
             while not worker.done() and time.monotonic() < deadline:
-                samples.append(observe(probe, fleet, path, token))
+                samples.append(observe(probe, fleet, path, token, reference))
                 time.sleep(.01)
         except BaseException:
             recorder.mutations.poison("status observation failed; drain in-flight mutations only")
@@ -699,7 +732,7 @@ def race(recorder, plan, probe, fleet, path, token):
     acks = [json.loads(path.read_text()) for path in sorted(recorder.output.glob("*-ack.json"))]
     require(len(acks) == len(plan) and all(row.get("operationCheck") == "PASS" for row in acks),
             "G01/G03 lacks every durable foreground ACK")
-    overlaps = [any(sample_overlap(ack, sample, path, token) for sample in samples) for ack in acks]
+    overlaps = [any(sample_overlap(ack, sample, path, token, reference) for sample in samples) for ack in acks]
     fleet.record("read-repair-overlap-proof", {"branch": plan[0].get("branch") if plan else None,
         "readCalls": len(readers), "allReadsObserved": bool(readers) if read_branch else True,
         "nativeFenceProved": False})
@@ -746,7 +779,7 @@ def run_branch(args, topology, nodes, branch):
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile="manual")
     candidate = json.loads(args.candidate.read_text())
-    require(candidate["source_sha"] == REFERENCE["candidateCommit"], "G01/G03 candidate contract is not reviewed")
+    reference = source_contract(candidate, args.case_id)
     fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
@@ -760,7 +793,7 @@ def run_branch(args, topology, nodes, branch):
         "maxInventoryObjects": 512, "maxInventoryBytes": 512 * 1024**2}
     fleet.record("binding", binding)
     current_target_key, current_reference_key = target_key(branch), reference_key(branch)
-    fleet.record("source-contract", {**REFERENCE, "branch": branch, "objectCount": OBJECTS, "objectSize": SIZE,
+    fleet.record("source-contract", {**reference, "branch": branch, "objectCount": OBJECTS, "objectSize": SIZE,
         "requiredPUTs": 3 if branch in (*G01_BRANCHES, *G02_BRANCHES) else 0, "serverCommitOverlapProved": False})
     probe, active, recorder, writer = Probe(binding), [], None, None
     result = {"topology": topology, "branch": branch,
@@ -807,12 +840,12 @@ def run_branch(args, topology, nodes, branch):
         require(physical_content(faulted) == physical_content(fleet.snapshot("attribution-before-START")),
                 "NOT_OBSERVED: G01/G03 missing shards changed before manual admission")
         path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="")
-        fleet.record("prepared-Admin-request", {"path": path, "query": [], "options": REFERENCE["requested"]})
-        start = fleet.record("original-Admin-start", probe.admin(path, [], json.dumps(REFERENCE["requested"]).encode()))
+        fleet.record("prepared-Admin-request", {"path": path, "query": [], "options": reference["requested"]})
+        start = fleet.record("original-Admin-start", probe.admin(path, [], json.dumps(reference["requested"]).encode()))
         token = start.get("response", {}).get("clientToken") if isinstance(start.get("response"), dict) else None
         require(start.get("httpStatus") == 200 and isinstance(token, str) and token, "G01/G03 admission lacks an original token")
         active.append((path, token))
-        wait_running(probe, fleet, path, token, len(expected))
+        wait_running(probe, fleet, path, token, len(expected), reference)
         witness = fleet.snapshot("target-missing-before-foreground")
         target = next(target for target in targets if target["key"] == current_target_key)
         if (target["node"], target["disk"], target["relativePath"]) in files(witness):
@@ -823,16 +856,16 @@ def run_branch(args, topology, nodes, branch):
         writer.seen.update((row["key"], row["versionId"]) for row in expected)
         if branch == "batch-version-delete":
             writer.batch_expected_ids = {item["VersionId"] for item in plan[0]["params"]["Delete"]["Objects"]}
-        responses, overlapped = race(writer, plan, probe, fleet, path, token)
+        responses, overlapped = race(writer, plan, probe, fleet, path, token, reference)
         mpu_runtime = plan[0].get("runtime") if branch in G05_BRANCHES else None
         if branch in G05_BRANCHES:
             verify_multipart_state(probe, fleet, bucket, branch, mpu_runtime,
                                     [(1, G05_PART_SIZES[0])] if branch != "complete" else list(enumerate(G05_PART_SIZES, 1)))
         final = fleet.record("ACK-derived-final-manifest", final_inventory(baseline, branch, plan, responses))
-        terminal = wait_terminal(probe, fleet, path, token)
+        terminal = wait_terminal(probe, fleet, path, token, reference)
         active.remove((path, token))
         for _ in range(2):
-            repeated = observe(probe, fleet, path, token)["response"]
+            repeated = observe(probe, fleet, path, token, reference)["response"]
             require(canonical(repeated.get("outcome")) == canonical(terminal.get("outcome"))
                     and repeated["summary"] == terminal["summary"], "G01/G03 terminal responsibility changed on repetition")
         # Collect physical evidence even if terminal counters fail. Old target
@@ -924,6 +957,17 @@ def complete_results(results, case_id):
 
 
 def main():
+    if sys.argv[1:2] == ['preflight']:
+        parser = argparse.ArgumentParser(description='Read-only native admission before fleet bootstrap')
+        parser.add_argument('--candidate', type=Path, required=True)
+        parser.add_argument('--case-id', choices=list(CASE_BRANCHES), required=True)
+        parser.add_argument('--testing-commit', required=True)
+        args = parser.parse_args(sys.argv[2:])
+        candidate = json.loads(args.candidate.read_text())
+        proof = native_preflight(candidate, args.testing_commit, args.case_id,
+                                 os.environ.get('VALIDATION_HEAL_NATIVE_DIRECTORY'))
+        print(json.dumps({'nativeProof': proof, 'fleetMutationRequested': False, 'canonicalCasePassClaimed': False}))
+        return
     def interrupted(signum, frame): raise KeyboardInterrupt(f"G01/G03 interrupted by signal {signum}")
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -942,8 +986,17 @@ def main():
             and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes),
             "G01/G03 requires four distinct current Heal nodes")
     candidate = json.loads(args.candidate.read_text())
-    require(candidate["source_sha"] == REFERENCE["candidateCommit"], "G01/G03 candidate contract not reviewed")
-    results = [native_blocked(candidate, topology, case_id) for topology in ("H1", "H2")]
+    native = native_preflight(candidate, args.testing_commit, case_id,
+                              os.environ.get('VALIDATION_HEAL_NATIVE_DIRECTORY'))
+    if native is None:
+        results = [native_blocked(candidate, topology, case_id) for topology in ("H1", "H2")]
+    else:
+        save(args.evidence / 'independent-native-race-subset.json', native)
+        results = [{'caseId': case_id, 'topology': topology, 'branch': branches[-1], 'verdict': 'PASS',
+            'cleanup': 'PASS', 'candidateCommit': candidate['source_sha'], 'nativeFenceProved': True,
+            'nativeProof': native, 'nativePhysicalShapes': ['4/2', '16/4'],
+            'distributedFleetExecutionClaimed': False, 'fleetExecutionClaimed': False,
+            'canonicalCasePassClaimed': False} for topology in ('H1', 'H2')]
     try:
         stop = False
         for topology in ("H1", "H2"):
@@ -957,8 +1010,8 @@ def main():
         complete = complete_results(results, case_id)
         save(args.evidence / "healthy-summary.json", {"caseId": case_id, "results": results, "complete": complete,
             "cleanup": "PASS" if all(row["cleanup"] == "PASS" for row in results) else "FAIL",
-            "canonicalCasePassClaimed": False, "nativePrerequisitesBlocked": True})
-    require(complete, "G01/G03 native prerequisites remain BLOCKED; every H1/H2 branch stays in the denominator")
+            "canonicalCasePassClaimed": False, "nativePrerequisitesBlocked": native is None})
+    require(complete, "race coverage or native prerequisites remain incomplete; every H1/H2 branch stays in the denominator")
 
 
 if __name__ == "__main__":

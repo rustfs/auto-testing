@@ -96,6 +96,11 @@ fi
 [ "${driver}" = healthy.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "physical Heal cases require candidate-bound bitrot tools"
 evidence="${artifacts}/evidence/${case_id}"
 mkdir -p "${artifacts}/cases" "${evidence}"
+if [ "${driver}" = race.py ]; then
+  python3 -B "${ROOT}/scripts/validation_heal/race.py" preflight \
+    --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
+    > "${evidence}/native-preflight.json"
+fi
 python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
   --result-file "${artifacts}/cases/${case_id}.json" --verdict RUNNING --cleanup-status PENDING
 

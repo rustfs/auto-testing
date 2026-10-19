@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from scripts.validation_heal import race_native as suite
 from scripts.validation_heal import race_native_evidence as consumer
+from scripts.validation_heal import race
 
 
 SOURCE = '6afdec9fe1b0b88007f2e5b445c19bf73d51d3ca'
@@ -21,6 +22,30 @@ CANDIDATE = {'source_sha': SOURCE, 'package_sha256': 'b' * 64}
 
 
 class RaceNativeTests(unittest.TestCase):
+    def test_new_source_g01_requires_exact_bundle_and_other_race_cases_remain_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root)
+            proof = race.native_preflight(CANDIDATE, HELPER, CASE, root)
+            self.assertTrue(proof['requiredNativeSubsetPassed'])
+            with self.assertRaises(ValueError): race.native_preflight(CANDIDATE, HELPER, CASE, '')
+            for case in race.CASE_IDS[1:]:
+                with self.subTest(case=case), self.assertRaises(ValueError):
+                    race.native_preflight(CANDIDATE, HELPER, case, root)
+            self.assertIsNone(race.native_preflight({'source_sha': race.REFERENCE['candidateCommit']}, HELPER, CASE, ''))
+            self.assertFalse(race.complete_results([], CASE))
+        shell = Path('scripts/validation_heal/run_case.sh').read_text()
+        self.assertLess(shell.index('race.py" preflight'), shell.index('(bootstrap)'))
+
+    def test_source_specific_settings_keep_exact_types_selectors_and_lock_policy(self):
+        reference = race.source_contract(CANDIDATE, CASE)
+        value = {'httpStatus': 200, 'response': {'summary': 'running', 'settings': copy.deepcopy(reference['effective'])}}
+        self.assertEqual(race.settings(value, reference), reference['effective'])
+        for key, changed in [('nolock', True), ('pool', 0), ('set', 0), ('recursive', 1), ('readRepair', True)]:
+            rejected = copy.deepcopy(value)
+            rejected['response']['settings'][key] = changed
+            with self.subTest(key=key), self.assertRaises(ValueError): race.settings(rejected, reference)
+
     def fixture(self, root):
         tools, evidence = root / 'native-tools', root / 'native-evidence'
         tools.mkdir()
