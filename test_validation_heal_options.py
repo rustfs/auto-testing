@@ -1,4 +1,6 @@
 import copy
+from contextlib import ExitStack
+import json
 from pathlib import Path
 import tempfile
 import types
@@ -56,6 +58,187 @@ class OptionsTests(unittest.TestCase):
             self.assertEqual(baseline['scanMode'], selected['scanMode'])
             changed = {name for name in baseline if baseline[name] != selected[name]}
             self.assertEqual(len(changed), 2 if branch.startswith('selector-') else 0 if branch == 'remove-false' else 1)
+
+    def test_remove_true_preserves_the_frozen_recursive_bucket_source_procedure(self):
+        baseline, selected = options.paired_options('remove-true')
+        self.assertTrue(baseline['recursive'])
+        self.assertTrue(selected['recursive'])
+        self.assertEqual(options.request_path('remove-true', self.bucket),
+                         '/rustfs/admin/v3/heal/' + self.bucket)
+        self.assertEqual(options.source_phases('remove-true'), ('selected',))
+        self.assertEqual(options.source_phases('remove-false'), ('baseline', 'selected'))
+        with self.assertRaisesRegex(ValueError, 'source procedure'):
+            options.run_instance(None, 'H1', ['node'], 'remove-true', 'DV', 'baseline')
+
+    def orphan_scene(self):
+        import uuid
+        directory = str(uuid.UUID(int=11)); version = str(uuid.UUID(int=12))
+        authority = {'node': {'formats': [{'disk': disk, 'sha256': str(disk)} for disk in range(4)],
+            'files': [{'disk': disk, 'path': self.bucket + '/control.bin/xl.meta', 'size': 7, 'sha256': 'control'}
+                      for disk in range(4)]}}
+        original = copy.deepcopy(authority)
+        for disk in range(4):
+            for name in ('xl.meta', directory + '/part.1', directory + '/part.1.integrity'):
+                original['node']['files'].append({'disk': disk, 'path': self.bucket + '/' + options.orphan.KEY + '/' + name,
+                                                'size': 100, 'sha256': str(disk) + name})
+        before = copy.deepcopy(authority)
+        before['node']['files'] += [copy.deepcopy(r) for r in original['node']['files']
+                                    if r['disk'] == 0 and '/' + options.orphan.KEY + '/' in r['path']]
+        target = {'node': 'node', 'disk': 0, 'dataDir': directory, 'versionId': version,
+                  'logical': {'erasure': {'data_blocks': 2, 'parity_blocks': 2}}}
+        return original, before, authority, target
+
+    def test_full_original_orphan_tree_and_one_below_quorum_member_are_required(self):
+        original, before, authority, target = self.orphan_scene()
+        options.validate_orphan_replay(original, before, authority, self.bucket, target)
+        for kind in ('data-only', 'sidecar', 'second-member', 'control', 'format', 'original-format', 'original-control', 'not-below-quorum'):
+            scene, changed, source = copy.deepcopy(before), copy.deepcopy(target), copy.deepcopy(original)
+            if kind == 'data-only': scene['node']['files'] = [r for r in scene['node']['files']
+                if not r['path'].endswith(options.orphan.KEY + '/xl.meta')]
+            elif kind == 'sidecar': scene['node']['files'] = [r for r in scene['node']['files']
+                if not r['path'].endswith('part.1.integrity')]
+            elif kind == 'second-member':
+                row = copy.deepcopy(scene['node']['files'][-1]); row['disk'] = 1; scene['node']['files'].append(row)
+            elif kind == 'control': scene['node']['files'][0]['sha256'] = 'changed'
+            elif kind == 'format': scene['node']['formats'][0]['sha256'] = 'changed'
+            elif kind == 'original-format': source['node']['formats'][0]['sha256'] = 'changed'
+            elif kind == 'original-control': source['node']['files'][0]['sha256'] = 'changed'
+            else: changed['logical']['erasure']['data_blocks'] = 1
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                options.validate_orphan_replay(source, scene, authority, self.bucket, changed)
+
+    def test_source_orphan_replay_uses_actual_h2_sixteen_member_read_quorum(self):
+        original, before, authority, target = self.orphan_scene()
+        source = {}; injected = {}; deleted = {}
+        for index in range(4):
+            name = 'node' + str(index)
+            source[name] = copy.deepcopy(original['node'])
+            deleted[name] = copy.deepcopy(authority['node'])
+            injected[name] = copy.deepcopy(before['node'] if index == 0 else authority['node'])
+        target['node'] = 'node0'
+        target['logical']['erasure'] = {'data_blocks': 8, 'parity_blocks': 8}
+        result = options.validate_orphan_replay(source, injected, deleted, self.bucket, target)
+        self.assertEqual(result['replayedMembers'], 1)
+        self.assertEqual(result['independentlyDecodedReadQuorum'], 8)
+        injected['node1'] = copy.deepcopy(before['node'])
+        with self.assertRaises(ValueError): options.validate_orphan_replay(source, injected, deleted, self.bucket, target)
+
+    def test_single_deleted_orphan_generation_keeps_all_dv_controls_and_marker_acks(self):
+        calls = []
+        def call(op, params, body=None):
+            calls.append((op, dict(params)))
+            return {'VersionId': str(__import__('uuid').UUID(int=len(calls))),
+                    **({'DeleteMarker': True} if op == 'delete_object' else {})}
+        recorder = types.SimpleNamespace(call=call, pending=None)
+        keys = (options.orphan.KEY, 'control.bin', 'marker-control.bin')
+        manifest = options.seed_fixture(recorder, self.bucket, 'DV', keys,
+                                        single_version_key=options.orphan.KEY)
+        orphan_rows = [r for r in manifest if r['key'] == options.orphan.KEY]
+        self.assertEqual(len(orphan_rows), 1)
+        self.assertTrue(orphan_rows[0]['isLatest'])
+        self.assertFalse(orphan_rows[0]['deleteMarker'])
+        self.assertEqual(len([r for r in manifest if r['key'] == 'control.bin']), 3)
+        self.assertEqual(len([r for r in manifest if r['key'] == 'marker-control.bin']), 4)
+        self.assertEqual(sum(r['deleteMarker'] for r in manifest), 1)
+
+    def test_source_orphan_execution_removes_whole_tree_before_reads_and_rescues_only_delete_authority(self):
+        for state, failure in (('repaired', None), ('authoritatively_absent', None),
+                               ('repaired', 'leftover-metadata'), ('repaired', 'lost-install-ack'),
+                               ('repaired', 'failed-authority-restore')):
+            original, before, authority, target = self.orphan_scene()
+            _, request = options.paired_options('remove-true')
+            version = target['versionId']; control_version = str(__import__('uuid').UUID(int=13))
+            manifest = [{'key': options.orphan.KEY, 'versionId': version, 'isLatest': True, 'deleteMarker': False},
+                        {'key': 'control.bin', 'versionId': control_version, 'isLatest': True, 'deleteMarker': False}]
+            mapped = {(self.bucket, r['key'], r['versionId']): {
+                **(target if r['key'] == options.orphan.KEY else {}), 'poolIndex': 0, 'setIndex': 0,
+                'deleteMarker': False, 'isLatest': True} for r in manifest}
+            status = {'summary': 'finished', 'settings': request, 'outcome': {
+                'execution': {'state': 'completed'}, 'coverage': 'complete', 'objectsTruncated': False,
+                'counters': {'processed': 2, 'healed': int(state == 'repaired'),
+                    'unchanged': 2 - int(state == 'repaired'), 'failed': 0, 'unknown': 0,
+                    'skipped': 0, 'attemptFailures': 0, 'overflowed': False},
+                'objects': [{'identity': {'kind': 'object', 'bucket': self.bucket, 'object': r['key'],
+                    'versionId': r['versionId'], 'poolIndex': None, 'setIndex': None,
+                    'bucketIncarnationId': 'one-incarnation'}, 'disposition': {
+                    'state': state if r['key'] == options.orphan.KEY else 'verified_healthy'}} for r in manifest]}}
+            events = []
+            after = copy.deepcopy(authority)
+            if failure == 'leftover-metadata':
+                after['node']['files'].append(copy.deepcopy(next(r for r in before['node']['files']
+                    if r['path'].endswith(options.orphan.KEY + '/xl.meta'))))
+            def snapshot(label, **kw):
+                events.append(label)
+                if label == 'A10-orphan-original-all-members': return original
+                if label in ('A10-orphan-fault-before-GET', 'A10-orphan-immediately-before-START'): return before
+                if label == 'A10-orphan-product-before-GET-or-rescue': return after
+                if label == 'A10-orphan-last-DELETE-restored' and failure == 'failed-authority-restore': return before
+                return authority
+            def remote(node, action, **params):
+                events.append((action, params))
+                self.assertEqual(action, 'orphan-install')
+                self.assertEqual(params['mode'], 'object')
+                if failure == 'lost-install-ack': raise RuntimeError('lost original install ACK')
+                return {'state': 'APPLIED', 'mode': 'object'}
+            fleet = types.SimpleNamespace(record=lambda label, value: value, snapshot=snapshot, remote=remote,
+                stop=lambda: None, start=lambda: None, orphan_faults=[])
+            recorder = types.SimpleNamespace(pending=None, call=unittest.mock.Mock(return_value={
+                'VersionId': version, 'ResponseMetadata': {'HTTPStatusCode': 204}}))
+            probe = types.SimpleNamespace(inventory=lambda *a, **k: {})
+            peer = types.SimpleNamespace(s3=unittest.mock.Mock(return_value={
+                'acknowledged': False, 'resultUnknown': False, 'response': {
+                    'ResponseMetadata': {'HTTPStatusCode': 404}, 'Error': {'Code': 'NoSuchVersion'}}}))
+            with self.subTest(state=state, failure=failure), ExitStack() as stack:
+                for name, value in [('seed_fixture', lambda *a, **k: copy.deepcopy(manifest)),
+                                    ('verify_seed', lambda *a: None), ('verify_parts', lambda *a: {}),
+                                    ('verify_public', lambda *a: None), ('idle_fleet', lambda *a: None),
+                                    ('Probe', lambda *a: peer)]: stack.enter_context(patch.object(options, name, value))
+                stack.enter_context(patch.object(options, 'map_fixture', side_effect=[mapped,
+                    {k: v for k, v in mapped.items() if k[1] != options.orphan.KEY}]))
+                task = stack.enter_context(patch.object(options, 'run_request', return_value=status))
+                captured = stack.enter_context(patch.object(options.orphan, 'capture'))
+                armed = stack.enter_context(patch.object(options.orphan, 'arm_all'))
+                recovered = stack.enter_context(patch.object(options.orphan, 'recover_all'))
+                if failure:
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        options.orphan_probe(fleet, probe, {'endpoints': ['peer']}, recorder,
+                                             self.bucket, 'H1', 'DV', request, [])
+                else:
+                    result = options.orphan_probe(fleet, probe, {'endpoints': ['peer']}, recorder,
+                                                  self.bucket, 'H1', 'DV', request, [])
+                    self.assertTrue(result['physical']['wholeOrphanObjectRemoved'])
+                    self.assertFalse(result['rescueIsProductRepair'])
+                captured.assert_called_once_with(fleet, original, self.bucket, 'old')
+                armed.assert_called_once_with(fleet, authority, self.bucket, 'authority')
+                recovered.assert_called_once_with(fleet)
+                self.assertEqual(fleet.a10_orphan_restored, failure != 'failed-authority-restore')
+                if failure in ('leftover-metadata', 'lost-install-ack'): peer.s3.assert_not_called()
+                if failure == 'lost-install-ack': task.assert_not_called()
+                else: self.assertEqual(task.call_args.args[2], '/rustfs/admin/v3/heal/' + self.bucket)
+                self.assertEqual(recorder.call.call_args.args, ('delete_object', {
+                    'Bucket': self.bucket, 'Key': options.orphan.KEY, 'VersionId': version}))
+
+    def test_remove_false_uses_original_repairable_scope_and_only_source_remove_true_uses_orphan_runtime(self):
+        for branch, phase in (('remove-false', 'baseline'), ('remove-false', 'selected'), ('remove-true', 'selected')):
+            with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                root = Path(directory); candidate = root / 'candidate.json'; rc = root / 'rc'; rc.write_bytes(b'runner')
+                candidate.write_text(json.dumps({'source_sha': options.REFERENCE['candidateCommit'], 'package_sha256': 'a' * 64}))
+                args = types.SimpleNamespace(evidence=root, candidate=candidate, rc_bin=rc, binary_sha='b' * 64,
+                                             tool_directory=root, testing_commit='c' * 40)
+                fleet = types.SimpleNamespace(record=lambda label, value: value, deploy=lambda *a: None, cleanup=lambda: True)
+                factory = stack.enter_context(patch.object(options, 'Fleet', return_value=fleet))
+                stack.enter_context(patch.object(options, 'verify_inspector', return_value={}))
+                stack.enter_context(patch.object(options, 'Probe', return_value=object()))
+                stack.enter_context(patch.object(options, 'FixtureRecorder', return_value=types.SimpleNamespace(pending=None)))
+                stack.enter_context(patch.dict(options.os.environ, {'GITHUB_RUN_ID': '12345', 'GITHUB_RUN_ATTEMPT': '1'}))
+                scope = stack.enter_context(patch.object(options, 'scope_probe', return_value={}))
+                orphan = stack.enter_context(patch.object(options, 'orphan_probe', return_value={}))
+                result = options.run_instance(args, 'H1', ['node'], branch, 'DB', phase)
+                self.assertEqual(result['verdict'], 'PASS')
+                self.assertEqual(factory.call_args.kwargs['runtime_profile'],
+                                 'orphan-preserve' if branch == 'remove-true' else 'manual')
+                self.assertEqual(orphan.call_count, int(branch == 'remove-true'))
+                self.assertEqual(scope.call_count, int(branch == 'remove-false'))
 
     def test_prefix_exact_and_recursive_scopes_do_not_include_adjacent_control(self):
         mapped = self.mapped()
@@ -140,6 +323,32 @@ class OptionsTests(unittest.TestCase):
                 elif kind == 'settings': status['settings'] = {**request, 'updateParity': True}
                 else: status['truncated'] = True
                 with self.assertRaises(ValueError): options.validate_outcome(status, mapped, selected, repaired, request)
+
+    def test_source_cleanup_receipts_keep_exact_versions_controls_and_counter_partition(self):
+        for state in ('repaired', 'authoritatively_absent'):
+            status, mapped, selected, repaired, request = self.status()
+            request = {**request, 'remove': True}; status['settings'] = request
+            target = next(iter(repaired))
+            receipt = next(r for r in status['outcome']['objects']
+                           if r['identity']['versionId'] == target[2] and r['identity']['object'] == target[1])
+            receipt['disposition']['state'] = state
+            absent = {target} if state == 'authoritatively_absent' else set()
+            if absent:
+                status['outcome']['counters']['healed'] -= 1
+                status['outcome']['counters']['unchanged'] += 1
+            proof = options.validate_outcome(status, mapped, selected, repaired - absent, request, absent=absent)
+            self.assertEqual(proof['authoritativelyAbsentACKs'], len(absent))
+            for kind in ('missing-target', 'wrong-version', 'unknown', 'false-counter', 'marker', 'wrong-options'):
+                bad = copy.deepcopy(status)
+                if kind == 'missing-target': bad['outcome']['objects'].remove(bad['outcome']['objects'][status['outcome']['objects'].index(receipt)])
+                elif kind == 'wrong-version': bad['outcome']['objects'][status['outcome']['objects'].index(receipt)]['identity']['versionId'] = 'unacknowledged'
+                elif kind == 'unknown': bad['outcome']['objects'][status['outcome']['objects'].index(receipt)]['disposition']['state'] = 'unknown'
+                elif kind == 'false-counter': bad['outcome']['counters']['healed'] += 1
+                elif kind == 'marker':
+                    next(r for r in bad['outcome']['objects'] if r['identity']['versionId'] == 'marker')['disposition']['state'] = 'authoritatively_absent'
+                else: bad['settings'] = {**request, 'remove': False}
+                with self.subTest(state=state, kind=kind), self.assertRaises(ValueError):
+                    options.validate_outcome(bad, mapped, selected, repaired - absent, request, absent=absent)
 
     def test_nullable_unrestricted_scope_keeps_the_independent_physical_binding(self):
         status, mapped, selected, repaired, request = self.status('recursive-true')
@@ -270,8 +479,15 @@ class OptionsTests(unittest.TestCase):
         rows = [{'topology': topology, 'branch': branch, 'fixture': fixture, 'phase': phase,
                  'verdict': 'PASS', 'cleanup': 'PASS', 'fullProbeCompleted': True}
                 for topology in ('H1', 'H2') for branch in options.BRANCHES for fixture in options.FIXTURES
-                for phase in ('baseline', 'selected')]
-        self.assertEqual(len(rows), 72)
+                for phase in options.source_phases(branch)]
+        self.assertEqual(len(rows), 68)
+        self.assertEqual({r['branch'] for r in rows}, set(options.BRANCHES))
+        for topology in ('H1', 'H2'):
+            for fixture in options.FIXTURES:
+                self.assertEqual({r['branch'] for r in rows if r['topology'] == topology
+                                  and r['fixture'] == fixture and r['phase'] == 'selected'}, set(options.BRANCHES))
+        with self.assertRaises(ValueError):
+            options.complete_results([*rows, {**rows[0], 'branch': 'remove-true', 'phase': 'baseline'}])
         self.assertTrue(options.complete_results(rows))
         self.assertFalse(options.complete_results(rows[:-1]))
         for name, value in (('verdict', 'FAIL'), ('cleanup', 'FAIL'), ('fullProbeCompleted', False)):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A10: paired Admin option probes on fresh DB/DV and owned C10 orphans."""
+"""A10: source option probes on fresh DB/DV and owned C10 orphan archives."""
 
 import argparse
 import copy
@@ -60,7 +60,12 @@ REFERENCE = {'candidateCommit': orphan.CANDIDATE,
         'pool/set': 'supported paired selector; exact independently measured physical set'},
     'dangerousEffects': {'remove': 'may delete unreferenced persisted bytes; never applied to a live fixture',
         'recreate': 'may reconstruct missing data; original ACK identities and complete controls stay fixed'},
-    'cliCoverageClaimed': False}
+    'cliCoverageClaimed': False,
+    'validationSource': {'commit': '524eb5b32c3236497fdd8a9271df0494fa3d9974', 'sourceFiles': {
+        'scripts/heal_h1_options_batch.py': '918d7b6d7a9bacb37095210b5a72a10b024b21f7a9cf46501eeae6272dd625d2',
+        'scripts/heal_h1_options_node.py': 'b78e7a65d071e08be3ee9d615091c69f801d5a48badb85f246acf9340fd829bc'}},
+    'removeTrueProcedure': 'one ACK version, exact DELETE authority, one complete original below-quorum object tree, recursive bucket sweep, whole object removal',
+    'removeTrueBaseline': 'option reference only, as in the frozen source; no synthetic remove=false orphan task'}
 
 
 def paired_options(branch):
@@ -70,7 +75,9 @@ def paired_options(branch):
     if branch == 'recursive-false': baseline['recursive'] = True
     elif branch == 'recursive-true': selected['recursive'] = True
     elif branch == 'recreate': selected['recreate'] = True
-    elif branch == 'remove-true': selected['remove'] = True
+    elif branch == 'remove-true':
+        baseline['recursive'] = selected['recursive'] = True
+        selected['remove'] = True
     elif branch == 'update-parity': selected['updateParity'] = True
     elif branch == 'read-repair': selected['readRepair'] = True
     elif branch.startswith('selector-'):
@@ -85,6 +92,13 @@ def paired_options(branch):
         'read-repair': {'readRepair'}, 'selector-valid': {'pool', 'set'}, 'selector-invalid': {'pool', 'set'}}[branch]
     require(changed == expected, 'A10 paired request changed unrelated defaults')
     return baseline, selected
+
+
+def source_phases(branch):
+    require(branch in BRANCHES, 'unknown A10 source branch')
+    # The frozen source runs the proven orphan only with remove=true. Its
+    # remove=false branch independently heals a repairable acknowledged object.
+    return ('selected',) if branch == 'remove-true' else ('baseline', 'selected')
 
 
 class FixtureRecorder(Recorder):
@@ -128,14 +142,16 @@ class FixtureRecorder(Recorder):
         return value
 
 
-def seed_fixture(recorder, bucket, fixture, keys=KEYS):
-    require(fixture in FIXTURES and len(keys) == len(set(keys)), 'invalid A10 fixture')
+def seed_fixture(recorder, bucket, fixture, keys=KEYS, *, single_version_key=None):
+    require(fixture in FIXTURES and len(keys) == len(set(keys)) and keys
+            and (single_version_key is None or single_version_key in keys[:-1]), 'invalid A10 fixture')
     recorder.call('create_bucket', {'Bucket': bucket})
     if fixture == 'DV':
         recorder.call('put_bucket_versioning', {'Bucket': bucket, 'VersioningConfiguration': {'Status': 'Enabled'}})
     expected = []
     for key in keys:
-        for number in range(3 if fixture == 'DV' else 1):
+        generations = 3 if fixture == 'DV' and key != single_version_key else 1
+        for number in range(generations):
             body = payload(f'A10/{fixture}/{key}/{number}', SIZE)
             response = recorder.call('put_object', {'Bucket': bucket, 'Key': key,
                 'Metadata': {'heal-fixture': 'A10', 'generation': str(number)}, 'Tagging': 'suite=heal&fixture=' + fixture}, body)
@@ -145,7 +161,7 @@ def seed_fixture(recorder, bucket, fixture, keys=KEYS):
                     'A10 candidate ACK disagrees with DB/DV versioning')
             require((key, version) not in {(entry['key'], entry['versionId']) for entry in expected},
                     'A10 PUT ACK reused a version')
-            expected.append({'key': key, 'versionId': version, 'isLatest': number == (2 if fixture == 'DV' else 0),
+            expected.append({'key': key, 'versionId': version, 'isLatest': number == generations - 1,
                 'deleteMarker': False, 'payload': {'size': len(body), 'sha256': hashlib.sha256(body).hexdigest()}})
             recorder.pending = None
     if fixture == 'DV':
@@ -202,6 +218,7 @@ def selection(branch, options, mapped):
 
 def request_path(branch, bucket):
     if branch.startswith('selector-'): return '/rustfs/admin/v3/heal/'
+    if branch == 'remove-true': return '/rustfs/admin/v3/heal/' + quote(bucket, safe='')
     key = 'scope/' if branch.startswith('recursive-') else KEYS[0]
     return '/rustfs/admin/v3/heal/' + quote(bucket, safe='') + '/' + quote(key, safe='/')
 
@@ -239,8 +256,11 @@ def run_request(probe, fleet, path, options, active, *, rejected=False):
     return status
 
 
-def validate_outcome(status, mapped, selected, repaired, options):
+def validate_outcome(status, mapped, selected, repaired, options, *, absent=frozenset()):
     outcome = status.get('outcome') or {}
+    require(absent <= selected and not (repaired & absent)
+            and (not absent or options.get('remove') is True and options.get('recursive') is True),
+            'A10 absence receipts require the exact destructive source scope')
     if not selected:
         buckets = {identity[0] for identity in mapped}
         require(not repaired and len(buckets) == 1, 'A10 absent prefix changed its physical scope or claimed a repair')
@@ -268,14 +288,16 @@ def validate_outcome(status, mapped, selected, repaired, options):
         incarnation = item.get('bucketIncarnationId')
         require(isinstance(incarnation, str) and incarnation and incarnations.setdefault(identity[0], incarnation) == incarnation,
                 'A10 lost or mixed a bucket incarnation')
-        state = 'repaired' if identity in repaired else 'metadata_healthy' if target['deleteMarker'] else 'verified_healthy'
+        state = ('authoritatively_absent' if identity in absent else 'repaired' if identity in repaired
+                 else 'metadata_healthy' if target['deleteMarker'] else 'verified_healthy')
         require(receipt.get('disposition', {}).get('state') == state, 'A10 false repair, unknown or incomplete integrity')
         seen.add(identity)
     expected = {'processed': len(selected), 'healed': len(repaired), 'unchanged': len(selected) - len(repaired),
                 'failed': 0, 'unknown': 0, 'skipped': 0, 'attemptFailures': 0, 'overflowed': False}
     require(all(type(counters.get(name)) is type(value) and counters[name] == value for name, value in expected.items()),
             'A10 counters disagree with the complete independent ACK/physical manifest')
-    return {'selectedACKs': len(selected), 'repairedACKs': len(repaired), 'completeVersionsAndMarkers': True}
+    return {'selectedACKs': len(selected), 'repairedACKs': len(repaired),
+            'authoritativelyAbsentACKs': len(absent), 'completeVersionsAndMarkers': True}
 
 
 def physical_selection(original, after, targets, selected):
@@ -386,11 +408,38 @@ def scope_probe(fleet, probe, binding, recorder, bucket, topology, fixture, bran
     return {'terminal': terminal, 'physical': physical, 'fixture': fixture, 'originalACKs': len(expected)}
 
 
+def validate_orphan_replay(original, before, authority, bucket, target):
+    prefix = bucket + '/' + orphan.KEY + '/'
+    source, actual, deleted = files(original), files(before), files(authority)
+    selected = target['node'], target['disk']
+    coding = target['logical']['erasure']
+    require(type(coding.get('data_blocks')) is int and 1 < coding['data_blocks']
+            and type(coding.get('parity_blocks')) is int and coding['parity_blocks'] > 0
+            and coding['data_blocks'] + coding['parity_blocks'] == len(orphan.members(original)),
+            'A10 orphan replay is not below the independently decoded read quorum')
+    expected = {k: r for k, r in source.items() if k[:2] == selected and k[2].startswith(prefix)}
+    require(expected and (selected[0], selected[1], prefix + 'xl.meta') in expected
+            and any(k[2].startswith(prefix + target['dataDir'] + '/') for k in expected),
+            'A10 source orphan lacks its original metadata or payload')
+    require(not any(k[2].startswith(prefix) for k in deleted)
+            and {k: r for k, r in actual.items() if k[2].startswith(prefix)} == expected,
+            'A10 replay must preserve the complete original object on exactly one member')
+    require({k: r for k, r in actual.items() if not k[2].startswith(prefix)} == deleted
+            == {k: r for k, r in source.items() if not k[2].startswith(prefix)}
+            and {n: d['formats'] for n, d in original.items()}
+            == {n: d['formats'] for n, d in before.items()} == {n: d['formats'] for n, d in authority.items()}
+            and orphan.members(before) == orphan.members(authority) == orphan.members(original),
+            'A10 orphan replay changed post-DELETE controls or physical membership')
+    return {'completeOriginalObjectTree': True, 'replayedMembers': 1,
+            'independentlyDecodedReadQuorum': coding['data_blocks'], 'postDeleteAuthorityRetained': True}
+
+
 def orphan_probe(fleet, probe, binding, recorder, bucket, topology, fixture, options, active):
-    # A10 reuses C10's complete descriptor archives and post-DELETE authority,
-    # while keeping the same data-only replay in both remove option phases.
+    require(options['recursive'] is True and options['remove'] is True and options['dryRun'] is False,
+            'A10 source orphan requires a recursive destructive sweep')
+    # C10 archives preserve the full old tree and a distinct post-DELETE rescue.
     keys = (orphan.KEY, 'control.bin', 'marker-control.bin')
-    expected = seed_fixture(recorder, bucket, fixture, keys)
+    expected = seed_fixture(recorder, bucket, fixture, keys, single_version_key=orphan.KEY)
     doomed = next(entry for entry in expected if entry['key'] == orphan.KEY and entry['isLatest'])
     if fixture == 'DV':
         # Remove every orphan-key generation, with separate exact durable ACKs.
@@ -401,6 +450,9 @@ def orphan_probe(fleet, probe, binding, recorder, bucket, topology, fixture, opt
     original = fleet.snapshot('A10-orphan-original-all-members', quiescent=True)
     mapped = map_fixture(original, bucket, expected, topology, multi_set=False)
     target = mapped[(bucket, orphan.KEY, doomed['versionId'])]
+    require(len(doomed_entries) == 1, 'A10 source orphan requires one acknowledged generation')
+    verify_parts(fleet, {identity: item for identity, item in mapped.items() if not item['deleteMarker']},
+                 'A10-all-original-orphan-and-control-streaming')
     orphan.capture(fleet, original, bucket, 'old')
     fleet.start()
     for entry in doomed_entries:
@@ -424,24 +476,29 @@ def orphan_probe(fleet, probe, binding, recorder, bucket, topology, fixture, opt
     fleet.a10_orphan_restored = False
     orphan.arm_all(fleet, authority, bucket, 'authority')
     try:
-        fleet.record('A10-owned-unreferenced-data-only-replay', fleet.remote(target['node'], 'orphan-install',
-            disk=target['disk'], bucket=bucket, key=orphan.KEY, dataDir=target['dataDir'], mode='data'))
+        fleet.record('A10-owned-complete-original-object-replay', fleet.remote(target['node'], 'orphan-install',
+            disk=target['disk'], bucket=bucket, key=orphan.KEY, dataDir=target['dataDir'], mode='object'))
         before = fleet.snapshot('A10-orphan-fault-before-GET', quiescent=True)
-        require({identity[:2] for identity in files(before) if identity[2].startswith(bucket + '/' + orphan.KEY + '/')}
-                == {(target['node'], target['disk'])}, 'A10 replay escaped its one original member')
-        require(all(not values for values in orphan.references(before, bucket, orphan.KEY).values()),
-                'A10 controlled orphan still has a live metadata reference')
+        fleet.record('A10-source-orphan-replay-proof', validate_orphan_replay(original, before, authority, bucket, target))
         fleet.start()
         require(physical_content(before) == physical_content(fleet.snapshot('A10-orphan-immediately-before-START')),
                 'NOT_OBSERVED: A10 orphan changed before admission')
-        status = run_request(probe, fleet, '/rustfs/admin/v3/heal/' + bucket + '/' + orphan.KEY, options, active)
+        status = run_request(probe, fleet, request_path('remove-true', bucket), options, active)
         idle_fleet(fleet, binding)
         fleet.stop()
         after = fleet.snapshot('A10-orphan-product-before-GET-or-rescue', quiescent=True)
-        branch = 'a10-remove-true' if options['remove'] else 'remove-false'
-        physical = orphan.physical_safety(before, after, authority, bucket, expected, branch,
-            doomed['versionId'], target['dataDir'], (target['node'], target['disk']))
-        terminal = orphan.terminal_safety(status, branch, bucket, options)
+        require(not any(identity[2].startswith(bucket + '/' + orphan.KEY + '/') for identity in files(after))
+                and physical_content(after) == physical_content(authority),
+                'A10 source sweep did not remove the whole orphan while preserving every post-DELETE control')
+        physical = {'wholeOrphanObjectRemoved': True, 'allPostDeleteControlsAndFormatsUnchanged': True,
+                    'beforeAnyTargetGETOrBackupRescue': True}
+        removed = {(bucket, orphan.KEY, doomed['versionId'])}
+        absent = {(r.get('identity', {}).get('bucket'), r.get('identity', {}).get('object'),
+                   public_version_id(r.get('identity', {}).get('versionId')))
+                  for r in status.get('outcome', {}).get('objects', [])
+                  if r.get('disposition', {}).get('state') == 'authoritatively_absent'}
+        require(absent <= removed, 'A10 sweep claimed a live control was absent')
+        terminal = validate_outcome(status, mapped, set(mapped), removed - absent, options, absent=absent)
         fleet.start()
         verify_public(fleet, binding, bucket, expected, baseline, fixture, 'A10-orphan-product-before-rescue-S3')
         for endpoint in binding['endpoints']:
@@ -467,16 +524,17 @@ def orphan_probe(fleet, probe, binding, recorder, bucket, topology, fixture, opt
     fleet.start()
     verify_public(fleet, binding, bucket, expected, baseline, fixture, 'A10-orphan-all-peer-final-S3')
     return {'fixture': fixture, 'terminal': terminal, 'physical': physical, 'allOriginalPostDeleteAuthoritiesRestored': True,
-            'C10UnreferencedOrphanProof': True, 'deletedACKs': len(doomed_entries), 'rescueIsProductRepair': False}
+            'sourceCompleteBelowQuorumOrphanProof': True, 'deletedACKs': len(doomed_entries), 'rescueIsProductRepair': False}
 
 
 def run_instance(args, topology, nodes, branch, fixture, phase):
+    require(phase in source_phases(branch), 'A10 phase is not part of its source procedure')
     directory = args.evidence / topology / branch / fixture / phase
     directory.mkdir(parents=True)
     candidate = json.loads(args.candidate.read_text())
     require(candidate['source_sha'] == REFERENCE['candidateCommit'], 'A10 option contract is not reviewed for this candidate')
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    is_orphan = branch.startswith('remove-')
+    is_orphan = branch == 'remove-true'
     runtime = 'orphan-preserve' if is_orphan else 'scope-isolation' if topology == 'H2' else 'manual'
     fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile=runtime)
     bucket = 'rv-heal-' + hashlib.sha256(run_id.encode()).hexdigest()[:16]
@@ -493,7 +551,9 @@ def run_instance(args, topology, nodes, branch, fixture, phase):
     options = baseline_options if phase == 'baseline' else selected_options
     fleet.record('A10-source-bound-contract', {**REFERENCE, 'branch': branch, 'fixture': fixture, 'phase': phase,
         'baselineOptions': baseline_options, 'selectedOptions': selected_options,
-        'singleLogicalFieldDelta': 'pool/set selector pair' if branch.startswith('selector-') else branch})
+        'singleLogicalFieldDelta': 'pool/set selector pair' if branch.startswith('selector-') else branch,
+        'registeredExecutionPhases': source_phases(branch),
+        'baselineExecutionRequired': branch != 'remove-true'})
     fleet.record('binding', binding)
     fleet.record('inspector-build', verify_inspector(args.tool_directory, candidate))
     probe, active, recorder = Probe(binding), [], None
@@ -535,7 +595,7 @@ def run_instance(args, topology, nodes, branch, fixture, phase):
 
 def complete_results(results):
     wanted = {(topology, branch, fixture, phase) for topology in ('H1', 'H2') for branch in BRANCHES
-              for fixture in FIXTURES for phase in ('baseline', 'selected')}
+              for fixture in FIXTURES for phase in source_phases(branch)}
     actual = {(row['topology'], row['branch'], row['fixture'], row['phase']) for row in results}
     require(len(actual) == len(results) and actual <= wanted, 'A10 duplicate or foreign parameter instance')
     return actual == wanted and all(row['verdict'] == row['cleanup'] == 'PASS' and row.get('fullProbeCompleted') is True
@@ -563,7 +623,7 @@ def main():
         for topology in ('H1', 'H2'):
             for branch in BRANCHES:
                 for fixture in FIXTURES:
-                    for phase in ('baseline', 'selected'):
+                    for phase in source_phases(branch):
                         row = run_instance(args, topology, nodes[:1] if topology == 'H1' else nodes[:4], branch, fixture, phase)
                         results.append(row)
                         if row['cleanup'] != 'PASS': return
@@ -571,7 +631,7 @@ def main():
         complete = complete_results(results)
         save(args.evidence / 'healthy-summary.json', {'caseId': CASE_ID, 'results': results, 'complete': complete,
             'cleanup': 'PASS' if results and all(row['cleanup'] == 'PASS' for row in results) else 'FAIL'})
-        require(complete, 'A10 requires every H1/H2 DB/DV baseline/selected option instance and complete cleanup')
+        require(complete, 'A10 requires every registered H1/H2 DB/DV source option instance and complete cleanup')
 
 
 if __name__ == '__main__':

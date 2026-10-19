@@ -211,6 +211,17 @@ Topologies: H1,H2. Branches: recursive-false, recursive-true, recreate, remove-f
 3. 逐一 START 并对比只改变一个字段的基线；recursive 检查子前缀，pool/set 检查实际目标身份，非法组合要求结构化拒绝且无副作用。
 4. WAIT、PHYSICAL、VERIFY 三者验收；updateParity/readRepair 若候选不支持必须显示明确拒绝，不可悄悄按默认修复算覆盖。
 
+Source implementation detail: frozen `heal_h1_options_batch.py` and
+`heal_h1_options_node.py` at `524eb5b32c3236497fdd8a9271df0494fa3d9974`
+run the remove=true orphan with a recursive bucket sweep after exact-version
+DELETE and one-member full-object replay (including metadata). Its false
+baseline is an option reference; remove=false is a separate repairable-object
+branch. The adapter keeps every original H1/H2 DB/DV branch, with 68 registered
+execution instances, and rejects the four formerly invented orphan baseline
+instances. Original failures remain archived. Physical closure requires the
+whole orphan to disappear, every post-DELETE control/format to remain exact,
+and complete version-addressed task receipts/counters before reads or rescue.
+
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:

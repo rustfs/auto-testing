@@ -1658,29 +1658,35 @@ passes 399 tests with eight macOS skips; C10 now has 22 tests. Its queued live
 plan is updated to this corrected revision before fleet dispatch.
 
 
-A10 now dispatches all nine source option branches on H1/H2, with fresh DB and
-DV namespaces for both baseline and selected requests: 72 distinct instances.
-Each pair changes only the reviewed option, or the inseparable pool/set
-selector pair. The exact candidate Admin/selector source hashes and supported
-fields are recorded in the contract; this is API coverage, not an rc claim.
-H2 scope probes use two actual eight-drive sets across the original four
-nodes. Recursive probes include a child prefix, an adjacent prefix and outside
-controls; selectors bind each ACK version to its measured physical set.
-Every historical version and marker must have complete, exact responsibility,
-truthful counters and retained settings. `readRepair=true` and invalid selectors
-must return HTTP 400 `InvalidArgument`, leave no active responsibility and
-preserve both missing and bitflipped control parts.
+A10 dispatches all nine source option branches on H1/H2 and fresh DB/DV
+namespaces. The frozen source `524eb5b32c3236497fdd8a9271df0494fa3d9974`
+executes its proven orphan only with `recursive=true,remove=true`; its
+`remove=false` branch independently heals a repairable ACK-bound object.
+The former migration added four synthetic remove=false orphan baseline
+instances. Those extra instances are outside the source procedure and have
+been removed; all original branches, both topologies and both fixture types
+remain mandatory, for 68 execution instances. Other option probes retain
+baseline/selected pairs changing one option or the pool/set selector pair.
+Exact candidate Admin/selector and validation-source hashes are recorded;
+this is API coverage. H2 scope probes use two actual eight-drive sets across
+the original four nodes. Recursive probes include child/adjacent/outside
+controls; selectors bind every ACK version to its measured physical set.
+Historical versions, markers, exact responsibility, counters, retained settings
+and structured rejections remain required.
 
-The remove pair reuses C10 descriptor capture, complete original-member census,
-post-DELETE authority and safe recovery. Both DB and DV delete every original
-target generation through separately recorded S3 ACKs, prove no live metadata
-or payload reference, then replay only one owned data directory. Both phases
-use the same data-only fault; only `remove` changes. Product physical and all
-peer S3 checks precede recovery. An accepted parameter which fails its registered
-physical behavior remains FAIL; it is never counted as default repair or as
-option rejection. Unknown, wrong or duplicate mutation ACKs and incomplete
-post-DELETE restoration retain DIRTY namespaces. This executor has 18 local
-contract tests and still requires canonical live evidence.
+The source-aligned remove=true probe seeds one orphan ACK version and retains
+all control versions/markers, streams every original shard, archives the full
+original tree, performs an exact DELETE, and proves S3 and all-member physical
+absence. It then replays the complete original object including xl.meta and
+integrity sidecars on exactly one below-quorum member. A recursive bucket
+sweep must remove the whole orphan object before GET or rescue and leave
+all post-DELETE controls/formats unchanged. Every original orphan/control
+version must have an exact complete canonical receipt and counter partition;
+only the removed ACK may report repaired or authoritatively_absent. Rescue
+restores only post-DELETE authority. Lost mutation ACKs and incomplete restore
+retain DIRTY namespaces. The old data-only/exact-object construction and its
+original live failures remain archived; they do not establish a source remove
+product failure. No new live or complete canonical PASS is claimed here.
 
 B08 live run `38104014806` remains FAIL with cleanup PASS: both write-loss
 branches produced incomplete target identities; H2 lock loss also failed a
