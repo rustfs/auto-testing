@@ -655,6 +655,11 @@ def run_branch(args, nodes, branch):
             dirty = True
             try:
                 fleet.stop()
+                original_failure = fleet.snapshot('DL-original-unresolved-business-before-gate-release',
+                    quiescent=True, buckets=[bucket, bucket + '-db'])
+                original_mpu = dl.capture_mpu(fleet, 'failure')
+                for node in nodes:
+                    fleet.record('DL-original-unresolved-service-logs', {'node': node, **fleet.remote(node, 'logs')})
                 for node in tuple(fleet.network_gates):
                     proof = fleet.record('DL-failure-owned-network-release', {'node': node,
                         **fleet.remote(node, 'network-release', expired=True)})
@@ -668,8 +673,9 @@ def run_branch(args, nodes, branch):
                     fleet.quorum_gates.remove(node)
                 failed_scene = fleet.snapshot('DL-original-unresolved-business-scene', quiescent=True, buckets=[bucket, bucket + '-db'])
                 failed_mpu = dl.capture_mpu(fleet, 'failure')
-                for node in nodes:
-                    fleet.record('DL-original-unresolved-service-logs', {'node': node, **fleet.remote(node, 'logs')})
+                require(physical_content(original_failure) == physical_content(failed_scene)
+                        and all(original_mpu['nodes'][node]['sceneSha256'] == failed_mpu['nodes'][node]['sceneSha256']
+                                for node in nodes), 'DL gate recovery changed the original failed business or MPU bytes')
                 retained_plan = prepare_retention(fleet, binding, dl.keys, failed_scene, failed_mpu['nodes'])
                 result['retention'] = isolate_retention(fleet, retained_plan)
             except Exception as exc:

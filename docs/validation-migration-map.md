@@ -2160,8 +2160,13 @@ and incarnation. All final physical files/formats, original shard bytes and
 public versions/metadata/tags still must match before cleanup. MPU retirement
 uses separate recovery ACKs and stopped final MPU/business checks. These occur
 before the recovered unique PUT. An incomplete seed/load or unresolved effect
-instead stops services, releases owned gates, captures the original scene and
-isolates every inode; the case and cleanup remain FAIL until separately audited.
+instead stops services, captures the original scene, releases owned gates and
+isolates unchanged inodes; the case and cleanup remain FAIL until separately audited.
+
+Failure capture order is explicit: stop services, save original stopped
+business/MPU bytes and logs while fault intents still exist, release only
+owned network/private-write gates, and recapture the stopped scene. Byte
+hashes must remain identical across gate recovery before isolation can begin.
 
 The full adapter intentionally requires the exact fixed candidate above.
 Historical `072b57b...` scoped source/contracts are retained, but its different

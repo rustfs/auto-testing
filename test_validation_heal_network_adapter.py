@@ -43,7 +43,11 @@ class NetworkAdapterTests(unittest.TestCase):
             def stop(self): state['running'] = False;events.append(('stop',))
             def snapshot(self, label, **kwargs):
                 events.append(('snapshot', label, copy.deepcopy(kwargs)))
-                return {node: {'files': [], 'formats': []} for node in nodes}
+                value = {node: {'files': [], 'formats': []} for node in nodes}
+                if mode == 'business-gate-drift' and label == 'DL-original-unresolved-business-scene':
+                    value[nodes[0]]['files'].append({'disk': 0, 'path': state['session'].bucket + '/unexpected-part',
+                                                   'size': 1, 'sha256': 'changed-during-gate-release'})
+                return value
             def remote(self, node, action, **params):
                 events.append(('remote', node, action))
                 if action == 'network-preflight':
@@ -85,7 +89,11 @@ class NetworkAdapterTests(unittest.TestCase):
                 test.assertFalse(state['running']);events.append(('freeze-business',))
             def capture_mpu(self, fleet, stage):
                 test.assertFalse(state['running']);self.stages.append(stage)
-                events.append(('capture-MPU', stage));return {'nodes': {n: {} for n in nodes}}
+                events.append(('capture-MPU', stage))
+                value = {'nodes': {n: {'sceneSha256': 'f' * 64} for n in nodes}}
+                if mode == 'mpu-gate-drift' and self.stages.count('failure') == 2:
+                    value['nodes'][nodes[0]]['sceneSha256'] = 'e' * 64
+                return value
             def run_load(self, readable):
                 test.assertTrue(state['running']);test.assertEqual(readable, {'node1': True, 'node3': True})
                 events.append(('load-inside-partition',))
@@ -167,18 +175,28 @@ class NetworkAdapterTests(unittest.TestCase):
                 self.assertEqual(len(event[2]['buckets']), 2)
 
     def test_unknown_seed_or_load_never_runs_ordinary_cleanup_or_retries_original_mutation(self):
-        for mode in ('seed-unknown', 'unknown-load', 'isolation-error'):
+        for mode in ('seed-unknown', 'unknown-load', 'isolation-error', 'business-gate-drift', 'mpu-gate-drift'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
                 result, events = self.run_mode(d, mode)
                 self.assertEqual((result['verdict'], result['cleanup']), ('FAIL', 'FAIL'))
                 self.assertNotIn(('cleanup',), events)
                 self.assertNotIn(('unique-PUT', 'recovered/unique.bin'), events)
                 self.assertNotIn(('reconcile-original-effects',), events)
-                self.assertIn(('isolate-original-inodes',), events)
+                if mode.endswith('gate-drift'):
+                    self.assertNotIn(('isolate-original-inodes',), events)
+                    self.assertIn('gate recovery changed', result['retentionError']['message'])
+                else:
+                    self.assertIn(('isolate-original-inodes',), events)
                 if mode == 'seed-unknown':
                     self.assertFalse(any(event[0] == 'inventory' for event in events))
                 if mode == 'isolation-error': self.assertIn('retentionError', result)
-                else: self.assertEqual(result['retention']['cleanup'], 'ISOLATED')
+                elif not mode.endswith('gate-drift'): self.assertEqual(result['retention']['cleanup'], 'ISOLATED')
+                if mode != 'seed-unknown':
+                    before = next(i for i, event in enumerate(events) if event[:2] ==
+                        ('snapshot', 'DL-original-unresolved-business-before-gate-release'))
+                    releases = [i for i, event in enumerate(events) if event[0] == 'remote' and event[2] == 'network-release']
+                    self.assertEqual(len(releases), 4)
+                    self.assertLess(before, min(releases))
 
 
 if __name__ == '__main__': unittest.main()
