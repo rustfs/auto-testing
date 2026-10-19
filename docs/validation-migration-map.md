@@ -2202,3 +2202,31 @@ Recovery reports `ISOLATED`; it performs no S3 requests, namespace deletion,
 old-shard restoration or original verdict rewrite. Original case SHA-256 is
 `13d06d16e8a05d544ec5dd6df5ae8bdabcd6c204c85f8ca4f411196569807099`.
 The complete I03 case remains unaccepted; the canonical total stays **104/158**.
+
+I03 diagnostic candidate `85c706cac09d53d0649487b8f1865f18beb53225`
+adds bounded GET/DELETE error classification at the existing S3 handler return
+boundary. It preserves the ingress request ID and original response. The
+classifier uses `S3Error`'s inherent source accessor, including nested wrappers;
+its standard error trait does not expose that payload. Two actual development
+regressions caught empty source/RPC classifications before this correction.
+The final three classification checks and one actual JSON-event check pass,
+including nested/cyclic errors, numeric errno, unchanged response properties
+and sensitive-message/RPC-metadata exclusion. Two fresh final-diff source
+reviews passed. This diagnoses errors without changing HTTP mapping, storage,
+RPC/authentication, retries, timeouts or the old live result.
+
+The adapter explicitly admits this additional full commit after checking all
+20 referenced product source files against committed Git objects. Eighteen
+original contract files remain byte-identical; the error source hash is
+updated and the diagnostic S3 boundary is additionally bound. Independent
+extractor checks cover 21 distinct files in total and retain the original
+`503/SlowDownRead` and size rules. Original `1c7fc818...` contracts are unchanged;
+unknown neighboring SHAs and the historical incompatible delete protocol stay
+rejected. The 825 Heal checks pass with nine platform skips.
+
+Separate hosted package-only run
+[39267250075/1](https://github.com/rustfs/rustfs/actions/runs/39267250075)
+is building this exact source. The complete published package, opaque build
+bytes and a newly built matching inspector still require independent audits
+before a new full-fixture live run. No previous tool artifact is treated as a
+new-candidate build, and no original `500` or canonical count is rewritten.

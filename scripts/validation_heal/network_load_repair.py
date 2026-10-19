@@ -25,8 +25,11 @@ SOURCE_FILES = {
 }
 
 
+CANDIDATES = frozenset((CANDIDATE, '85c706cac09d53d0649487b8f1865f18beb53225'))
+
+
 def source_reference(candidate):
-    require(candidate == CANDIDATE, 'full I03 DL delete recovery is reviewed only for the exact fixed candidate')
+    require(candidate in CANDIDATES, 'full I03 DL delete recovery is not reviewed for this exact candidate')
     return {'candidateCommit': candidate, 'sourceFiles': SOURCE_FILES.copy(),
         'deleteWriteQuorum': 'configured set / 2 + 1', 'failedDeleteAttemptsProductRollback': True,
         'rollbackFailureIsNotSuccessfulDelete': True, 'healSettlesDeleteBeforeReadingVersion': True,

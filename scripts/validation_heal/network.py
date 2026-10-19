@@ -88,6 +88,15 @@ GET_SOURCE_FILES = {
 }
 
 
+STORAGE_REFERENCES['85c706cac09d53d0649487b8f1865f18beb53225'] = {
+    **STORAGE_REFERENCES['1c7fc818dd858247c45b39542abd8291b1e6e31b'],
+    'candidateCommit': '85c706cac09d53d0649487b8f1865f18beb53225'}
+GET_SOURCE_FILES['85c706cac09d53d0649487b8f1865f18beb53225'] = {
+    **GET_SOURCE_FILES['1c7fc818dd858247c45b39542abd8291b1e6e31b'],
+    'rustfs/src/error.rs': 'c6a8d569b295659cf5a26a44bb3d8ba809c4ca3405d87525624699d161e08970',
+    'rustfs/src/storage/ecfs.rs': '68d8ae2428504010adeb7bc51d2309496260898e4c74e5577a0af4f1bfe13c85'}
+
+
 def source_reference(candidate_commit):
     require(isinstance(candidate_commit, str) and candidate_commit in STORAGE_REFERENCES,
             'network storage policy is not reviewed for this candidate')

@@ -70,6 +70,11 @@ LOCK_REFERENCES = {
 }
 
 
+LOCK_REFERENCES['85c706cac09d53d0649487b8f1865f18beb53225'] = {
+    **LOCK_REFERENCES['1c7fc818dd858247c45b39542abd8291b1e6e31b'],
+    'candidateCommit': '85c706cac09d53d0649487b8f1865f18beb53225'}
+
+
 def lock_reference(candidate_commit):
     require(isinstance(candidate_commit, str) and candidate_commit in LOCK_REFERENCES,
             "lock policy is not reviewed for this candidate")
