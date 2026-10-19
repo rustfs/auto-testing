@@ -3433,6 +3433,67 @@ class HealWholeDriveReplacementTest(unittest.TestCase):
         self.assertEqual(len(observed), 5)
 
 
+class HealPackageFinalizationTest(unittest.TestCase):
+    def run_finalizer(self, mode, *, installed=True):
+        import os
+        import subprocess
+        source = Path('scripts/validation_heal/run_case.sh').read_text()
+        function = 'finalize_package() {' + source.split('finalize_package() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for node in ('n0', 'n1', 'n2', 'n3'):
+                if installed: (root / node).touch()
+            query = root / 'dpkg-query'
+            query.write_text('''#!/usr/bin/env python3
+import os,pathlib,sys
+if sys.argv[1:]==['-W','-f=','rustfs']: sys.exit(0)
+if sys.argv[1:] != ['-W','-f=${db:Status-Status}','rustfs']: sys.exit(2)
+if os.environ['MODE']=='query-error': sys.exit(42)
+if (pathlib.Path(os.environ['SCENE'])/os.environ['NODE']).exists(): print('installed');sys.exit(0)
+sys.exit(1)
+''')
+            purge = root / 'dpkg'
+            purge.write_text('''#!/usr/bin/env python3
+import os,pathlib,sys
+assert sys.argv[1:]==['-P','rustfs']
+p=pathlib.Path(os.environ['SCENE'])
+with (p/'purges').open('a') as out: out.write(os.environ['NODE']+'\\n')
+if os.environ['MODE']=='purge-error':sys.exit(42)
+if os.environ['MODE']!='left-installed':(p/os.environ['NODE']).unlink()
+''')
+            sudo = root / 'sudo'
+            sudo.write_text('#!/bin/sh\n[ "$1" = -n ] || exit 1\nshift\nexec "$@"\n')
+            systemctl = root / 'systemctl'
+            systemctl.write_text('#!/bin/sh\nexit 3\n')
+            for p in (query, purge, sudo, systemctl): p.chmod(0o700)
+            shell = '''set -euo pipefail
+NODES=(n0 n1 n2 n3); SSH_OPTS=(-o BatchMode=yes); SSH_USER=test
+stop_existing() { return 0; }
+ssh() { local arg node=""; for arg in "$@"; do case "$arg" in test@*) node="${arg##*@}" ;; esac; done; NODE="$node" bash -c "${@: -1}"; }
+''' + function + '\nfinalize_package\n'
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'], SCENE=str(root), MODE=mode)
+            env.pop('BASH_ENV', None)
+            result = subprocess.run(['bash', '-c', shell], env=env, capture_output=True, text=True)
+            purges = (root / 'purges').read_text().splitlines() if (root / 'purges').exists() else []
+            return result, purges, [n for n in ('n0','n1','n2','n3') if (root / n).exists()]
+
+    def test_actual_nested_shell_passes_literal_dpkg_format_and_purges_all_four_packages(self):
+        result, purges, remaining = self.run_finalizer('success')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(purges, ['n0','n1','n2','n3'])
+        self.assertEqual(remaining, [])
+        result, purges, remaining = self.run_finalizer('success', installed=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(purges, [])
+
+    def test_query_errors_failed_purge_and_still_installed_packages_cannot_report_clean(self):
+        for mode in ('query-error', 'purge-error', 'left-installed'):
+            with self.subTest(mode=mode):
+                result, _, remaining = self.run_finalizer(mode)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(remaining, ['n0','n1','n2','n3'])
+
+
 class HealAdminResponseBudgetTest(unittest.TestCase):
     def test_complete_reviewed_8mib_response_and_strict_oversize_and_content_length(self):
         from io import BytesIO

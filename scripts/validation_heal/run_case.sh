@@ -137,7 +137,17 @@ finalize_package() {
   for node in "${NODES[@]}"; do
     (stop_existing "${node}") || failed=1
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-      'if dpkg-query -W -f="${Status}" rustfs 2>/dev/null | grep -q "install ok installed"; then sudo -n dpkg -P rustfs; fi' || failed=1
+      'set -eu
+status=0
+state="$(dpkg-query -W -f="\${db:Status-Status}" rustfs 2>/dev/null)" || status=$?
+case "${status}:${state}" in
+  0:installed|0:config-files) sudo -n dpkg -P rustfs ;;
+  1:) ;;
+  *) printf "unexpected rustfs package query state\n" >&2; exit 1 ;;
+esac
+status=0
+state="$(dpkg-query -W -f="\${db:Status-Status}" rustfs 2>/dev/null)" || status=$?
+test "${status}:${state}" = "1:"' || failed=1
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
       '! systemctl is-active --quiet rustfs' || failed=1
   done
