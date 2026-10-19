@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "candidates": {
+    "6afdec9fe1b0b88007f2e5b445c19bf73d51d3ca": {
+      "sourceTree": "65abe5d45aa4d632499960cff01bbf8d80f8a26a",
+      "cargoLockSha256": "b4d959f964c13d8ed507657fa4b52752769f96e5cce932845d3d8cec69a5cd56",
+      "sourceFiles": {
+        "crates/ecstore/src/set_disk/ops/object.rs": "9af09ff2c969975dd5196bda8006745d13c5cc6a8f520f6e1b67cc1b2dd0ca3a",
+        "crates/ecstore/src/set_disk/ops/heal.rs": "4029248422352e178b92cf26f6b96cc88b6a521eefd7c57f2985f9da1daab2e8",
+        "crates/ecstore/src/set_disk/core/io_primitives.rs": "6e50c8ea8b374b8a2d73da740321af25fed6e26c34e5117feca3e5f5891782ab"
+      },
+      "regressions": {
+        "committed-overwrite-cleanup": {
+          "test": "set_disk::ops::object::put_object_tmp_cleanup_tests::deep_heal_preserves_committed_generation_during_old_data_cleanup",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/object.rs",
+          "sourceAssertions": [
+            "Actual PHASE_CLEANUP pause after new physical generation commit while TailDrained overwrite ACK remains pending.",
+            "Real Deep and shared read-repair each reconstruct missing new-generation encoded part before any GET, across 4/2 and 16/4 geometries.",
+            "All unchanged replica metadata, original overwrite ACK and final new-generation physical/full-body identity are preserved."
+          ],
+          "witnessKind": "ordered-barrier-milestones",
+          "milestonePrefix": "native_g01: ",
+          "milestones": [
+            "native_g01: geometry=4/2 read_repair=false old_cleanup_paused new_generation_committed target_part_missing",
+            "native_g01: geometry=4/2 read_repair=false locked_heal_completed new_generation_part_rebuilt_before_get",
+            "native_g01: geometry=4/2 read_repair=false overwrite_ack_preserved final_physical_generation_and_full_body_verified",
+            "native_g01: geometry=4/2 read_repair=true old_cleanup_paused new_generation_committed target_part_missing",
+            "native_g01: geometry=4/2 read_repair=true locked_heal_completed new_generation_part_rebuilt_before_get",
+            "native_g01: geometry=4/2 read_repair=true overwrite_ack_preserved final_physical_generation_and_full_body_verified",
+            "native_g01: geometry=16/4 read_repair=false old_cleanup_paused new_generation_committed target_part_missing",
+            "native_g01: geometry=16/4 read_repair=false locked_heal_completed new_generation_part_rebuilt_before_get",
+            "native_g01: geometry=16/4 read_repair=false overwrite_ack_preserved final_physical_generation_and_full_body_verified",
+            "native_g01: geometry=16/4 read_repair=true old_cleanup_paused new_generation_committed target_part_missing",
+            "native_g01: geometry=16/4 read_repair=true locked_heal_completed new_generation_part_rebuilt_before_get",
+            "native_g01: geometry=16/4 read_repair=true overwrite_ack_preserved final_physical_generation_and_full_body_verified"
+          ]
+        },
+        "stale-read-repair-final-rename": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::read_repair_commit_aborts_when_object_changes_before_final_rename",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Real missing external shard forces actual shared read-repair data reconstruction.",
+            "Pause immediately before final commit fence; a successor overwrite ACK precedes release.",
+            "Obsolete read-repair returns exact DiskError::Timeout and final current ETag equals acknowledged overwrite."
+          ],
+          "witnessKind": "reviewed-in-test-assertions",
+          "milestonePrefix": null,
+          "milestones": []
+        },
+        "versioned-read-repair-lock-owner": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::object_lock_diagnostics_distinguish_read_repair_from_queued_put",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Historical missing external shard is repaired under actual shared Data-phase lock.",
+            "Queued PUT cannot acquire namespace and later historical GET times out while version-specific owner remains held.",
+            "After release, successor PUT ACK and every original/new version full body remain correct."
+          ],
+          "witnessKind": "reviewed-in-test-assertions",
+          "milestonePrefix": null,
+          "milestones": []
+        },
+        "cancelled-physical-unlink-owner": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::cancelled_heal_backup_cleanup_retains_key_owner_until_unlink_finishes",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Actual external Heal backup unlink pauses in outer, inner and shared read-repair modes.",
+            "Caller abort does not retire namespace commit owner; successor write lock remains pending until physical unlink drains.",
+            "After physical completion, successor obtains lock, owned backup is absent and committed full body is preserved."
+          ],
+          "witnessKind": "reviewed-in-test-assertions",
+          "milestonePrefix": null,
+          "milestones": []
+        }
+      },
+      "cases": {
+        "heal.race-unversioned-overwrite": [
+          "committed-overwrite-cleanup",
+          "stale-read-repair-final-rename"
+        ],
+        "heal.race-versioned-put": [
+          "versioned-read-repair-lock-owner"
+        ],
+        "heal.lock-timeout-and-caller-abort": [
+          "versioned-read-repair-lock-owner",
+          "cancelled-physical-unlink-owner",
+          "stale-read-repair-final-rename"
+        ]
+      }
+    }
+  }
+}

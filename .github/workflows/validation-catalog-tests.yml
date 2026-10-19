@@ -33,6 +33,7 @@ on:
       - test_validation_heal_encrypted.py
       - test_validation_heal_schema.py
       - test_validation_heal_native.py
+      - test_validation_heal_race_native.py
       - test_validation_heal_incarnation_native.py
       - test_validation_heal_manager_native.py
       - test_validation_heal_manager_fixture.py
@@ -98,6 +99,7 @@ on:
       - test_validation_heal_encrypted.py
       - test_validation_heal_schema.py
       - test_validation_heal_native.py
+      - test_validation_heal_race_native.py
       - test_validation_heal_incarnation_native.py
       - test_validation_heal_manager_native.py
       - test_validation_heal_manager_fixture.py
@@ -160,6 +162,7 @@ jobs:
       - run: python3 -B -m unittest -v test_validation_heal_persistence.py test_validation_heal_persistence_mrf.py
       - run: python3 -B -m unittest -v test_validation_heal_incarnation.py test_validation_heal_incarnation_replay.py
       - run: python3 -B -m unittest -v test_validation_heal_incarnation_native.py
+      - run: python3 -B -m unittest -v test_validation_heal_race_native.py
       - run: bash -n scripts/run_validation_case.sh scripts/validation_heal/run_case.sh scripts/validation_oidc/run_case.sh
       - run: bash -n rustfs-storage-test.sh rustfs_pool_expand.sh rustfs-replication-test.sh scripts/validation_pool/run_case.sh scripts/validation_replication/run_case.sh test_validation_scanner_usage.sh
       - run: bash test_validation_scanner_usage.sh
