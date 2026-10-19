@@ -26,6 +26,7 @@ try:
     from .stop import status, idle_fleet
     from .scanner_repair import JournalWindow, event_time
     from .mrf_records import verify_reference, REFERENCE as MRF_REFERENCE
+    from .versions import public_version_id
     from .mrf_replay import (acknowledge, identity, pending_bindings, read_checkpoints, retirement,
                              source_tasks, verified_receipt)
 except ImportError:
@@ -41,6 +42,7 @@ except ImportError:
     from stop import status, idle_fleet
     from scanner_repair import JournalWindow, event_time
     from mrf_records import verify_reference, REFERENCE as MRF_REFERENCE
+    from versions import public_version_id
     from mrf_replay import (acknowledge, identity, pending_bindings, read_checkpoints, retirement,
                             source_tasks, verified_receipt)
 
@@ -156,7 +158,9 @@ def terminal(current, bucket, expected, missing):
     seen, incarnation = set(), None
     for row in rows:
         item = row.get("identity") or {}
-        pair = item.get("object"), item.get("versionId") or "null"
+        version = item.get("versionId")
+        require(version is None or isinstance(version, str), "queue receipt has an untyped version identity")
+        pair = item.get("object"), public_version_id(version)
         require(item.get("bucket") == bucket and pair in wanted and pair not in seen
                 and type(item.get("poolIndex")) is int and item["poolIndex"] == 0
                 and type(item.get("setIndex")) is int and item["setIndex"] == 0
@@ -302,6 +306,17 @@ def run_topology(args, topology, nodes, **unused):
                 "ATTRIBUTION_NOT_OBSERVED: an owned fault changed before pressure admission")
         initial_checkpoints = read_checkpoints(fleet, nodes, "MRF-empty-baseline")
         require(all(not item["intents"] for item in initial_checkpoints.values()), "pressure fixture has unrelated durable responsibility")
+        # Deny only the dedicated durable bucket on one owned drive. System
+        # metadata must remain readable/writable for the real MRF journal.
+        # Finish SSH permission probes before admitting the finite pressure work;
+        # the actual MRF Full event after the SDK ACKs is still mandatory.
+        gate_node, gate_disk = nodes[0], 0
+        owner = fleet.record("original-gated-process", fleet.remote(gate_node, "process"))
+        fleet.drive_gates.add(gate_node)
+        fleet.record("permission-gate-armed", fleet.remote(gate_node, "drive-gate-arm-live", disk=gate_disk, expected=owner))
+        fleet.record("permission-gate-activated", fleet.remote(gate_node, "drive-gate-activate"))
+        gate_proof = fleet.record("actual-service-refusal", fleet.remote(gate_node, "drive-gate-probe"))
+        validate_durable_gate(gate_proof, run_id, durable_bucket)
         window = JournalWindow(fleet, "pressure-admission", event_targets={"rustfs::heal::manager", "rustfs::heal::task"})
         pressure = Pressure(probe, fleet, binding, active)
         first = scopes[0]
@@ -326,15 +341,6 @@ def run_topology(args, topology, nodes, **unused):
         require(len({scope["token"] for scope in scopes[:3]}) == 3, "independent buckets reused a task identity")
         rejected = rejection(pressure.call(scopes[3]["path"]), admission="full", reason="none", code="SlowDown", http=503)
         require(pressure.sample()["queueLength"] == CAPACITY, "NOT_OBSERVED: Full was not witnessed with the actual two-slot queue")
-        # Deny only the dedicated durable bucket on one owned drive. System
-        # metadata must remain readable/writable for the real MRF journal.
-        gate_node, gate_disk = nodes[0], 0
-        owner = fleet.record("original-gated-process", fleet.remote(gate_node, "process"))
-        fleet.drive_gates.add(gate_node)
-        fleet.record("permission-gate-armed", fleet.remote(gate_node, "drive-gate-arm-live", disk=gate_disk, expected=owner))
-        fleet.record("permission-gate-activated", fleet.remote(gate_node, "drive-gate-activate"))
-        gate_proof = fleet.record("actual-service-refusal", fleet.remote(gate_node, "drive-gate-probe"))
-        validate_durable_gate(gate_proof, run_id, durable_bucket)
         earliest_ms, ack_start = int(time.time() * 1000) - 5000, datetime.now(timezone.utc)
         durable_expected, obligations, _ = acknowledge(durable_recorder, durable_bucket, "offline-put", durable_expected, fixture="DB")
         fleet.record("durable-ACK-ledger", {"expected": durable_expected, "obligations": obligations})

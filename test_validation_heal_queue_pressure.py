@@ -1,6 +1,7 @@
 """Reject false queue admission, responsibility retirement and resource proofs."""
 
 import copy
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -214,6 +215,87 @@ class QueuePressureTests(unittest.TestCase):
             elif name == "false-repair": outcome["objects"][0]["disposition"]["state"] = "repaired"
             else: outcome["objectsTruncated"] = True
             with self.subTest(name=name), self.assertRaises(ValueError): queue.terminal(value, "owned", expected, missing)
+
+    def test_terminal_maps_only_reviewed_null_version_forms_to_exact_sdk_identity(self):
+        for version in (None, "", "null", "00000000-0000-0000-0000-000000000000"):
+            value, expected, missing = self.terminal()
+            for row in value['outcome']['objects']: row['identity']['versionId'] = version
+            with self.subTest(version=version):
+                self.assertEqual(queue.terminal(value, 'owned', expected, missing)['diagnosticObjects'], 2)
+        for version in (False, True, 0, [], {}, 'another-version', '01234567-89ab-4cde-8fab-0123456789ab'):
+            value, expected, missing = self.terminal()
+            value['outcome']['objects'][0]['identity']['versionId'] = version
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                queue.terminal(value, 'owned', expected, missing)
+
+    def test_real_orchestrator_finishes_durable_gate_before_finite_pressure_admission(self):
+        for system_accessible in (True, False):
+            with self.subTest(system_accessible=system_accessible), tempfile.TemporaryDirectory() as tmp:
+                calls = []
+
+                class Fleet:
+                    def __init__(self, nodes, directory, run_id, *args, **kwargs):
+                        self.nodes, self.run_id = nodes, run_id
+                        self.faults, self.drive_gates, self.reserved = [], set(), True
+
+                    def record(self, label, value):
+                        if label == 'binding': self.binding = value
+                        return value
+
+                    def remote(self, node, action, **kwargs):
+                        calls.append(action)
+                        if action == 'drive-gate-probe':
+                            control = {name: {'uid': 0, 'gid': 0, 'errno': 0} for name in ('read', 'write')}
+                            return {'scope': 'durable-bucket', 'disk': 0,
+                                'dataPath': f'/data/rustfs1/heal-validation/{self.run_id}/data/{self.binding["bucketPrefix"]}-durable',
+                                'systemMetadataAccessible': system_accessible,
+                                'systemMetadataControl': {**control, 'sameServiceIdentity': True},
+                                'sameServiceIdentity': True, 'privateMountNamespace': True, 'dacBypassRemoved': True,
+                                'name': 'EACCES', 'errno': 13, 'readProbe': {'errno': 13}}
+                        return {}
+
+                    def deploy(self, *args): pass
+                    def snapshot(self, *args, **kwargs): return {}
+                    def start(self): pass
+                    def stop(self): pass
+                    def cleanup(self): return True
+
+                class Pressure:
+                    def __init__(self, *args): pass
+                    def admit(self, path):
+                        calls.append('pressure-admission')
+                        raise ValueError('end test at first pressure admission')
+
+                root = Path(tmp)
+                (root / 'evidence').mkdir()
+                (root / 'candidate.json').write_text(json.dumps({
+                    'source_sha': queue.REFERENCE['candidateCommit'], 'package_sha256': 'c' * 64}))
+                (root / 'rc').write_bytes(b'unit-test-only')
+                args = types.SimpleNamespace(evidence=root / 'evidence', candidate=root / 'candidate.json',
+                    rc_bin=root / 'rc', tool_directory=root, testing_commit='a' * 40, binary_sha='b' * 64)
+                target = {'node': 'vm000', 'disk': 0, 'relativePath': 'owned/objects/0/generation/part.1',
+                          'sha256': 'a' * 64, 'key': 'objects/0', 'versionId': 'null'}
+                with ExitStack() as patches:
+                    replacements = {'Fleet': Fleet, 'Pressure': Pressure,
+                        'Probe': lambda *args: types.SimpleNamespace(inventory=lambda *args, **kwargs: {}),
+                        'Recorder': lambda *args: None, 'seed': lambda *args: [{'key': 'objects/0', 'versionId': 'null'}],
+                        'verify_inspector': lambda *args: {}, 'verify_reference': lambda *args: {},
+                        'verify_seed': lambda *args: {}, 'validate_topology': lambda *args: {},
+                        'map_cohorts': lambda *args, **kwargs: [target], 'verify_part_manifest': lambda *args, **kwargs: {},
+                        'validate_missing_batch': lambda *args: {}, 'physical_content': lambda *args: 'unchanged',
+                        'read_checkpoints': lambda *args, **kwargs: {'vm000': {'intents': []}},
+                        'JournalWindow': lambda *args, **kwargs: None}
+                    for name, value in replacements.items(): patches.enter_context(patch.object(queue, name, value))
+                    patches.enter_context(patch.dict(queue.os.environ, {'GITHUB_RUN_ID': '321', 'GITHUB_RUN_ATTEMPT': '1'}))
+                    result = queue.run_topology(args, 'H1', ['vm000'])
+                self.assertEqual(result['verdict'], 'FAIL')
+                for action in ('drive-gate-arm-live', 'drive-gate-activate', 'drive-gate-probe'):
+                    self.assertIn(action, calls)
+                if system_accessible:
+                    self.assertLess(calls.index('drive-gate-probe'), calls.index('pressure-admission'))
+                    self.assertEqual(result['failure']['message'], 'end test at first pressure admission')
+                else:
+                    self.assertNotIn('pressure-admission', calls)
 
     def test_running_window_requires_partial_actual_processing(self):
         value = {"summary": "running", "outcome": {"execution": {"state": "running"}, "counters": {"processed": 5}}}
