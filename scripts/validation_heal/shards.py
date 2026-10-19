@@ -506,7 +506,7 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory)
     candidate = json.loads(args.candidate.read_text())
-    fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
+    tool_manifest = fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate))
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
@@ -532,6 +532,18 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
         needs_multipart = "DM" in recipe["contract"]["probes"]["fixture"].split(",")
         if needs_multipart:
             expected += seed(recorder, bucket, "DM", 4, SIZES, existing_bucket=True)
+        boundary_plan, boundary_expected, boundary_targets = None, [], []
+        if args.case_id in {"heal.data-shard-bitrot", "heal.parity-shard-bitrot"}:
+            try:
+                from . import shard_boundaries
+            except ImportError:
+                import shard_boundaries
+            calibration = fleet.snapshot("DB-size-calibration-live")
+            target = map_target(calibration, bucket, "objects/0008.bin", "data", 1)
+            boundary_plan = fleet.record("DB-source-size-plan", shard_boundaries.parameters(
+                tool_manifest, candidate, target, calibration, recorder, expected))
+            boundary_expected = shard_boundaries.seed_controls(recorder, bucket, boundary_plan)
+            expected += boundary_expected
         baseline = fleet.record("s3-baseline", probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
         fleet.record("fixture-manifest", {"expected": expected, **verify_seed(expected, baseline)})
         pending = fleet.record("mpu-baseline", pending_inventory(probe, bucket)) if needs_multipart else None
@@ -544,6 +556,10 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
             require(all(head.get(name) == value for name, value in entry["properties"].items()), "HEAD differs from GET baseline")
         fleet.stop()
         original = fleet.snapshot("physical-baseline", quiescent=True)
+        if boundary_plan is not None:
+            boundary_targets = shard_boundaries.map_controls(original, bucket, boundary_expected, boundary_plan)
+            fleet.record("DB-boundary-original-proofs", shard_boundaries.prove_controls(
+                fleet, boundary_targets, "DB-boundary-original-bitrot"))
         cross_node = args.case_id == "heal.admin-token-cross-node-status"
         if cross_node:
             fleet.record("cross-node-binding", {"coordinator": "node1", "peer": "node2", "stableEndpoint": "node3",
@@ -612,6 +628,10 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
                     physical = {"dryRunPhysicalUnchanged": True, "repairedAck": False, "backupUsedOnlyAfterNoMutationProof": True}
                 else:
                     physical = validate_repaired_physical(before, repaired, target)
+                if boundary_plan is not None:
+                    shard_boundaries.map_controls(repaired, bucket, boundary_expected, boundary_plan)
+                    fleet.record("DB-boundary-repaired-proofs-" + name, shard_boundaries.prove_controls(
+                        fleet, boundary_targets, "DB-boundary-preserved-bitrot-" + name))
                 bitrot = verify_cohort(fleet, target, ("recovered-bitrot-" if dry_run else "repaired-bitrot-") + name)
                 fleet.start()
                 current = fleet.record("s3-after-" + name, probe.inventory(bucket, unversioned_current_tags=fixture == "DB"))
@@ -623,6 +643,8 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
                         compare_inventories(baseline, peer_s3)
                 ranges = verify_ranges(probe, fleet, bucket, key, version_id=target["versionId"],
                     expected_body=payload(f"{bucket}/{key}/0", 5 * 1024**2 + 123) if fixture == "DV" else None)
+                boundary_ranges = (shard_boundaries.verify_ranges(probe, fleet, bucket, boundary_expected, boundary_plan)
+                                   if boundary_plan is not None else None)
                 condition_proof = verify_conditions(probe, fleet, branch, baseline, heads[key], "repaired-condition") if conditions else None
                 if pending is not None:
                     require(fleet.record("mpu-after-" + name, pending_inventory(probe, bucket)) == pending,
@@ -631,6 +653,11 @@ def run_topology(args, topology, nodes, *, fixture="DB"):
                     validate_repaired_status(status, target)
                 result["branches"][name] = {"verdict": "PASS", "physical": physical, "bitrot": bitrot,
                     "s3": comparison, "ranges": ranges, "trigger": "manual-normal" if mode == 1 else "manual-deep"}
+                if boundary_plan is not None:
+                    result["branches"][name]["DBBoundaryControls"] = {
+                        "originalDefaultDBCount": 128, "supplementalObjectCount": len(boundary_expected),
+                        "allBoundaryShapesPhysicallyVerified": True, "ranges": boundary_ranges,
+                        "completedMultipartProtocolClaimed": False}
                 if condition_proof is not None:
                     result["branches"][name]["conditions"] = condition_proof
             except (Exception, KeyboardInterrupt) as exc:

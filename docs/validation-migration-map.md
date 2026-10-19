@@ -2230,3 +2230,23 @@ is building this exact source. The complete published package, opaque build
 bytes and a newly built matching inspector still require independent audits
 before a new full-fixture live run. No previous tool artifact is treated as a
 new-candidate build, and no original `500` or canonical count is rewritten.
+
+
+C02/C03 DB boundary completion (2026-10-19): the shard executor retains all
+128 original DB controls and every frozen first/middle/last corruption branch,
+including C02's completed multipart-data branch. Before any fault, the exact
+candidate size contract, actual default-class process environment and decoded
+full-set calibration object now derive inline and EC block minus/exact/plus
+sizes. Supplemental public PUT controls also cover zero/one, 4-KiB and the
+source-bound 5-MiB minimum-part-size boundary. These single-PUT size controls do
+not claim completed multipart protocol coverage or a Cartesian C03/DM matrix.
+The original count, bytes and MPU controls remain in the full baseline; the
+combined fixture must fit the existing 256-object and 512-MiB budgets. Every
+supplemental control requires a decoded full-set shape and original physical
+checksum/no-part proof, repeated after each repair, plus independent full GET
+and Range verification. The runtime integration regression rejects the previous
+uncalibrated C02 and C03 callers. Six focused tests and the 831-test Heal suite
+pass (nine platform skips). Fresh candidate-bound H1/H2 execution and independent
+acceptance remain required; the original C02/C03 failures and canonical
+104/158 count are unchanged. I03's inspector and replay remain pinned to the
+separately reviewed `536a0a13b7a428a557dbe20d03faf72808da4abd` helper.
