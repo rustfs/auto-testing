@@ -185,7 +185,7 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
-        if action == "mpu-scene":
+        if action == "mpu-scene" or action.startswith("retained-scene-"):
             source += "\nimport types\nmpu_scene_backend = types.ModuleType('mpu_scene')\nexec(" + repr(
                 NODE_SOURCE.with_name("mpu_scene.py").read_text()) + ", mpu_scene_backend.__dict__)\n"
         if action.startswith(("retained-scene-", "owner-markers-")):

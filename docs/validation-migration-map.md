@@ -2108,3 +2108,25 @@ version assertions, and isolate unresolved scenes with the existing strict
 recovery protocol. Session/census support alone neither enables a new fleet
 dispatch nor completes I03. The 807-check Heal suite passes with nine platform
 skips; no new live or canonical acceptance is claimed.
+
+I03 unresolved-scene isolation (2026-10-19): `network_retention.py` now freezes
+the original four reservation owners and stopped business/MPU scene digests.
+All four read-only preflights precede any move. The existing durable isolation
+backend supports `lock-quorum` with private per-run archive parents and
+non-overwriting same-filesystem renames. It hashes the primary and DB fixture,
+original DL MPU key prefixes and original I03 shard-injection backups while
+retaining credential files by inode/metadata without reading their contents.
+Interrupted moves resume against the same durable census; missing roots,
+changed archived bytes, active gates, owner/mount drift and destination
+collisions block progress. Every original file and inode is retained; no shard
+restoration, S3 Abort or namespace deletion is performed by isolation.
+
+The recovery entry point accepts this path only for one archived I03
+FAIL/cleanup-FAIL branch with an exact candidate/package/binary/helper/run
+binding and four matching original reservations. It reports `ISOLATED`, never
+`PASS` or `alreadyClean`, including retries after all active paths are absent.
+Historical expiry-only recovery keeps its existing strict boundary. The live
+I03 adapter still does not emit this new intent or invoke DL; integration,
+independent partial-delete repair and fresh full-fixture live acceptance
+remain required. Local filesystem/controller tests do not certify live
+isolation or increase the canonical count.

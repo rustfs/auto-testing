@@ -14,11 +14,13 @@ try:
     from .heal_probe import require, save
     from .interrupted_recovery import checkpoint_plan, restore_and_isolate
     from .outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan, acknowledged_legacy_plan
+    from .network_retention import archived_plan as network_retention_plan, isolate as isolate_network_scene
 except ImportError:
     from healthy import Fleet, physical_content
     from heal_probe import require, save
     from interrupted_recovery import checkpoint_plan, restore_and_isolate
     from outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan, acknowledged_legacy_plan
+    from network_retention import archived_plan as network_retention_plan, isolate as isolate_network_scene
 
 
 def quota_recovery_plan(artifact, failed_run, candidate):
@@ -93,8 +95,10 @@ def quota_recovery_plan(artifact, failed_run, candidate):
 
 
 def network_recovery_plan(artifact, failed_run, candidate):
-    """Recover only an I03 gate whose independent expiry unit is gone."""
+    """Select exact I03 expiry recovery or unresolved-load scene isolation."""
     case = "heal.network-partition-and-lock-quorum"
+    if list(artifact.glob(f"*/run/{case}/evidence/{case}/H2/*/*-network-retention-intent.json")):
+        return network_retention_plan(artifact, failed_run, candidate)
     results = list(artifact.glob(f"*/run/{case}/cases/{case}.json"))
     require(len(results) == 1, "network recovery requires one exact I03 result")
     result = json.loads(results[0].read_text())
@@ -639,6 +643,9 @@ def main():
         if plan.get("buckets"):
             fleet.snapshot_buckets = plan["buckets"]
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
+        if plan.get("kind") == "unresolved-network-load":
+            complete.append({"failedRunId": args.failed_run_id, **isolate_network_scene(fleet, plan)})
+            continue
         if plan.get("kind") == "network-expiry-recovery":
             for node in plan["nodes"]:
                 fleet.record("network-recovery-stop", {"node": node, **fleet.remote(node, "stop")})

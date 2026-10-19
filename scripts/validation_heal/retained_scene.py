@@ -92,6 +92,13 @@ def census(folder, owner, *, state, node):
     """Hash the complete inode inventory; read only explicitly scoped content."""
     rows, content_count = [], 0
     boundary_device = folder.lstat().st_dev
+    network = owner.get("runtimeProfile") == "lock-quorum"
+    fixture_buckets = {owner["bucket"]}
+    if network:
+        fixture_buckets.add(owner["bucket"] + "-db")
+    multipart_keys = {hashlib.sha256(f"{owner['bucket']}/dl/{endpoint}/{name}.bin".encode()).hexdigest()
+                      for endpoint in ("node1", "node3", "node4")
+                      for name in ("abort", "complete", "create", "upload")} if network else set()
     def visit(path):
         nonlocal content_count
         node["checked"](path, folder)
@@ -115,7 +122,11 @@ def census(folder, owner, *, state, node):
             require(stable(info) == stable(after), "retained scene directory changed during audit")
         else:
             parts = Path(relative).parts
-            fixture = not state and len(parts) > 2 and parts[:2] == ("data", owner["bucket"])
+            fixture = not state and len(parts) > 2 and parts[0] == "data" and parts[1] in fixture_buckets
+            network_mpu = (not state and network and len(parts) > 4
+                           and parts[:3] == ("data", ".rustfs.sys", "multipart") and parts[3] in multipart_keys)
+            network_backup = (not state and network and len(parts) == 2 and parts[0] == "quarantine"
+                              and re.fullmatch(r"I03-missing-target\.(original|intent\.json|applied\.json)", parts[1]))
             mrf = not state and relative in {
                 "data/.rustfs.sys/.heal-mrf-snapshot.0.bin", "data/.rustfs.sys/.heal-mrf-snapshot.1.bin",
                 "data/.rustfs.sys/.heal-mrf-manifest.json"}
@@ -125,7 +136,7 @@ def census(folder, owner, *, state, node):
             opaque_backup = (not state and owner.get("runtimeProfile") == "outcome-legacy"
                              and len(parts) == 2 and parts[0] == "quarantine"
                              and re.fullmatch(r"J02-[0-9a-f]{32}\.(original|intent\.json|applied\.json|failed-[0-9a-f]{64})", parts[1]))
-            if (state and relative == "rustfs") or fixture or mrf or backup or opaque_backup:
+            if (state and relative == "rustfs") or fixture or mrf or backup or opaque_backup or network_mpu or network_backup:
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
                     require(stable(os.fstat(fd)) == stable(info) and info.st_size <= 2 * 1024**3,
@@ -157,17 +168,17 @@ def mounted_paths():
 def inspect(request, node):
     state, roots = node["paths"](request["runId"])
     expected = request["expectedOwner"]
-    per_run = expected.get("runtimeProfile") == "outcome-legacy"
+    per_run = expected.get("runtimeProfile") in {"outcome-legacy", "lock-quorum"}
     retained_state, retained_roots = destinations(state, roots, per_run_parent=per_run)
     if per_run:
         old_state, old_roots = destinations(state, roots)
         require(not any(node["checked"](path, state.parent if index == 4 else node["MOUNTS"][index]).exists()
                         for index, path in enumerate((*old_roots, old_state))),
-                "J02 shared archive already exists; refusing another retention layout")
+                "shared archive already exists; refusing another retention layout")
     require(isinstance(expected, dict) and expected.get("runId") == request["runId"]
             and expected.get("unit") == node["unit"](request["runId"])
             and expected.get("hostname") == node["socket"].gethostname()
-            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart", "outcome-grace", "outcome-legacy"}, "retained scene archived owner differs")
+            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart", "outcome-grace", "outcome-legacy", "lock-quorum"}, "retained scene archived owner differs")
     current = node["mounts"]()
     require(len(current) == len(expected.get("mounts", [])) == 4
             and all(all(actual[key] == old[key] for key in ("target", "source", "fstype", "uuid", "maj:min"))
@@ -210,19 +221,32 @@ def inspect(request, node):
         baseline["archiveLayout"] = "per-run-parent"
     intent = retained_state.parent / (request["runId"] + ".intent.json")
     node["checked"](intent, state.parent)
-    if expected["runtimeProfile"] in {"root-restart", "outcome-grace", "outcome-legacy"}:
+    network = expected["runtimeProfile"] == "lock-quorum"
+    if expected["runtimeProfile"] in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum"}:
         original_sha = request.get("expectedOriginalSceneSha256", "")
         require(re.fullmatch(r"[0-9a-f]{64}", original_sha) is not None,
                 "restored fixture requires its original physical scene digest")
         baseline["originalSceneSha256"] = original_sha
+        if network:
+            require(re.fullmatch(r"[0-9a-f]{64}", request.get("expectedMpuSceneSha256", "")) is not None,
+                    "network retention requires its stopped original MPU scene digest")
+            baseline["originalMpuSceneSha256"] = request["expectedMpuSceneSha256"]
+            baseline["originalMpuKeysSha256"] = sha(request["mpuKeys"])
         require("absent" not in locations, "restored fixture cannot omit an original root")
         if not intent.exists():
             require(all(location == "active" for location in locations), "unbound retained fixture")
-            scene = node["snapshot"]({"runId": request["runId"], "action": "snapshot", "quiescent": True})
+            scene = node["snapshot"]({"runId": request["runId"], "action": "snapshot", "quiescent": True,
+                **({"buckets": [expected["bucket"], expected["bucket"] + "-db"]} if network else {})})
             require(scene.get("quiescent") is True and type(scene.get("pid")) is int and scene["pid"] == 0
                     and scene.get("binarySha256") == expected["binarySha256"]
                     and sha({key: scene[key] for key in ("files", "formats")}) == original_sha,
                     "restored fixture differs from the original business scene")
+            if network:
+                mpu = node["mpu_scene_backend"].run({"runId": request["runId"], "action": "mpu-scene",
+                    "bucket": expected["bucket"], "keys": request["mpuKeys"],
+                    "expectedBinarySha256": expected["binarySha256"]}, node)
+                require(mpu["sceneSha256"] == request["expectedMpuSceneSha256"],
+                        "network retained multipart scene differs from the original stopped census")
     if intent.exists():
         require(encoded(private_json(intent)) == encoded(baseline), "retained scene drifted from its durable isolation intent")
     else:
@@ -232,8 +256,10 @@ def inspect(request, node):
 
 def run(request, node):
     fields = {"runId", "action", "expectedOwner"}
-    if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace", "outcome-legacy"}:
+    if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum"}:
         fields.add("expectedOriginalSceneSha256")
+    if request.get("expectedOwner", {}).get("runtimeProfile") == "lock-quorum":
+        fields.update({"expectedMpuSceneSha256", "mpuKeys"})
     if request["action"] == "retained-scene-isolate":
         fields.add("expectedBaseline")
     require(set(request) == fields,
@@ -267,7 +293,7 @@ def run(request, node):
             "originalSceneRestored": False, "canonicalPassClaimed": False, "backupRestorationUsed": False,
             "credentialContentsRead": False, "inspectionOnly": request["action"] == "retained-scene-audit",
             "mutated": mutated, "activeNamespaceIsolated": "active" not in locations}
-    if request["expectedOwner"].get("runtimeProfile") == "outcome-legacy":
+    if request["expectedOwner"].get("runtimeProfile") in {"outcome-legacy", "lock-quorum"}:
         result["privateArchiveParents"] = []
         for target in (*retained_roots, retained_state):
             info = target.parent.lstat() if target.parent.exists() else None

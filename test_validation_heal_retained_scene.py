@@ -159,6 +159,7 @@ class RetainedSceneTests(unittest.TestCase):
             scope = {"__name__": "__node_test__"}
             exec(compile(source, "retained-node", "exec"), scope)
             self.assertTrue(callable(scope["retained_scene_backend"].run))
+            self.assertTrue(callable(scope["mpu_scene_backend"].run))
             return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
         with tempfile.TemporaryDirectory() as directory, patch("scripts.validation_heal.healthy.subprocess.run", side_effect=execute):
             Fleet(["vm000"], Path(directory), "gh-12345-1-h2").remote("vm000", "retained-scene-audit", expectedOwner={})
