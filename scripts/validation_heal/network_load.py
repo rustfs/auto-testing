@@ -30,6 +30,11 @@ SOURCE_FILES = {
         'crates/ecstore/src/set_disk/ops/object.rs': 'fdcfda1a8811a93537f9cd47cadac7380bee66b3d14242ca91500bbf38e6bedb'},
 }
 MULTIPART_SOURCE = '1ac5c17a94845fb16f6d75b8d3692cb18f81556086d4cc4a96b63deae106ab8d'
+MPU_LAYOUT_SOURCE = '479a3b3f8c9f7b43b25b3f41d1b6769a67c6dc58c15845331da87e1fbc762679'
+DISK_SOURCE = {
+    '072b57b37559fbe626aeda8abf61617fdcbdd926': '7ab3137947d0a4f9007a40abc3e1735ec83ca820f6dc03a3a9426ae1b4f096d7',
+    '1c7fc818dd858247c45b39542abd8291b1e6e31b': 'cd045a322ad7e41e2253ac08554f10634192345cbd923f2854553a229c036f4b',
+}
 MUTATIONS = frozenset({'put_object', 'copy_object', 'delete_object', 'create_multipart_upload',
     'upload_part', 'complete_multipart_upload', 'abort_multipart_upload'})
 READS = frozenset({'get_object', 'head_object', 'list_objects_v2', 'list_object_versions',
@@ -40,7 +45,11 @@ def source_reference(candidate):
     require(candidate in SOURCE_FILES, 'DL operations are not reviewed for this exact candidate')
     return {'candidateCommit': candidate, 'sourceFiles': {**SOURCE_FILES[candidate],
         'crates/ecstore/src/set_disk/mod.rs': MPU_SOURCE[candidate],
+        'crates/ecstore/src/set_disk/metadata.rs': MPU_LAYOUT_SOURCE,
+        'crates/ecstore/src/disk/mod.rs': DISK_SOURCE[candidate],
         'crates/ecstore/src/set_disk/ops/multipart.rs': MULTIPART_SOURCE},
+        'multipartLayout': {'systemBucket': '.rustfs.sys/multipart', 'keyRoot': 'sha256(bucket + "/" + object)',
+                            'uploadIdDecodedForScope': False},
         'negativeObjectMutation': {'httpStatus': 503, 'code': 'ServiceUnavailable'},
         'abortRefusalIsNotRollback': True, 'listDuringPartitionIsNotGlobalCompleteness': True,
         'maximumWorkers': 4, 'admissionSeconds': ADMISSION_SECONDS,
@@ -164,9 +173,9 @@ def read_steps(fixture, endpoint):
     ]
 
 
-def read_journal(directory, binding, endpoint, role):
+def read_receipts(directory, binding, endpoint):
     """Reconstruct from original durable bytes, including requests with no ACK."""
-    require(role in {'writer', 'reader'} and endpoint in binding['endpoints'], 'unknown DL worker ownership')
+    require(endpoint in binding['endpoints'], 'unknown DL endpoint ownership')
     directory = Path(directory)
     requests, acks = sorted(directory.glob('*-request.json')), sorted(directory.glob('*-ack.json'))
     require({p.name for p in acks} <= {p.name.replace('-request.json', '-ack.json') for p in requests},
@@ -176,18 +185,16 @@ def read_journal(directory, binding, endpoint, role):
         request = json.loads(path.read_text())
         require(path.name == f'{index:06d}-request.json' and type(request['sequence']) is int and request['sequence'] == index
                 and request.get('schemaVersion') == 2
-                and request['runId'] == binding['runId'] and request['identity']['endpoint'] == endpoint
-                and request['identity']['role'] == role and type(request['identity']['step']) is int
-                and request['identity']['step'] == index, 'DL request sequence/run/worker ownership differs')
+                and request['runId'] == binding['runId'], 'DL request sequence/run ownership differs')
         validate_s3_request(binding, request['operation'], request['params'])
-        require(request['operation'] in (MUTATIONS if role == 'writer' else READS), 'DL operation escaped its worker role')
         row = {'request': request, 'requestFile': path.name, 'requestSha256': hashlib.sha256(path.read_bytes()).hexdigest(),
                'prepared': True, 'ackPresent': False, 'resolution': 'UNKNOWN_PREPARED_REQUEST'}
         ack_path = path.with_name(path.name.replace('-request.json', '-ack.json'))
         if ack_path.exists():
-            ack = json.loads(ack_path.read_text())
+            ack_bytes = ack_path.read_bytes()
+            ack = json.loads(ack_bytes)
             require(ack.get('schemaVersion') == 2 and ack['requestFile'] == path.name and ack['requestSha256'] == row['requestSha256']
-                    and ack['runId'] == request['runId'] and ack['sequence'] == index
+                    and ack['runId'] == request['runId'] and type(ack['sequence']) is int and ack['sequence'] == index
                     and ack['identity'] == request['identity'] and ack['clockDomain'] == request['clockDomain'],
                     'DL ACK is not bound to its exact durable request')
             observed = ack['observation']
@@ -206,9 +213,22 @@ def read_journal(directory, binding, endpoint, role):
                         and ack['collectorCallStartedMonotonicNs'] <= observed['callStartedMonotonicNs']
                         < observed['callFinishedMonotonicNs'] <= ack['collectorCallFinishedMonotonicNs'],
                         'DL actual client interval escaped the original collection window')
-            row.update(ackPresent=True, ack=ack, resolution='UNKNOWN_RESULT' if observed.get('resultUnknown') is True
+            row.update(ackPresent=True, ackFile=ack_path.name, ackSha256=hashlib.sha256(ack_bytes).hexdigest(),
+                       ack=ack, resolution='UNKNOWN_RESULT' if observed.get('resultUnknown') is True
                        else 'REQUIRES_INDEPENDENT_RECONCILIATION')
         rows.append(row)
+    return rows
+
+
+def read_journal(directory, binding, endpoint, role):
+    require(role in {'writer', 'reader'}, 'unknown DL worker role')
+    rows = read_receipts(directory, binding, endpoint)
+    for index, row in enumerate(rows, 1):
+        request, identity = row['request'], row['request']['identity']
+        require(isinstance(identity, dict) and identity.get('endpoint') == endpoint and identity.get('role') == role
+                and type(identity.get('step')) is int and identity['step'] == index,
+                'DL request worker ownership or ordinal differs')
+        require(request['operation'] in (MUTATIONS if role == 'writer' else READS), 'DL operation escaped its worker role')
     return rows
 
 
@@ -241,11 +261,8 @@ class LoadJournal(Recorder):
             return {'attempt': self.attempted, 'operation': step['operation'], 'error': error, 'row': row}
 
 
-def validate_call(result, fixture, endpoint, *, readable):
-    row = result['row']
-    require(row is not None and row['ackPresent'], 'DL call has no exact durable ACK; retain its original request')
-    observation = row['ack']['observation']
-    request, operation = row['request'], row['request']['operation']
+def validate_planned_request(request, fixture, endpoint, *, readable):
+    operation = request['operation']
     role, ordinal = request['identity']['role'], request['identity']['step']
     steps = mutation_steps(fixture, endpoint) if role == 'writer' else read_steps(fixture, endpoint)
     require(type(ordinal) is int and 1 <= ordinal <= len(steps), 'DL request escaped its exact planned ordinal')
@@ -255,6 +272,14 @@ def validate_call(result, fixture, endpoint, *, readable):
             and request['identity']['nonce'] == step.get('nonce') and request['expectHttp'] == expected_http
             and (request.get('payload') == digest(step['body']) if 'body' in step else 'payload' not in request),
             'DL original selector/nonce/body/status policy differs from its planned request')
+
+
+def validate_call(result, fixture, endpoint, *, readable):
+    row = result['row']
+    require(row is not None and row['ackPresent'], 'DL call has no exact durable ACK; retain its original request')
+    observation = row['ack']['observation']
+    request, operation = row['request'], row['request']['operation']
+    validate_planned_request(request, fixture, endpoint, readable=readable)
     response = observation.get('response') or {}
     status = response.get('ResponseMetadata', {}).get('HTTPStatusCode')
     require(observation.get('clientCallInvoked') is True and observation.get('resultUnknown') is False

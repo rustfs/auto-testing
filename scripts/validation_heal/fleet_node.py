@@ -1740,6 +1740,7 @@ def main(request):
     for action in ("incarnation-census", "incarnation-capture", "incarnation-install", "incarnation-finalize", "incarnation-phase"):
         actions[action] = incarnation_operation
     actions["task-records"] = task_records
+    actions["mpu-scene"] = lambda value: globals()["mpu_scene_backend"].run(value, globals())
     actions["process-clock"] = process_clock
     actions["environment-capabilities"] = environment_capabilities
     for action in ("retained-scene-audit", "retained-scene-isolate"):

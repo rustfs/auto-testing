@@ -2040,7 +2040,7 @@ Original failures and original reports remain unchanged.
 | --- | --- | --- |
 | DV | Reuses auto-test `seed(DV)` and `suspend_fixture`: four keys with three distinct non-null data versions each; real suspended overwrites, null marker creation/removal ACKs; retained live/null marker identities; current and historical markers. Versioning returns to Enabled before partition. The fault targets a retained null data version. Every selected key version participates in GET, negative Heal and complete recursive recovery. All 15 retained data versions receive full physical shard checks; markers receive exact S3 refusal/header checks. HEAD preserves version identity, length, ETag, Last-Modified and metadata. | This expanded fixture still needs a new live run and independent evidence acceptance. It does not claim a partition while the bucket remains Suspended. |
 | DB | Adds a separate never-versioned run-owned bucket with the default 128 controls. The exact candidate size contract and actual EC:8 process/object geometry calibrate zero/one, 4 KiB, inline, EC block and source-bound 5-MiB MPU minimum minus/exact/plus sizes. All 128 controls require decoded full-set shape witnesses; every distinct size has partition GET, physical checksum/no-part and Range evidence. Original/fault/rejoin/repaired snapshots explicitly include both primary and DB buckets. All peers must preserve complete inventories and stable original HEADs. | Fresh live execution and independent acceptance remain required. The MPU-size controls are single PUT objects; they do not claim completed multipart protocol coverage, which remains part of DL. |
-| DL | `network_load.py` adds the request-layer foundation: three distinct control versions per endpoint, response-bound MPU UploadId/part ETag fixtures and four independent worker journals. Its 28-call matrix includes concurrent PUT/GET/HEAD/LIST/COPY/DELETE, version selectors and actual Create/UploadPart/Complete/Abort MPU requests. Requests bind exact selectors, nonce/body/status policy and worker/run/source/endpoint URL fingerprint; overlap uses actual SDK intervals. | This module is not yet wired into the live adapter. Add complete post-rejoin object/version/MPU reconciliation, failure-scene retention and recovery/isolation integration before dispatch. Mocked matrix completion is not DL live or canonical acceptance. |
+| DL | `network_load.py` supplies three distinct control versions per endpoint, response-bound MPU fixtures and four independent worker journals for its concurrent 28-call matrix. `network_load_session.py` registers seed/workers before SDK invocation, reconciles original versions and pending MPU effects after rejoin, and withholds cleanup until a stopped physical MPU census proves no files remain. Original request and ACK byte hashes remain frozen. | Session and MPU census are not yet wired into the live adapter. Independent physical repair of partially refused version deletes, retained-scene isolation and recovery integration remain required before dispatch. Modeled matrix/reconciliation tests are not DL live or canonical acceptance. |
 
 The expanded DV fixture stays within the existing 128-identity/512-MiB
 inventory limits. Network expiry remains 1,200 seconds; partition task deadlines,
@@ -2081,9 +2081,30 @@ ACK JSON. Only actual invoked SDK intervals in one clock domain can prove
 client overlap; collector setup windows cannot establish it, and no server
 commit fence is claimed.
 
-The pending live adapter must register the seed Recorder and every worker
-journal before invocation, including failures before a complete fixture is
-returned. It must preserve the original object and system MPU failure scene,
-resolve every invoked mutation without silently retrying PUT/Complete, and
-refuse cleanup/acceptance while any result remains unresolved. This request
-layer alone neither enables a new fleet dispatch nor completes I03.
+`LoadSession` now durably registers the seed Recorder and all four worker
+journals before invocation. Seed failures retain their original unknown
+request even when no complete fixture returns. Recovery first verifies all
+original business versions on every peer, binds discovered pending upload IDs
+only to original prepared Create requests, and records distinct recovery Abort
+ACKs. No PUT/Complete retry or fabricated original ACK is allowed. Public
+absence alone cannot permit cleanup: a stopped four-node census must also
+find no remaining MPU files. The original stopped business snapshot is frozen
+before load; the final stopped snapshot must preserve all original files and
+formats, with only the existing physical repair oracle's exact acknowledged
+version exceptions. Hidden business files also block cleanup. Both original
+request and ACK byte hashes must remain unchanged. Unexpected positive mutation ACKs, changed/missing
+business versions and hidden MPU orphans retain the namespace.
+
+`mpu_scene.py` hashes all files under eight exact run-owned bucket/key SHA-256
+prefixes on the original sixteen drives, using the immutable candidate's
+multipart layout. It neither decodes opaque UploadIds nor reads credential or
+other system-key contents. It requires stopped original services, matching
+candidate/owner/mount identities and bounded stable regular files. The census
+does not claim payload integrity or EC/bitrot correctness.
+
+The pending live adapter must preserve the original object and system MPU
+failure scene, independently repair partial refused deletes without dropping
+version assertions, and isolate unresolved scenes with the existing strict
+recovery protocol. Session/census support alone neither enables a new fleet
+dispatch nor completes I03. The 807-check Heal suite passes with nine platform
+skips; no new live or canonical acceptance is claimed.
