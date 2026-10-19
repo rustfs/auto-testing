@@ -3,15 +3,133 @@
 import copy
 from datetime import datetime, timezone
 import json
+from pathlib import Path
+import stat
+import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 from scripts.validation_heal import queue_pressure as queue
 from scripts.validation_heal.fleet_node import runtime_config
 from scripts.validation_heal.matrix import AUTOMATIC_CASES, select
+from scripts.validation_heal import drive_gate, fleet_node
+import test_validation_heal_persistence_mrf as mrf_gate_fixtures
 
 
 class QueuePressureTests(unittest.TestCase):
+    def durable_gate_fixture(self, root):
+        state, disk, bucket, system = mrf_gate_fixtures.MrfCorruptionTests().bucket_gate_fixture(root)
+        prefix = bucket.name
+        durable = bucket.with_name(prefix + '-durable')
+        bucket.rename(durable)
+        (state / 'owner.json').write_text(json.dumps({'runtimeProfile': 'queue-pressure', 'bucket': prefix}))
+        for i in range(4): (disk / 'data' / (prefix + f'-queue-{i}')).mkdir()
+        return state, disk, durable, system
+
+    def test_actual_durable_gate_preserves_system_and_queue_buckets_through_activation_and_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state, disk, durable, system = self.durable_gate_fixture(Path(tmp))
+            controls = [system, disk / 'data', *list((disk / 'data').glob('*-queue-*'))]
+            original = {p: (p.stat().st_mode, p.stat().st_ino) for p in controls}
+            mode = stat.S_IMODE(durable.stat().st_mode)
+            with mrf_gate_fixtures.MrfCorruptionTests().rooted_lstat():
+                value = drive_gate.apply_gate(state, [disk], 0, 'permission-denied', scope='durable-bucket')
+                self.assertEqual(value['dataPath'], str(durable))
+                self.assertEqual(value['scope'], 'durable-bucket')
+                drive_gate.activate_gate(state, [disk])
+                self.assertEqual(stat.S_IMODE(durable.stat().st_mode), 0)
+                self.assertEqual({p: (p.stat().st_mode, p.stat().st_ino) for p in controls}, original)
+                self.assertEqual((system / 'format.json').read_bytes(), b'format-control')
+                self.assertTrue(drive_gate.release_gate(state, [disk])['originalPermissionsRestored'])
+            self.assertEqual(stat.S_IMODE(durable.stat().st_mode), mode)
+
+    def test_durable_gate_rejects_foreign_owner_scope_symlink_and_marker_redirection(self):
+        for kind in ('profile', 'prefix', 'symlink', 'marker'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                state, disk, durable, system = self.durable_gate_fixture(Path(tmp))
+                owner = json.loads((state / 'owner.json').read_text())
+                if kind == 'profile': owner['runtimeProfile'] = 'flapping'
+                elif kind == 'prefix': owner['bucket'] = '../foreign'
+                elif kind == 'symlink':
+                    saved = durable.with_name(durable.name + '-saved')
+                    durable.rename(saved)
+                    durable.symlink_to(saved, target_is_directory=True)
+                (state / 'owner.json').write_text(json.dumps(owner))
+                with mrf_gate_fixtures.MrfCorruptionTests().rooted_lstat():
+                    if kind == 'marker':
+                        drive_gate.apply_gate(state, [disk], 0, 'permission-denied', scope='durable-bucket')
+                        p = state / 'drive-gate.json'
+                        value = json.loads(p.read_text())
+                        value['dataPath'] = str(system)
+                        p.write_text(json.dumps(value));p.chmod(0o600)
+                        with self.assertRaises(ValueError): drive_gate.activate_gate(state, [disk])
+                        with self.assertRaises(ValueError): drive_gate.release_gate(state, [disk])
+                    else:
+                        with self.assertRaises(ValueError):
+                            drive_gate.apply_gate(state, [disk], 0, 'permission-denied', scope='durable-bucket')
+                        self.assertFalse((state / 'drive-gate.json').exists())
+
+    def test_live_arm_selects_fixed_durable_scope_only_for_queue_pressure(self):
+        before = {name: {'pid': 10, 'startTicks': 100}.get(name, name) for name in fleet_node.PROCESS_FIELDS}
+        request = {'runId': 'owned', 'action': 'drive-gate-arm-live', 'disk': 0, 'expected': before}
+        for profile, expected in [('queue-pressure', {'scope': 'durable-bucket'}), ('flapping', {})]:
+            calls = []
+            gate = types.SimpleNamespace(validate_live_boundary=lambda pid: None,
+                apply_gate=lambda *args, **kwargs: calls.append(kwargs) or {'state': 'ARMED'})
+            with patch.object(fleet_node, 'owned', return_value=(Path('/owned'), [Path('/disk')], {'runtimeProfile': profile})), \
+                 patch.object(fleet_node, 'process', return_value=before), \
+                 patch.object(fleet_node, 'gate_module', return_value=gate), \
+                 patch.object(fleet_node, 'quorum_gate_module', return_value=types.SimpleNamespace(checked=lambda *args: None)):
+                self.assertTrue(fleet_node.drive_gate_arm_live(request)['sameOriginalProcess'])
+            self.assertEqual(calls, [expected])
+
+    def test_actual_durable_scope_probes_business_denial_and_both_system_controls_in_same_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state, disk, durable, _ = self.durable_gate_fixture(Path(tmp))
+            denied = {'uid': 0, 'gid': 0, 'errno': 13}
+            control = {'uid': 0, 'gid': 0, 'errno': 0}
+            value = {'mode': 'permission-denied', 'scope': 'durable-bucket', 'phase': 'active',
+                     'dataPath': str(durable), 'disk': 0}
+            outputs = [types.SimpleNamespace(returncode=0, stdout=json.dumps(v)) for v in (denied, denied, control, control)]
+            with mrf_gate_fixtures.MrfCorruptionTests().rooted_lstat(), \
+                 patch.object(drive_gate, 'checked_gate', return_value=value), \
+                 patch.object(drive_gate, 'process_identity', return_value={'uid': 0, 'gid': 0, 'capEff': 0}), \
+                 patch.object(Path, 'readlink', side_effect=[Path('mnt:[candidate]'), Path('mnt:[host]')]), \
+                 patch.object(drive_gate.subprocess, 'run', side_effect=outputs) as invoke:
+                proof = drive_gate.probe_gate(state, [disk], 123)
+            self.assertTrue(proof['systemMetadataAccessible'])
+            self.assertEqual(proof['scope'], 'durable-bucket')
+            self.assertEqual(len(invoke.call_args_list), 4)
+            for call in invoke.call_args_list:
+                self.assertIn('--mount=/proc/123/ns/mnt', call.args[0])
+                self.assertIn('--bounding-set=-dac_override,-dac_read_search', call.args[0])
+            self.assertTrue(invoke.call_args_list[1].args[0][-1].endswith('-durable/objects/0000.bin/xl.meta'))
+            self.assertTrue(invoke.call_args_list[2].args[0][-1].endswith('/data/.rustfs.sys/.validation-mrf-write-probe'))
+            self.assertTrue(invoke.call_args_list[3].args[0][-1].endswith('/data/.rustfs.sys/format.json'))
+
+    def test_durable_refusal_requires_both_successful_system_controls_and_exact_owned_path(self):
+        run_id, bucket = 'gh-123-1-h1', 'rv-heal-0123456789abcdef-durable'
+        control = {'errno': 0, 'uid': 0, 'gid': 0}
+        value = {'scope': 'durable-bucket', 'disk': 0, 'errno': 13, 'name': 'EACCES', 'readProbe': {'errno': 13},
+            'dataPath': f'/data/rustfs1/heal-validation/{run_id}/data/{bucket}', 'systemMetadataAccessible': True,
+            'systemMetadataControl': {'sameServiceIdentity': True, 'read': dict(control), 'write': dict(control)},
+            'sameServiceIdentity': True, 'privateMountNamespace': True, 'dacBypassRemoved': True}
+        queue.validate_durable_gate(value, run_id, bucket)
+        for kind in ('scope', 'path', 'disk', 'read', 'write', 'control', 'identity', 'namespace', 'dac', 'flag', 'false-success'):
+            bad = copy.deepcopy(value)
+            if kind == 'scope': bad['scope'] = 'disk'
+            elif kind == 'path': bad['dataPath'] = bad['dataPath'].removesuffix('-durable')
+            elif kind == 'disk': bad['disk'] = 1
+            elif kind in {'read', 'write'}: bad['systemMetadataControl'][kind]['errno'] = 13
+            elif kind == 'control': bad['systemMetadataControl'].pop('read')
+            elif kind == 'identity': bad['systemMetadataControl']['write']['uid'] = 1000
+            elif kind == 'namespace': bad['privateMountNamespace'] = False
+            elif kind == 'dac': bad['dacBypassRemoved'] = False
+            elif kind == 'flag': bad['systemMetadataAccessible'] = False
+            else: bad['systemMetadataControl']['read']['errno'] = False
+            with self.subTest(kind=kind), self.assertRaises(ValueError): queue.validate_durable_gate(bad, run_id, bucket)
+
     def status(self):
         return {"clusterStatusComplete": True, "coverage": {"expected": 1, "responded": 1, "unknown": 0},
             "healQueueLength": 2, "healActiveTasks": 1, "healOperations": {"queueLength": 2,

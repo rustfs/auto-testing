@@ -43,19 +43,20 @@ def require(value, message):
 def gate_folder(state, roots, disk, scope):
     folder = roots[disk] / "data"
     if scope == "disk": return folder
-    require(scope == "bucket", "invalid drive gate scope")
+    require(scope in {"bucket", "durable-bucket"}, "invalid drive gate scope")
     marker = state / "owner.json"
     info = marker.lstat()
     require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
             and info.st_size < 16384 and info.st_mode & 0o022 == 0, "invalid bucket gate owner marker")
     owner = json.loads(marker.read_text())
-    require(owner.get("runtimeProfile") == "mrf-crash"
+    expected_profile = "queue-pressure" if scope == "durable-bucket" else "mrf-crash"
+    require(owner.get("runtimeProfile") == expected_profile
             and isinstance(owner.get("bucket"), str) and re.fullmatch(r"rv-heal-[0-9a-f]{16}", owner["bucket"]),
             "bucket gate requires the dedicated owned MRF fixture")
     info = folder.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700,
             "bucket gate private data root changed")
-    return folder / owner["bucket"]
+    return folder / (owner["bucket"] + ("-durable" if scope == "durable-bucket" else ""))
 
 
 def checked_gate(state, roots):
@@ -88,7 +89,7 @@ def apply_gate(state, roots, disk, mode, *, scope="disk"):
             and (original_mode == 0o700 if scope == "disk" else
                  mode == "permission-denied" and original_mode in {0o700, 0o755, 0o777}),
             "expected owned gate directory with supported original permissions")
-    if scope == "bucket":
+    if scope in {"bucket", "durable-bucket"}:
         objects = (folder / "objects").lstat()
         probe = (folder / "objects/0000.bin").lstat()
         read_target = (folder / "objects/0000.bin/xl.meta").lstat()
@@ -99,7 +100,7 @@ def apply_gate(state, roots, disk, mode, *, scope="disk"):
     value = {"schemaVersion": 1, "disk": disk, "mode": mode, "dataPath": str(folder),
              "originalMode": original_mode, "device": info.st_dev, "inode": info.st_ino,
              "phase": "armed" if mode == "permission-denied" else "active"}
-    if scope == "bucket": value["scope"] = scope
+    if scope != "disk": value["scope"] = scope
     # Intent precedes chmod/start. Cleanup can restore a partially applied gate.
     fd = os.open(state / "drive-gate.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as stream:
@@ -203,7 +204,7 @@ def probe_gate(state, roots, pid):
     read = None
     if value["mode"] == "permission-denied":
         # A denied write alone cannot prove a stale member cannot read.
-        relative = "objects/0000.bin/xl.meta" if value.get("scope") == "bucket" else ".rustfs.sys/format.json"
+        relative = "objects/0000.bin/xl.meta" if value.get("scope") in {"bucket", "durable-bucket"} else ".rustfs.sys/format.json"
         read_args = [*args[:-4], "python3", "-c", READ_PROBE_SOURCE,
                      value["dataPath"] + "/" + relative]
         result = subprocess.run(read_args, capture_output=True, text=True, timeout=15)
@@ -211,7 +212,7 @@ def probe_gate(state, roots, pid):
         read = json.loads(result.stdout)
         validate_probe(read, value["mode"], identity)
     control = None
-    if value.get("scope") == "bucket":
+    if value.get("scope") in {"bucket", "durable-bucket"}:
         system = roots[value["disk"]] / "data/.rustfs.sys"
         info = system.lstat()
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0, "MRF control root is not an owned non-linked directory")

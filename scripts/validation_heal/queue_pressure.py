@@ -66,6 +66,21 @@ REFERENCE = {"candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926",
     "nativeCriticalWindowClaimed": False}
 
 
+def validate_durable_gate(value, run_id, bucket):
+    control = value.get("systemMetadataControl") or {}
+    require(value.get("scope") == "durable-bucket" and type(value.get("disk")) is int and value["disk"] == 0
+            and value.get("dataPath") == f"/data/rustfs1/heal-validation/{run_id}/data/{bucket}"
+            and value.get("systemMetadataAccessible") is True and control.get("sameServiceIdentity") is True
+            and all(type(control.get(label, {}).get("errno")) is int and control[label]["errno"] == 0
+                    and type(control[label].get("uid")) is int and control[label]["uid"] == 0
+                    and type(control[label].get("gid")) is int and control[label]["gid"] == 0 for label in ("read", "write"))
+            and value.get("sameServiceIdentity") is True and value.get("privateMountNamespace") is True
+            and value.get("dacBypassRemoved") is True and value.get("name") == "EACCES"
+            and value.get("errno") == 13 and value.get("readProbe", {}).get("errno") == 13,
+            "queue pressure needs exact durable-bucket refusal and readable/writable system metadata")
+    return value
+
+
 def rejection(observed, *, admission, reason, code, http):
     require(observed.get("httpStatus") == http and not observed.get("transportError"),
             "queue rejection has a wrong status or an unknown transport result")
@@ -311,17 +326,15 @@ def run_topology(args, topology, nodes, **unused):
         require(len({scope["token"] for scope in scopes[:3]}) == 3, "independent buckets reused a task identity")
         rejected = rejection(pressure.call(scopes[3]["path"]), admission="full", reason="none", code="SlowDown", http=503)
         require(pressure.sample()["queueLength"] == CAPACITY, "NOT_OBSERVED: Full was not witnessed with the actual two-slot queue")
-        # Restrict the outage to one run-owned drive in the existing service's
-        # private mount namespace. No scheduler/process is stopped to fake Full.
+        # Deny only the dedicated durable bucket on one owned drive. System
+        # metadata must remain readable/writable for the real MRF journal.
         gate_node, gate_disk = nodes[0], 0
         owner = fleet.record("original-gated-process", fleet.remote(gate_node, "process"))
         fleet.drive_gates.add(gate_node)
         fleet.record("permission-gate-armed", fleet.remote(gate_node, "drive-gate-arm-live", disk=gate_disk, expected=owner))
         fleet.record("permission-gate-activated", fleet.remote(gate_node, "drive-gate-activate"))
         gate_proof = fleet.record("actual-service-refusal", fleet.remote(gate_node, "drive-gate-probe"))
-        require(gate_proof.get("sameServiceIdentity") is True and gate_proof.get("privateMountNamespace") is True
-                and gate_proof.get("name") == "EACCES" and gate_proof.get("readProbe", {}).get("errno") == 13,
-                "pressure degraded write has no same-namespace refusal witness")
+        validate_durable_gate(gate_proof, run_id, durable_bucket)
         earliest_ms, ack_start = int(time.time() * 1000) - 5000, datetime.now(timezone.utc)
         durable_expected, obligations, _ = acknowledge(durable_recorder, durable_bucket, "offline-put", durable_expected, fixture="DB")
         fleet.record("durable-ACK-ledger", {"expected": durable_expected, "obligations": obligations})

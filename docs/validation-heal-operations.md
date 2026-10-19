@@ -646,6 +646,12 @@ J06 的自动入口为 `heal.performance-abba`。执行器在部署前冻结三�
 
 A02 的自动入口为 `heal.admin-scope-isolation`。H2 的专用 `scope-isolation` runtime 使用当前四节点/十六盘，按盘序交织节点并设置 `RUSTFS_ERASURE_SET_DRIVE_COUNT=8`，要求真实两个 set 各跨全部四个节点。普通执行器仍只接受原单 set。两个桶的完整 ACK/实际物理 set 清单冻结后，root/bucket/prefix/object/pool-set 各自新部署、注入选中与控制故障。完整物理和 streaming 证明必须先于 GET 和控制备份恢复。H1 保留原四盘单 set，明确记录不存在未选 set 的适用边界；不能拿同盘目录冒充第二个 set。未限制选择器的原始 receipt 在该固定候选中允许 null，单独保存实际物理映射，显式 pool/set 则必须严格匹配原始字段。
 
+### I04 durable responsibility during queue pressure
+
+The live `queue-pressure` permission fault targets only `<owned-prefix>-durable` on the first owned drive. The other four queue buckets and `.rustfs.sys` retain their original permissions. The live arm derives this fixed suffix from the root-owned reservation; callers cannot supply another bucket or path. Flapping keeps its separate whole-drive fault and F07 keeps its original dedicated bucket scope.
+
+Before the three degraded-write ACKs, the same original service/mount-namespace identity must observe business read/write `EACCES` and successful system metadata read/write controls with DAC bypass removed. A whole-drive refusal or unavailable system control is rejected before those writes. Full, Merged, Dropped, all three committed MRF responsibilities, exact source-task retirement, complete six-bucket snapshots and original `769/129/129/129` fixtures remain required. Blocking the MRF journal cannot isolate queue-Full retention. A corrected fault does not establish canonical PASS until a separate complete live run is independently audited; original failed results remain retained.
+
 ### Exact-source native race subsets
 
 `race_native.py` builds and runs the reviewed tests in `race_native_contracts.json` on a hosted tools runner. The candidate checkout must match the exact commit, tree, lock and reviewed Rust files; the producer and registry must match the exact auto-testing checkout. The build uses a fresh target directory and rejects compiler wrappers or injected Rust flags. Each selected regression runs in a separate process with one exact nonignored test. Original logs, executable digest and ordered barrier milestones are retained. These artifacts are separate from `native_regressions.py`; existing F07/C11 artifact contracts remain unchanged.

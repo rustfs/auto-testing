@@ -951,7 +951,8 @@ def drive_gate_arm_live(request):
     module = gate_module()
     module.validate_live_boundary(before["pid"])
     require(quorum_gate_module().checked(state, roots) is None, "live drive gate cannot share a quorum gate")
-    receipt = module.apply_gate(state, roots, request["disk"], "permission-denied")
+    gate_args = {"scope": "durable-bucket"} if owner.get("runtimeProfile") == "queue-pressure" else {}
+    receipt = module.apply_gate(state, roots, request["disk"], "permission-denied", **gate_args)
     after = process(request)
     require(all(before.get(name) == after.get(name) for name in PROCESS_FIELDS), "live arm crossed its owned process identity")
     return {**receipt, "processBefore": before, "processAfter": after, "sameOriginalProcess": True}
