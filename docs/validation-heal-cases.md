@@ -1222,6 +1222,16 @@ Execution policy: `evidence-blocked`; disabled by default: `false`.
 
 Blocked reason (`EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION`): 已实现 H1/H2 checkpoint 截断、未来 schema、真实较早代次回放、committed MRF CRC 故障、私有限额卷的真实 journal ENOSPC 和独立安全重扫；10 项原生回归仅为前置证据。仍缺全部所需 fsync/commit 临界点审核和完整现场分支的独立 live 审计，诊断执行不能提升 canonical 验收。
 
+Journal ENOSPC recovery preserves the first failed checkpoint/terminal publication
+attempt before restarting the original durable owner after filler release. A new
+rescan is permitted only after that same responsibility either completes with
+full physical and durable terminal proof or retains an exact failed terminal
+without a runnable owner. A still-pending scope remains a failure. Successful
+original replay must repair the complete remaining manifest before any target
+GET; the later distinct rescan must report zero repairs and preserve original
+completion bytes. No forceStart, owner deletion or old-record restoration is
+used to bypass overlap admission. This flow still requires fresh live evidence.
+
 1. 先制造并证明真实 durable root/MRF 责任，CHECKPOINT 定位精确本 run task/record，其他系统记录禁止触碰。
 2. 停止测试服务，按 FAULT_FORMAT 对这些已审核记录分别截断、坏校验、未来 schema、旧代次；写失败实例用独占限额故障层，不塞满真实共享盘。
 3. 重启后核对解析/错误状态：未知或损坏记录保留、可诊断，不能静默删除并 ACK；责任仍能安全重扫处理。

@@ -367,6 +367,86 @@ def retained_write_failure(observed, roots, frozen, current, events):
             "failedWriteAcknowledged": False, "originalFailureReclassified": False, "backupRescueUsed": False}
 
 
+def recover_write_before_rescan(fleet, probe, binding, expected, baseline, original, targets,
+                                frozen, failed, failure_proof, failure_scene, remaining, events, active):
+    token, bucket = frozen["taskId"], frozen["bucket"]
+    # Export the first failed attempt before product recovery may legitimately
+    # replace its runtime status with a successful replay of the same token.
+    fleet.record("original-write-failure-before-recovery", {"firstFailedAttempt": failed, "proof": failure_proof})
+    fleet.stop()
+    require(physical_content(fleet.snapshot("write-failure-before-original-recovery", quiescent=True))
+            == physical_content(failure_scene), "space release changed the original failed repair scene")
+    retained_write_failure(checkpoints.records(fleet, token, "write-failure-checkpoint-before-recovery", quiescent=True),
+        checkpoints.records(fleet, token, "write-failure-root-before-recovery", quiescent=True, family="root"),
+        frozen, failed, events)
+    fleet.start()
+    deadline = time.monotonic() + 180
+    while True:
+        require(time.monotonic() < deadline, "released original write responsibility did not reach a bounded recovery outcome")
+        current = recovery_status(probe, fleet, token)
+        require(time.monotonic() < deadline, "released original write responsibility did not reach a bounded recovery outcome")
+        if current.get("summary") != "running": break
+        time.sleep(.2)
+    fleet.stop()
+    roots = checkpoints.records(fleet, token, "write-original-root-after-recovery", quiescent=True, family="root")
+    if current.get("summary") != "finished":
+        require(all(canonical(current.get(name)) == canonical(failed.get(name))
+                    for name in ("summary", "settings", "outcome", "detail")),
+                "original write recovery neither retained its failure nor completed verified work")
+        retained = retained_write_failure(
+            checkpoints.records(fleet, token, "write-original-checkpoint-after-recovery", quiescent=True),
+            roots, frozen, current, events)
+        require(retained["originalAdmissionRetained"] is False,
+                "original write responsibility still owns its durable scope after recovery; separate rescan is not admitted")
+        require(physical_content(fleet.snapshot("write-original-failed-recovery-physical", quiescent=True))
+                == physical_content(failure_scene), "failed original recovery changed its acknowledged repair scene")
+        fleet.start()
+        return None
+    completion = rescan_outcome(current, bucket, expected,
+        {version_identity(target) for target in remaining}, frozen["bucketIncarnationId"])
+    completion.pop("originalFailedTaskReclassified")
+    durable = completed_original(roots, frozen, current)
+    healed = fleet.snapshot("write-original-replay-physical-before-rescan-or-GET", quiescent=True)
+    fleet.record("write-original-replay-complete-physical-proof",
+        validate_repaired_physical(original, healed, targets[0], repair_targets=targets))
+    for target in targets: verify_proof(fleet, target, "write-original-replay-full-shard-integrity")
+    fleet.start()
+    admissions = []
+    rescanned = run_task(probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
+        option_overrides={"recursive": True}, admissions=admissions)
+    require(len(admissions) == 1 and admissions[0]["clientToken"] != token,
+            "write recovery rescan reused or relabelled the original responsibility")
+    rescan = rescan_outcome(rescanned, bucket, expected, set(), frozen["bucketIncarnationId"])
+    repeated = recovery_status(probe, fleet, token)
+    require(all(canonical(repeated.get(name)) == canonical(current.get(name))
+                for name in ("summary", "settings", "outcome", "detail", "truncated")),
+            "separate rescan rewrote the original write recovery result")
+    for endpoint in binding["endpoints"]:
+        peer = Probe(binding, endpoint)
+        same = status(peer, fleet, checkpoints.PATH, token, "same-original-write-replay-peer")
+        require(all(canonical(same.get(name)) == canonical(current.get(name))
+                    for name in ("summary", "settings", "outcome", "detail", "truncated")),
+                "original write replay did not converge on every peer")
+        inventory = fleet.record("complete-peer-S3", {"endpoint": endpoint, **peer.inventory(bucket,
+            unversioned_current_tags=expected[0]["versionId"] == "null")})
+        verify_seed(expected, inventory); compare_inventories(baseline, inventory)
+    fleet.stop()
+    require(physical_content(healed) == physical_content(fleet.snapshot("write-replay-after-rescan-and-reads", quiescent=True)),
+            "rescan or business reads repaired work missing from the original write replay proof")
+    retained = checkpoints.records(fleet, token, "retained-write-original-completion", quiescent=True, family="root")
+    completed_original(retained, frozen, repeated)
+    require(canonical(exact_records(retained, token, "root")) == canonical(exact_records(roots, token, "root")),
+            "rescan or business reads changed the original write replay durable completion")
+    replay = {"realSameTaskReplayBeforeSeparateRescan": True, "failedFirstAttemptRetained": True,
+              "separateRescanIsOriginalTaskCompletion": False, "durableOriginalCompletion": durable}
+    fleet.record("complete-original-journal-write-reconciliation", {"firstFailedAttempt": failed,
+        "retainedFailureProof": failure_proof, "originalReplayCompletion": current,
+        "originalReplayPhysicalAndCounters": completion, "separateRescan": rescan, "restartProof": replay})
+    fleet.faults.clear()
+    return {"verdict": "PASS", "originalWriteFailure": failure_proof, "separateRescan": rescan,
+            "originalAfterRestart": replay, "completePhysicalAndS3ManifestsVerified": True, "canonicalCasePassClaimed": False}
+
+
 def journal_write_failure(fleet, probe, binding, expected, baseline, original, targets, frozen, active):
     token, bucket = frozen["taskId"], frozen["bucket"]
     require(frozen["value"]["admin"]["outcome"]["counters"]["healed"] == 0,
@@ -429,6 +509,10 @@ def journal_write_failure(fleet, probe, binding, expected, baseline, original, t
         del fleet.frozen_processes[node]
     active.remove((checkpoints.PATH, token))
     idle_fleet(fleet, binding)
+    if proof["originalAdmissionRetained"]:
+        recovered = recover_write_before_rescan(fleet, probe, binding, expected, baseline, original, targets,
+            frozen, current, proof, scene, remaining, window.events, active)
+        if recovered is not None: return recovered
     admissions = []
     rescanned = run_task(probe, fleet, {"bucket": bucket, "key": ""}, 2, active,
         option_overrides={"recursive": True}, admissions=admissions)

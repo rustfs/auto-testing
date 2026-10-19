@@ -444,7 +444,7 @@ class PersistenceContractTests(unittest.TestCase):
                     persistence.retained_write_failure(observed, roots, frozen, current, events)
 
     def test_write_refusal_release_rescan_and_real_original_retry_have_distinct_evidence(self):
-        for change in (None, "wrong-mount-witness", "release-failure", "late-export-failure"):
+        for change in (None, "wrong-mount-witness", "release-failure", "late-export-failure", "pending-owner"):
             observed, roots, frozen, failed, events = self.write_failure()
             expected = [{"key": f"objects/{i:04d}.bin", "versionId": "null", "deleteMarker": False} for i in range(3)]
             def finished(heal):
@@ -489,8 +489,13 @@ class PersistenceContractTests(unittest.TestCase):
                 if label == "retained-write-admission-after-reads": return final_roots
                 return roots if kwargs.get("family") == "root" else observed
             def run_task(*args, **kwargs): kwargs["admissions"].append({"clientToken": INCARNATION}); return rescanned
+            def recover_pending(*args):
+                issued.append("recover-pending-original-before-new-task")
+                if change == "pending-owner": raise ValueError("original durable scope remains owned")
+                return None
             window = SimpleNamespace(events=events, capture=lambda: events)
             with patch.object(persistence, "JournalWindow", return_value=window), \
+                 patch.object(persistence, "recover_write_before_rescan", create=True, side_effect=recover_pending), \
                  patch.object(persistence, "recovery_status", side_effect=[failed, failed, final]), \
                  patch.object(persistence.checkpoints, "records", side_effect=records), \
                  patch.object(persistence, "validate_repaired_physical"), patch.object(persistence, "verify_proof"), \
@@ -510,6 +515,100 @@ class PersistenceContractTests(unittest.TestCase):
                     with self.assertRaises((ValueError, OSError)): persistence.journal_write_failure(*args)
                     self.assertTrue(fleet.faults)
                     if change == "wrong-mount-witness": self.assertNotIn("bounded-volumes-release", issued)
+                    if change == "pending-owner":
+                        self.assertIn("recover-pending-original-before-new-task", issued)
+                        self.assertNotIn("journal-rescan-complete-physical-before-any-GET", issued)
+
+    def test_pending_write_owner_recovers_before_new_rescan_without_reclassifying_first_failure(self):
+        cases = (None, "failed-terminal", "still-owned", "wrong-terminal", "streaming-error", "rescan-heals",
+                 "same-token", "peer-disagrees", "read-repair", "changed-terminal", "export-error",
+                 "pre-recovery-drift", "recovery-timeout", "late-recovery-completion")
+        for change in cases:
+            with self.subTest(change=change):
+                observed, failed_roots, frozen, failed, events = self.write_failure()
+                current, _, expected, _, _ = self.rescan()
+                final_roots = self.completion_roots(frozen, current)
+                failed_terminal = copy.deepcopy(failed_roots)
+                failed_terminal["node"]["records"][3] = {"disk": 1, "relativePath": journal.names("root", TOKEN)[0], "present": False}
+                terminal = {"schema": 1, "task_id": TOKEN, "heal_type": frozen["rootAdmission"]["value"]["heal_type"],
+                    "options": frozen["rootAdmission"]["value"]["options"], "status": {"Failed": {"error": failed["detail"]}}}
+                failed_terminal["node"]["records"][4].update(encoded(terminal))
+                failed_terminal["node"]["records"][5].update(encoded({"schema": 1, "terminal": terminal, "outcome": failed["outcome"]}))
+                first_failed = copy.deepcopy(failed)
+                failure_scene = {"node": {"files": [], "formats": []}}
+                healed = {"node": {"files": [{"disk": 1, "path": "bound/part.1", "sha256": "a" * 64}], "formats": []}}
+                issued, exports = [], {}
+                class ReplayFleet:
+                    faults = [("node", {"faultId": "F07-shard-0"})]
+                    def start(self): issued.append("start")
+                    def stop(self): issued.append("stop")
+                    def record(self, label, value):
+                        issued.append(label)
+                        if change == "export-error" and label == "complete-original-journal-write-reconciliation": raise OSError("lost reconciliation export")
+                        exports[label] = copy.deepcopy(value); return value
+                    def snapshot(self, label, **kwargs):
+                        issued.append(label)
+                        if label == "write-failure-before-original-recovery" and change == "pre-recovery-drift": return copy.deepcopy(healed)
+                        if label in ("write-failure-before-original-recovery", "write-original-failed-recovery-physical"): return copy.deepcopy(failure_scene)
+                        if label == "write-replay-after-rescan-and-reads" and change == "read-repair": return copy.deepcopy(failure_scene)
+                        return copy.deepcopy(healed)
+                fleet = ReplayFleet()
+                def records(fleet, token, label, **kwargs):
+                    self.assertEqual(token, TOKEN)
+                    if kwargs.get("family") != "root": return copy.deepcopy(observed)
+                    if label == "write-failure-root-before-recovery": return copy.deepcopy(failed_roots)
+                    if change == "still-owned": return copy.deepcopy(failed_roots)
+                    if change == "failed-terminal": return copy.deepcopy(failed_terminal)
+                    result = copy.deepcopy(final_roots)
+                    if change == "wrong-terminal" or change == "changed-terminal" and label == "retained-write-original-completion":
+                        report = journal.decode_json(checkpoint.bytes_of(result["node"]["records"][5]))
+                        if change == "wrong-terminal": report["outcome"]["counters"]["healed"] = 0
+                        else: report["unrelated"] = "changed after rescan"
+                        result["node"]["records"][5].update(encoded(report))
+                    return result
+                def run_task(*args, **kwargs):
+                    self.assertIn("write-original-replay-complete-physical-proof", issued)
+                    self.assertIn("write-original-replay-full-shard-integrity", issued)
+                    kwargs["admissions"].append({"clientToken": TOKEN if change == "same-token" else INCARNATION})
+                    issued.append("independent-new-rescan")
+                    rescan = copy.deepcopy(current)
+                    if change != "rescan-heals": rescan["outcome"]["counters"].update(healed=0, unchanged=257)
+                    return rescan
+                def verify(*args):
+                    issued.append("write-original-replay-full-shard-integrity")
+                    if change == "streaming-error": raise ValueError("actual cohort failed streaming proof")
+                proof = persistence.retained_write_failure(observed, failed_roots, frozen, failed, events)
+                target = {"node": "node", "disk": 1, "relativePath": "bound/part.1", "key": expected[-1]["key"], "versionId": "null"}
+                active = []
+                with patch.object(persistence.checkpoints, "records", side_effect=records), \
+                     patch.object(persistence, "validate_repaired_physical"), patch.object(persistence, "verify_proof", side_effect=verify), \
+                     patch.object(persistence, "recovery_status", return_value={"summary": "running"} if change == "recovery-timeout" else failed if change in ("failed-terminal", "still-owned") else current), \
+                     patch.object(persistence, "run_task", side_effect=run_task), \
+                     patch.object(persistence, "status", return_value=failed if change == "peer-disagrees" else current), \
+                     patch.object(persistence, "Probe", return_value=SimpleNamespace(inventory=lambda *a, **kw: {})), \
+                     patch.object(persistence, "verify_seed"), patch.object(persistence, "compare_inventories"), \
+                     patch.object(persistence.time, "monotonic", return_value=0,
+                                  side_effect=[0, .01, 181] if change in ("recovery-timeout", "late-recovery-completion") else None):
+                    args = (fleet, None, {"endpoints": {"node1": "http://owned"}}, expected, {}, healed, [target],
+                            frozen, failed, proof, failure_scene, [target], events, active)
+                    if change in (None, "failed-terminal"):
+                        result = persistence.recover_write_before_rescan(*args)
+                        if change is None:
+                            self.assertTrue(result["originalAfterRestart"]["realSameTaskReplayBeforeSeparateRescan"])
+                            self.assertFalse(result["originalAfterRestart"]["separateRescanIsOriginalTaskCompletion"])
+                            self.assertFalse(result["canonicalCasePassClaimed"])
+                            self.assertFalse(fleet.faults)
+                            self.assertEqual(exports["complete-original-journal-write-reconciliation"]["firstFailedAttempt"], first_failed)
+                        else:
+                            self.assertIsNone(result); self.assertTrue(fleet.faults)
+                            self.assertNotIn("independent-new-rescan", issued)
+                    else:
+                        with self.assertRaises((ValueError, OSError)): persistence.recover_write_before_rescan(*args)
+                        self.assertTrue(fleet.faults)
+                        if change in ("still-owned", "wrong-terminal", "streaming-error"):
+                            self.assertNotIn("independent-new-rescan", issued)
+                self.assertEqual(failed, first_failed)
+                self.assertEqual(exports["original-write-failure-before-recovery"]["firstFailedAttempt"], first_failed)
 
     def test_successful_replay_cannot_discard_rescue_before_manifest_terminal_and_evidence_agree(self):
         for change in (None, "read-repair", "late-archive-failure", "rescan-relabels-original"):
