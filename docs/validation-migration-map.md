@@ -9,17 +9,17 @@ live run proves each source assertion on the required topology.
 
 ## Current acceptance and remaining work
 
-All 158 canonical IDs are retained. Independent complete live acceptance is **103/158**: the prior 101-case census plus B07 `heal.below-read-quorum` ([run 38727279347/1](https://github.com/rustfs/rustfs/actions/runs/38727279347)) and A10 `heal.admin-option-contract` ([run 39197088183/1](https://github.com/rustfs/rustfs/actions/runs/39197088183)). Both complete source matrices, immutable candidate/package/tools and cleanup were independently audited; earlier failures remain retained.
+All 158 canonical IDs are retained. Independent complete live acceptance is **104/158**: the prior 101-case census plus B07 `heal.below-read-quorum` ([run 38727279347/1](https://github.com/rustfs/rustfs/actions/runs/38727279347)), A10 `heal.admin-option-contract` ([run 39197088183/1](https://github.com/rustfs/rustfs/actions/runs/39197088183)) and B06 `heal.read-quorum-boundary` ([run 39223475622/1](https://github.com/rustfs/rustfs/actions/runs/39223475622)). Their complete source matrices, immutable candidate/package/tools and cleanup were independently audited; earlier failures remain retained.
 
 | Acceptance state | Cases | Remaining requirement |
 | --- | ---: | --- |
-| Independently accepted complete live PASS | 103 | Preserve original provenance and complete results. |
-| Retained live failures with existing executors | 31 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
+| Independently accepted complete live PASS | 104 | Preserve original provenance and complete results. |
+| Retained live failures with existing executors | 30 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
 | Required native barriers | 7 | A09 and G01–G06 need exact candidate-bound server lock/version/commit barriers. |
 | Orchestration or evidence blocked | 4 | C11, F07, I05 and J02 need their remaining native or full live evidence closure. |
 | Environment gated, disabled by default | 13 | Control flows, oracles and unmet reasons are implemented; dedicated resource adapters and real execution remain conditional on the required resources. |
 
-The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 42 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
+The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 41 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
 
 [J02 diagnostic 38874900846/1](https://github.com/rustfs/rustfs/actions/runs/38874900846) completed all 20 H1/H2 × DB/DV branch instances on that exact candidate. Sixteen branches report PASS; the four original all-metadata-corruption probes report permanent Failed rather than Unknown and retain NOT_OBSERVED. Independent archive and provenance audits passed. Independent mixed-branch audits verified all four repaired shards against original complete bytes, exact receipts and counters, surviving below-quorum failures, original terminal preservation and post-rescue S3 inventories. All 50 node namespace finalization receipts passed audit. Real legacy writes separately produce Unknown with zero repairs and unchanged physical files, but do not replace the original source procedure. Full J02 canonical acceptance remains blocked; these partial results add no canonical acceptance.
 
@@ -2175,3 +2175,30 @@ compiled collector, inspector pin, native barrier, request retry or time budget
 changes in this delivery. Local modeled orchestration and filesystem tests
 remain distinct from new full-fixture live evidence. Canonical acceptance
 remains **104/158** until that evidence is independently verified.
+
+
+I03 full-fixture live run [39254429889/1](https://github.com/rustfs/rustfs/actions/runs/39254429889)
+used helper `3b064c90bc24a11003c1721a964a9c30b831751a`, fixed candidate
+`1c7fc818dd858247c45b39542abd8291b1e6e31b`, package `38288322026/1`
+and inspector `39214576404/1`. Its first minority-partition branch failed:
+19 DL requests were actually invoked and fully drained, with zero unknown
+results. The node1 historical DELETE and node4 GET returned definite
+`500/InternalError`. Original request IDs, exact version selectors, seed
+payloads and current server PIDs were independently correlated. The remaining
+four branches did not run. These responses retain their original FAIL;
+no expected-status relaxation or product root-cause claim is made.
+
+The original stopped business/MPU/log scene was captured before owned-gate
+removal, with unchanged business and MPU hashes afterward. All original
+root/state trees on the four nodes were isolated by inode-preserving same-filesystem moves into
+private per-run archives. Separate recovery re-audit
+[39257565469/1](https://github.com/rustfs/rustfs/actions/runs/39257565469)
+verified all four preflight, no-op isolation and post-audit receipts. Independent
+audit checked the official ZIP digests, all 723 unchanged original evidence
+members, all 20 original root/state content and inode censuses, unchanged
+private archive parents and the exact executed stopped-service/binary/mount
+guards. Two sequential reviews passed before fleet ownership was released.
+Recovery reports `ISOLATED`; it performs no S3 requests, namespace deletion,
+old-shard restoration or original verdict rewrite. Original case SHA-256 is
+`13d06d16e8a05d544ec5dd6df5ae8bdabcd6c204c85f8ca4f411196569807099`.
+The complete I03 case remains unaccepted; the canonical total stays **104/158**.
