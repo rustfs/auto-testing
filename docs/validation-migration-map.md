@@ -2024,3 +2024,26 @@ Recovery diagnostic `38704914473/1` ran on helper `9c01cb8` after the independen
 
 
 The 2026-10-15 source reconciliation restores the omitted J02 `readonly-terminal-failure` branch from frozen source script `524eb5b32c3236497fdd8a9271df0494fa3d9974`. Heal retains 84 canonical cases; its operation inventory is now 302 branches and 534 applicable topology templates. The current-token missing-shard fixture uses an actual private service-namespace read-only gate and proves EROFS before admission. Its original task must retain one permanent, unbound key-level failure and exactly one attempt; release must leave the shard missing. A distinct compensating token must repair the original current ACK version at the protected-control incarnation, with physical reconstruction and bitrot evidence captured before GETs. Full public versions/tags and the original failed token are checked again after compensation. Lost gate acknowledgements retain the gate registration for cleanup. This is local implementation evidence, not a live PASS; original corrupt-metadata Unknown and grace Deferred/new-token source procedures remain incomplete, so all current diagnostics passing still cannot claim full J02 completion.
+
+### I03 fixture completeness follow-up (2026-10-19)
+
+The frozen source is `524eb5b32c3236497fdd8a9271df0494fa3d9974`.
+Its I03 fixture contract includes DB, DV and DL. Run `39232916911/1`
+(helper `4d43a6e96f8b8cfb2e45e1aebc99772d83ae23dc`, candidate
+`1c7fc818dd858247c45b39542abd8291b1e6e31b`) reported five passing
+branches. Independent archive, request, ACK/task/physical/public and cleanup
+checks accept that replay's four-key, two-version scope. It does not complete
+the frozen fixture contract. The accepted migration total remains **104/158**.
+Original failures and original reports remain unchanged.
+
+| Fixture | Implementation and evidence | Remaining acceptance work |
+| --- | --- | --- |
+| DV | Reuses auto-test `seed(DV)` and `suspend_fixture`: four keys with three distinct non-null data versions each; real suspended overwrites, null marker creation/removal ACKs; retained live/null marker identities; current and historical markers. Versioning returns to Enabled before partition. The fault targets a retained null data version. Every selected key version participates in GET, negative Heal and complete recursive recovery. All 15 retained data versions receive full physical shard checks; markers receive exact S3 refusal/header checks. HEAD preserves version identity, length, ETag, Last-Modified and metadata. | This expanded fixture still needs a new live run and independent evidence acceptance. It does not claim a partition while the bucket remains Suspended. |
+| DB | Existing network objects are external single-part objects of approximately 5 MiB. | Add the frozen zero/one, 4 KiB, actual inline/EC/MPU boundary matrix and physical shape witnesses. External-only controls do not establish DB coverage. |
+| DL | Existing partition workload serially probes exact-version GET, unique negative PUT and Heal, followed by explicit write resolution and peer inventories. | Add bounded concurrent PUT/GET/HEAD/LIST/COPY/DELETE, version and MPU operations, with per-request durable ACKs, increasing per-key nonce and resolution of unknown outcomes. Serial PUT/GET is insufficient. |
+
+The expanded DV fixture stays within the existing 128-identity/512-MiB
+inventory limits. Network expiry remains 1,200 seconds; partition task deadlines,
+request retry policy, quorum error mapping and complete-version receipt checks
+are preserved. Source fixture completeness must be checked separately from a
+raw five-branch PASS before accepting I03 as a migrated canonical PASS.

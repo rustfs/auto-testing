@@ -17,12 +17,13 @@ from urllib.parse import quote
 
 try:
     from .heal_probe import Probe, canonical, compare_inventories, payload, require, save
-    from .heal_workload import Recorder, RecordedCallError, verify_seed
+    from .heal_workload import Recorder, RecordedCallError, seed, verify_seed
     from .healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
     from .matrix import select
     from .shards import files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
-    from .versions import public_version_id, validate_version_receipts, verify_quorum_contract, validate_unrecoverable_get
+    from .versions import public_version_id, suspend_fixture, validate_version_receipts, verify_quorum_contract, validate_unrecoverable_get
+    from .markers import add_marker, verify_markers
     from .write_quorum import expected_reads, resolve_put, negative_put, STORAGE_REFERENCE
     from .quorum_boundary import LOCK_REFERENCE, lock_reference
     from .stop import idle_fleet
@@ -30,12 +31,13 @@ try:
     from .scanner_repair import JournalWindow
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require, save
-    from heal_workload import Recorder, RecordedCallError, verify_seed
+    from heal_workload import Recorder, RecordedCallError, seed, verify_seed
     from healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
     from matrix import select
     from shards import files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
-    from versions import public_version_id, validate_version_receipts, verify_quorum_contract, validate_unrecoverable_get
+    from versions import public_version_id, suspend_fixture, validate_version_receipts, verify_quorum_contract, validate_unrecoverable_get
+    from markers import add_marker, verify_markers
     from write_quorum import expected_reads, resolve_put, negative_put, STORAGE_REFERENCE
     from quorum_boundary import LOCK_REFERENCE, lock_reference
     from stop import idle_fleet
@@ -51,7 +53,9 @@ REFERENCE = {'candidateCommit': LOCK_REFERENCE['candidateCommit'], 'lock': LOCK_
     'network': {'servicePort': 9000, 'managementPort': 22, 'ttlSeconds': TTL_SECONDS,
         'rules': 'one owned nft table per host; exact peer IPv4 and TCP source/destination port',
         'mutation': 'all expiry timers armed before the first atomic table transaction'},
-    'load': {'fixtureObjects': 4, 'versionsPerObject': 2, 'partitionPUTs': 2, 'recoveredPUTs': 1,
+    'load': {'fixtureObjects': 4, 'versionsPerObject': 3, 'retainedNullVersions': 4,
+        'currentAndHistoricalMarkers': True, 'partitionVersioning': 'Enabled after witnessed Suspended/null operations',
+        'partitionPUTs': 2, 'recoveredPUTs': 1,
         'automaticRetries': 0, 'negativeTaskDeadlineSeconds': 330},
     'writePolicy': 'three-peer groups retain R but use independent private gates to measure W-1; two-peer groups lose W and exclusive lock quorum'}
 
@@ -101,12 +105,78 @@ def negative_get_contract(contract, side, plan):
 
 
 def recover_versions(probe, fleet, binding, bucket, expected, target, active):
-    require(len(expected) == 2 and len({entry['key'] for entry in expected}) == 1
-            and target['key'] == expected[0]['key'], 'network recovery requires both acknowledged versions of one exact key')
+    require(len(expected) >= 3 and len({entry['key'] for entry in expected}) == 1
+            and len({entry['versionId'] for entry in expected}) == len(expected)
+            and (target['key'], target['versionId']) in {(entry['key'], entry['versionId']) for entry in expected}
+            and sum(not entry['deleteMarker'] and entry['versionId'] != 'null' for entry in expected) >= 3,
+            'network recovery requires all acknowledged versions of one exact three-version key')
     current = run_task(probe, fleet, {'bucket': bucket, 'key': target['key']}, 2, active,
         option_overrides={'recursive': True}, status_endpoints=tuple(binding['endpoints'])[1:])
     return validate_version_receipts(current, bucket, expected, 2,
         required_repairs={(target['key'], target['versionId'])})
+
+
+def seed_versions(recorder, fleet, bucket):
+    expected = seed(recorder, bucket, 'DV', 4, [SIZE])
+    expected = suspend_fixture(recorder, bucket, expected)
+    suspended = fleet.record('suspended-null-S3-baseline', recorder.probe.inventory(bucket))
+    fleet.record('suspended-null-ACK-manifest', {'expected': expected, **verify_seed(expected, suspended)})
+    # Null overwrites and marker removals are real S3 operations. Re-enable
+    # before the partition so new writes must return distinct non-null IDs.
+    recorder.call('put_bucket_versioning', {'Bucket': bucket, 'VersioningConfiguration': {'Status': 'Enabled'}})
+    require(recorder.call('get_bucket_versioning', {'Bucket': bucket}).get('Status') == 'Enabled',
+            'network fixture did not persist re-enabled versioning')
+    key = 'objects/0000.bin'
+    expected = add_marker(expected, key, recorder.call('delete_object', {'Bucket': bucket, 'Key': key}))
+    fleet.record('version-fixture-coverage', version_coverage(expected))
+    return expected
+
+
+def version_coverage(expected):
+    keys = {f'objects/{index:04d}.bin' for index in range(4)}
+    require({entry['key'] for entry in expected} == keys
+            and len({(entry['key'], entry['versionId']) for entry in expected}) == len(expected),
+            'network fixture omits a key or duplicates a version identity')
+    counts = {}
+    for key in sorted(keys):
+        entries = [entry for entry in expected if entry['key'] == key]
+        data = [entry for entry in entries if not entry['deleteMarker'] and entry['versionId'] != 'null']
+        require(len(data) == 3 and all(isinstance(entry['versionId'], str) and entry['versionId'] for entry in data)
+                and len({entry['payload']['sha256'] for entry in data}) == 3
+                and sum(entry['isLatest'] is True for entry in entries) == 1
+                and sum(entry['versionId'] == 'null' for entry in entries) == 1,
+                'network fixture lacks three distinct data ACKs, one latest identity or its retained null version')
+        counts[key] = len(entries)
+    require(any(entry['deleteMarker'] and entry['isLatest'] for entry in expected)
+            and any(entry['deleteMarker'] and not entry['isLatest'] for entry in expected)
+            and any(entry['versionId'] == 'null' and entry['deleteMarker'] for entry in expected)
+            and any(entry['versionId'] == 'null' and not entry['deleteMarker'] for entry in expected),
+            'network fixture lacks current/historical markers or live/deleted null identities')
+    return {'acknowledgedIdentitiesPerKey': counts, 'threeDistinctDataVersionsPerKey': True,
+            'currentAndHistoricalMarkers': True, 'retainedLiveAndMarkerNullVersions': True,
+            'partitionVersioning': 'Enabled', 'suspendedPartitionClaimed': False,
+            'remainingSourceFixtures': ['DB boundary matrix', 'DL concurrent operation matrix'],
+            'canonicalCasePassClaimed': False}
+
+
+def version_heads(probe, fleet, bucket, expected, label):
+    result = []
+    for entry in expected:
+        if entry['deleteMarker']:
+            continue
+        observed = fleet.record(label, probe.s3('head_object', {
+            'Bucket': bucket, 'Key': entry['key'], 'VersionId': entry['versionId']}))
+        response = observed.get('response') or {}
+        require(observed.get('acknowledged') is True and observed.get('resultUnknown') is False
+                and response.get('ResponseMetadata', {}).get('HTTPStatusCode') == 200
+                and response.get('ContentLength') == entry['payload']['size']
+                and response.get('ETag') and response.get('LastModified')
+                and response.get('VersionId', 'null') == entry['versionId'],
+                'version HEAD lost its ACK identity, length, ETag or Last-Modified')
+        result.append({'key': entry['key'], 'versionId': entry['versionId'],
+            'properties': {name: response.get(name) for name in
+                ('ContentLength', 'ETag', 'LastModified', 'ContentType', 'Metadata')}})
+    return result
 
 
 def plan_for(snapshot, target, branch):
@@ -367,28 +437,21 @@ def run_branch(args, nodes, branch):
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         recorder = Recorder(probe, directory / 'fixture')
-        recorder.call('create_bucket', {'Bucket': bucket})
-        recorder.call('put_bucket_versioning', {'Bucket': bucket, 'VersioningConfiguration': {'Status': 'Enabled'}})
-        expected = []
-        for index in range(4):
-            key = f'objects/{index:04d}.bin'
-            for version in range(2):
-                body = payload(f'{bucket}/{key}/{version}', SIZE)
-                ack = recorder.call('put_object', {'Bucket': bucket, 'Key': key,
-                    'ContentType': 'application/octet-stream', 'Metadata': {'heal-fixture': 'DV', 'nonce': f'{index}-{version}'},
-                    'Tagging': 'suite=heal&fixture=DV'}, body)
-                require(ack.get('VersionId') not in {None, 'null'}, 'versioned network fixture has no exact ACK version')
-                expected.append({'key': key, 'versionId': ack['VersionId'], 'isLatest': version == 1, 'deleteMarker': False,
-                    'payload': {'size': SIZE, 'sha256': hashlib.sha256(body).hexdigest()}})
+        expected = seed_versions(recorder, fleet, bucket)
         baseline = fleet.record('all-version-S3-baseline', probe.inventory(bucket))
         fleet.record('exact-ACK-manifest', {'expected': expected, **verify_seed(expected, baseline)})
+        original_heads = version_heads(probe, fleet, bucket, expected, 'original-version-HEAD')
+        for key in sorted({entry['key'] for entry in expected if entry['deleteMarker']}):
+            verify_markers(probe, fleet, bucket, key, expected)
         fleet.stop()
         original = fleet.snapshot('physical-baseline', quiescent=True)
         validate_topology(original, 'H2')
-        selected = expected[1]
-        target = map_target(original, bucket, selected['key'], 'data', 1, selected['versionId'])
+        key_versions = [entry for entry in expected if entry['key'] == 'objects/0001.bin']
+        selected = next(entry for entry in key_versions if not entry['deleteMarker'] and entry['versionId'] == 'null')
+        target = map_target(original, bucket, selected['key'], 'data', 1, selected['versionId'], latest_required=False)
         target = {**target, **next(row for row in target['cohort'] if row['node'] == nodes[3])}
-        cohorts = [map_target(original, bucket, entry['key'], 'data', 1, entry['versionId'], latest_required=False) for entry in expected]
+        cohorts = [map_target(original, bucket, entry['key'], 'data', 1, entry['versionId'], latest_required=False)
+                   for entry in expected if not entry['deleteMarker']]
         plan = fleet.record('actual-partition-quorum-plan', plan_for(original, target, branch))
         params = {'disk': target['disk'], 'faultId': 'I03-missing-target'}
         registration = target['node'], params
@@ -426,7 +489,7 @@ def run_branch(args, nodes, branch):
         for side in plan['sides']:
             endpoint = side['endpoint']
             local_probe = Probe(binding, endpoint)
-            for version in expected[:2]:
+            for version in key_versions:
                 read, diagnostics = partition_get(local_probe, fleet, {
                     'Bucket': bucket, 'Key': version['key'], 'VersionId': version['versionId']})
                 available = side['metadataAuthorities'] - int(3 in side['members'] and version['versionId'] == selected['versionId'])
@@ -443,7 +506,7 @@ def run_branch(args, nodes, branch):
                 require(diagnostics['complete'], 'partition GET diagnostics are incomplete; inspect retained raw response')
             row = unique_put(local_probe, directory, bucket, 'partition/' + endpoint + '.bin', rows)
             row['negativeProof'] = negative_put(row['observed'])
-            result.setdefault('partitionTasks', {})[endpoint] = negative_heal(local_probe, fleet, bucket, expected[:2], target, active)
+            result.setdefault('partitionTasks', {})[endpoint] = negative_heal(local_probe, fleet, bucket, key_versions, target, active)
             status = fleet.record('partition-raw-background', local_probe.admin('/rustfs/admin/v3/background-heal/status', [], b''))
             require(status.get('httpStatus') == 200 and isinstance(status.get('response'), dict), 'partition background status unavailable')
             result.setdefault('coverage', {})[endpoint] = validate_partial(status['response'], len(side['members']))
@@ -462,7 +525,7 @@ def run_branch(args, nodes, branch):
         fleet.start()
         require(physical_content(scene) == physical_content(fleet.snapshot('all-peer-return-before-independent-repair')),
                 'network recovery repaired a target before the independent product task')
-        result['recoveryResponsibility'] = recover_versions(probe, fleet, binding, bucket, expected[:2], selected, recovery_active)
+        result['recoveryResponsibility'] = recover_versions(probe, fleet, binding, bucket, key_versions, selected, recovery_active)
         idle_fleet(fleet, binding)
         fleet.stop()
         after = fleet.snapshot('physical-rebuilt-before-any-recovered-GET', quiescent=True)
@@ -480,13 +543,18 @@ def run_branch(args, nodes, branch):
                                 'deleteMarker': False, 'payload': released['payload']}]
         inventories = []
         for endpoint in binding['endpoints']:
-            inventory = fleet.record('all-peer-complete-final-S3', Probe(binding, endpoint).inventory(bucket))
+            peer = Probe(binding, endpoint)
+            inventory = fleet.record('all-peer-complete-final-S3', peer.inventory(bucket))
             verify_seed(augmented, inventory)
+            require(version_heads(peer, fleet, bucket, expected, 'all-peer-original-version-HEAD') == original_heads,
+                    'network recovery changed an original version HEAD or Last-Modified')
             subset = {**inventory, 'entries': [row for row in inventory['entries'] if row['key'] != released['key']]}
             compare_inventories(baseline, subset)
             inventories.append(inventory)
         for inventory in inventories[1:]:
             compare_inventories(inventories[0], inventory)
+        result['markers'] = [verify_markers(probe, fleet, bucket, key, expected)
+            for key in sorted({entry['key'] for entry in expected if entry['deleteMarker']})]
         require(all(row['properties'].get('Metadata') == {'heal-fixture': 'I03', 'nonce': released['key']}
                     and row['tags'] == [{'Key': 'fixture', 'Value': 'I03'}, {'Key': 'suite', 'Value': 'heal'}]
                     for inventory in inventories for row in inventory['entries'] if row['key'] == released['key']),

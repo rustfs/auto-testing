@@ -2,6 +2,7 @@
 
 import copy
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -319,25 +320,148 @@ class NetworkScopedContractTests(unittest.TestCase):
         self.assertTrue(result['admissionRefused'])
         self.assertFalse(result['repairClaimed'])
 
-    def test_recovery_requests_all_versions_and_keeps_the_two_receipt_oracle(self):
+    def test_recovery_requests_every_historical_and_null_version(self):
         status, expected, target = NetworkTests().negative('repaired')
         expected = [{**entry, 'deleteMarker': False} for entry in expected]
-        status['outcome']['counters'].update(healed=1, unchanged=1, skipped=0)
+        for version in ('v2', 'null'):
+            expected.append({'key': 'objects/a', 'versionId': version, 'deleteMarker': False})
+            status['outcome']['objects'].append({'identity': {'bucket': 'owned', 'object': 'objects/a',
+                'versionId': None if version == 'null' else version, 'bucketIncarnationId': 'incarnation',
+                'poolIndex': 0, 'setIndex': 0}, 'disposition': {'state': 'verified_healthy'}})
+        status['outcome']['counters'].update(processed=4, healed=1, unchanged=3, skipped=0)
         binding = {'endpoints': {'node1': 'one', 'node2': 'two', 'node3': 'three', 'node4': 'four'}}
-        for missing in (False, True):
-            current = copy.deepcopy(status)
-            if missing:
-                current['outcome']['objects'] = current['outcome']['objects'][1:]
-                current['outcome']['counters'].update(processed=1, unchanged=0)
-            with self.subTest(missing=missing), patch.object(network, 'run_task', return_value=current) as task:
+        for target_version in ('v1', 'null'):
+            for missing in (False, True):
+                current = copy.deepcopy(status)
+                for row in current['outcome']['objects']:
+                    row['disposition']['state'] = ('repaired' if network.public_version_id(row['identity']['versionId'])
+                                                   == target_version else 'verified_healthy')
                 if missing:
-                    with self.assertRaisesRegex(ValueError, 'omitted or duplicated'):
-                        network.recover_versions(None, None, binding, 'owned', expected, target, [])
+                    current['outcome']['objects'] = current['outcome']['objects'][1:]
+                    current['outcome']['counters'].update(processed=3, unchanged=2)
+                selected = {**target, 'versionId': target_version}
+                with self.subTest(target=target_version, missing=missing), patch.object(network, 'run_task', return_value=current) as task:
+                    if missing:
+                        with self.assertRaisesRegex(ValueError, 'omitted or duplicated'):
+                            network.recover_versions(None, None, binding, 'owned', expected, selected, [])
+                    else:
+                        proof = network.recover_versions(None, None, binding, 'owned', expected, selected, [])
+                        self.assertEqual((proof['receipts'], proof['repaired']), (4, 1))
+                    self.assertEqual(task.call_args.kwargs['option_overrides'], {'recursive': True})
+                    self.assertEqual(task.call_args.kwargs['status_endpoints'], ('node2', 'node3', 'node4'))
+
+
+
+class NetworkVersionFixtureTests(unittest.TestCase):
+    def fixture(self, *, wrong_ack=False):
+        class Recorder:
+            def __init__(self):
+                self.mode, self.rows, self.calls, self.nonce = None, [], [], 0
+                self.probe = SimpleNamespace(binding={'bucketPrefix': 'owned'}, inventory=self.inventory)
+            def inventory(self, bucket):
+                return {'entries': copy.deepcopy(self.rows)}
+            def call(self, operation, params, body=None):
+                self.calls.append((operation, copy.deepcopy(params)))
+                self.nonce += 1
+                if operation == 'put_bucket_versioning':
+                    self.mode = params['VersioningConfiguration']['Status']
+                if operation == 'get_bucket_versioning': return {'Status': self.mode}
+                if operation not in {'put_object', 'delete_object'}: return {}
+                key = params['Key']
+                if operation == 'delete_object' and 'VersionId' in params:
+                    self.rows = [entry for entry in self.rows if (entry['key'], entry['versionId']) != (key, params['VersionId'])]
+                    same = [entry for entry in self.rows if entry['key'] == key]
+                    if same: same[-1]['isLatest'] = True
+                    return {'VersionId': params['VersionId'], 'DeleteMarker': True}
+                version = f'v{self.nonce}' if self.mode == 'Enabled' else 'null'
+                if version == 'null':
+                    self.rows = [entry for entry in self.rows if (entry['key'], entry['versionId']) != (key, 'null')]
+                for entry in self.rows:
+                    if entry['key'] == key: entry['isLatest'] = False
+                marker = operation == 'delete_object'
+                entry = {'key': key, 'versionId': version, 'isLatest': True, 'deleteMarker': marker}
+                if body is not None: entry['payload'] = {'size': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
+                self.rows.append(entry)
+                return {'VersionId': 'null' if wrong_ack and not marker else version,
+                        'DeleteMarker': marker, 'ResponseMetadata': {'HTTPStatusCode': 204 if marker else 200}}
+        recorder = Recorder()
+        evidence = []
+        fleet = SimpleNamespace(record=lambda label, value: evidence.append((label, copy.deepcopy(value))) or value)
+        return recorder, fleet, evidence
+
+    def seed(self):
+        recorder, fleet, evidence = self.fixture()
+        with patch.object(network, 'SIZE', 97), patch('scripts.validation_heal.versions.VERSION_SIZE', 123):
+            expected = network.seed_versions(recorder, fleet, 'owned')
+        return expected, recorder, evidence
+
+    def test_real_seed_uses_three_versions_and_suspended_null_delete_ack_sequence(self):
+        expected, recorder, evidence = self.seed()
+        coverage = network.version_coverage(expected)
+        self.assertEqual(len(expected), 19)
+        self.assertEqual(recorder.mode, 'Enabled')
+        self.assertEqual(len([entry for entry in expected if not entry['deleteMarker']]), 15)
+        self.assertFalse(coverage['suspendedPartitionClaimed'])
+        self.assertFalse(coverage['canonicalCasePassClaimed'])
+        self.assertEqual(len([params for op, params in recorder.calls if op == 'delete_object' and params.get('VersionId') == 'null']), 4)
+        suspended = next(value for label, value in evidence if label == 'suspended-null-ACK-manifest')
+        self.assertTrue(suspended['seedAckAndFullGetAgree'])
+        self.assertEqual(len(suspended['expected']), 18)
+        self.assertEqual([params['VersioningConfiguration']['Status'] for op, params in recorder.calls
+                          if op == 'put_bucket_versioning'], ['Enabled', 'Suspended', 'Enabled'])
+        target_versions = [entry for entry in expected if entry['key'] == 'objects/0001.bin']
+        self.assertEqual(len(target_versions), 4)
+        self.assertTrue(any(entry['versionId'] == 'null' and entry['isLatest'] for entry in target_versions))
+
+    def test_missing_fixture_dimensions_or_duplicate_identities_cannot_claim_coverage(self):
+        expected, _, _ = self.seed()
+        for kind in ('third-version', 'duplicate', 'same-content', 'current-marker', 'historical-marker', 'null', 'latest'):
+            broken = copy.deepcopy(expected)
+            if kind == 'third-version': broken.pop(0)
+            elif kind == 'duplicate': broken.append(copy.deepcopy(broken[0]))
+            elif kind == 'same-content': broken[1]['payload'] = broken[0]['payload']
+            elif kind == 'current-marker':
+                broken = [entry for entry in broken if not (entry['deleteMarker'] and entry['isLatest'])]
+            elif kind == 'historical-marker':
+                broken = [entry for entry in broken if not (entry['deleteMarker'] and not entry['isLatest'])]
+            elif kind == 'null': broken = [entry for entry in broken if entry['versionId'] != 'null']
+            else: broken[0]['isLatest'] = True
+            with self.subTest(kind=kind), self.assertRaises(ValueError): network.version_coverage(broken)
+
+    def test_seed_refuses_missing_enabled_version_ack_before_faults(self):
+        recorder, fleet, _ = self.fixture(wrong_ack=True)
+        with patch.object(network, 'SIZE', 97), self.assertRaisesRegex(ValueError, 'real version ID'):
+            network.seed_versions(recorder, fleet, 'owned')
+        self.assertEqual(len([op for op, params in recorder.calls if op == 'put_object']), 1)
+
+    def test_two_version_or_foreign_target_recovery_fails_before_task_admission(self):
+        expected, _, _ = self.seed()
+        versions = [entry for entry in expected if entry['key'] == 'objects/0001.bin']
+        for selected, target in [(versions[:2], versions[0]), (versions, {'key': versions[0]['key'], 'versionId': 'foreign'})]:
+            with patch.object(network, 'run_task') as task, self.assertRaises(ValueError):
+                network.recover_versions(None, None, {'endpoints': {}}, 'owned', selected, target, [])
+            task.assert_not_called()
+
+    def test_head_identity_length_and_last_modified_are_required(self):
+        entry = {'key': 'objects/a', 'versionId': 'v1', 'deleteMarker': False, 'payload': {'size': 123}}
+        original = {'acknowledged': True, 'resultUnknown': False,
+            'response': {'VersionId': 'v1', 'ContentLength': 123, 'ETag': 'etag', 'LastModified': 'original-time',
+                         'ResponseMetadata': {'HTTPStatusCode': 200}}}
+        fleet = SimpleNamespace(record=lambda label, value: value)
+        for kind in ('valid', 'unknown', 'wrong-version', 'short', 'partial', 'no-modification-time', 'no-etag'):
+            observed = copy.deepcopy(original)
+            if kind == 'unknown': observed['resultUnknown'] = True
+            elif kind == 'wrong-version': observed['response']['VersionId'] = 'v2'
+            elif kind == 'short': observed['response']['ContentLength'] = 122
+            elif kind == 'partial': observed['response']['ResponseMetadata']['HTTPStatusCode'] = 206
+            elif kind == 'no-modification-time': observed['response'].pop('LastModified')
+            elif kind == 'no-etag': observed['response'].pop('ETag')
+            probe = SimpleNamespace(s3=unittest.mock.Mock(return_value=observed))
+            with self.subTest(kind=kind):
+                if kind == 'valid': self.assertEqual(len(network.version_heads(probe, fleet, 'owned', [entry], 'head')), 1)
                 else:
-                    proof = network.recover_versions(None, None, binding, 'owned', expected, target, [])
-                    self.assertEqual((proof['receipts'], proof['repaired']), (2, 1))
-                self.assertEqual(task.call_args.kwargs['option_overrides'], {'recursive': True})
-                self.assertEqual(task.call_args.kwargs['status_endpoints'], ('node2', 'node3', 'node4'))
+                    with self.assertRaises(ValueError): network.version_heads(probe, fleet, 'owned', [entry], 'head')
+            probe.s3.assert_called_once_with('head_object', {'Bucket': 'owned', 'Key': 'objects/a', 'VersionId': 'v1'})
 
 
 class NetworkExpiryTests(unittest.TestCase):
