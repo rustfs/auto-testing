@@ -27,6 +27,7 @@ try:
     from .quorum_boundary import LOCK_REFERENCE, lock_reference
     from .stop import idle_fleet
     from .network_gate import TTL_SECONDS
+    from .scanner_repair import JournalWindow
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require, save
     from heal_workload import Recorder, RecordedCallError, verify_seed
@@ -39,6 +40,7 @@ except ImportError:
     from quorum_boundary import LOCK_REFERENCE, lock_reference
     from stop import idle_fleet
     from network_gate import TTL_SECONDS
+    from scanner_repair import JournalWindow
 
 
 CASE_ID = 'heal.network-partition-and-lock-quorum'
@@ -262,6 +264,47 @@ def release_network(fleet):
         require(value.get('expiryTriggered') is False, 'partition expired before its complete evidence window')
 
 
+def partition_get(probe, fleet, params):
+    """Retain one GET's raw response and journal window before its oracle can fail."""
+    identity_fields = ('pid', 'startTicks', 'bootId', 'unit', 'executable', 'binarySha256',
+                       'mountNamespace', 'commandSha256', 'environmentFileSha256', 'settings')
+    first_sequence = fleet.sequence + 1
+    before = fleet.record('partition-GET-process-before', {node: fleet.remote(node, 'process') for node in fleet.nodes})
+    require(all(all(field in value for field in identity_fields) and type(value['pid']) is int and value['pid'] > 1
+                and value['binarySha256'] == probe.binding['candidateBinarySha256'] for value in before.values()),
+            'partition GET diagnostic lacks a live candidate process')
+    # Raw pages are retained; parsed events are not a causal proof or oracle.
+    window = JournalWindow(fleet, 'partition-GET-journal', event_targets=set())
+    observed, request_sequence = None, None
+    try:
+        observed = fleet.record('partition-explicit-version-GET', probe.s3('get_object', params))
+        request_sequence = fleet.sequence
+    finally:
+        errors, after = [], {}
+        try:
+            window.capture()
+        except Exception as exc:
+            errors.append({'stage': 'journal', 'type': type(exc).__name__, 'message': str(exc)})
+        for node in fleet.nodes:
+            try:
+                after[node] = fleet.remote(node, 'process')
+                require(all(field in after[node] and after[node][field] == before[node][field] for field in identity_fields),
+                        'partition GET crossed a candidate process identity change')
+            except Exception as exc:
+                errors.append({'stage': 'process', 'node': node, 'type': type(exc).__name__, 'message': str(exc)})
+        fleet.record('partition-GET-process-after', after)
+        if observed is None:
+            errors.append({'stage': 'request', 'message': 'GET raised before returning a raw observation'})
+        response = (observed or {}).get('response') or {}
+        diagnostics = fleet.record('partition-GET-diagnostics', {
+            'complete': not errors, 'endpoint': probe.endpoint_name, 'params': params,
+            'requestId': response.get('ResponseMetadata', {}).get('RequestId'),
+            'firstEvidenceSequence': first_sequence, 'requestEvidenceSequence': request_sequence,
+            'lastEvidenceSequence': fleet.sequence, 'errors': errors,
+            'causalAttributionClaimed': False, 'automaticRequestRetries': 0})
+    return observed, diagnostics
+
+
 def run_branch(args, nodes, branch):
     directory = args.evidence / 'H2' / branch
     directory.mkdir(parents=True)
@@ -347,14 +390,15 @@ def run_branch(args, nodes, branch):
             endpoint = side['endpoint']
             local_probe = Probe(binding, endpoint)
             for version in expected[:2]:
-                read = fleet.record('partition-explicit-version-GET', local_probe.s3('get_object', {
-                    'Bucket': bucket, 'Key': version['key'], 'VersionId': version['versionId']}))
+                read, diagnostics = partition_get(local_probe, fleet, {
+                    'Bucket': bucket, 'Key': version['key'], 'VersionId': version['versionId']})
                 available = side['metadataAuthorities'] - int(3 in side['members'] and version['versionId'] == selected['versionId'])
                 if available >= plan['readQuorum']:
                     require(read.get('acknowledged') is True and read.get('resultUnknown') is False
                             and read.get('payload') == version['payload'], 'R-capable partition cannot redeem its exact original ACK')
                 else:
                     validate_unrecoverable_get(read, contract)
+                require(diagnostics['complete'], 'partition GET diagnostics are incomplete; inspect retained raw response')
             row = unique_put(local_probe, directory, bucket, 'partition/' + endpoint + '.bin', rows)
             row['negativeProof'] = negative_put(row['observed'])
             result.setdefault('partitionTasks', {})[endpoint] = negative_heal(local_probe, fleet, bucket, expected[:2], target, active)

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.validation_heal import network, network_gate as gate, fleet_node
@@ -193,6 +194,91 @@ class NetworkTests(unittest.TestCase):
         self.assertIn(network.CASE_ID, AUTOMATIC_CASES)
         source = Path('scripts/validation_heal/run_case.sh').read_text()
         self.assertIn(network.CASE_ID + ') driver=network.py', source)
+
+
+class NetworkGetDiagnosticsTests(unittest.TestCase):
+    params = {'Bucket': 'owned', 'Key': 'objects/a', 'VersionId': 'exact-version'}
+
+    def fixture(self, *, changed_node=None, journal_failure=False):
+        class Fleet:
+            nodes = ('vm000', 'vm001', 'vm002', 'vm003')
+            def __init__(self):
+                self.sequence, self.evidence, self.calls, self.process_reads = 0, [], [], {}
+            def record(self, label, value):
+                self.sequence += 1
+                self.evidence.append((self.sequence, label, copy.deepcopy(value)))
+                return value
+            def remote(self, node, action, **params):
+                self.calls.append((node, action, params))
+                if action == 'process':
+                    self.process_reads[node] = self.process_reads.get(node, 0) + 1
+                    return {'pid': 123, 'startTicks': 7 + int(node == changed_node and self.process_reads[node] > 1),
+                        'bootId': 'boot', 'unit': 'owned.service', 'executable': '/owned/rustfs',
+                        'binarySha256': 'a' * 64, 'mountNamespace': 'mnt:1', 'commandSha256': 'command',
+                        'environmentFileSha256': 'environment', 'settings': {'RUSTFS_SCANNER_ENABLED': 'false'}}
+                if action != 'logs': raise AssertionError('diagnostics attempted a mutation: ' + action)
+                if params.get('checkpoint'):
+                    return {'complete': True, 'afterCursor': node + '-before'}
+                if journal_failure: raise ValueError('original journal read failed')
+                return {'complete': True, 'beforeCursor': params['afterCursor'], 'afterCursor': node + '-after',
+                        'hasMore': False, 'journal': json.dumps({'message': 'original error', 'request_id': 'request-500'})}
+        observed = {'acknowledged': False, 'resultUnknown': False,
+            'response': {'Error': {'Code': 'InternalError'}, 'ResponseMetadata': {'HTTPStatusCode': 500, 'RequestId': 'request-500'}}}
+        probe = SimpleNamespace(binding={'candidateBinarySha256': 'a' * 64}, endpoint_name='node4',
+                                s3=unittest.mock.Mock(return_value=observed))
+        return Fleet(), probe, observed
+
+    def test_get500_keeps_four_cursor_windows_and_identity_before_oracle_failure(self):
+        fleet, probe, original = self.fixture()
+        observed, diagnostics = network.partition_get(probe, fleet, self.params)
+        self.assertIs(observed, original)
+        self.assertTrue(diagnostics['complete'])
+        self.assertEqual(diagnostics['requestId'], 'request-500')
+        self.assertFalse(diagnostics['causalAttributionClaimed'])
+        request = next(row for row in fleet.evidence if row[1] == 'partition-explicit-version-GET')
+        self.assertEqual(diagnostics['requestEvidenceSequence'], request[0])
+        windows = [row for row in fleet.evidence if row[1] == 'partition-GET-journal-window']
+        self.assertEqual(len(windows), 4)
+        self.assertTrue(all(row[0] > request[0] and 'original error' in row[2]['journal'] for row in windows))
+        self.assertEqual(fleet.process_reads, dict.fromkeys(fleet.nodes, 2))
+        probe.s3.assert_called_once_with('get_object', self.params)
+        with self.assertRaisesRegex(ValueError, 'below-quorum GET'):
+            network.validate_unrecoverable_get(observed, {'unrecoverableGet': {'httpStatus': 503, 'code': 'SlowDownRead'}})
+
+    def test_failed_journal_keeps_response_and_checks_every_after_process(self):
+        fleet, probe, original = self.fixture(journal_failure=True)
+        observed, diagnostics = network.partition_get(probe, fleet, self.params)
+        self.assertIs(observed, original)
+        self.assertFalse(diagnostics['complete'])
+        self.assertEqual(diagnostics['errors'][0]['stage'], 'journal')
+        self.assertEqual(fleet.process_reads, dict.fromkeys(fleet.nodes, 2))
+        probe.s3.assert_called_once()
+
+    def test_process_restart_cannot_certify_the_original_request(self):
+        fleet, probe, _ = self.fixture(changed_node='vm002')
+        _, diagnostics = network.partition_get(probe, fleet, self.params)
+        self.assertFalse(diagnostics['complete'])
+        self.assertEqual(diagnostics['errors'][0]['node'], 'vm002')
+        self.assertEqual(fleet.process_reads, dict.fromkeys(fleet.nodes, 2))
+        probe.s3.assert_called_once()
+
+    def test_request_exception_preserves_original_error_and_still_collects_diagnostics(self):
+        fleet, probe, _ = self.fixture()
+        probe.s3.side_effect = ValueError('original request exception')
+        with self.assertRaisesRegex(ValueError, '^original request exception$'):
+            network.partition_get(probe, fleet, self.params)
+        diagnostics = fleet.evidence[-1][2]
+        self.assertFalse(diagnostics['complete'])
+        self.assertIsNone(diagnostics['requestEvidenceSequence'])
+        self.assertEqual(fleet.process_reads, dict.fromkeys(fleet.nodes, 2))
+        self.assertEqual(len([row for row in fleet.evidence if row[1] == 'partition-GET-journal-window']), 4)
+
+    def test_wrong_candidate_cannot_send_a_diagnostic_get(self):
+        fleet, probe, _ = self.fixture()
+        probe.binding['candidateBinarySha256'] = 'b' * 64
+        with self.assertRaisesRegex(ValueError, 'live candidate process'):
+            network.partition_get(probe, fleet, self.params)
+        probe.s3.assert_not_called()
 
 
 class NetworkExpiryTests(unittest.TestCase):
