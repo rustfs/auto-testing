@@ -90,13 +90,16 @@ def read_file(fd: int, name: str, limit: int = LIMIT) -> bytes:
     opened = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     try:
         info = os.fstat(opened)
-        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= limit,
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink <= 1 and info.st_size <= limit,
                 "expected bounded regular non-hardlinked file")
         require(mount_id(opened) == mount_id(fd), "file bind-mount escape")
+        # Atomic publication can unlink the opened predecessor before fstat.
+        # Reject those bytes as churn; only bounded live observers may retry.
+        require(info.st_nlink == 1, "file changed while reading")
         with os.fdopen(opened, "rb", closefd=False) as stream:
             value = stream.read(limit + 1)
         after = os.fstat(opened)
-        require(len(value) <= limit and info.st_size == len(value)
+        require(after.st_nlink == 1 and len(value) <= limit and info.st_size == len(value)
                 and (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
                 == (after.st_size, after.st_mtime_ns, after.st_ctime_ns), "file changed while reading")
         return value

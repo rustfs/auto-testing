@@ -31,6 +31,58 @@ class DurableRecordFaultTests(unittest.TestCase):
     incarnation = "22345678-1234-4234-8234-123456789abc"
     bucket = "rv-heal-0123456789abcdef"
 
+    def test_atomic_replace_after_open_rejects_detached_bytes_as_read_churn(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current, successor = root / 'checkpoint', root / 'successor'
+            current.write_bytes(b'earlier')
+            successor.write_bytes(b'later')
+            original_open = os.open
+            observed = []
+            def replace_after_open(name, flags, **kwargs):
+                descriptor = original_open(name, flags, **kwargs)
+                if name == current.name:
+                    os.replace(successor, current)
+                    observed.append(os.fstat(descriptor).st_nlink)
+                return descriptor
+            descriptor = original_open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with patch.object(fault.os, 'open', side_effect=replace_after_open), \
+                     patch.object(fault, 'mount_id', return_value=1):
+                    with self.assertRaisesRegex(ValueError, '^file changed while reading$'):
+                        fault.read_file(descriptor, current.name)
+                self.assertEqual(observed, [0])
+                with patch.object(fault, 'mount_id', return_value=1):
+                    self.assertEqual(fault.read_file(descriptor, current.name), b'later')
+                self.assertEqual(current.stat().st_nlink, 1)
+            finally:
+                os.close(descriptor)
+
+    def test_detached_inode_does_not_hide_type_size_or_mount_refusals(self):
+        for poison in ('oversized', 'fifo', 'mount'):
+            with self.subTest(poison=poison), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                current, successor = root / 'checkpoint', root / 'successor'
+                if poison == 'fifo': os.mkfifo(current)
+                else: current.write_bytes(b'12345' if poison == 'oversized' else b'old')
+                successor.write_bytes(b'new')
+                original_open = os.open
+                def replace_after_open(name, flags, **kwargs):
+                    descriptor = original_open(name, flags, **kwargs)
+                    if name == current.name:
+                        os.replace(successor, current)
+                        self.assertEqual(os.fstat(descriptor).st_nlink, 0)
+                    return descriptor
+                descriptor = original_open(root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    with patch.object(fault.os, 'open', side_effect=replace_after_open), \
+                         patch.object(fault, 'mount_id', side_effect=[2, 1] if poison == 'mount' else None, return_value=1):
+                        message = 'file bind-mount escape' if poison == 'mount' else 'expected bounded regular non-hardlinked file'
+                        with self.assertRaisesRegex(ValueError, '^' + message + '$'):
+                            fault.read_file(descriptor, current.name, limit=4)
+                finally:
+                    os.close(descriptor)
+
     def test_live_read_race_is_retryable_but_stopped_read_and_path_failures_are_not(self):
         for message in ('file changed while reading', 'file bind-mount escape', 'expected bounded regular non-hardlinked file'):
             with self.subTest(message=message), patch.object(journal, 'census', side_effect=ValueError(message)):
@@ -67,7 +119,7 @@ class DurableRecordFaultTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, '^Heal node'): fleet.remote('node', 'journal-observe')
 
     def test_atomic_advance_uses_one_held_pidfd_and_refreezes_on_observation_failure(self):
-        for change in (None, 'timeout', 'birth', 'corrupt', 'incarnation', 'options', 'counter', 'read-error', 'unstable', 'post-birth', 'late-progress', 'continue-interrupted', 'stop-pending', 'stop-timeout', 'stop-birth'):
+        for change in (None, 'timeout', 'birth', 'corrupt', 'incarnation', 'options', 'counter', 'read-error', 'unstable', 'unlinked-open', 'unlinked-open-timeout', 'post-birth', 'late-progress', 'continue-interrupted', 'stop-pending', 'stop-timeout', 'stop-birth'):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
                 base = Path(temp).resolve(); roots = tuple(base / str(i) for i in range(4))
                 for root in roots: root.mkdir()
@@ -115,6 +167,19 @@ class DurableRecordFaultTests(unittest.TestCase):
                         raced[0] = True
                         if change == 'read-error': raise PermissionError('unexpected access denial')
                         raise ValueError('file changed while reading')
+                    if running[0] and not raced[0] and change in ('unlinked-open', 'unlinked-open-timeout'):
+                        raced[0] = True
+                        original_open = os.open
+                        def replace_after_open(name, flags, **params):
+                            descriptor = original_open(name, flags, **params)
+                            if name == path.name:
+                                successor = path.with_name('natural-checkpoint-successor')
+                                successor.write_bytes(next_raw)
+                                os.replace(successor, path)
+                                self.assertEqual(os.fstat(descriptor).st_nlink, 0)
+                            return descriptor
+                        with patch.object(fault.os, 'open', side_effect=replace_after_open):
+                            return real_read(*args, **kwargs)
                     return real_read(*args, **kwargs)
                 for context in (patch.object(fleet_node, 'owned', return_value=(base, roots, owner)),
                     patch.object(fleet_node, 'digest', return_value=owner['binarySha256']),
@@ -134,15 +199,19 @@ class DurableRecordFaultTests(unittest.TestCase):
                 stack.enter_context(patch.object(Path, 'read_text', read_text))
                 stack.enter_context(patch.object(journal, 'read', side_effect=read))
                 if change == 'timeout': stack.enter_context(patch.object(fleet_node.time, 'monotonic', side_effect=[0, 61]))
+                elif change == 'unlinked-open-timeout': stack.enter_context(patch.object(fleet_node.time, 'monotonic', side_effect=[0, .01, 61]))
                 elif change == 'late-progress': stack.enter_context(patch.object(fleet_node.time, 'monotonic', side_effect=[0, .01, 61]))
                 elif change == 'stop-timeout': stack.enter_context(patch.object(fleet_node.time, 'monotonic', side_effect=[0, .01, .02, 61]))
-                if change in (None, 'unstable', 'stop-pending'):
+                if change in (None, 'unstable', 'unlinked-open', 'stop-pending'):
                     result = fleet_node.journal_operation(request)
                     self.assertTrue(result['checkpointAdvancedAndFrozen'])
                     self.assertTrue(result['pidfdBound'])
                     self.assertEqual(result['observedProcessed'], 3)
                     self.assertEqual(path.read_bytes(), next_raw)
                     self.assertEqual(len(process_calls), 3)
+                elif change == 'unlinked-open-timeout':
+                    with self.assertRaisesRegex(ValueError, 'actual checkpoint advance exceeded its frozen 60-second budget'):
+                        fleet_node.journal_operation(request)
                 else:
                     with self.assertRaises((ValueError, OSError, KeyboardInterrupt)): fleet_node.journal_operation(request)
                 self.assertEqual(events, [fleet_node.signal.SIGCONT, fleet_node.signal.SIGSTOP])

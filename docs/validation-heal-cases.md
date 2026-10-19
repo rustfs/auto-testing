@@ -1220,6 +1220,8 @@ Source assertions:
 
 Topologies: H1,H2. Branches: checkpoint-truncate, mrf-checksum, future-schema, stale-generation, journal-write-failure, native-persist-fence.
 
+实时读取遇到原子替换后链接数为零的旧文件句柄时，先核对文件类型、大小与挂载边界，再拒绝旧句柄字节并返回读取变化。只有原有有界观察循环可以重试；停止后的读取和故障注入仍直接失败，硬链接、非普通文件、超限和挂载逃逸仍被拒绝。原 pidfd、60 秒 advance 预算和完整 checkpoint/resume/root 校验不变。Linux 原子替换组件复现仅证明读取竞争，不证明旧 live 失败的唯一原因，也不替代 RustFS 持久化屏障证据。
+
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
 Blocked reason (`EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION`): 已实现 H1/H2 checkpoint 截断、未来 schema、真实较早代次回放、committed MRF CRC 故障、私有限额卷的真实 journal ENOSPC 和独立安全重扫；10 项原生回归仅为前置证据。仍缺全部所需 fsync/commit 临界点审核和完整现场分支的独立 live 审计，诊断执行不能提升 canonical 验收。
