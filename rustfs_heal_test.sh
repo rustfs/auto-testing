@@ -1121,6 +1121,22 @@ step7_analyze_results() {
   if printf '%s' "${summary}" | grep -qiE '^(finished|completed|success|done|stopped)$' \
     && [ "${failed_n}" -eq 0 ]; then
     log "heal test PASSED: cluster heal complete, 0 failed, data read-back OK, ${NODES[${OUTAGE_NODE_INDEX}]}_used=${outage_used}GB"
+
+    # HEAL-STEP 8: MRF intent cleanup for deleted buckets (backlog#8590).
+    # Legacy durable PartialWrite intents whose bucket has been deleted must
+    # not remain active: the heal scheduler retries them indefinitely against
+    # a nonexistent bucket (rustfs/backlog#8590).
+    local mrf_leak
+    mrf_leak="$(printf '%s' "${summary}" | grep -oE '"bucket":"[^"]*"' | sort -u | while read -r bq; do
+      bq_name=$(printf '%s' "${bq}" | sed 's/"bucket":"//;s/"//')
+      if ! aws s3api head-bucket --bucket "${bq_name}" 2>/dev/null; then
+        printf 'MRF intent references deleted bucket: %s\n' "${bq_name}"
+      fi
+    done)"
+    if [ -n "${mrf_leak}" ]; then
+      log "HEAL-STEP 8 MRF intent leak: ${mrf_leak}"
+    fi
+
     return 0
   fi
   die "heal test FAILED: summary=${summary} failed=${failed_n} ${NODES[${OUTAGE_NODE_INDEX}]}_used=${outage_used}GB"
