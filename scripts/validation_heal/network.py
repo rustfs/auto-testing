@@ -30,6 +30,9 @@ try:
     from .network_gate import TTL_SECONDS
     from .scanner_repair import JournalWindow
     from .network_fixtures import db_parameters, seed_db, map_db, prove_db, verify_db
+    from .network_load_session import LoadSession
+    from .network_load_repair import source_reference as delete_source_reference, classify_deletes, recover_controls
+    from .network_retention import prepare as prepare_retention, isolate as isolate_retention
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require, save
     from heal_workload import Recorder, RecordedCallError, seed, verify_seed
@@ -45,6 +48,9 @@ except ImportError:
     from network_gate import TTL_SECONDS
     from scanner_repair import JournalWindow
     from network_fixtures import db_parameters, seed_db, map_db, prove_db, verify_db
+    from network_load_session import LoadSession
+    from network_load_repair import source_reference as delete_source_reference, classify_deletes, recover_controls
+    from network_retention import prepare as prepare_retention, isolate as isolate_retention
 
 
 CASE_ID = 'heal.network-partition-and-lock-quorum'
@@ -454,16 +460,21 @@ def run_branch(args, nodes, branch):
         'maxInventoryBytes': 512 * 1024**2}
     fleet.record('binding', binding)
     fleet.record('network-source-contract', reference)
+    fleet.record('DL-delete-recovery-source-contract', delete_source_reference(candidate['source_sha']))
     manifest = fleet.record('inspector-build', verify_inspector(args.tool_directory, candidate))
     contract = verify_quorum_contract(manifest, candidate)
     result = {'topology': 'H2', 'branch': branch, 'verdict': 'RUNNING', 'cleanup': 'PENDING'}
-    probe, active, recovery_active, rows = Probe(binding), [], [], []
+    probe, active, recovery_active, rows, dl = Probe(binding), [], [], [], None
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
+        dl_endpoints = ['node1', 'node3' if branch in {'read-boundary', 'lock-boundary'} else 'node4']
+        dl = LoadSession(binding, bucket, dl_endpoints, directory / 'DL')
         recorder = Recorder(probe, directory / 'fixture')
         expected = seed_versions(recorder, fleet, bucket)
         key_versions = [entry for entry in expected if entry['key'] == 'objects/0001.bin']
         selected = next(entry for entry in key_versions if not entry['deleteMarker'] and entry['versionId'] == 'null')
+        dl_fixture = dl.seed()
+        expected += dl_fixture['expected']
         calibration = fleet.snapshot('DB-size-calibration-live')
         calibration_target = map_target(calibration, bucket, selected['key'], 'data', 1, selected['versionId'])
         db_plan = fleet.record('DB-source-size-plan', db_parameters(manifest, candidate, calibration_target, calibration))
@@ -474,12 +485,15 @@ def run_branch(args, nodes, branch):
         db_heads = version_heads(probe, fleet, db_bucket, db_expected, 'DB-original-HEAD')
         baseline = fleet.record('all-version-S3-baseline', probe.inventory(bucket))
         fleet.record('exact-ACK-manifest', {'expected': expected, **verify_seed(expected, baseline)})
+        dl.register_baseline(baseline)
         original_heads = version_heads(probe, fleet, bucket, expected, 'original-version-HEAD')
         for key in sorted({entry['key'] for entry in expected if entry['deleteMarker']}):
             verify_markers(probe, fleet, bucket, key, expected)
         fleet.stop()
         physical_buckets = [bucket, db_bucket]
         original = fleet.snapshot('physical-baseline', quiescent=True, buckets=physical_buckets)
+        dl.register_business_baseline(original)
+        dl.capture_mpu(fleet, 'baseline')
         validate_topology(original, 'H2')
         target = map_target(original, bucket, selected['key'], 'data', 1, selected['versionId'], latest_required=False)
         target = {**target, **next(row for row in target['cohort'] if row['node'] == nodes[3])}
@@ -488,6 +502,8 @@ def run_branch(args, nodes, branch):
         db_representatives, db_witnesses = map_db(original, db_bucket, db_expected, db_plan)
         fleet.record('DB-all128-physical-shapes', {'objects': db_witnesses, 'allBoundariesObserved': True})
         plan = fleet.record('actual-partition-quorum-plan', plan_for(original, target, branch))
+        require(tuple(side['endpoint'] for side in plan['sides']) == dl.endpoints,
+                'DL endpoints differ from the actual original cohort partition')
         params = {'disk': target['disk'], 'faultId': 'I03-missing-target'}
         registration = target['node'], params
         fleet.faults.append(registration)
@@ -521,6 +537,11 @@ def run_branch(args, nodes, branch):
             require(sum(row['writable'] for index in side['members'] for row in gates[nodes[index]]['disks']) == side['writableDrives']
                     and all(row['readableMetadata'] and row['sameServiceUidAndMountNamespace'] for index in side['members']
                             for row in gates[nodes[index]]['disks']), 'actual independent R/W witnesses differ from partition plan')
+        result['DL-load'] = fleet.record('DL-partition-concurrent-load', dl.run_load({
+            side['endpoint']: side['lockClients'] >= plan['sharedLockQuorum']
+                and side['metadataAuthorities'] >= plan['readQuorum'] for side in plan['sides']}))
+        require(result['DL-load']['complete'] is True,
+                'DL partition load is incomplete or has an uncertain/unexpected original response')
         for side in plan['sides']:
             endpoint = side['endpoint']
             local_probe = Probe(binding, endpoint)
@@ -551,8 +572,12 @@ def run_branch(args, nodes, branch):
         fleet.record('partition-process-resource-observations', {node: fleet.remote(node, 'process-metrics') for node in nodes})
         fleet.stop()
         scene = fleet.snapshot('negative-scene-before-release', quiescent=True, buckets=physical_buckets)
-        require(physical_content(faulted) == physical_content(project(scene, bucket, [row['key'] for row in rows])),
-                'partition writes/Heal changed an original version, control or damaged target')
+        dl.capture_mpu(fleet, 'failure')
+        delete_records = fleet.record('DL-stopped-original-delete-records', {node: fleet.remote(node, 'network-delete-records',
+            bucket=bucket, keys=sorted(side['controlKey'] for side in dl_fixture['sides'].values()),
+            expectedBinarySha256=binding['candidateBinarySha256']) for node in nodes})
+        damage = fleet.record('DL-original-delete-failure-obligations', classify_deletes(faulted,
+            project(scene, bucket, [row['key'] for row in rows]), dl_fixture, dl.registered_receipts(), plan, nodes, delete_records))
         for node in nodes:
             fleet.record('partition-peer-logs', {'node': node, **fleet.remote(node, 'logs')})
         release_network(fleet)
@@ -563,16 +588,27 @@ def run_branch(args, nodes, branch):
         require(physical_content(scene) == physical_content(fleet.snapshot('all-peer-return-before-independent-repair', buckets=physical_buckets)),
                 'network recovery repaired a target before the independent product task')
         result['recoveryResponsibility'] = recover_versions(probe, fleet, binding, bucket, key_versions, selected, recovery_active)
+        result['DL-recoveryResponsibility'] = recover_controls(probe, fleet, binding, dl_fixture, damage, recovery_active)
         idle_fleet(fleet, binding)
         fleet.stop()
         after = fleet.snapshot('physical-rebuilt-before-any-recovered-GET', quiescent=True, buckets=physical_buckets)
-        result['physical'] = validate_repaired_physical(original, project(after, bucket, [row['key'] for row in rows]), target)
+        repair_targets = [target, *damage['repairTargets']]
+        result['physical'] = validate_repaired_physical(original, project(after, bucket, [row['key'] for row in rows]), target,
+                                                      repair_targets=repair_targets)
         result['streaming'] = [verify_cohort(fleet, cohort, 'every-original-version-streaming') for cohort in cohorts]
         result['DB-physical'] = prove_db(fleet, db_representatives)
         fleet.faults.remove(registration)
+        dl.capture_mpu(fleet, 'pre-reconcile')
         fleet.start()
         result['writeResolution'] = resolve_writes(fleet, binding, bucket, rows)
         require(all(row['resolution']['state'] == 'ABSENT' for row in rows), 'a W/lock-negative partition nevertheless committed a new version')
+        result['DL-public-reconciliation'] = dl.reconcile()
+        fleet.stop()
+        dl.capture_mpu(fleet, 'post-reconcile')
+        final_business = fleet.snapshot('DL-stopped-final-business-closure', quiescent=True, buckets=physical_buckets)
+        result['DL-closure'] = dl.finish_reconciliation(final_business, repair_targets=repair_targets)
+        require(dl.safe_to_cleanup, 'DL original mutation effects remain unresolved')
+        fleet.start()
         released = unique_put(probe, directory, bucket, 'recovered/unique.bin', rows)
         require(released['observed']['acknowledged'] is True and released['observed']['response'].get('VersionId') not in {None, 'null'},
                 'fully recovered cluster cannot acknowledge a distinct safe PUT')
@@ -612,28 +648,56 @@ def run_branch(args, nodes, branch):
                 fleet.record('stop-original-partition-task', Probe(binding, endpoint).admin(path, [('clientToken', token), ('forceStop', 'true')], b''))
             except Exception as exc:
                 fleet.record('stop-partition-task-error', {'error': str(exc)})
-        try:
-            if fleet.network_gates or fleet.quorum_gates:
-                fleet.stop()
-                release_network(fleet)
-                for node in tuple(fleet.quorum_gates):
-                    fleet.record('failed-branch-W-release', fleet.remote(node, 'quorum-gate', mode='clear'))
-                    fleet.quorum_gates.remove(node)
-                fleet.start()
-            pending = [row for row in rows if 'resolution' not in row]
-            if pending:
-                fleet.stop()
-                fleet.start()
-                resolve_writes(fleet, binding, bucket, pending)
-        except Exception as exc:
+        if dl is not None and not dl.safe_to_cleanup:
+            # No S3 observation, rescue or ordinary cleanup may erase an
+            # incomplete seed or uncertain mutation. Preserve the stopped
+            # original scene, including refused Abort effects, by inode.
             dirty = True
-            result['recoveryError'] = str(exc)
-        if dirty:
-            fleet.stop()
-            fleet.record('retain-unresolved-network-or-write', {'state': 'DIRTY', 'namespacesRetained': True, 'writes': rows})
+            try:
+                fleet.stop()
+                for node in tuple(fleet.network_gates):
+                    proof = fleet.record('DL-failure-owned-network-release', {'node': node,
+                        **fleet.remote(node, 'network-release', expired=True)})
+                    require(proof.get('state') == 'CLEAR' and proof.get('rulesRemaining') == 0,
+                            'DL failure retained an owned network rule')
+                    fleet.network_gates.remove(node)
+                for node in tuple(fleet.quorum_gates):
+                    proof = fleet.record('DL-failure-owned-W-release', {'node': node,
+                        **fleet.remote(node, 'quorum-gate', mode='clear')})
+                    require(proof.get('state') == 'CLEAR', 'DL failure retained its private W gate')
+                    fleet.quorum_gates.remove(node)
+                failed_scene = fleet.snapshot('DL-original-unresolved-business-scene', quiescent=True, buckets=[bucket, bucket + '-db'])
+                failed_mpu = dl.capture_mpu(fleet, 'failure')
+                for node in nodes:
+                    fleet.record('DL-original-unresolved-service-logs', {'node': node, **fleet.remote(node, 'logs')})
+                retained_plan = prepare_retention(fleet, binding, dl.keys, failed_scene, failed_mpu['nodes'])
+                result['retention'] = isolate_retention(fleet, retained_plan)
+            except Exception as exc:
+                result['retentionError'] = {'type': type(exc).__name__, 'message': str(exc)}
             clean = False
         else:
-            clean = fleet.cleanup()
+            try:
+                if fleet.network_gates or fleet.quorum_gates:
+                    fleet.stop()
+                    release_network(fleet)
+                    for node in tuple(fleet.quorum_gates):
+                        fleet.record('failed-branch-W-release', fleet.remote(node, 'quorum-gate', mode='clear'))
+                        fleet.quorum_gates.remove(node)
+                    fleet.start()
+                pending = [row for row in rows if 'resolution' not in row]
+                if pending:
+                    fleet.stop()
+                    fleet.start()
+                    resolve_writes(fleet, binding, bucket, pending)
+            except Exception as exc:
+                dirty = True
+                result['recoveryError'] = str(exc)
+            if dirty:
+                fleet.stop()
+                fleet.record('retain-unresolved-network-or-write', {'state': 'DIRTY', 'namespacesRetained': True, 'writes': rows})
+                clean = False
+            else:
+                clean = fleet.cleanup()
         result.update(cleanup='PASS' if clean else 'FAIL', writes=rows)
         fleet.record('branch-result', result)
     return result

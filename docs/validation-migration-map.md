@@ -2040,7 +2040,7 @@ Original failures and original reports remain unchanged.
 | --- | --- | --- |
 | DV | Reuses auto-test `seed(DV)` and `suspend_fixture`: four keys with three distinct non-null data versions each; real suspended overwrites, null marker creation/removal ACKs; retained live/null marker identities; current and historical markers. Versioning returns to Enabled before partition. The fault targets a retained null data version. Every selected key version participates in GET, negative Heal and complete recursive recovery. All 15 retained data versions receive full physical shard checks; markers receive exact S3 refusal/header checks. HEAD preserves version identity, length, ETag, Last-Modified and metadata. | This expanded fixture still needs a new live run and independent evidence acceptance. It does not claim a partition while the bucket remains Suspended. |
 | DB | Adds a separate never-versioned run-owned bucket with the default 128 controls. The exact candidate size contract and actual EC:8 process/object geometry calibrate zero/one, 4 KiB, inline, EC block and source-bound 5-MiB MPU minimum minus/exact/plus sizes. All 128 controls require decoded full-set shape witnesses; every distinct size has partition GET, physical checksum/no-part and Range evidence. Original/fault/rejoin/repaired snapshots explicitly include both primary and DB buckets. All peers must preserve complete inventories and stable original HEADs. | Fresh live execution and independent acceptance remain required. The MPU-size controls are single PUT objects; they do not claim completed multipart protocol coverage, which remains part of DL. |
-| DL | `network_load.py` supplies three distinct control versions per endpoint, response-bound MPU fixtures and four independent worker journals for its concurrent 28-call matrix. `network_load_session.py` registers seed/workers before SDK invocation, reconciles original versions and pending MPU effects after rejoin, and withholds cleanup until a stopped physical MPU census proves no files remain. Original request and ACK byte hashes remain frozen. | Session and MPU census are not yet wired into the live adapter. Independent physical repair of partially refused version deletes, retained-scene isolation and recovery integration remain required before dispatch. Modeled matrix/reconciliation tests are not DL live or canonical acceptance. |
+| DL | `network_load.py` supplies three distinct control versions per endpoint, response-bound MPU fixtures and four independent worker journals for its concurrent 28-call matrix. `network_load_session.py` registers seed/workers before SDK invocation, reconciles original versions and pending MPU effects after rejoin, and withholds cleanup until a stopped physical MPU census proves no files remain. Original request and ACK byte hashes remain frozen. | The complete adapter now invokes the session, physical version recovery, MPU closure and unresolved-scene isolation for the fixed `1c7fc818dd858247c45b39542abd8291b1e6e31b` candidate. Fresh same-candidate live execution and independent full-fixture acceptance remain required. Modeled matrix/reconciliation tests are not DL live or canonical acceptance. |
 
 The expanded DV fixture stays within the existing 128-identity/512-MiB
 inventory limits. Network expiry remains 1,200 seconds; partition task deadlines,
@@ -2102,12 +2102,11 @@ other system-key contents. It requires stopped original services, matching
 candidate/owner/mount identities and bounded stable regular files. The census
 does not claim payload integrity or EC/bitrot correctness.
 
-The pending live adapter must preserve the original object and system MPU
-failure scene, independently repair partial refused deletes without dropping
-version assertions, and isolate unresolved scenes with the existing strict
-recovery protocol. Session/census support alone neither enables a new fleet
-dispatch nor completes I03. The 807-check Heal suite passes with nine platform
-skips; no new live or canonical acceptance is claimed.
+The live adapter now preserves original object and system MPU failure scenes,
+checks partial refused deletes without dropping version assertions, and routes
+unresolved effects into the strict isolation/recovery protocol. The earlier
+807-check session delivery remains scoped evidence; current full-adapter
+regressions and fresh live acceptance are recorded separately below.
 
 I03 unresolved-scene isolation (2026-10-19): `network_retention.py` now freezes
 the original four reservation owners and stopped business/MPU scene digests.
@@ -2126,7 +2125,48 @@ FAIL/cleanup-FAIL branch with an exact candidate/package/binary/helper/run
 binding and four matching original reservations. It reports `ISOLATED`, never
 `PASS` or `alreadyClean`, including retries after all active paths are absent.
 Historical expiry-only recovery keeps its existing strict boundary. The live
-I03 adapter still does not emit this new intent or invoke DL; integration,
-independent partial-delete repair and fresh full-fixture live acceptance
-remain required. Local filesystem/controller tests do not certify live
-isolation or increase the canonical count.
+I03 adapter now emits this intent when a seed or original DL effect remains
+unresolved. Local filesystem/controller tests do not certify live isolation
+or increase the canonical count; full-fixture live acceptance remains pending.
+
+
+I03 complete DL adapter (2026-10-19): the fixed `1c7fc818...` candidate now
+executes all DB/DV/DL stages in one original branch. The session exists before
+any DL SDK call. Its six acknowledged data versions join the primary baseline,
+all original HEADs, recursive version responsibility and all sixteen-drive
+streaming checks. Four workers issue the 28-call matrix inside the actual
+partition, between independent network witnesses. DL stable reads use their
+own intact data and actual shared-lock quorum, independently of the separate
+missing DV shard. The 128-object DB fixture remains included in every complete
+business snapshot.
+
+`network_delete_records.py` reads only bounded `delete-prepared` JSON files
+under the two original stopped DL control keys. It exports selectors and
+hashes, never raw records or nested metadata. Exact source hashes bind the
+version-1 journal, FileInfo serialization, delete rollback and Heal settlement
+behavior. Duplicate JSON fields, unsafe files, wrong runtime/owner, unbound
+versions/data directories/metadata hashes/target bytes and changed
+incarnations fail closed. The exact original refused historical-version
+request can explain only its reachable writable slots. Other versions, DB/DV
+controls, readonly or disconnected roots, new business commits and altered
+part bytes keep their original strict assertions.
+
+A complete prepared original backup is a product settlement obligation, not
+proof of commit or rollback. After rejoin, independent recursive product tasks
+must report all three original versions per DL key. Unbacked version loss
+requires an actual repaired receipt; source-bound product delete settlement
+may precede a healthy shard receipt only for that exact original generation
+and incarnation. All final physical files/formats, original shard bytes and
+public versions/metadata/tags still must match before cleanup. MPU retirement
+uses separate recovery ACKs and stopped final MPU/business checks. These occur
+before the recovered unique PUT. An incomplete seed/load or unresolved effect
+instead stops services, releases owned gates, captures the original scene and
+isolates every inode; the case and cleanup remain FAIL until separately audited.
+
+The full adapter intentionally requires the exact fixed candidate above.
+Historical `072b57b...` scoped source/contracts are retained, but its different
+delete protocol does not certify this expanded adapter. No product source,
+compiled collector, inspector pin, native barrier, request retry or time budget
+changes in this delivery. Local modeled orchestration and filesystem tests
+remain distinct from new full-fixture live evidence. Canonical acceptance
+remains **104/158** until that evidence is independently verified.
