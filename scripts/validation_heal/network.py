@@ -64,12 +64,49 @@ STORAGE_REFERENCES = {
 }
 
 
+GET_SOURCE_FILES = {
+    '072b57b37559fbe626aeda8abf61617fdcbdd926': {
+        'rustfs/src/error.rs': '656d38972c06339015c174405571a94f19d8dd64a680e1a7ca631f80205f99a7',
+        'crates/ecstore/src/set_disk/ops/object.rs': 'f0f407509b5a12803a191cc1c3a9eb079a15a80a4bbcacca70141150364628ca',
+        'crates/heal/src/heal/task/heal_bucket.rs': '2f89bc694d78b68cc2c505fdd854770176fb87cc97d31ea80a1b810f47d8c881'},
+    '1c7fc818dd858247c45b39542abd8291b1e6e31b': {
+        'rustfs/src/error.rs': 'e7cff0e28978b49d3ee0e8c24da1fa439b3118a7d3f7304edf00dc0535691598',
+        'crates/ecstore/src/set_disk/ops/object.rs': 'fdcfda1a8811a93537f9cd47cadac7380bee66b3d14242ca91500bbf38e6bedb',
+        'crates/heal/src/heal/task/heal_bucket.rs': 'fa38b21ee7997a909fc5f0671d777fd49983ccaaa18ced85bae8de76b75835ad'},
+}
+
+
 def source_reference(candidate_commit):
     require(isinstance(candidate_commit, str) and candidate_commit in STORAGE_REFERENCES,
             'network storage policy is not reviewed for this candidate')
     return {**copy.deepcopy(REFERENCE), 'candidateCommit': candidate_commit,
             'lock': lock_reference(candidate_commit),
-            'storage': copy.deepcopy(STORAGE_REFERENCES[candidate_commit])}
+            'storage': copy.deepcopy(STORAGE_REFERENCES[candidate_commit]),
+            'getPolicy': {'lockBeforeObjectMetadata': True,
+                'lockUnavailableGet': {'httpStatus': 503, 'code': 'ServiceUnavailable'},
+                'allVersionRecovery': {'recursive': True},
+                'sourceFiles': {**GET_SOURCE_FILES[candidate_commit],
+                    'crates/heal/src/heal/channel.rs': '7f669ca43b9559db9b97fba6b419a6c76a94d76acd8526db132d74b7c534d6b0'}}}
+
+
+def negative_get_contract(contract, side, plan):
+    policy = source_reference(contract['candidateCommit'])['getPolicy']
+    require(contract.get('recognized') is True and contract['sourceFiles'].get('rustfs/src/error.rs')
+            == policy['sourceFiles']['rustfs/src/error.rs'], 'partition GET error mapping differs from exact candidate')
+    require(type(side.get('lockClients')) is int and 0 <= side['lockClients'] <= 4
+            and plan.get('sharedLockQuorum') == 2, 'partition GET has an unknown shared-lock domain')
+    if side['lockClients'] < plan['sharedLockQuorum']:
+        return {**contract, 'unrecoverableGet': policy['lockUnavailableGet']}
+    return contract
+
+
+def recover_versions(probe, fleet, binding, bucket, expected, target, active):
+    require(len(expected) == 2 and len({entry['key'] for entry in expected}) == 1
+            and target['key'] == expected[0]['key'], 'network recovery requires both acknowledged versions of one exact key')
+    current = run_task(probe, fleet, {'bucket': bucket, 'key': target['key']}, 2, active,
+        option_overrides={'recursive': True}, status_endpoints=tuple(binding['endpoints'])[1:])
+    return validate_version_receipts(current, bucket, expected, 2,
+        required_repairs={(target['key'], target['versionId'])})
 
 
 def plan_for(snapshot, target, branch):
@@ -180,7 +217,7 @@ def validate_negative_task(current, bucket, expected, target):
 
 def negative_heal(probe, fleet, bucket, expected, target, active):
     path = '/rustfs/admin/v3/heal/' + quote(bucket, safe='') + '/' + quote(target['key'], safe='/')
-    admission = fleet.record('partition-Heal-admission', probe.admin(path, [], json.dumps(BASE_OPTIONS).encode()))
+    admission = fleet.record('partition-Heal-admission', probe.admin(path, [], json.dumps({**BASE_OPTIONS, 'recursive': True}).encode()))
     if admission.get('httpStatus') != 200:
         # No retry: require an actual structured storage/lock refusal. An
         # absent token or transport exception alone cannot prove safe refusal.
@@ -397,7 +434,12 @@ def run_branch(args, nodes, branch):
                     require(read.get('acknowledged') is True and read.get('resultUnknown') is False
                             and read.get('payload') == version['payload'], 'R-capable partition cannot redeem its exact original ACK')
                 else:
-                    validate_unrecoverable_get(read, contract)
+                    scoped_contract = negative_get_contract(contract, side, plan)
+                    fleet.record('partition-GET-error-contract', {'endpoint': endpoint, 'versionId': version['versionId'],
+                        'lockClients': side['lockClients'], 'sharedLockQuorum': plan['sharedLockQuorum'],
+                        'availableSources': available, 'readQuorum': plan['readQuorum'],
+                        'requiredError': scoped_contract['unrecoverableGet']})
+                    validate_unrecoverable_get(read, scoped_contract)
                 require(diagnostics['complete'], 'partition GET diagnostics are incomplete; inspect retained raw response')
             row = unique_put(local_probe, directory, bucket, 'partition/' + endpoint + '.bin', rows)
             row['negativeProof'] = negative_put(row['observed'])
@@ -420,10 +462,7 @@ def run_branch(args, nodes, branch):
         fleet.start()
         require(physical_content(scene) == physical_content(fleet.snapshot('all-peer-return-before-independent-repair')),
                 'network recovery repaired a target before the independent product task')
-        repaired = run_task(probe, fleet, {'bucket': bucket, 'key': selected['key']}, 2, recovery_active,
-                            status_endpoints=tuple(binding['endpoints'])[1:])
-        result['recoveryResponsibility'] = validate_version_receipts(repaired, bucket, expected[:2], 2,
-            required_repairs={(selected['key'], selected['versionId'])})
+        result['recoveryResponsibility'] = recover_versions(probe, fleet, binding, bucket, expected[:2], selected, recovery_active)
         idle_fleet(fleet, binding)
         fleet.stop()
         after = fleet.snapshot('physical-rebuilt-before-any-recovered-GET', quiescent=True)

@@ -281,6 +281,65 @@ class NetworkGetDiagnosticsTests(unittest.TestCase):
         probe.s3.assert_not_called()
 
 
+class NetworkScopedContractTests(unittest.TestCase):
+    def contract(self):
+        source = '1c7fc818dd858247c45b39542abd8291b1e6e31b'
+        return {'candidateCommit': source, 'recognized': True,
+                'sourceFiles': {'rustfs/src/error.rs': network.GET_SOURCE_FILES[source]['rustfs/src/error.rs']},
+                'unrecoverableGet': {'httpStatus': 503, 'code': 'SlowDownRead'}}
+
+    def test_lock_and_data_losses_require_different_exact503_codes(self):
+        for clients, expected in [(1, 'ServiceUnavailable'), (2, 'SlowDownRead'), (3, 'SlowDownRead')]:
+            contract = network.negative_get_contract(self.contract(), {'lockClients': clients}, {'sharedLockQuorum': 2})
+            for status, code in [(503, 'ServiceUnavailable'), (503, 'SlowDownRead'), (500, 'InternalError')]:
+                observed = {'acknowledged': False, 'resultUnknown': False,
+                    'response': {'Error': {'Code': code}, 'ResponseMetadata': {'HTTPStatusCode': status}}}
+                with self.subTest(clients=clients, status=status, code=code):
+                    if status == 503 and code == expected:
+                        network.validate_unrecoverable_get(observed, contract)
+                    else:
+                        with self.assertRaises(ValueError): network.validate_unrecoverable_get(observed, contract)
+
+    def test_foreign_source_or_unknown_lock_domain_cannot_select_an_error(self):
+        for kind in ('source', 'digest', 'unrecognized', 'boolean', 'quorum'):
+            contract, side, plan = self.contract(), {'lockClients': 1}, {'sharedLockQuorum': 2}
+            if kind == 'source': contract['candidateCommit'] = 'f' * 40
+            elif kind == 'digest': contract['sourceFiles']['rustfs/src/error.rs'] = 'f' * 64
+            elif kind == 'unrecognized': contract['recognized'] = False
+            elif kind == 'boolean': side['lockClients'] = True
+            else: plan['sharedLockQuorum'] = 1
+            with self.subTest(kind=kind), self.assertRaises(ValueError): network.negative_get_contract(contract, side, plan)
+
+    def test_negative_heal_requests_both_versions_without_changing_safe_refusal(self):
+        fleet = SimpleNamespace(record=lambda label, value: value)
+        probe = SimpleNamespace(admin=unittest.mock.Mock(return_value={'httpStatus': 503,
+            'response': {'Code': 'ServiceUnavailable'}}))
+        result = network.negative_heal(probe, fleet, 'owned', [], {'key': 'objects/a'}, [])
+        self.assertTrue(json.loads(probe.admin.call_args.args[2])['recursive'])
+        self.assertTrue(result['admissionRefused'])
+        self.assertFalse(result['repairClaimed'])
+
+    def test_recovery_requests_all_versions_and_keeps_the_two_receipt_oracle(self):
+        status, expected, target = NetworkTests().negative('repaired')
+        expected = [{**entry, 'deleteMarker': False} for entry in expected]
+        status['outcome']['counters'].update(healed=1, unchanged=1, skipped=0)
+        binding = {'endpoints': {'node1': 'one', 'node2': 'two', 'node3': 'three', 'node4': 'four'}}
+        for missing in (False, True):
+            current = copy.deepcopy(status)
+            if missing:
+                current['outcome']['objects'] = current['outcome']['objects'][1:]
+                current['outcome']['counters'].update(processed=1, unchanged=0)
+            with self.subTest(missing=missing), patch.object(network, 'run_task', return_value=current) as task:
+                if missing:
+                    with self.assertRaisesRegex(ValueError, 'omitted or duplicated'):
+                        network.recover_versions(None, None, binding, 'owned', expected, target, [])
+                else:
+                    proof = network.recover_versions(None, None, binding, 'owned', expected, target, [])
+                    self.assertEqual((proof['receipts'], proof['repaired']), (2, 1))
+                self.assertEqual(task.call_args.kwargs['option_overrides'], {'recursive': True})
+                self.assertEqual(task.call_args.kwargs['status_endpoints'], ('node2', 'node3', 'node4'))
+
+
 class NetworkExpiryTests(unittest.TestCase):
     owner = {'runId': 'gh-123-1-h2', 'hostname': 'node1', 'unit': 'owned.service',
              'runtimeProfile': 'lock-quorum', 'binarySha256': 'a' * 64}
