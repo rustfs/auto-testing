@@ -312,6 +312,57 @@ def mounts():
     return observed
 
 
+def environment_service_state():
+    """Observe fixed service/port names; never stop or certify a clean scene."""
+    fields = {'LoadState', 'ActiveState', 'SubState', 'MainPID'}
+
+    def service():
+        raw = command('systemctl', 'show', 'rustfs.service', '--no-pager',
+                      '--property=LoadState,ActiveState,SubState,MainPID', check=False)
+        values = dict(line.split('=', 1) for line in raw.stdout.splitlines() if '=' in line)
+        require(set(values) == fields and re.fullmatch(r'[0-9]+', values['MainPID']),
+                'environment service observation is incomplete')
+        require(raw.returncode == 0 or values['LoadState'] == 'not-found',
+                'environment service observation failed')
+        return {**values, 'MainPID': int(values['MainPID'])}
+
+    def validation_units():
+        raw = command('systemctl', 'list-units', '--all', '--type=service', '--plain',
+                      '--no-legend', '--no-pager', 'rustfs-validation-heal-*.service')
+        rows = []
+        for line in raw.stdout.splitlines():
+            parts = line.split(None, 4)
+            require(len(parts) >= 4 and parts[0].startswith('rustfs-validation-heal-')
+                    and parts[0].endswith('.service'), 'ambiguous validation service inventory')
+            run_id = parts[0][len('rustfs-validation-heal-'):-len('.service')]
+            require(RUN_PATTERN.fullmatch(run_id), 'unrecognized validation service requires audit')
+            rows.append(dict(zip(('unit', 'load', 'active', 'sub'), parts[:4])))
+        require(len(rows) <= 256 and len({row['unit'] for row in rows}) == len(rows),
+                'validation service inventory is unbounded or duplicated')
+        return sorted(rows, key=lambda row: row['unit'])
+
+    def listeners():
+        raw = command('ss', '-H', '-ltnp', '( sport = :9000 )')
+        rows = []
+        for line in raw.stdout.splitlines():
+            parts = line.split(None, 5)
+            require(len(parts) >= 5 and parts[0] == 'LISTEN' and parts[3].endswith(':9000'),
+                    'ambiguous port 9000 listener')
+            rows.append({'localAddress': parts[3],
+                         'pids': sorted({int(pid) for pid in re.findall(r'\bpid=([1-9][0-9]*)\b', line)})})
+        require(len(rows) <= 256, 'port listener inventory is unbounded')
+        return sorted(rows, key=lambda row: (row['localAddress'], row['pids']))
+
+    before = (service(), validation_units(), listeners())
+    after = (service(), validation_units(), listeners())
+    require(before == after, 'environment runtime changed during read-only observation')
+    standard, units, port = after
+    return {'standardService': standard, 'loadedValidationUnits': units, 'port9000Listeners': port,
+            'stableObservation': True, 'inspectionOnly': True, 'mutated': False,
+            'cleanStateCertified': False, 'globalWorkflowIdleCertified': False,
+            'retainedSceneRecoveryCertified': False}
+
+
 def environment_capabilities(request):
     """Read existing mounts and kernel interfaces without reserving a run."""
     paths(request['runId'])
@@ -344,6 +395,7 @@ def environment_capabilities(request):
         observed.append(row)
     binary = Path('/usr/bin/rustfs')
     return {'hostname': socket.gethostname(), 'mounts': observed, 'inspectionOnly': True, 'mutated': False,
+        'runtime': environment_service_state(),
         'kernel': {'pidfd': hasattr(os, 'pidfd_open'), 'cgroupV2': Path('/sys/fs/cgroup/cgroup.controllers').is_file(),
                    'fuseDevice': Path('/dev/fuse').exists() and stat.S_ISCHR(Path('/dev/fuse').stat().st_mode)},
         'commands': {name: shutil.which(name) is not None for name in ('docker', 'fusermount3', 'nft', 'az')},

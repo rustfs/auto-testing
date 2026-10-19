@@ -58,6 +58,9 @@ def summarize(observed):
                            'H3': {'mountsAvailable': available(nodes[:3], 4), 'requiredEndpoints': 12},
                            'H4': {'mountsAvailable': available(nodes[:3], 8), 'requiredEndpoints': 24},
                            'H6': {'platformRestartAuthorityVerified': False}},
+        'runtimeObservationsComplete': all(value.get('runtime', {}).get('stableObservation') is True
+                                           for value in observed.values()),
+        'cleanStateCertified': False, 'globalWorkflowIdleCertified': False,
         'actualErasureLayoutVerified': False, 'faultBackendVerified': False,
         'compatibleReleasePairVerified': False, 'canonicalPassClaimed': False}
 

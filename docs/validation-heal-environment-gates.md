@@ -1,5 +1,11 @@
 # Heal 环境门控与原生阻断
 
+## Read-only fleet inspection
+
+The Functional Chain `environment.inspect` entry records the current four Heal hosts' mount capabilities, fixed `rustfs.service` status, loaded validation service names and listening PIDs on port 9000. Service and listener observations must agree across two samples. Process arguments, service descriptions and credential files are excluded. Inspection never stops services or changes retained scenes.
+
+These observations do not certify a clean environment. Independently audit retained validation scenes and the complete shared-workflow census before dispatching another case. A completed workflow's success or failure alone does not prove recovery. The regular case installer remains responsible for stopping the standard service, and its existing namespace/port reservation guards remain authoritative.
+
 第一批 13 个用例保留全部 recipe、分支和 source assertions，并新增 `environment_cases.py` 的控制流程与断言，接入 validation 调度。它们默认关闭，只产生 `BLOCKED` 结果与未满足原因；默认路径不会连接或修改 fleet。真实执行沿用 auto-testing 的 S3/Admin collector、ACK ledger、候选包绑定、物理故障 oracle 和恢复模式，专用资源操作由部署环境的适配器提供。当前没有把适配器协议或未运行代码计为 canonical PASS。
 
 设置 `AUTO_TESTING_ENABLE_ENV_GATED_HEAL=1` 并通过 `VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES` 指向 JSON 能力清单后，门控会检查全部能力。缺项仍返回 `BLOCKED`。能力齐全后还要用 `VALIDATION_HEAL_ENVIRONMENT_RUNTIME` 指向 runtime JSON；只有候选/checkout/client 摘要、全部拓扑、当前 Heal SSH 节点和适配器摘要校验通过后才会运行分支。未绑定适配器仍为 `BLOCKED`；执行结果需要 source assertion 审核，当前实现不会自动生成 canonical PASS。
