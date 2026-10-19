@@ -222,6 +222,13 @@ instances. Original failures remain archived. Physical closure requires the
 whole orphan to disappear, every post-DELETE control/format to remain exact,
 and complete version-addressed task receipts/counters before reads or rescue.
 
+Complete live acceptance: [run 39197088183/1](https://github.com/rustfs/rustfs/actions/runs/39197088183)
+on helper `b16e6072679d6a60a044b9d4520b30b4a79b5557` passed all 68 instances
+and independent ACK/task/physical/public/cleanup audit, including 170 node
+finalizations. Candidate `072b57b37559fbe626aeda8abf61617fdcbdd926`, package
+`38043283428/1` and inspector `38715612825/1` remain immutable. Earlier failures
+are retained; control rescue is not counted as product repair.
+
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
