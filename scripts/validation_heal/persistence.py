@@ -546,7 +546,7 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
         pending = {"operation": "admit-original-checkpoint-task"}
         token = checkpoints.admit(probe, fleet, active)
         pending = None
-        earlier = checkpoints.capture_earlier(fleet, token, bucket, "F07-earlier-generation") if branch == "stale-generation" else None
+        earlier = checkpoints.capture_earlier(fleet, token, bucket, "F07-earlier-generation", advance=True) if branch == "stale-generation" else None
         if earlier is not None:
             require(earlier["value"]["admin"]["outcome"]["counters"]["healed"] == 0,
                     "NOT_OBSERVED: earlier generation missed the pre-repair capture window")

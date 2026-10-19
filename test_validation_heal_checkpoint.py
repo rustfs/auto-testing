@@ -140,6 +140,73 @@ class AdminCheckpointTests(unittest.TestCase):
                 self.assertEqual(fleet.frozen_processes, {"node": identity})
                 receipt[key] = original
 
+    def test_atomic_earlier_capture_keeps_the_registered_birth_frozen_without_an_ssh_resume_gap(self):
+        observed, _, _ = self.fixture(); owner = reader.owned_checkpoint(observed, TOKEN, BUCKET)
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50)
+        receipt = {'processBound': True, 'originalProductBytes': True, 'productMetadataMutated': False,
+            'runId': 'gh-12345-1-h1', 'family': 'checkpoint', 'taskId': TOKEN, 'disk': owner['disk'],
+            'relativePath': owner['checkpoint']['relativePath'], 'faultId': 'F07-early',
+            'binarySha256': identity['binarySha256'], 'captured': journal.entry(reader.bytes_of(owner['checkpoint'])),
+            'checkpointAdvancedAndFrozen': True, 'pidfdBound': True, 'serviceFrozen': True,
+            'observedProcessed': 3, 'processIdentity': identity}
+        calls = []
+        fleet = SimpleNamespace(run_id=receipt['runId'], frozen_processes={'node': identity},
+            record=lambda label, value: value, remote=lambda node, action, **params: calls.append(action) or receipt)
+        with patch.object(reader, 'freeze', return_value=(owner, identity)):
+            earlier = reader.capture_earlier(fleet, TOKEN, BUCKET, 'F07-early', advance=True)
+        self.assertEqual(calls, ['journal-capture-advance'])
+        self.assertTrue(earlier['advancedAndFrozen'])
+        self.assertEqual(earlier['processIdentity'], identity)
+        self.assertEqual(fleet.frozen_processes, {'node': identity})
+        for key, bad in [('checkpointAdvancedAndFrozen', False), ('pidfdBound', False), ('serviceFrozen', False),
+                         ('observedProcessed', True), ('observedProcessed', 2), ('processIdentity', {})]:
+            original = receipt[key]; receipt[key] = bad
+            with self.subTest(key=key, bad=bad), patch.object(reader, 'freeze', return_value=(owner, identity)), \
+                    self.assertRaises(ValueError):
+                reader.capture_earlier(fleet, TOKEN, BUCKET, 'F07-early', advance=True)
+            receipt[key] = original
+            self.assertEqual(fleet.frozen_processes, {'node': identity})
+
+    def test_atomic_frozen_generation_still_requires_full_fleet_checkpoint_and_root_censuses(self):
+        observed, value, _ = self.fixture(); roots, _ = self.root_fixture()
+        earlier = reader.owned_checkpoint(observed, TOKEN, BUCKET)
+        from scripts.validation_heal.fleet_node import PROCESS_FIELDS
+        identity = {name: name for name in PROCESS_FIELDS}; identity.update(pid=50)
+        earlier.update(advancedAndFrozen=True, processIdentity=identity)
+        value['checkpoint_time'] = 101; value['current_object_index'] = 3
+        value['processed_objects'].append('objects/third'); value['successful_objects'] = 3
+        value['admin']['outcome']['counters'].update(processed=3, unchanged=2)
+        observed['node']['records'][4].update(encoded(value, signed=True))
+        for tree in (observed, roots):
+            for peer in ('peer1', 'peer2', 'peer3'):
+                tree[peer] = copy.deepcopy(tree['node'])
+                tree[peer]['records'] = [{'disk': r['disk'], 'relativePath': r['relativePath'], 'present': False}
+                                         for r in tree[peer]['records']]
+        for change in (None, 'unregistered', 'changed-birth', 'not-frozen', 'second-owner'):
+            fleet = SimpleNamespace(nodes=['node', 'peer1', 'peer2', 'peer3'],
+                frozen_processes={} if change == 'unregistered' else {'node': identity},
+                record=lambda label, value: value)
+            if change == 'changed-birth': fleet.frozen_processes['node'] = {**identity, 'pid': 51}
+            calls = []
+            fleet.remote = lambda node, action, **params: calls.append(action) or {
+                **identity, 'state': 'S' if change == 'not-frozen' else 'T'}
+            current = copy.deepcopy(observed)
+            if change == 'second-owner': current['peer1'] = copy.deepcopy(current['node'])
+            def census(fleet, token, label, **params):
+                self.assertNotIn('nodes', params)
+                self.assertIn(label, ('Admin-checkpoint-frozen', 'Admin-root-frozen'))
+                return roots if params.get('family') == 'root' else current
+            with self.subTest(change=change), patch.object(reader, 'records', side_effect=census) as records:
+                if change:
+                    with self.assertRaises(ValueError): reader.freeze(fleet, TOKEN, BUCKET, earlier=earlier)
+                else:
+                    frozen, birth = reader.freeze(fleet, TOKEN, BUCKET, earlier=earlier)
+                    self.assertEqual(birth, identity)
+                    self.assertEqual(frozen['value']['admin']['outcome']['counters']['processed'], 3)
+                    self.assertEqual(records.call_count, 2)
+                self.assertNotIn('process-signal', calls)
+
     def test_stale_boundary_requires_actual_newer_progress_in_the_same_original_responsibility(self):
         observed, value, _ = self.fixture()
         earlier = reader.owned_checkpoint(observed, TOKEN, BUCKET)

@@ -9,6 +9,9 @@ import json
 import os
 from pathlib import Path
 import struct
+import subprocess
+import sys
+import time
 import tempfile
 import types
 import unittest
@@ -37,7 +40,7 @@ class DurableRecordFaultTests(unittest.TestCase):
 
     def test_only_live_observation_refusals_survive_the_remote_boundary_as_retryable(self):
         refusal = 'NOT_OBSERVED: exact durable records changed between the two bounded reads'
-        for action in ('journal-observe', 'journal-capture', 'journal-apply', 'journal-census'):
+        for action in ('journal-observe', 'journal-capture', 'journal-capture-advance', 'journal-apply', 'journal-census'):
             output = io.StringIO()
             with self.subTest(action=action), patch.object(fleet_node.os, 'geteuid', return_value=0), \
                  patch.object(fleet_node, 'journal_operation', side_effect=ValueError(refusal)), contextlib.redirect_stdout(output):
@@ -62,6 +65,209 @@ class DurableRecordFaultTests(unittest.TestCase):
             response = types.SimpleNamespace(returncode=1, stdout=json.dumps({'observationUnavailable': refusal}), stderr='failed')
             with patch.object(healthy.subprocess, 'run', return_value=response):
                 with self.assertRaisesRegex(ValueError, '^Heal node'): fleet.remote('node', 'journal-observe')
+
+    def test_atomic_advance_uses_one_held_pidfd_and_refreezes_on_observation_failure(self):
+        for change in (None, 'timeout', 'birth', 'corrupt', 'incarnation', 'options', 'counter', 'read-error', 'unstable', 'post-birth', 'late-progress', 'continue-interrupted', 'stop-pending', 'stop-timeout', 'stop-birth'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
+                base = Path(temp).resolve(); roots = tuple(base / str(i) for i in range(4))
+                for root in roots: root.mkdir()
+                owner, request, path, raw = self.fixture(roots[0]); request.pop('kind')
+                for root in roots[1:]:
+                    (root / 'data/.rustfs.sys/buckets').mkdir(parents=True); (root / 'quarantine').mkdir()
+                request['action'] = 'journal-capture-advance'
+                identity = {name: name for name in fleet_node.PROCESS_FIELDS}
+                identity.update(pid=50, startTicks=20, binarySha256=owner['binarySha256'])
+                request['expected'] = identity
+                next_raw = self.checkpoint(processed=3, time=101)
+                value = json.loads(next_raw)
+                if change == 'incarnation': value['admin']['buckets'][self.bucket] = str(uuid.uuid4())
+                elif change == 'options': value['admin']['options']['nolock'] = True
+                elif change == 'counter': value['admin']['outcome']['counters']['processed'] = True
+                if change in ('incarnation', 'options', 'counter'): next_raw = self.signed(value)
+                if change == 'corrupt': next_raw = b'invalid checkpoint'
+                events = []; running = [False]; raced = [False]
+                def signal_pidfd(fd, signum, *args):
+                    self.assertEqual(fd, 55); events.append(signum)
+                    running[0] = signum == fleet_node.signal.SIGCONT
+                    if running[0] and change != 'timeout': path.write_bytes(next_raw)
+                    if running[0] and change == 'continue-interrupted': raise KeyboardInterrupt('lost CONT receipt')
+                def process(request):
+                    if len(process_calls) >= 2: self.assertEqual(events[-1], fleet_node.signal.SIGSTOP)
+                    process_calls.append(True)
+                    return {**identity, 'state': 'S' if change == 'stop-pending' and len(process_calls) == 3
+                            and not stop_ready[0] else 'T',
+                            **({'startTicks': 21} if change == 'post-birth' and len(process_calls) == 3 else {})}
+                process_calls = []; stop_ready = [False]; stopped_reads = [0]
+                old_read_text = Path.read_text
+                def read_text(p, *a, **kw):
+                    if str(p) == '/proc/50/stat':
+                        state = 'S' if running[0] else 'T'
+                        if not running[0] and events:
+                            stopped_reads[0] += 1
+                            if change == 'stop-timeout' or change == 'stop-pending' and stopped_reads[0] == 1: state = 'S'
+                            stop_ready[0] = state == 'T'
+                        changed_birth = change == 'birth' or change == 'stop-birth' and not running[0] and events
+                        return '50 (owned candidate) ' + state + ' ' + ' '.join(['0'] * 18 + ['21' if changed_birth else '20'])
+                    return old_read_text(p, *a, **kw)
+                real_read = journal.read
+                def read(*args, **kwargs):
+                    if running[0] and not raced[0] and change in ('read-error', 'unstable'):
+                        raced[0] = True
+                        if change == 'read-error': raise PermissionError('unexpected access denial')
+                        raise ValueError('file changed while reading')
+                    return real_read(*args, **kwargs)
+                for context in (patch.object(fleet_node, 'owned', return_value=(base, roots, owner)),
+                    patch.object(fleet_node, 'digest', return_value=owner['binarySha256']),
+                    patch.object(fleet_node, 'fault_module', return_value=fault),
+                    patch.dict(fleet_node.__dict__, journal_fault_backend=journal),
+                    patch.object(fleet_node, 'process', side_effect=process)):
+                    stack.enter_context(context)
+                opened = stack.enter_context(patch.object(fleet_node.os, 'pidfd_open', create=True, return_value=55))
+                sent = stack.enter_context(patch.object(fleet_node.signal, 'pidfd_send_signal', create=True, side_effect=signal_pidfd))
+                real_close = os.close
+                closed = []
+                def close(fd):
+                    if fd == 55: closed.append(fd)
+                    else: real_close(fd)
+                stack.enter_context(patch.object(fleet_node.os, 'close', side_effect=close))
+                stack.enter_context(patch.object(fault, 'mount_id', return_value=1))
+                stack.enter_context(patch.object(Path, 'read_text', read_text))
+                stack.enter_context(patch.object(journal, 'read', side_effect=read))
+                if change == 'timeout': stack.enter_context(patch.object(fleet_node.time, 'monotonic', side_effect=[0, 61]))
+                elif change == 'late-progress': stack.enter_context(patch.object(fleet_node.time, 'monotonic', side_effect=[0, .01, 61]))
+                elif change == 'stop-timeout': stack.enter_context(patch.object(fleet_node.time, 'monotonic', side_effect=[0, .01, .02, 61]))
+                if change in (None, 'unstable', 'stop-pending'):
+                    result = fleet_node.journal_operation(request)
+                    self.assertTrue(result['checkpointAdvancedAndFrozen'])
+                    self.assertTrue(result['pidfdBound'])
+                    self.assertEqual(result['observedProcessed'], 3)
+                    self.assertEqual(path.read_bytes(), next_raw)
+                    self.assertEqual(len(process_calls), 3)
+                else:
+                    with self.assertRaises((ValueError, OSError, KeyboardInterrupt)): fleet_node.journal_operation(request)
+                self.assertEqual(events, [fleet_node.signal.SIGCONT, fleet_node.signal.SIGSTOP])
+                self.assertEqual(closed, [55])
+                opened.assert_called_once_with(50, 0)
+                self.assertEqual((roots[0] / ('quarantine/' + request['faultId'] + '.early.checkpoint')).read_bytes(), raw)
+
+    def test_atomic_advance_rejects_unpaused_foreign_or_unbounded_requests_before_capture_or_signal(self):
+        for change in ('runtime', 'live', 'birth', 'input', 'budget', 'path', 'disk', 'family'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
+                root = Path(temp).resolve(); owner, request, path, raw = self.fixture(root); request.pop('kind')
+                request['action'] = 'journal-capture-advance'
+                identity = {name: name for name in fleet_node.PROCESS_FIELDS}
+                identity.update(pid=50, startTicks=20, binarySha256=owner['binarySha256']); request['expected'] = identity.copy()
+                if change == 'runtime': owner['runtimeProfile'] = 'mrf-crash'
+                elif change == 'birth': request['expected']['startTicks'] = 21
+                elif change == 'input': request['command'] = 'arbitrary'
+                elif change == 'budget': request['timeout'] = 600
+                elif change == 'path': request['relativePath'] = '.rustfs.sys/foreign.json'
+                elif change == 'disk': request['disk'] = True
+                elif change == 'family': request['family'] = 'mrf'
+                for context in (patch.object(fleet_node, 'owned', return_value=(root, [root] * 4, owner)),
+                    patch.object(fleet_node, 'digest', return_value=owner['binarySha256']),
+                    patch.object(fleet_node, 'fault_module', return_value=fault),
+                    patch.dict(fleet_node.__dict__, journal_fault_backend=journal),
+                    patch.object(fleet_node, 'process', return_value={**identity, 'state': 'S' if change == 'live' else 'T'}),
+                    patch.object(fleet_node.os, 'pidfd_open', create=True, return_value=55),
+                    patch.object(fleet_node.signal, 'pidfd_send_signal', create=True)):
+                    stack.enter_context(context)
+                captured = stack.enter_context(patch.object(journal, 'capture'))
+                with self.assertRaises(ValueError): fleet_node.journal_operation(request)
+                captured.assert_not_called()
+                self.assertEqual(path.read_bytes(), raw)
+                self.assertEqual(list((root / 'quarantine').iterdir()), [])
+
+    def test_advance_rejects_reopened_capture_device_or_mount_before_resuming(self):
+        for key in ('device', 'mountId'):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
+                root = Path(temp).resolve(); owner, request, path, raw = self.fixture(root); request.pop('kind')
+                request['action'] = 'journal-capture-advance'
+                identity = {name: name for name in fleet_node.PROCESS_FIELDS}
+                identity.update(pid=50, startTicks=20, binarySha256=owner['binarySha256']); request['expected'] = identity
+                real_capture = journal.capture
+                def capture(*args): return {**real_capture(*args), key: -1}
+                for context in (patch.object(fleet_node, 'owned', return_value=(root, [root] * 4, owner)),
+                    patch.object(fleet_node, 'digest', return_value=owner['binarySha256']),
+                    patch.object(fleet_node, 'fault_module', return_value=fault),
+                    patch.dict(fleet_node.__dict__, journal_fault_backend=journal),
+                    patch.object(fleet_node, 'process', return_value={**identity, 'state': 'T'}),
+                    patch.object(fleet_node.os, 'pidfd_open', create=True, return_value=55),
+                    patch.object(fault, 'mount_id', return_value=1), patch.object(journal, 'capture', side_effect=capture)):
+                    stack.enter_context(context)
+                signals = stack.enter_context(patch.object(fleet_node.signal, 'pidfd_send_signal', create=True))
+                real_close = os.close; closed = []
+                def close(fd):
+                    if fd == 55: closed.append(fd)
+                    else: real_close(fd)
+                stack.enter_context(patch.object(fleet_node.os, 'close', side_effect=close))
+                with self.assertRaisesRegex(ValueError, 'root device or mount changed'): fleet_node.journal_operation(request)
+                signals.assert_not_called(); self.assertEqual(closed, [55]); self.assertEqual(path.read_bytes(), raw)
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'pidfd_open')
+                         and hasattr(fleet_node.signal, 'pidfd_send_signal'), 'actual Linux pidfd required')
+    def test_actual_linux_pidfd_stops_the_same_child_after_real_checkpoint_file_progress(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve(); roots = tuple(base / str(i) for i in range(4))
+            for root in roots: root.mkdir()
+            owner, request, path, early = self.fixture(roots[0]); request.pop('kind')
+            request['action'] = 'journal-capture-advance'
+            for root in roots[1:]: (root / 'data/.rustfs.sys/buckets').mkdir(parents=True)
+            resume_path = roots[0] / 'data' / journal.names('checkpoint', self.token)[1]
+            resume = json.dumps({'schema_version': 7, 'task_id': self.token, 'task_type': 'admin_erasure_set',
+                'set_disk_id': 'pool_0_set_0', 'completed': False, 'replacement_targets': [], 'replacement_generation': None}).encode()
+            resume_path.write_bytes(resume)
+            later = self.checkpoint(processed=3, time=101); next_bytes = base / 'next'; next_bytes.write_bytes(later)
+            child_source = ("import os,signal,sys,time; os.kill(os.getpid(),signal.SIGSTOP); "
+                "raw=open(sys.argv[2],'rb').read(); f=open(sys.argv[1]+'.next','xb'); "
+                "f.write(raw); f.flush(); os.fsync(f.fileno()); f.close(); os.replace(sys.argv[1]+'.next',sys.argv[1]); "
+                "time.sleep(120)")
+            child = subprocess.Popen([sys.executable, '-c', child_source, str(path), str(next_bytes)])
+            cleanup_fd = None
+            real_send = fleet_node.signal.pidfd_send_signal
+            def stat_fields(): return Path(f'/proc/{child.pid}/stat').read_text().rpartition(') ')[2].split()
+            try:
+                cleanup_fd = os.pidfd_open(child.pid, 0)
+                deadline = time.monotonic() + 5
+                while stat_fields()[0] != 'T':
+                    self.assertIsNone(child.poll()); self.assertLess(time.monotonic(), deadline); time.sleep(.01)
+                birth = int(stat_fields()[19])
+                identity = {name: name for name in fleet_node.PROCESS_FIELDS}
+                identity.update(pid=child.pid, startTicks=birth, binarySha256=owner['binarySha256'])
+                request['expected'] = identity
+                snapshots, signals = [], []
+                def process(request):
+                    fields = stat_fields(); self.assertEqual(int(fields[19]), birth)
+                    if len(snapshots) >= 2: self.assertEqual(signals[-1], fleet_node.signal.SIGSTOP)
+                    snapshots.append(fields[0]); return {**identity, 'state': fields[0]}
+                def send(fd, signum, *args):
+                    signals.append(signum); return real_send(fd, signum, *args)
+                with patch.object(fleet_node, 'owned', return_value=(base, roots, owner)), \
+                        patch.object(fleet_node, 'digest', return_value=owner['binarySha256']), \
+                        patch.object(fleet_node, 'fault_module', return_value=fault), \
+                        patch.dict(fleet_node.__dict__, journal_fault_backend=journal), \
+                        patch.object(fleet_node, 'process', side_effect=process), \
+                        patch.object(fleet_node.signal, 'pidfd_send_signal', side_effect=send):
+                    result = fleet_node.journal_operation(request)
+                self.assertEqual(signals, [fleet_node.signal.SIGCONT, fleet_node.signal.SIGSTOP])
+                self.assertEqual(snapshots, ['T', 'T', 'T'])
+                self.assertEqual(result['observedProcessed'], 3)
+                self.assertEqual(stat_fields()[0], 'T')
+                self.assertEqual(path.read_bytes(), later)
+                self.assertEqual(resume_path.read_bytes(), resume)
+                self.assertEqual((roots[0] / ('quarantine/' + request['faultId'] + '.early.checkpoint')).read_bytes(), early)
+                print('ATOMIC_PIDFD_COMPONENT ' + json.dumps({'simulatedCheckpoint': True, 'actualLinuxPidfd': True,
+                    'sameProcessBirth': True, 'checkpointCounts': [2, 3], 'earlierBackupByteIdentical': True,
+                    'laterFileByteIdentical': True, 'companionUnchanged': True, 'childStoppedBeforeReturn': True,
+                    'rustfsCandidateExecuted': False, 'canonicalPassClaimed': False}))
+            finally:
+                try:
+                    if cleanup_fd is not None: real_send(cleanup_fd, fleet_node.signal.SIGKILL, None, 0)
+                    elif child.poll() is None: child.kill()
+                except ProcessLookupError: pass
+                finally:
+                    if cleanup_fd is not None: os.close(cleanup_fd)
+                child.wait(timeout=5)
 
     def test_full_server_checkpoint_fixture_preserves_feature_unified_json_order(self):
         # Original bytes from candidate 1aa9be87, diagnostic 38261190390/1.

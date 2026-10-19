@@ -1193,6 +1193,104 @@ def configure_encryption(request):
     return encryption_module().configure(state, owner, request, fault_module())
 
 
+def advance_captured_checkpoint(request, roots, owner, module, fault, before, capture):
+    require(owner.get("runtimeProfile") == "root-restart" and before.get("state") == "T"
+            and request["family"] == "checkpoint" and len(roots) == 4,
+            "checkpoint advance requires its paused owned root-restart service")
+    require(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"),
+            "checkpoint advance requires Linux pidfd support")
+    descriptor = os.pidfd_open(before["pid"], 0)
+    resumed = False
+    try:
+        bound = process(request)
+        require(bound.get("state") == "T" and all(bound.get(name) == before[name] for name in PROCESS_FIELDS),
+                "checkpoint advance lost its original paused process birth")
+        with fault.directory(roots[request["disk"]]) as root_fd:
+            require(os.fstat(root_fd).st_dev == capture.get("device")
+                    and fault.mount_id(root_fd) == capture.get("mountId"),
+                    "checkpoint capture root device or mount changed before advance")
+            path = module.relative(request)
+            earlier = module.read(root_fd, path, fault)
+            require(module.same_json(module.entry(earlier), capture["captured"]),
+                    "captured checkpoint changed before resuming its original process")
+            old = module.checkpoint_value(earlier, request["taskId"], owner["bucket"])
+            old_count = old["admin"]["outcome"]["counters"]["processed"]
+            require(type(old_count) is int and 0 < old_count < 2**64,
+                    "earlier checkpoint has no exact positive progress")
+            deadline = time.monotonic() + 60
+            # Register the resume intent before the syscall: interruption or a
+            # lost local receipt must still refreeze this exact held pidfd.
+            resumed = True
+            signal.pidfd_send_signal(descriptor, signal.SIGCONT, None, 0)
+            while True:
+                require(time.monotonic() < deadline,
+                        "NOT_OBSERVED: actual checkpoint advance exceeded its frozen 60-second budget")
+                # The held pidfd binds signals. Cheap procfs birth checks avoid
+                # hashing the full candidate between progress and SIGSTOP.
+                fields = Path(f"/proc/{before['pid']}/stat").read_text().rpartition(") ")[2].split()
+                require(len(fields) >= 20 and fields[19].isdigit() and int(fields[19]) == before["startTicks"],
+                        "original checkpoint process exited or changed birth during advance")
+                try:
+                    raw = module.read(root_fd, path, fault)
+                except FileNotFoundError:
+                    raw = None
+                except ValueError as exc:
+                    if str(exc) != "file changed while reading": raise
+                    raw = None
+                if raw is not None:
+                    value = module.checkpoint_value(raw, request["taskId"], owner["bucket"])
+                    require(all(module.same_json(value["admin"].get(name), old["admin"].get(name))
+                                for name in ("buckets", "options", "set_disk_id")),
+                            "checkpoint advance changed original incarnation, options or set")
+                    count = value["admin"].get("outcome", {}).get("counters", {}).get("processed")
+                    require(type(count) is int and old_count <= count < 2**64,
+                            "checkpoint advance regressed or lost its exact progress")
+                    if count > old_count:
+                        require(time.monotonic() < deadline,
+                                "NOT_OBSERVED: actual checkpoint advance exceeded its frozen 60-second budget")
+                        signal.pidfd_send_signal(descriptor, signal.SIGSTOP, None, 0)
+                        resumed = False
+                        break
+                time.sleep(.01)
+            # Signal delivery can precede the actual group stop. Await T on
+            # the same birth within the original observation deadline.
+            while True:
+                require(time.monotonic() < deadline,
+                        "NOT_OBSERVED: original process did not stop within its frozen advance budget")
+                fields = Path(f"/proc/{before['pid']}/stat").read_text().rpartition(") ")[2].split()
+                require(len(fields) >= 20 and fields[19].isdigit() and int(fields[19]) == before["startTicks"],
+                        "checkpoint process changed birth before its actual group stop")
+                if fields[0] == "T": break
+                time.sleep(.001)
+        after = process(request)
+        require(after.get("state") == "T" and all(after.get(name) == before[name] for name in PROCESS_FIELDS),
+                "advanced checkpoint did not freeze the original candidate process")
+        observed = module.stable_census(roots, request, fault)
+        selected = [row for row in observed["records"]
+                    if (row["disk"], row["relativePath"]) == (request["disk"], request["relativePath"])]
+        require(len(selected) == 1 and selected[0].get("present") is True,
+                "NOT_OBSERVED: advanced original checkpoint disappeared before freeze")
+        row = selected[0]
+        current = base64.b64decode(row["rawBase64"], validate=True)
+        require(module.same_json(module.entry(current), {name: row.get(name) for name in ("size", "sha256")}),
+                "advanced checkpoint census bytes differ")
+        # This validates the original digest, all counters, time and cursor,
+        # without installing or otherwise modifying any product record.
+        module.transform(current, {**request, "kind": "stale-generation"}, owner, None, earlier=earlier)
+        final_count = module.checkpoint_value(current, request["taskId"], owner["bucket"])["admin"]["outcome"]["counters"]["processed"]
+        require(final_count >= count, "checkpoint progress regressed between observation and actual freeze")
+        return {**capture, "observation": observed, "processIdentity": {name: after[name] for name in PROCESS_FIELDS},
+                "processBound": True, "serviceFrozen": True, "checkpointAdvancedAndFrozen": True,
+                "pidfdBound": True, "observedProcessed": count, "naturalProductProgressObserved": True}
+    finally:
+        try:
+            if resumed:
+                try: signal.pidfd_send_signal(descriptor, signal.SIGSTOP, None, 0)
+                except ProcessLookupError: pass
+        finally:
+            os.close(descriptor)
+
+
 def journal_operation(request):
     state, roots, owner = owned(request["runId"])
     require(digest(state / "rustfs") == owner["binarySha256"], "durable-record candidate changed")
@@ -1205,9 +1303,9 @@ def journal_operation(request):
                 "bounded journal runtime mutates only the owned Admin checkpoint family")
         roots = volume_views(state, roots, owner)
     module, fault = globals()["journal_fault_backend"], fault_module()
-    if request["action"] in {"journal-observe", "journal-capture"}:
+    if request["action"] in {"journal-observe", "journal-capture", "journal-capture-advance"}:
         fields = {"runId", "action", "family", "taskId", "expected"}
-        if request["action"] == "journal-capture":
+        if request["action"] in {"journal-capture", "journal-capture-advance"}:
             fields |= {"disk", "relativePath", "faultId", "expectedBefore"}
         require(set(request) == fields, "live durable-record observation/capture has unknown mutation or path inputs")
         before = process(request)
@@ -1215,8 +1313,14 @@ def journal_operation(request):
         require(isinstance(expected, dict) and before.get("pid", 0) > 1
                 and all(name in expected and before.get(name) == expected[name] for name in PROCESS_FIELDS),
                 "live durable-record observation lost its exact service birth or candidate")
+        if request["action"] == "journal-capture-advance":
+            require(owner.get("runtimeProfile") == "root-restart" and before.get("state") == "T"
+                    and request["family"] == "checkpoint" and len(roots) == 4,
+                    "checkpoint advance requires its paused owned root-restart service")
+            require(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"),
+                    "checkpoint advance requires Linux pidfd support")
         observed = module.stable_census(roots, request, fault)
-        if request["action"] == "journal-capture":
+        if request["action"] in {"journal-capture", "journal-capture-advance"}:
             require(request["family"] == "checkpoint" and type(request["disk"]) is int and 0 <= request["disk"] < 4,
                     "earlier checkpoint capture has no exact owned Admin record/disk")
             selected = [row for row in observed["records"]
@@ -1226,6 +1330,8 @@ def journal_operation(request):
                     "NOT_OBSERVED: earlier checkpoint differs from its two stable process-bound reads")
             with fault.directory(roots[request["disk"]]) as fd:
                 observed = {**module.capture(fd, request, owner, fault), "observation": observed}
+            if request["action"] == "journal-capture-advance":
+                return advance_captured_checkpoint(request, roots, owner, module, fault, before, observed)
         after = process(request)
         require(all(after.get(name) == before.get(name) for name in PROCESS_FIELDS),
                 "service restarted while observing exact durable records")
@@ -1646,7 +1752,7 @@ def main(request):
     actions["journal-rejection-audit"] = journal_rejection_audit_finalize
     actions["journal-retained-audit"] = journal_retained_audit_finalize
     actions["journal-retained-audit-finalize"] = journal_retained_audit_finalize
-    for action in ("journal-census", "journal-observe", "journal-capture", "journal-apply", "journal-recover"):
+    for action in ("journal-census", "journal-observe", "journal-capture", "journal-capture-advance", "journal-apply", "journal-recover"):
         actions[action] = journal_operation
     for action in ('generation-capture', 'generation-install', 'generation-recover'):
         actions[action] = generation_operation
