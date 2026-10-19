@@ -2040,7 +2040,7 @@ Original failures and original reports remain unchanged.
 | --- | --- | --- |
 | DV | Reuses auto-test `seed(DV)` and `suspend_fixture`: four keys with three distinct non-null data versions each; real suspended overwrites, null marker creation/removal ACKs; retained live/null marker identities; current and historical markers. Versioning returns to Enabled before partition. The fault targets a retained null data version. Every selected key version participates in GET, negative Heal and complete recursive recovery. All 15 retained data versions receive full physical shard checks; markers receive exact S3 refusal/header checks. HEAD preserves version identity, length, ETag, Last-Modified and metadata. | This expanded fixture still needs a new live run and independent evidence acceptance. It does not claim a partition while the bucket remains Suspended. |
 | DB | Adds a separate never-versioned run-owned bucket with the default 128 controls. The exact candidate size contract and actual EC:8 process/object geometry calibrate zero/one, 4 KiB, inline, EC block and source-bound 5-MiB MPU minimum minus/exact/plus sizes. All 128 controls require decoded full-set shape witnesses; every distinct size has partition GET, physical checksum/no-part and Range evidence. Original/fault/rejoin/repaired snapshots explicitly include both primary and DB buckets. All peers must preserve complete inventories and stable original HEADs. | Fresh live execution and independent acceptance remain required. The MPU-size controls are single PUT objects; they do not claim completed multipart protocol coverage, which remains part of DL. |
-| DL | Existing partition workload serially probes exact-version GET, unique negative PUT and Heal, followed by explicit write resolution and peer inventories. | Add bounded concurrent PUT/GET/HEAD/LIST/COPY/DELETE, version and MPU operations, with per-request durable ACKs, increasing per-key nonce and resolution of unknown outcomes. Serial PUT/GET is insufficient. |
+| DL | `network_load.py` adds the request-layer foundation: three distinct control versions per endpoint, response-bound MPU UploadId/part ETag fixtures and four independent worker journals. Its 28-call matrix includes concurrent PUT/GET/HEAD/LIST/COPY/DELETE, version selectors and actual Create/UploadPart/Complete/Abort MPU requests. Requests bind exact selectors, nonce/body/status policy and worker/run/source/endpoint URL fingerprint; overlap uses actual SDK intervals. | This module is not yet wired into the live adapter. Add complete post-rejoin object/version/MPU reconciliation, failure-scene retention and recovery/isolation integration before dispatch. Mocked matrix completion is not DL live or canonical acceptance. |
 
 The expanded DV fixture stays within the existing 128-identity/512-MiB
 inventory limits. Network expiry remains 1,200 seconds; partition task deadlines,
@@ -2059,3 +2059,31 @@ The reviewed multipart minimum is bound to the fixed candidate's full
 existing 512-MiB budget. This read-only preparation is not fresh DB live evidence.
 The existing node-side snapshot bucket guard continues to require the primary
 bucket and allows only its owned suffixes; no broader host path is introduced.
+
+
+I03 DL request layer (2026-10-19): `LoadJournal` reuses the auto-test
+`Recorder` and serializes one worker's calls; readers and writers never share
+mutable sequence state. Two endpoint pairs execute eight mutations and six
+reads each, within a frozen 180-second admission budget and the existing SDK
+request limits. The controller alone writes Fleet evidence. Every prepared
+request stays bound to its original ACK SHA-256; missing ACKs and unknown
+results remain unresolved, and a failed worker admits no subsequent calls.
+
+The fixed candidate maps write-quorum/lock errors to HTTP 503
+`ServiceUnavailable`; that refusal does not prove rollback, especially for
+MPU Abort. Partition LIST responses are bounded observations, not global
+completeness. A finite HTTP-status tuple (at most three explicit codes) extends
+the code-level Recorder API for these LIST observations; existing integer and
+default callers retain their checks, and CLI traces still require one integer.
+Operation-specific code, payload, version and selector validators remain
+mandatory. HEAD properties use the same datetime representation as the durable
+ACK JSON. Only actual invoked SDK intervals in one clock domain can prove
+client overlap; collector setup windows cannot establish it, and no server
+commit fence is claimed.
+
+The pending live adapter must register the seed Recorder and every worker
+journal before invocation, including failures before a complete fixture is
+returned. It must preserve the original object and system MPU failure scene,
+resolve every invoked mutation without silently retrying PUT/Complete, and
+refuse cleanup/acceptance while any result remains unresolved. This request
+layer alone neither enables a new fleet dispatch nor completes I03.

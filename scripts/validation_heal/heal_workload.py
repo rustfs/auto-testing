@@ -47,8 +47,12 @@ class Recorder:
         self.mutations = MutationOrder()
 
     def call(self, operation: str, params: dict, body: bytes | None = None,
-             identity: dict | None = None, expect_http: int | None = None, *, admission_deadline=None) -> dict:
+             identity: dict | None = None, expect_http: int | tuple[int, ...] | None = None, *, admission_deadline=None) -> dict:
         params=copy.deepcopy(params);identity=copy.deepcopy(identity)
+        require(expect_http is None or type(expect_http) is int and 100 <= expect_http <= 599
+                or isinstance(expect_http, tuple) and 1 <= len(expect_http) <= 3
+                and all(type(value) is int and 100 <= value <= 599 for value in expect_http)
+                and len(set(expect_http)) == len(expect_http), 'invalid finite expected HTTP status set')
         validate_s3_request(self.probe.binding, operation, params)
         if operation == 'delete_objects':validate_batch_request(params)
         require(body is None or isinstance(body,bytes) and len(body)<=MAX_BODY and operation in {'put_object','upload_part'},
@@ -86,8 +90,12 @@ class Recorder:
                       "error": {"type": type(exc).__name__, "message": str(exc)}}
         finished = time.monotonic_ns()
         status = (result.get("response") or {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
-        checked = status == expect_http if expect_http is not None else (
-            result["acknowledged"] and type(status) is int and 200<=status<300)
+        if expect_http is None:
+            checked = result["acknowledged"] and type(status) is int and 200<=status<300
+        elif isinstance(expect_http, tuple):
+            checked = status in expect_http
+        else:
+            checked = status == expect_http
         checked = checked and not result.get('clientCleanupError')
         per_item = None
         if operation == 'delete_objects' and status == 200:
