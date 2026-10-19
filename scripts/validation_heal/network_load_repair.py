@@ -25,7 +25,8 @@ SOURCE_FILES = {
 }
 
 
-CANDIDATES = frozenset((CANDIDATE, '85c706cac09d53d0649487b8f1865f18beb53225'))
+CANDIDATES = frozenset((CANDIDATE, '85c706cac09d53d0649487b8f1865f18beb53225',
+                        '62ff96774fa4139d45f14d70b70519aae8070ac0'))
 
 
 def source_reference(candidate):

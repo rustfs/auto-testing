@@ -14,6 +14,8 @@ from scripts.validation_heal import network, quorum_boundary, write_quorum
 
 ORIGINAL = '072b57b37559fbe626aeda8abf61617fdcbdd926'
 FIXED = '1c7fc818dd858247c45b39542abd8291b1e6e31b'
+DIAGNOSTIC = '85c706cac09d53d0649487b8f1865f18beb53225'
+RPC_FIXED = '62ff96774fa4139d45f14d70b70519aae8070ac0'
 
 
 class RecordedSourceContract(Exception):
@@ -55,7 +57,7 @@ class QuorumCandidateTests(unittest.TestCase):
 
     def test_actual_executors_record_the_selected_candidate_before_deploy(self):
         for module in (quorum_boundary, network):
-            for source in (ORIGINAL, FIXED):
+            for source in (ORIGINAL, FIXED, DIAGNOSTIC, RPC_FIXED):
                 with self.subTest(executor=module.CASE_ID, source=source):
                     with self.assertRaises(RecordedSourceContract) as completed:
                         self.execute_until_contract(module, source)
@@ -69,7 +71,8 @@ class QuorumCandidateTests(unittest.TestCase):
 
     def test_unknown_and_malformed_sources_never_reach_inspector_or_deploy(self):
         for module in (quorum_boundary, network):
-            for source in ('0' * 40, FIXED[:7], FIXED.upper(), None, [], True):
+            for source in ('0' * 40, FIXED[:7], FIXED.upper(), RPC_FIXED[:7], RPC_FIXED.upper(),
+                           RPC_FIXED[:-1] + '1', None, [], True):
                 with self.subTest(executor=module.CASE_ID, source=source):
                     with self.assertRaises(ValueError):
                         self.execute_until_contract(module, source, allow_inspector=False)

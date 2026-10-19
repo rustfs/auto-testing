@@ -96,6 +96,14 @@ GET_SOURCE_FILES['85c706cac09d53d0649487b8f1865f18beb53225'] = {
     'rustfs/src/error.rs': 'c6a8d569b295659cf5a26a44bb3d8ba809c4ca3405d87525624699d161e08970',
     'rustfs/src/storage/ecfs.rs': '68d8ae2428504010adeb7bc51d2309496260898e4c74e5577a0af4f1bfe13c85'}
 
+STORAGE_REFERENCES['62ff96774fa4139d45f14d70b70519aae8070ac0'] = {
+    **STORAGE_REFERENCES['85c706cac09d53d0649487b8f1865f18beb53225'],
+    'candidateCommit': '62ff96774fa4139d45f14d70b70519aae8070ac0'}
+GET_SOURCE_FILES['62ff96774fa4139d45f14d70b70519aae8070ac0'] = {
+    **GET_SOURCE_FILES['85c706cac09d53d0649487b8f1865f18beb53225'],
+    'rustfs/src/error.rs': '267cf292f0af47bca782ebb4de119a5bbe119af82111dac0bbf60f1311ef8383',
+    'rustfs/src/storage/ecfs.rs': 'e0c4ce6569f75771c73de043f8416645bcd1de86a1192a79f45d7418953086f9'}
+
 
 def source_reference(candidate_commit):
     require(isinstance(candidate_commit, str) and candidate_commit in STORAGE_REFERENCES,

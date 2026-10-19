@@ -47,6 +47,12 @@ SOURCE_FILES['85c706cac09d53d0649487b8f1865f18beb53225'] = {
     'rustfs/src/storage/ecfs.rs': '68d8ae2428504010adeb7bc51d2309496260898e4c74e5577a0af4f1bfe13c85'}
 DISK_SOURCE['85c706cac09d53d0649487b8f1865f18beb53225'] = DISK_SOURCE['1c7fc818dd858247c45b39542abd8291b1e6e31b']
 
+SOURCE_FILES['62ff96774fa4139d45f14d70b70519aae8070ac0'] = {
+    **SOURCE_FILES['85c706cac09d53d0649487b8f1865f18beb53225'],
+    'rustfs/src/error.rs': '267cf292f0af47bca782ebb4de119a5bbe119af82111dac0bbf60f1311ef8383',
+    'rustfs/src/storage/ecfs.rs': 'e0c4ce6569f75771c73de043f8416645bcd1de86a1192a79f45d7418953086f9'}
+DISK_SOURCE['62ff96774fa4139d45f14d70b70519aae8070ac0'] = DISK_SOURCE['85c706cac09d53d0649487b8f1865f18beb53225']
+
 
 def source_reference(candidate):
     require(candidate in SOURCE_FILES, 'DL operations are not reviewed for this exact candidate')

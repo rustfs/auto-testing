@@ -1722,6 +1722,8 @@ Topologies: H2. Branches: minority-partition, read-boundary, write-boundary, loc
 
 候选支持与 B06 相同，但 storageclass 与锁策略分别按精确候选绑定。`1c7fc81` 的锁客户端范围、quorum 阈值及 EC:8 配置已复核；其 RPC 控制通道工厂有变化，必须重新取得真实双向网络探针、admission、partial coverage 和 rejoin 证据，不能由源码等价或 B07 通过推定本例通过。B08 的候选范围保持独立。
 
+The adapter additionally binds exact source `62ff96774fa4139d45f14d70b70519aae8070ac0` and its typed RPC `Unavailable` response mapping to `503/ServiceUnavailable`. Every referenced lock, EC, multipart and delete-recovery source file remains independently checked against that committed source; neighboring or abbreviated revisions are rejected. This source requires its matching immutable package and source-bound inspector before live execution. All five original branches, complete DB/DV/DL fixtures, refused-mutation accounting, physical-before-GET proofs, task responsibility and cleanup requirements remain mandatory; the source admission alone does not establish live acceptance.
+
 1. H2 先冻结实际节点/slot/对象R/W和锁quorum，NETWORK规则只匹配本例服务端口并带run ID、超时恢复。
 2. 构造少数派及边界分区，双端探针证实隔离；SSH、跳板机和其他服务端口保持连通。
 3. 双方执行带nonce的PUT/GET/heal，少数派不能承诺不安全提交；BACKGROUND必须暴露missing peer/partial coverage。
