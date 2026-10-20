@@ -85,26 +85,43 @@ NATIVE_REFERENCE = {
     'effective': {**BASE_OPTIONS, 'recursive': True, 'nolock': False, 'pool': None, 'set': None},
     'nativeFence': 'exact-source real Heal during committed overwrite cleanup plus stale read-repair final rename',
 }
+VERSION_CANDIDATE = 'bd0671ba781d8ebf509f4f03533228dfb44496f1'
+VERSION_REFERENCE = {**NATIVE_REFERENCE, 'candidateCommit': VERSION_CANDIDATE,
+    'nativeFence': 'exact-source Heal cleanup and explicit-version commit and deletion fences'}
+NATIVE_RUNTIME = {
+    NATIVE_CANDIDATE: {'reference': NATIVE_REFERENCE, 'cases': ('heal.race-unversioned-overwrite',)},
+    VERSION_CANDIDATE: {'reference': VERSION_REFERENCE,
+        'cases': ('heal.race-unversioned-overwrite', 'heal.race-versioned-put', 'heal.race-version-delete')},
+}
+# Registry subsets do not enable a fleet case. Its reviewed runtime source and
+# complete case-specific native group must both be present before bootstrap.
+FULL_NATIVE_GROUPS = {
+    'heal.race-unversioned-overwrite': ['committed-overwrite-cleanup', 'stale-read-repair-final-rename'],
+    'heal.race-versioned-put': ['versioned-read-repair-lock-owner', 'explicit-version-append-final-rename'],
+    'heal.race-version-delete': ['explicit-version-delete-final-rename'],
+}
 
 
 def source_contract(candidate, case_id):
     require(case_id in CASE_IDS, 'unregistered race case')
     if candidate.get('source_sha') == REFERENCE['candidateCommit']:
         return REFERENCE
-    require(candidate.get('source_sha') == NATIVE_CANDIDATE
-            and case_id == 'heal.race-unversioned-overwrite', 'race candidate/case contract is not reviewed')
-    return NATIVE_REFERENCE
+    entry = NATIVE_RUNTIME.get(candidate.get('source_sha'))
+    require(entry is not None and case_id in entry['cases'] and case_id in FULL_NATIVE_GROUPS
+            and entry['reference']['candidateCommit'] == candidate['source_sha'],
+            'race candidate/case contract is not reviewed')
+    return entry['reference']
 
 
 def native_preflight(candidate, testing_commit, case_id, directory):
     reference = source_contract(candidate, case_id)
     if reference is REFERENCE:
         return None
-    require(bool(directory), 'G01 requires exact-source native proof before any fleet mutation')
+    require(bool(directory), 'race requires exact-source native proof before any fleet mutation')
     proof = verify_native(directory, candidate, testing_commit, case_id)
-    require(proof['requiredRegressionLabels'] == ['committed-overwrite-cleanup', 'stale-read-repair-final-rename']
+    require(proof['requiredRegressionLabels'] == FULL_NATIVE_GROUPS[case_id]
             and proof['requiredNativeSubsetPassed'] is True and proof['wholeCasePassClaimed'] is False,
-            'G01 native commit/cleanup group is incomplete')
+            'case-specific native commit group is incomplete')
     return proof
 
 

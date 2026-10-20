@@ -46,14 +46,53 @@ class RaceNativeTests(unittest.TestCase):
             rejected['response']['settings'][key] = changed
             with self.subTest(key=key), self.assertRaises(ValueError): race.settings(rejected, reference)
 
-    def fixture(self, root):
+    def test_a_registered_historical_owner_subset_cannot_certify_the_full_version_put_case(self):
+        case = 'heal.race-versioned-put'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root)
+            subset = consumer.verify(root, CANDIDATE, HELPER, case)
+            self.assertEqual(subset['requiredRegressionLabels'], ['versioned-read-repair-lock-owner'])
+            self.assertTrue(subset['requiredNativeSubsetPassed'])
+            with patch.dict(race.NATIVE_RUNTIME, {SOURCE: {'reference': race.NATIVE_REFERENCE, 'cases': (case,)}}):
+                with self.assertRaisesRegex(ValueError, 'case-specific native commit group is incomplete'):
+                    race.native_preflight(CANDIDATE, HELPER, case, root)
+
+    def test_runtime_case_opt_in_does_not_change_the_exact_source_or_enable_other_native_groups(self):
+        wrong_source = copy.deepcopy(race.NATIVE_REFERENCE)
+        wrong_source['candidateCommit'] = 'e' * 40
+        for reference, case in [(wrong_source, CASE), (race.NATIVE_REFERENCE, 'heal.race-markers-and-batch-delete')]:
+            with self.subTest(case=case), patch.dict(race.NATIVE_RUNTIME, {SOURCE: {'reference': reference, 'cases': (case,)}}):
+                with self.assertRaisesRegex(ValueError, 'race candidate/case contract is not reviewed'):
+                    race.native_preflight(CANDIDATE, HELPER, case, '/never-used')
+
+    def test_version_source_admits_only_three_complete_native_groups_without_executing_artifacts(self):
+        source = race.VERSION_CANDIDATE
+        candidate = {**CANDIDATE, 'source_sha': source}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root, source=source)
+            with patch.object(suite.subprocess, 'run', side_effect=AssertionError('must not execute native artifacts')):
+                for case in race.CASE_IDS[:3]:
+                    with self.subTest(case=case):
+                        proof = race.native_preflight(candidate, HELPER, case, root)
+                        self.assertEqual(proof['candidateCommit'], source)
+                        self.assertEqual(proof['requiredRegressionLabels'], race.FULL_NATIVE_GROUPS[case])
+                        self.assertTrue(proof['requiredNativeSubsetPassed'])
+                        self.assertFalse(proof['wholeCasePassClaimed'])
+                        self.assertFalse(proof['canonicalCasePassClaimed'])
+                for case in race.CASE_IDS[3:]:
+                    with self.subTest(case=case), self.assertRaises(ValueError):
+                        race.native_preflight(candidate, HELPER, case, root)
+
+    def fixture(self, root, *, source=SOURCE):
         tools, evidence = root / 'native-tools', root / 'native-evidence'
         tools.mkdir()
         evidence.mkdir()
-        contract = suite.contract_for(SOURCE)
+        contract = suite.contract_for(source)
         binary = tools / suite.BINARY
         binary.write_bytes(b'synthetic nonexecutable artifact; must never run')
-        manifest = {'schemaVersion': 1, 'candidateCommit': SOURCE, 'artifactKind': suite.KIND,
+        manifest = {'schemaVersion': 1, 'candidateCommit': source, 'artifactKind': suite.KIND,
             'candidateSourceTree': contract['sourceTree'], 'candidateCargoLockSha256': contract['cargoLockSha256'],
             'sourceFiles': contract['sourceFiles'], 'regressions': contract['regressions'], 'cases': contract['cases'],
             'buildEnvironment': suite.BUILD_ENV, 'buildCommand': suite.BUILD_COMMAND,
@@ -76,7 +115,7 @@ class RaceNativeTests(unittest.TestCase):
                 'exitCode': 0, 'runtimeEnvironment': suite.RUNTIME_ENV,
                 'command': ['/synthetic/' + suite.BINARY, spec['test'], '--exact', '--show-output', '--test-threads=1'],
                 'milestones': spec['milestones'], 'originalLogSha256': suite.sha(log)})
-        self.write(evidence / 'race-native-results.json', {'schemaVersion': 1, 'candidateCommit': SOURCE,
+        self.write(evidence / 'race-native-results.json', {'schemaVersion': 1, 'candidateCommit': source,
             'candidateSourceTree': manifest['candidateSourceTree'], 'binarySha256': manifest['binarySha256'],
             'nativeManifestSha256': suite.sha(tools / 'race-native.json'), 'results': rows,
             'requiredNativeSubsetsComplete': True, 'canonicalCasePassClaimed': False, 'fleetExecutionClaimed': False})
