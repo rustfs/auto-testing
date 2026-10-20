@@ -224,21 +224,51 @@ class CapacityContractTests(unittest.TestCase):
         owner = {"runtimeProfile": "journal-bounded", "unit": "owned-test.service", "binarySha256": "a" * 64,
                  "volumes": [str(root / 'data') for root in roots]}
         bindings = ['--property=PrivateMounts=true', '--property=BindPaths=/verified/private/data:/owned/disk0/data']
+        def execute(*args, **kwargs):
+            if args[:2] == ('systemctl', 'show'):
+                return SimpleNamespace(stdout='LogRateLimitIntervalUSec=1s\nLogRateLimitBurst=1000000\n')
+            return SimpleNamespace(stdout='systemd 249 (249.11)\n')
         with patch.object(fleet_node, "owned", return_value=(state, roots, owner)), patch.object(fleet_node, "stopped"), \
              patch.object(fleet_node, "digest", return_value=owner["binarySha256"]), \
-             patch.object(fleet_node, "command") as command, \
+             patch.object(fleet_node, "command", side_effect=execute) as command, \
              patch.object(fleet_node, "gate_module", return_value=SimpleNamespace(checked_gate=lambda *args: None, start_properties=lambda *args: [])), \
              patch.object(fleet_node, "quorum_gate_module", return_value=SimpleNamespace(properties=lambda *args: [])), \
              patch.object(fleet_node, "replacement_module", return_value=SimpleNamespace(start_properties=lambda *args: [])), \
              patch.object(fleet_node, "volume_module", return_value=SimpleNamespace(properties=lambda *args: bindings)):
-            fleet_node.start({"runId": "gh-1-1-h1"})
-        issued = command.call_args.args
+            started = fleet_node.start({"runId": "gh-1-1-h1"})
+        issued = next(call.args for call in command.call_args_list if call.args[0] == 'systemd-run')
         self.assertEqual(issued[0], 'systemd-run')
-        self.assertIn('--property=LogRateLimitIntervalSec=0', issued)
-        self.assertIn('--property=LogRateLimitBurst=0', issued)
+        self.assertIn('--property=LogRateLimitIntervalSec=1s', issued)
+        self.assertIn('--property=LogRateLimitBurst=1000000', issued)
+        self.assertEqual(started['journalPolicy']['rateBurst'], 1000000)
+        self.assertEqual(started['journalPolicy']['systemdVersion'], 'systemd 249 (249.11)')
+        self.assertFalse(started['journalPolicy']['hostWideSettingsChanged'])
         for property in bindings: self.assertIn(property, issued)
         self.assertIn('--property=RemainAfterExit=yes', issued)
         self.assertEqual(issued[-4:], tuple(owner["volumes"]))
+
+    def test_owned_journal_policy_rejects_zero_ignored_missing_or_different_effective_values(self):
+        for output in ('', 'LogRateLimitIntervalUSec=0\nLogRateLimitBurst=0\n',
+                       'LogRateLimitIntervalUSec=30s\nLogRateLimitBurst=10000\n',
+                       'LogRateLimitIntervalUSec=1s\nLogRateLimitBurst=999999\n',
+                       'LogRateLimitBurst=1000000\n'):
+            with self.subTest(output=output), patch.object(fleet_node, 'command',
+                    return_value=SimpleNamespace(stdout=output)) as command:
+                with self.assertRaisesRegex(ValueError, 'journal rate policy differs'):
+                    fleet_node.journal_policy({'unit': 'owned.service'})
+                self.assertEqual(command.call_count, 1)
+                self.assertEqual(command.call_args.args[:3], ('systemctl', 'show', 'owned.service'))
+        for interval in ('1s', '1000000'):
+            with self.subTest(interval=interval), patch.object(fleet_node, 'command', side_effect=[
+                    SimpleNamespace(stdout=f'LogRateLimitIntervalUSec={interval}\nLogRateLimitBurst=1000000\n'),
+                    SimpleNamespace(stdout='systemd 249 (249.11)\n')]):
+                self.assertEqual(fleet_node.journal_policy({'unit': 'owned.service'})['rateIntervalSeconds'], 1)
+        for version in ('', 'unknown daemon\n'):
+            with self.subTest(version=version), patch.object(fleet_node, 'command', side_effect=[
+                    SimpleNamespace(stdout='LogRateLimitIntervalUSec=1s\nLogRateLimitBurst=1000000\n'),
+                    SimpleNamespace(stdout=version)]):
+                with self.assertRaisesRegex(ValueError, 'systemd version is unavailable'):
+                    fleet_node.journal_policy({'unit': 'owned.service'})
 
     def test_bounded_journal_capacity_refuses_arbitrary_limits_paths_or_process_birth(self):
         owner = {"runtimeProfile": "journal-bounded"}

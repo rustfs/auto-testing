@@ -548,7 +548,7 @@ def start(request):
         runtime_configuration(state, owner)
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
-            "--property=LogRateLimitIntervalSec=0", "--property=LogRateLimitBurst=0",
+            "--property=LogRateLimitIntervalSec=1s", "--property=LogRateLimitBurst=1000000",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
             *(["--property=PrivateMounts=true", "--property=CapabilityBoundingSet=~CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"]
@@ -560,7 +560,21 @@ def start(request):
             *quorum_gate_module().properties(state, roots),
             *(volume_module().properties(state, roots, owner) if owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"} else []),
             *replacement_module().start_properties(state, roots), str(state / "rustfs"), *owner["volumes"])
-    return {"unit": owner["unit"], "started": True}
+    return {"unit": owner["unit"], "started": True, "journalPolicy": journal_policy(owner)}
+
+
+def journal_policy(owner):
+    """Verify the owned unit's effective policy before source attribution."""
+    output = command("systemctl", "show", owner["unit"], "-p", "LogRateLimitIntervalUSec",
+                     "-p", "LogRateLimitBurst").stdout
+    values = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    require(values.get("LogRateLimitIntervalUSec") in {"1s", "1000000"}
+            and values.get("LogRateLimitBurst") == "1000000",
+            "owned service journal rate policy differs; source attribution cannot start")
+    version = command("systemctl", "--version").stdout.splitlines()
+    require(version and re.fullmatch(r"systemd [0-9]+(?: .*)?", version[0]), "systemd version is unavailable")
+    return {"unit": owner["unit"], "rateIntervalSeconds": 1, "rateBurst": 1000000,
+            "effectiveProperties": values, "systemdVersion": version[0], "hostWideSettingsChanged": False}
 
 
 def stopped(owner):
