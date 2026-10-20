@@ -185,6 +185,9 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
+        if action == "race-io-cap":
+            source += "\nimport types\nrace_io_backend = types.ModuleType('race_io')\nexec(" + repr(
+                NODE_SOURCE.with_name("race_io.py").read_text()) + ", race_io_backend.__dict__)\n"
         if action == "mpu-race-scene":
             source += "\nimport types\nmpu_race_backend = types.ModuleType('mpu_race_physical')\nexec(" + repr(
                 NODE_SOURCE.with_name("mpu_race_physical.py").read_text()) + ", mpu_race_backend.__dict__)\n"

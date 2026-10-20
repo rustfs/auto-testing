@@ -30,6 +30,7 @@ try:
     from .cursor import validate_missing_batch, verify_part_manifest
     from .versions import public_version_id
     from .race_native_evidence import verify as verify_native
+    from .race_io import set_fleet as set_race_io_cap
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require, save
     from heal_workload import Recorder, seed as seed_workload, verify_seed
@@ -41,6 +42,7 @@ except ImportError:
     from cursor import validate_missing_batch, verify_part_manifest
     from versions import public_version_id
     from race_native_evidence import verify as verify_native
+    from race_io import set_fleet as set_race_io_cap
 
 
 CASE_IDS = ("heal.race-unversioned-overwrite", "heal.race-versioned-put", "heal.race-version-delete", "heal.race-markers-and-batch-delete", "heal.race-multipart-complete-abort", "heal.race-copy-and-metadata-update")
@@ -512,9 +514,16 @@ def object_scene(snapshot, bucket, key):
 
 def map_fixture(snapshot, bucket, expected):
     live_expected = [row for row in expected if not row.get("deleteMarker")]
-    mapped = {(row["key"], row["versionId"]): map_target(
-        object_scene(snapshot, bucket, row["key"]), bucket, row["key"], "data", 1,
-        row["versionId"], latest_required=False) for row in live_expected}
+    mapped = {}
+    for row in live_expected:
+        target = map_target(object_scene(snapshot, bucket, row["key"]), bucket, row["key"], "data", 1,
+                            row["versionId"], latest_required=False)
+        # Frozen H1 removes the fourth physical drive's shard, regardless of
+        # shuffled coding role. H2 uses the same local slot on its first host.
+        selected = next((part for part in target["cohort"]
+                         if part["node"] == sorted(snapshot)[0] and part["disk"] == 3), None)
+        require(selected is not None, "race fixture lacks its original fourth-drive member")
+        mapped[row["key"], row["versionId"]] = {**target, **selected}
     require(len(mapped) == len(live_expected), "G01/G04 physical map omitted/duplicated an ACK")
     return mapped
 
@@ -884,6 +893,8 @@ def run_branch(args, topology, nodes, branch):
         faulted = fleet.snapshot("complete-fault-physical", quiescent=True)
         fleet.record("fault-batch-proof", validate_missing_batch(before, faulted, targets, receipts))
         fleet.start()
+        if branch not in G05_BRANCHES:
+            set_race_io_cap(fleet, args.case_id, branch, True, nodes=sorted({target['node'] for target in targets}))
         require(physical_content(faulted) == physical_content(fleet.snapshot("attribution-before-START")),
                 "NOT_OBSERVED: G01/G03 missing shards changed before manual admission")
         path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="")
@@ -904,6 +915,8 @@ def run_branch(args, topology, nodes, branch):
         if branch == "batch-version-delete":
             writer.batch_expected_ids = {item["VersionId"] for item in plan[0]["params"]["Delete"]["Objects"]}
         responses, overlapped = race(writer, plan, probe, fleet, path, token, reference)
+        if branch not in G05_BRANCHES:
+            set_race_io_cap(fleet, args.case_id, branch, False, nodes=sorted({target['node'] for target in targets}))
         mpu_runtime = plan[0].get("runtime") if branch in G05_BRANCHES else None
         if branch in G05_BRANCHES:
             verify_multipart_state(probe, fleet, bucket, branch, mpu_runtime,
