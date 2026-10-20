@@ -185,6 +185,9 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
+        if action in {"mpu-race-backups", "version-race-backups"}:
+            source += "\nimport types\nmpu_race_backups_backend = types.ModuleType('mpu_race_backups')\nexec(" + repr(
+                NODE_SOURCE.with_name("mpu_race_backups.py").read_text()) + ", mpu_race_backups_backend.__dict__)\n"
         if action == "race-io-cap":
             source += "\nimport types\nrace_io_backend = types.ModuleType('race_io')\nexec(" + repr(
                 NODE_SOURCE.with_name("race_io.py").read_text()) + ", race_io_backend.__dict__)\n"
@@ -220,7 +223,7 @@ class Fleet:
             source += "\nimport types\ngeneration_backend = types.ModuleType('generation_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("generation_fault.py").read_text()) + ", generation_backend.__dict__)\n"
         if action in {"apply-fault", "recover-fault", "verify-part", "verify-parts", "verify-inline",
-                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure", "outcome-legacy-phase", "start"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith(("journal-", "incarnation-", "owner-markers-")):
+                      "bucket-record-snapshot", "bucket-record-apply", "bucket-record-recover", "format-schema-fault", "encryption-configure", "outcome-legacy-phase", "mpu-race-backups", "version-race-backups", "start"} or action.startswith("generation-") or action.startswith("orphan-") or action.startswith(("journal-", "incarnation-", "owner-markers-")):
             source += "\nimport types\nfault = types.ModuleType('heal_fault')\nexec(" + repr(
                 NODE_SOURCE.with_name("heal_fault.py").read_text()) + ", fault.__dict__)\n"
         if action.startswith(("journal-", "incarnation-")):

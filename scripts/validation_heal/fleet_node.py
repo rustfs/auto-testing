@@ -1819,6 +1819,8 @@ def main(request):
     actions["mpu-race-scene"] = lambda value: globals()["mpu_race_backend"].run(value, globals())
     actions["network-delete-records"] = lambda value: globals()["network_delete_records_backend"].run(value, globals())
     actions["race-io-cap"] = lambda value: globals()["race_io_backend"].run(value, globals())
+    actions["mpu-race-backups"] = lambda value: globals()["mpu_race_backups_backend"].run(value, globals())
+    actions["version-race-backups"] = lambda value: globals()["mpu_race_backups_backend"].run(value, globals())
     actions["process-clock"] = process_clock
     actions["environment-capabilities"] = environment_capabilities
     for action in ("retained-scene-audit", "retained-scene-isolate"):

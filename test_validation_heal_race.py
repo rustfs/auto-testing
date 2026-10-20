@@ -33,7 +33,8 @@ class RaceTests(unittest.TestCase):
                     for value in ("v0", "v1", "v2")]
         plan = race.operation_plan("rv-heal-0123456789abcdef", "read-all-versions-during-heal", expected)
         self.assertEqual(len(plan), 3)
-        self.assertEqual({step["readVersionId"] for step in plan}, {"v0"})
+        self.assertEqual([step['referenceKey'] for step in plan], [f'objects/{i:04d}.bin' for i in range(3)])
+        self.assertTrue(all('readVersionId' not in step for step in plan))
         self.assertEqual([step["params"]["Metadata"]["nonce"] for step in plan], ["0", "1", "2"])
 
     def test_g06_keeps_copy_metadata_and_tag_operations_distinct(self):

@@ -138,7 +138,7 @@ def census(folder, owner, *, state, node):
                              and re.fullmatch(r"J02-[0-9a-f]{32}\.(original|intent\.json|applied\.json|failed-[0-9a-f]{64})", parts[1]))
             race_backup = (not state and owner.get("runtimeProfile") == "manual"
                            and len(parts) == 2 and parts[0] == "quarantine"
-                           and re.fullmatch(r"G01-[a-z0-9-]{1,48}\.(original|intent\.json|applied\.json)", parts[1]))
+                           and re.fullmatch(r"G0[12]-[a-z0-9-]{1,48}\.(original|intent\.json|applied\.json)", parts[1]))
             if (state and relative == "rustfs") or fixture or mrf or backup or opaque_backup or network_mpu or network_backup or race_backup:
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
