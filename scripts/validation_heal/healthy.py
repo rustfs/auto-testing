@@ -185,6 +185,9 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
+        if action == "mpu-race-scene":
+            source += "\nimport types\nmpu_race_backend = types.ModuleType('mpu_race_physical')\nexec(" + repr(
+                NODE_SOURCE.with_name("mpu_race_physical.py").read_text()) + ", mpu_race_backend.__dict__)\n"
         if action == "network-delete-records":
             source += "\nimport types\nnetwork_delete_records_backend = types.ModuleType('network_delete_records')\nexec(" + repr(
                 NODE_SOURCE.with_name("network_delete_records.py").read_text()) + ", network_delete_records_backend.__dict__)\n"

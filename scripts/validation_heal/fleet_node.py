@@ -1816,6 +1816,7 @@ def main(request):
         actions[action] = incarnation_operation
     actions["task-records"] = task_records
     actions["mpu-scene"] = lambda value: globals()["mpu_scene_backend"].run(value, globals())
+    actions["mpu-race-scene"] = lambda value: globals()["mpu_race_backend"].run(value, globals())
     actions["network-delete-records"] = lambda value: globals()["network_delete_records_backend"].run(value, globals())
     actions["process-clock"] = process_clock
     actions["environment-capabilities"] = environment_capabilities
