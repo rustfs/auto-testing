@@ -234,6 +234,8 @@ class CapacityContractTests(unittest.TestCase):
             fleet_node.start({"runId": "gh-1-1-h1"})
         issued = command.call_args.args
         self.assertEqual(issued[0], 'systemd-run')
+        self.assertIn('--property=LogRateLimitIntervalSec=0', issued)
+        self.assertIn('--property=LogRateLimitBurst=0', issued)
         for property in bindings: self.assertIn(property, issued)
         self.assertIn('--property=RemainAfterExit=yes', issued)
         self.assertEqual(issued[-4:], tuple(owner["volumes"]))

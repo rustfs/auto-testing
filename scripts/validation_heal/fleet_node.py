@@ -548,6 +548,7 @@ def start(request):
         runtime_configuration(state, owner)
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
+            "--property=LogRateLimitIntervalSec=0", "--property=LogRateLimitBurst=0",
             "--property=RuntimeMaxSec=" + str(resource_limits(owner.get("resourceProfile", "standard"))["runtimeMaxSeconds"]),
             "--property=MemoryMax=4G",
             *(["--property=PrivateMounts=true", "--property=CapabilityBoundingSet=~CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH"]
@@ -1173,12 +1174,12 @@ def logs(request):
         require(cursor is None or isinstance(cursor, str) and re.fullmatch(r"[A-Za-z0-9=;_-]{1,512}", cursor),
                 "invalid journal cursor")
         args = ["journalctl", "-u", owner["unit"], "--quiet", "--no-pager", "--all", "-o", "json",
-                "--output-fields=__CURSOR,MESSAGE"]
+                "--output-fields=__CURSOR,MESSAGE,MESSAGE_ID"]
         # +N selects the FIRST N entries after the cursor. A plain -n N
         # selects the tail and could silently drop the beginning of a window.
         args += ["--after-cursor", cursor, "-n", "+10000"] if cursor else ["-n", "1"]
         output = command(*args).stdout
-        lines, observed_cursor, entries = [], None, 0
+        lines, observed_cursor, entries, source_message_loss = [], None, 0, []
         for line in output.splitlines():
             row = json.loads(line)
             entry_cursor = row.get("__CURSOR")
@@ -1188,6 +1189,12 @@ def logs(request):
             if isinstance(message, list) and all(type(value) is int and 0 <= value <= 255 for value in message):
                 message = bytes(message).decode("utf-8")
             require(isinstance(message, str), "journal message is not complete text")
+            # Cursor continuity cannot recover entries discarded by journald.
+            # Keep the original notice so the caller records the failed page.
+            if (row.get("MESSAGE_ID") == "a596d6fe7bfa4994828e72309e95d61e"
+                    or re.fullmatch(r"Suppressed [1-9][0-9]* messages from .+", message)):
+                source_message_loss.append({"cursor": entry_cursor, "message": message,
+                                            "messageId": row.get("MESSAGE_ID")})
             entries += 1
             require(entries <= 10000, "journal page exceeds its bound; source attribution is incomplete")
             observed_cursor = entry_cursor
@@ -1195,7 +1202,8 @@ def logs(request):
         require(observed_cursor is not None or cursor is not None and not lines,
                 "journal did not expose a complete cursor window")
         return {"unit": owner["unit"], "journal": "\n".join(lines), "beforeCursor": cursor,
-                "afterCursor": observed_cursor or cursor, "complete": True,
+                "afterCursor": observed_cursor or cursor, "complete": not source_message_loss,
+                "sourceMessageLoss": source_message_loss,
                 "entries": entries, "hasMore": cursor is not None and entries == 10000}
     return {"unit": owner["unit"], "journal": command("journalctl", "-u", owner["unit"], "--no-pager", "-n", "2000").stdout}
 

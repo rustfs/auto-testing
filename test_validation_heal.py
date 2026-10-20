@@ -1439,6 +1439,31 @@ class HealScannerSourceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 node_logs({"runId": "unit", "afterCursor": "s=previous;i=1"})
 
+    def test_remote_log_window_retains_suppression_notice_and_refuses_complete_attribution(self):
+        owner = {"unit": "private.service"}
+        for notice in (
+                {"MESSAGE": "Suppressed 893 messages from private.service"},
+                {"MESSAGE": "localized journal loss notice", "MESSAGE_ID": "a596d6fe7bfa4994828e72309e95d61e"}):
+            with self.subTest(notice=notice), patch.object(fleet_node, "owned", return_value=(None, None, owner)), \
+                    patch.object(fleet_node, "command") as command:
+                command.return_value = types.SimpleNamespace(stdout=json.dumps({**notice, "__CURSOR": "s=abc;i=loss"}) + "\n")
+                value = node_logs({"runId": "unit", "afterCursor": "s=abc;i=before"})
+                self.assertFalse(value["complete"])
+                self.assertEqual(value["journal"], notice["MESSAGE"])
+                self.assertEqual(value["afterCursor"], "s=abc;i=loss")
+                self.assertTrue(value["sourceMessageLoss"])
+                self.assertIn("MESSAGE_ID", next(arg for arg in command.call_args.args if arg.startswith("--output-fields=")))
+                records = []
+                def remote(node, action, **params):
+                    return {"complete": True, "afterCursor": "s=abc;i=before"} if params.get("checkpoint") else value
+                fleet = types.SimpleNamespace(nodes=["host"], remote=remote,
+                    record=lambda label, row: records.append(row) or row)
+                window = JournalWindow(fleet, "suppressed", event_targets={"rustfs::heal::manager"})
+                with self.assertRaisesRegex(ValueError, "completeness"):
+                    window.capture()
+                self.assertEqual(records[-1], {"node": "host", **value})
+                self.assertFalse(window.events["host"])
+
     def test_cursor_pagination_keeps_early_attribution_and_does_not_skip_pages(self):
         events = self.events()
         observations = [{"complete": True, "afterCursor": "checkpoint"},
