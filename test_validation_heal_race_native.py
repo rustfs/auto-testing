@@ -139,6 +139,53 @@ class RaceNativeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invented or omitted'):
                 consumer.verify(root, candidate, HELPER, case)
 
+    def test_default_owner_and_copy_source_collect_exact_groups_without_runtime_admission(self):
+        source = '757b751482bb970bc321e92059690a7698554358'
+        candidate = {**CANDIDATE, 'source_sha': source}
+        contract = suite.contract_for(source)
+        self.assertEqual(len(contract['regressions']), 10)
+        self.assertEqual(sum(len(v['milestones']) for v in contract['regressions'].values()), 104)
+        self.assertIn('crates/ecstore/src/bucket/metadata_sys.rs', contract['sourceFiles'])
+        self.assertIn('crates/ecstore/src/set_disk/mod.rs', contract['sourceFiles'])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root, source=source)
+            with patch.object(suite.subprocess, 'run', side_effect=AssertionError('must not execute artifacts')):
+                for case, label, count in [
+                    ('heal.admin-nolock-safety', 'default-heal-exclusive-owner', 16),
+                    ('heal.race-copy-and-metadata-update', 'copy-and-metadata-final-rename', 24),
+                ]:
+                    with self.subTest(case=case):
+                        self.assertEqual(contract['cases'][case], [label])
+                        self.assertEqual(len(contract['regressions'][label]['milestones']), count)
+                        proof = consumer.verify(root, candidate, HELPER, case)
+                        self.assertEqual(proof['requiredRegressionLabels'], [label])
+                        self.assertTrue(proof['requiredNativeSubsetPassed'])
+                        self.assertFalse(proof['wholeCasePassClaimed'])
+                        self.assertFalse(proof['canonicalCasePassClaimed'])
+                for case in race.CASE_IDS:
+                    with self.subTest(case=case), self.assertRaisesRegex(ValueError, 'case contract is not reviewed'):
+                        race.native_preflight(candidate, HELPER, case, root)
+
+    def test_default_owner_or_copy_cannot_omit_reverse_or_invent_native_events(self):
+        source = '757b751482bb970bc321e92059690a7698554358'
+        candidate = {**CANDIDATE, 'source_sha': source}
+        for case, label in [('heal.admin-nolock-safety', 'default-heal-exclusive-owner'),
+                            ('heal.race-copy-and-metadata-update', 'copy-and-metadata-final-rename')]:
+            for mutation in ('omit', 'reverse', 'invent'):
+                with self.subTest(case=case, mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.fixture(root, source=source)
+                    summary = root / 'native-evidence/race-native-results.json'
+                    value = json.loads(summary.read_text())
+                    row = next(row for row in value['results'] if row['label'] == label)
+                    if mutation == 'omit': row['milestones'].pop()
+                    elif mutation == 'reverse': row['milestones'].reverse()
+                    else: row['milestones'].append(row['milestones'][0] + '-invented')
+                    self.write(summary, value)
+                    with self.assertRaisesRegex(ValueError, 'invented or omitted'):
+                        consumer.verify(root, candidate, HELPER, case)
+
     def fixture(self, root, *, source=SOURCE):
         tools, evidence = root / 'native-tools', root / 'native-evidence'
         tools.mkdir()

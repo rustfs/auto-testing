@@ -595,6 +595,281 @@
           "multipart-continue-complete-abort-final-rename"
         ]
       }
+    },
+    "757b751482bb970bc321e92059690a7698554358": {
+      "sourceTree": "069b7f321084c52d00ce873d932b8e7f6ca17319",
+      "cargoLockSha256": "b4d959f964c13d8ed507657fa4b52752769f96e5cce932845d3d8cec69a5cd56",
+      "sourceFiles": {
+        "crates/ecstore/src/set_disk/ops/object.rs": "38f3fc4ab7562d4c14202cafb75f36d3e6ea63c376526702042f1139eebc9fa0",
+        "crates/ecstore/src/set_disk/ops/heal.rs": "0b706ac476e02202d5ad217a166eb523abfd3cfd123902a9fb7edf27bd2bf376",
+        "crates/ecstore/src/set_disk/core/io_primitives.rs": "6e50c8ea8b374b8a2d73da740321af25fed6e26c34e5117feca3e5f5891782ab",
+        "crates/ecstore/src/bucket/metadata_sys.rs": "35313244379c20bcfea44fae79c8b4f74fa7cecd60c7ea33cae47399951e8de3",
+        "crates/ecstore/src/set_disk/mod.rs": "4a20398f08dab92f83b2e6fd649de31c5a57c395c9184e2a896cf8990a986de8"
+      },
+      "regressions": {
+        "committed-overwrite-cleanup": {
+          "test": "set_disk::ops::object::put_object_tmp_cleanup_tests::deep_heal_preserves_committed_generation_during_old_data_cleanup",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/object.rs",
+          "sourceAssertions": [
+            "Every actual shuffled cleanup slot pauses after new physical generation commit while TailDrained overwrite ACK remains pending.",
+            "Real Deep and shared read-repair reconstruct a missing new-generation encoded part before GET in4/2 and16/4 geometries.",
+            "All old physical generations disappear after cleanup; every new encoded shard, unchanged metadata, overwrite ACK and complete final body remain exact."
+          ],
+          "witnessKind": "ordered-barrier-milestones",
+          "milestonePrefix": "native_g01: ",
+          "milestones": [
+            "native_g01: geometry=4/2 read_repair=false old_cleanup_paused new_generation_committed target_part_missing",
+            "native_g01: geometry=4/2 read_repair=false locked_heal_completed new_generation_part_rebuilt_before_get",
+            "native_g01: geometry=4/2 read_repair=false overwrite_ack_preserved final_physical_generation_and_full_body_verified",
+            "native_g01: geometry=4/2 read_repair=true old_cleanup_paused new_generation_committed target_part_missing",
+            "native_g01: geometry=4/2 read_repair=true locked_heal_completed new_generation_part_rebuilt_before_get",
+            "native_g01: geometry=4/2 read_repair=true overwrite_ack_preserved final_physical_generation_and_full_body_verified",
+            "native_g01: geometry=16/4 read_repair=false old_cleanup_paused new_generation_committed target_part_missing",
+            "native_g01: geometry=16/4 read_repair=false locked_heal_completed new_generation_part_rebuilt_before_get",
+            "native_g01: geometry=16/4 read_repair=false overwrite_ack_preserved final_physical_generation_and_full_body_verified",
+            "native_g01: geometry=16/4 read_repair=true old_cleanup_paused new_generation_committed target_part_missing",
+            "native_g01: geometry=16/4 read_repair=true locked_heal_completed new_generation_part_rebuilt_before_get",
+            "native_g01: geometry=16/4 read_repair=true overwrite_ack_preserved final_physical_generation_and_full_body_verified"
+          ]
+        },
+        "stale-read-repair-final-rename": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::read_repair_commit_aborts_when_object_changes_before_final_rename",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Real missing external shard forces actual shared read-repair data reconstruction.",
+            "Pause immediately before final commit fence; a successor overwrite ACK precedes release.",
+            "Obsolete read-repair returns exact DiskError::Timeout and final current ETag equals acknowledged overwrite."
+          ],
+          "witnessKind": "reviewed-in-test-assertions",
+          "milestonePrefix": null,
+          "milestones": []
+        },
+        "versioned-read-repair-lock-owner": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::object_lock_diagnostics_distinguish_read_repair_from_queued_put",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Historical missing external shard is repaired under actual shared Data-phase lock.",
+            "Queued PUT cannot acquire namespace and later historical GET times out while version-specific owner remains held.",
+            "After release, successor PUT ACK and every original/new version full body remain correct."
+          ],
+          "witnessKind": "reviewed-in-test-assertions",
+          "milestonePrefix": null,
+          "milestones": []
+        },
+        "cancelled-physical-unlink-owner": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::cancelled_heal_backup_cleanup_retains_key_owner_until_unlink_finishes",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Actual external Heal backup unlink pauses in outer, inner and shared read-repair modes.",
+            "Caller abort does not retire namespace commit owner; successor write lock remains pending until physical unlink drains.",
+            "After physical completion, successor obtains lock, owned backup is absent and committed full body is preserved."
+          ],
+          "witnessKind": "reviewed-in-test-assertions",
+          "milestonePrefix": null,
+          "milestones": []
+        },
+        "explicit-version-append-final-rename": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::native_explicit_version_commit_preserves_acknowledged_new_version",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Actual selected-version shared Deep reconstruction pauses before its final rename after releasing the read guard.",
+            "Foreground version mutation ACK and same-key physical write-tail drain precede releasing stale Heal; append succeeds or deleted version remains typed FileVersionNotFound.",
+            "All surviving acknowledged version UUIDs, data dirs, original encoded shards and complete exact/current bodies remain intact in4/2 and16/4; deleted generations do not reappear."
+          ],
+          "witnessKind": "ordered-barrier-milestones",
+          "milestonePrefix": "native_g02: ",
+          "milestones": [
+            "native_g02: geometry=4/2 mutation=append reconstruction_paused_before_final_rename",
+            "native_g02: geometry=4/2 mutation=append foreground_ack_and_physical_tail_verified_before_release",
+            "native_g02: geometry=4/2 mutation=append exact_version_outcome_physical_generations_and_full_bodies_verified",
+            "native_g02: geometry=16/4 mutation=append reconstruction_paused_before_final_rename",
+            "native_g02: geometry=16/4 mutation=append foreground_ack_and_physical_tail_verified_before_release",
+            "native_g02: geometry=16/4 mutation=append exact_version_outcome_physical_generations_and_full_bodies_verified"
+          ]
+        },
+        "explicit-version-delete-final-rename": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::native_explicit_version_commit_refuses_deleted_historical_and_current_versions",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Actual selected-version shared Deep reconstruction pauses before its final rename after releasing the read guard.",
+            "Foreground version mutation ACK and same-key physical write-tail drain precede releasing stale Heal; append succeeds or deleted version remains typed FileVersionNotFound.",
+            "All surviving acknowledged version UUIDs, data dirs, original encoded shards and complete exact/current bodies remain intact in4/2 and16/4; deleted generations do not reappear."
+          ],
+          "witnessKind": "ordered-barrier-milestones",
+          "milestonePrefix": "native_g03: ",
+          "milestones": [
+            "native_g03: geometry=4/2 mutation=delete-historical reconstruction_paused_before_final_rename",
+            "native_g03: geometry=4/2 mutation=delete-historical foreground_ack_and_physical_tail_verified_before_release",
+            "native_g03: geometry=4/2 mutation=delete-historical exact_version_outcome_physical_generations_and_full_bodies_verified",
+            "native_g03: geometry=16/4 mutation=delete-historical reconstruction_paused_before_final_rename",
+            "native_g03: geometry=16/4 mutation=delete-historical foreground_ack_and_physical_tail_verified_before_release",
+            "native_g03: geometry=16/4 mutation=delete-historical exact_version_outcome_physical_generations_and_full_bodies_verified",
+            "native_g03: geometry=4/2 mutation=delete-current reconstruction_paused_before_final_rename",
+            "native_g03: geometry=4/2 mutation=delete-current foreground_ack_and_physical_tail_verified_before_release",
+            "native_g03: geometry=4/2 mutation=delete-current exact_version_outcome_physical_generations_and_full_bodies_verified",
+            "native_g03: geometry=16/4 mutation=delete-current reconstruction_paused_before_final_rename",
+            "native_g03: geometry=16/4 mutation=delete-current foreground_ack_and_physical_tail_verified_before_release",
+            "native_g03: geometry=16/4 mutation=delete-current exact_version_outcome_physical_generations_and_full_bodies_verified"
+          ]
+        },
+        "marker-and-batch-delete-final-rename": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::native_marker_and_batch_delete_fence_preserves_acknowledged_version_set",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Real protected external-data reconstruction pauses before final metadata rename in4/2 and16/4 geometries for four independent marker/delete mutations.",
+            "Foreground create-marker, exact marker removal, two-item version deletion with exact per-item ACKs or unversioned deletion and same-key physical tail drain all precede releasing stale Heal.",
+            "Every member retains the exact acknowledged marker/data version set without duplicates; surviving encoded shards and full exact/current bodies remain unchanged, and deleted directories or markers cannot resurrect."
+          ],
+          "witnessKind": "ordered-barrier-milestones",
+          "milestonePrefix": "native_g04: ",
+          "milestones": [
+            "native_g04: geometry=4/2 mutation=create-marker reconstruction_paused_before_final_rename",
+            "native_g04: geometry=4/2 mutation=create-marker exact_foreground_acks_and_physical_tail_verified_before_release",
+            "native_g04: geometry=4/2 mutation=create-marker marker_set_deleted_directories_surviving_shards_and_full_bodies_verified",
+            "native_g04: geometry=4/2 mutation=delete-marker reconstruction_paused_before_final_rename",
+            "native_g04: geometry=4/2 mutation=delete-marker exact_foreground_acks_and_physical_tail_verified_before_release",
+            "native_g04: geometry=4/2 mutation=delete-marker marker_set_deleted_directories_surviving_shards_and_full_bodies_verified",
+            "native_g04: geometry=4/2 mutation=batch-version-delete reconstruction_paused_before_final_rename",
+            "native_g04: geometry=4/2 mutation=batch-version-delete exact_foreground_acks_and_physical_tail_verified_before_release",
+            "native_g04: geometry=4/2 mutation=batch-version-delete marker_set_deleted_directories_surviving_shards_and_full_bodies_verified",
+            "native_g04: geometry=4/2 mutation=unversioned-delete reconstruction_paused_before_final_rename",
+            "native_g04: geometry=4/2 mutation=unversioned-delete exact_foreground_acks_and_physical_tail_verified_before_release",
+            "native_g04: geometry=4/2 mutation=unversioned-delete marker_set_deleted_directories_surviving_shards_and_full_bodies_verified",
+            "native_g04: geometry=16/4 mutation=create-marker reconstruction_paused_before_final_rename",
+            "native_g04: geometry=16/4 mutation=create-marker exact_foreground_acks_and_physical_tail_verified_before_release",
+            "native_g04: geometry=16/4 mutation=create-marker marker_set_deleted_directories_surviving_shards_and_full_bodies_verified",
+            "native_g04: geometry=16/4 mutation=delete-marker reconstruction_paused_before_final_rename",
+            "native_g04: geometry=16/4 mutation=delete-marker exact_foreground_acks_and_physical_tail_verified_before_release",
+            "native_g04: geometry=16/4 mutation=delete-marker marker_set_deleted_directories_surviving_shards_and_full_bodies_verified",
+            "native_g04: geometry=16/4 mutation=batch-version-delete reconstruction_paused_before_final_rename",
+            "native_g04: geometry=16/4 mutation=batch-version-delete exact_foreground_acks_and_physical_tail_verified_before_release",
+            "native_g04: geometry=16/4 mutation=batch-version-delete marker_set_deleted_directories_surviving_shards_and_full_bodies_verified",
+            "native_g04: geometry=16/4 mutation=unversioned-delete reconstruction_paused_before_final_rename",
+            "native_g04: geometry=16/4 mutation=unversioned-delete exact_foreground_acks_and_physical_tail_verified_before_release",
+            "native_g04: geometry=16/4 mutation=unversioned-delete marker_set_deleted_directories_surviving_shards_and_full_bodies_verified"
+          ]
+        },
+        "multipart-continue-complete-abort-final-rename": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::native_multipart_continue_complete_abort_fences_stale_heal",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Real three-part committed unversioned object and distinct same-key A/B pending uploads: A parts1/2, B parts1/2/3, independent payloads and ACK identities.",
+            "Actual missing committed part forces shared Deep Heal to pause before final rename in4/2 and16/4 geometries; A part3 and B Abort ACK preserve all other committed and A pending shard bytes.",
+            "A Complete ACK and namespace physical tail drain precede release; stale Heal returns exact DiskError::Timeout. All new metadata/parts remain byte exact, old generation and both staging directories absent, final full body equals ordered A ACK payloads.",
+            "Native logical/unversioned scope does not prove full versioned SDK H1/H2 overlap, protocol or fleet execution."
+          ],
+          "witnessKind": "ordered-barrier-milestones",
+          "milestonePrefix": "native_g05: ",
+          "milestones": [
+            "native_g05: geometry=4/2 committed_multipart_and_two_distinct_pending_uploads_seeded",
+            "native_g05: geometry=4/2 real_committed_object_heal_paused_before_final_rename",
+            "native_g05: geometry=4/2 continue_ack_and_other_abort_preserve_pending_parts_and_original_commit",
+            "native_g05: geometry=4/2 complete_ack_and_all_physical_tails_verified_before_release",
+            "native_g05: geometry=4/2 stale_heal_rejected_exact_completed_parts_full_body_and_upload_retirement_verified",
+            "native_g05: geometry=16/4 committed_multipart_and_two_distinct_pending_uploads_seeded",
+            "native_g05: geometry=16/4 real_committed_object_heal_paused_before_final_rename",
+            "native_g05: geometry=16/4 continue_ack_and_other_abort_preserve_pending_parts_and_original_commit",
+            "native_g05: geometry=16/4 complete_ack_and_all_physical_tails_verified_before_release",
+            "native_g05: geometry=16/4 stale_heal_rejected_exact_completed_parts_full_body_and_upload_retirement_verified"
+          ]
+        },
+        "default-heal-exclusive-owner": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::native_default_heal_owner_fences_queued_put_and_version_delete",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Default locked Deep Heal owns the real exclusive namespace during external part staging before any writer queues; a positive reader control distinguishes exclusivity.",
+            "Real PUT and exact historical DELETE acquisition futures each poll Pending under that owner; after release Heal reconstructs every original shard before foreground publication.",
+            "ACK successor or retained-current generation, exact version population, independent coding-index shard bytes and complete bodies remain correct across4/2 and16/4; this does not claim Admin normalization or live API timing."
+          ],
+          "witnessKind": "ordered-barrier-milestones",
+          "milestonePrefix": "native_a09: ",
+          "milestones": [
+            "native_a09: geometry=4/2 mutation=put default_deep_heal_staged_exclusive_owner_read_blocked",
+            "native_a09: geometry=4/2 mutation=put actual_foreground_namespace_future_pending_original_bytes_unchanged",
+            "native_a09: geometry=4/2 mutation=put heal_reconstructed_before_foreground_commit",
+            "native_a09: geometry=4/2 mutation=put foreground_ack_final_versions_parts_and_full_body_verified",
+            "native_a09: geometry=4/2 mutation=version-delete default_deep_heal_staged_exclusive_owner_read_blocked",
+            "native_a09: geometry=4/2 mutation=version-delete actual_foreground_namespace_future_pending_original_bytes_unchanged",
+            "native_a09: geometry=4/2 mutation=version-delete heal_reconstructed_before_foreground_commit",
+            "native_a09: geometry=4/2 mutation=version-delete foreground_ack_final_versions_parts_and_full_body_verified",
+            "native_a09: geometry=16/4 mutation=put default_deep_heal_staged_exclusive_owner_read_blocked",
+            "native_a09: geometry=16/4 mutation=put actual_foreground_namespace_future_pending_original_bytes_unchanged",
+            "native_a09: geometry=16/4 mutation=put heal_reconstructed_before_foreground_commit",
+            "native_a09: geometry=16/4 mutation=put foreground_ack_final_versions_parts_and_full_body_verified",
+            "native_a09: geometry=16/4 mutation=version-delete default_deep_heal_staged_exclusive_owner_read_blocked",
+            "native_a09: geometry=16/4 mutation=version-delete actual_foreground_namespace_future_pending_original_bytes_unchanged",
+            "native_a09: geometry=16/4 mutation=version-delete heal_reconstructed_before_foreground_commit",
+            "native_a09: geometry=16/4 mutation=version-delete foreground_ack_final_versions_parts_and_full_body_verified"
+          ]
+        },
+        "copy-and-metadata-final-rename": {
+          "test": "set_disk::ops::heal::heal_result_report_tests::native_copy_and_metadata_mutations_preserve_acknowledged_state_during_heal",
+          "sourcePath": "crates/ecstore/src/set_disk/ops/heal.rs",
+          "sourceAssertions": [
+            "Real ECStore cross-key streamed COPY, self metadata replacement and tag update ACK before releasing actual shared Deep reconstruction final-rename pause.",
+            "Unchanged COPY source completes repair; changed destination or metadata/tag generation rejects stale Heal with exact DiskError::Timeout, preserving all acknowledged physical bytes and reclaiming replaced generation.",
+            "Independent fresh Heal reconstructs metadata/tag targets before finalGET; exact source/destination/control payloads, user metadata/content type/tags and acknowledged shard bytes remain preserved in4/2 and16/4."
+          ],
+          "witnessKind": "ordered-barrier-milestones",
+          "milestonePrefix": "native_g06: ",
+          "milestones": [
+            "native_g06: geometry=4/2 mutation=copy-source real_reconstruction_paused_before_final_rename",
+            "native_g06: geometry=4/2 mutation=copy-source foreground_ack_and_all_physical_tails_verified_before_release",
+            "native_g06: geometry=4/2 mutation=copy-source exact_copy_metadata_tags_generations_and_full_bodies_verified",
+            "native_g06: geometry=4/2 mutation=copy-destination real_reconstruction_paused_before_final_rename",
+            "native_g06: geometry=4/2 mutation=copy-destination foreground_ack_and_all_physical_tails_verified_before_release",
+            "native_g06: geometry=4/2 mutation=copy-destination exact_copy_metadata_tags_generations_and_full_bodies_verified",
+            "native_g06: geometry=4/2 mutation=replace-metadata real_reconstruction_paused_before_final_rename",
+            "native_g06: geometry=4/2 mutation=replace-metadata foreground_ack_and_all_physical_tails_verified_before_release",
+            "native_g06: geometry=4/2 mutation=replace-metadata exact_copy_metadata_tags_generations_and_full_bodies_verified",
+            "native_g06: geometry=4/2 mutation=update-tags real_reconstruction_paused_before_final_rename",
+            "native_g06: geometry=4/2 mutation=update-tags foreground_ack_and_all_physical_tails_verified_before_release",
+            "native_g06: geometry=4/2 mutation=update-tags exact_copy_metadata_tags_generations_and_full_bodies_verified",
+            "native_g06: geometry=16/4 mutation=copy-source real_reconstruction_paused_before_final_rename",
+            "native_g06: geometry=16/4 mutation=copy-source foreground_ack_and_all_physical_tails_verified_before_release",
+            "native_g06: geometry=16/4 mutation=copy-source exact_copy_metadata_tags_generations_and_full_bodies_verified",
+            "native_g06: geometry=16/4 mutation=copy-destination real_reconstruction_paused_before_final_rename",
+            "native_g06: geometry=16/4 mutation=copy-destination foreground_ack_and_all_physical_tails_verified_before_release",
+            "native_g06: geometry=16/4 mutation=copy-destination exact_copy_metadata_tags_generations_and_full_bodies_verified",
+            "native_g06: geometry=16/4 mutation=replace-metadata real_reconstruction_paused_before_final_rename",
+            "native_g06: geometry=16/4 mutation=replace-metadata foreground_ack_and_all_physical_tails_verified_before_release",
+            "native_g06: geometry=16/4 mutation=replace-metadata exact_copy_metadata_tags_generations_and_full_bodies_verified",
+            "native_g06: geometry=16/4 mutation=update-tags real_reconstruction_paused_before_final_rename",
+            "native_g06: geometry=16/4 mutation=update-tags foreground_ack_and_all_physical_tails_verified_before_release",
+            "native_g06: geometry=16/4 mutation=update-tags exact_copy_metadata_tags_generations_and_full_bodies_verified"
+          ]
+        }
+      },
+      "cases": {
+        "heal.race-unversioned-overwrite": [
+          "committed-overwrite-cleanup",
+          "stale-read-repair-final-rename"
+        ],
+        "heal.race-versioned-put": [
+          "versioned-read-repair-lock-owner",
+          "explicit-version-append-final-rename"
+        ],
+        "heal.lock-timeout-and-caller-abort": [
+          "versioned-read-repair-lock-owner",
+          "cancelled-physical-unlink-owner",
+          "stale-read-repair-final-rename"
+        ],
+        "heal.race-version-delete": [
+          "explicit-version-delete-final-rename"
+        ],
+        "heal.race-markers-and-batch-delete": [
+          "marker-and-batch-delete-final-rename"
+        ],
+        "heal.race-multipart-complete-abort": [
+          "multipart-continue-complete-abort-final-rename"
+        ],
+        "heal.admin-nolock-safety": [
+          "default-heal-exclusive-owner"
+        ],
+        "heal.race-copy-and-metadata-update": [
+          "copy-and-metadata-final-rename"
+        ]
+      }
     }
   }
 }

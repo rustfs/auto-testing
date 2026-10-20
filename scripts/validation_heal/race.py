@@ -21,7 +21,7 @@ import uuid
 
 try:
     from .heal_probe import Probe, canonical, compare_inventories, payload, require, save
-    from .heal_workload import Recorder, verify_seed
+    from .heal_workload import Recorder, seed as seed_workload, verify_seed
     from .healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
     from .matrix import select
@@ -32,7 +32,7 @@ try:
     from .race_native_evidence import verify as verify_native
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require, save
-    from heal_workload import Recorder, verify_seed
+    from heal_workload import Recorder, seed as seed_workload, verify_seed
     from healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
     from matrix import select
@@ -62,8 +62,8 @@ OBJECTS = 257
 SIZE = 257 * 1024 + 123
 TARGET_KEY = "objects/0256.bin"
 REFERENCE_KEY = "objects/0000.bin"
-G06_TARGET_KEY = "actual/slash/0256.bin"
-G06_REFERENCE_KEY = "space key/0000.bin"
+G06_TARGET_KEY = "中文/文件/0252.bin"
+G06_REFERENCE_KEY = "literal%2Fslash/0254.bin"
 G05_TARGET_KEY = "multipart/target.bin"
 G05_PART_SIZES = (5 * 1024 * 1024 + 17, 5 * 1024 * 1024 + 93, 1024 * 1024 + 47)
 REFERENCE = {
@@ -224,6 +224,9 @@ def sample_overlap(ack, observed, path, token, reference=REFERENCE):
 
 def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
     require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES, *G05_BRANCHES, *G06_BRANCHES) and type(count) is int and 3 <= count <= OBJECTS, "G01/G02/G03/G04/G05/G06 unregistered fixture")
+    if branch in G06_BRANCHES:
+        require(count == OBJECTS, "G06 requires the frozen complete 257-key DS population")
+        return seed_workload(recorder, bucket, "DS", count, [SIZE])
     recorder.call("create_bucket", {"Bucket": bucket})
     if branch in G04_BRANCHES:
         versioned = branch != "unversioned-delete"
@@ -285,10 +288,7 @@ def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
     if branch in (*G02_BRANCHES, *G03_BRANCHES):
         recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})
     entries = []
-    if branch in G06_BRANCHES:
-        keys = [G06_REFERENCE_KEY] + [f"ds/{index:04d}.bin" for index in range(1, count - 1)] + [G06_TARGET_KEY]
-    else:
-        keys = [f"objects/{index:04d}.bin" for index in range(count - 1)] + [TARGET_KEY]
+    keys = [f"objects/{index:04d}.bin" for index in range(count - 1)] + [TARGET_KEY]
     current_target = target_key(branch)
     for key in keys:
         versions = 3 if key == current_target and branch in (*G02_BRANCHES, *G03_BRANCHES) else 1
@@ -379,11 +379,11 @@ def operation_plan(bucket, branch, expected):
         ]
     if branch in G06_BRANCHES:
         if branch == "copy-source":
-            return [{"operation": "copy_object", "params": {"Bucket": bucket, "Key": current_target,
-                "CopySource": {"Bucket": bucket, "Key": current_reference, "VersionId": "null"}}, "nonce": "copy-source"}]
-        if branch == "copy-destination":
             return [{"operation": "copy_object", "params": {"Bucket": bucket, "Key": current_reference,
-                "CopySource": {"Bucket": bucket, "Key": current_target, "VersionId": "null"}}, "nonce": "copy-destination"}]
+                "CopySource": {"Bucket": bucket, "Key": current_target, "VersionId": "null"}}, "nonce": "copy-source"}]
+        if branch == "copy-destination":
+            return [{"operation": "copy_object", "params": {"Bucket": bucket, "Key": current_target,
+                "CopySource": {"Bucket": bucket, "Key": current_reference, "VersionId": "null"}}, "nonce": "copy-destination"}]
         if branch == "replace-metadata":
             return [{"operation": "copy_object", "params": {"Bucket": bucket, "Key": current_target,
                 "CopySource": {"Bucket": bucket, "Key": current_target, "VersionId": "null"},
@@ -480,16 +480,15 @@ def final_inventory(baseline, branch, plan, responses):
         entry = next(row for row in result["entries"] if row["key"] == current_target)
         copy_result = responses[-1].get("CopyObjectResult") or {}
         copy_etag = copy_result.get("ETag") or responses[-1].get("ETag")
-        if branch == "copy-source":
-            reference = next(row for row in result["entries"] if row["key"] == current_reference)
-            entry["payload"] = copy.deepcopy(reference["payload"])
-            require(isinstance(copy_etag, str) and copy_etag, "G06 copy-source ACK lacks its committed ETag")
-            entry["properties"].update(ETag=copy_etag)
-        elif branch == "copy-destination":
-            destination = next(row for row in result["entries"] if row["key"] == current_reference)
-            destination["payload"] = copy.deepcopy(entry["payload"])
-            require(isinstance(copy_etag, str) and copy_etag, "G06 copy-destination ACK lacks its committed ETag")
-            destination["properties"].update(ETag=copy_etag)
+        if branch in {"copy-source", "copy-destination"}:
+            source_key, destination_key = ((current_target, current_reference) if branch == "copy-source"
+                                           else (current_reference, current_target))
+            source = next(row for row in result["entries"] if row["key"] == source_key)
+            destination = next(row for row in result["entries"] if row["key"] == destination_key)
+            require(isinstance(copy_etag, str) and copy_etag, "G06 COPY ACK lacks its committed ETag")
+            for field in ("payload", "properties", "tags"):
+                destination[field] = copy.deepcopy(source[field])
+            destination["properties"]["ETag"] = copy_etag
         elif branch == "replace-metadata":
             require(isinstance(copy_etag, str) and copy_etag, "G06 metadata replacement ACK lacks its committed ETag")
             entry["properties"].update(Metadata=plan[0]["params"]["Metadata"], ContentType=plan[0]["params"]["ContentType"])
@@ -528,8 +527,9 @@ def physical_transition(before, after, bucket, mapped, final, branch):
     require(all(any(row["path"].startswith(f"{bucket}/{key}/") for key in known)
                 for value in after.values() for row in value["files"]), "G01/G03 created an unacknowledged physical key")
     current_target, current_reference = target_key(branch), reference_key(branch)
+    changed_key = (current_reference if branch == "copy-source" else current_target)
     for (key, version), target in mapped.items():
-        if key == current_target: continue
+        if key == (changed_key if branch in G06_BRANCHES else current_target): continue
         validate_repaired_physical(object_scene(before, bucket, key), object_scene(after, bucket, key), target)
     survivors = map_fixture(after, bucket, final["entries"])
     original_target = [value for (key, _), value in mapped.items() if key == current_target]
@@ -598,11 +598,10 @@ def physical_transition(before, after, bucket, mapped, final, branch):
                     == [(part["index"], part["sha256"], part["size"]) for part in current_target_values[0]["cohort"]],
                     "G05 pending/aborted MPU changed committed object bytes")
     elif branch in G06_BRANCHES:
-        changed_key = current_reference if branch == "copy-destination" else current_target
         target_after = next(value for (key, _), value in survivors.items() if key == changed_key)
         target_before = next(value for (key, _), value in mapped.items() if key == changed_key)
         if branch in {"copy-source", "copy-destination"}:
-            source_key = current_reference if branch == "copy-source" else current_target
+            source_key = current_target if branch == "copy-source" else current_reference
             source = next(value for (key, _), value in mapped.items() if key == source_key)
             require(target_after["dataDir"] != target_before["dataDir"]
                     and {part["index"]: (part["sha256"], part["size"]) for part in target_after["cohort"]}
@@ -623,11 +622,13 @@ def physical_transition(before, after, bucket, mapped, final, branch):
                     and [(row["index"], row["sha256"], row["size"]) for row in target["cohort"]]
                     == [(row["index"], row["sha256"], row["size"]) for row in original["cohort"]],
                     "G01/G03 delete changed another retained ACK generation")
-    current_dirs = {target["dataDir"] for target in current_target_values}
+    inspected_keys = {current_target, changed_key} if branch in G06_BRANCHES else {current_target}
     for value in after.values():
         for row in value["files"]:
-            prefix = f"{bucket}/{current_target}/"
-            if not row["path"].startswith(prefix): continue
+            key = next((key for key in inspected_keys if row["path"].startswith(f"{bucket}/{key}/")), None)
+            if key is None: continue
+            prefix = f"{bucket}/{key}/"
+            current_dirs = {target["dataDir"] for (name, _), target in survivors.items() if name == key}
             if branch == "unversioned-delete":
                 raise ValueError("G04 unversioned DELETE left a physical target leaf")
             suffix = row["path"][len(prefix):]
