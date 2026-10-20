@@ -15,12 +15,14 @@ try:
     from .interrupted_recovery import checkpoint_plan, restore_and_isolate
     from .outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan, acknowledged_legacy_plan
     from .network_retention import archived_plan as network_retention_plan, isolate as isolate_network_scene
+    from .race_retention import archived_plan as race_retention_plan, isolate as isolate_race_scene
 except ImportError:
     from healthy import Fleet, physical_content
     from heal_probe import require, save
     from interrupted_recovery import checkpoint_plan, restore_and_isolate
     from outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan, acknowledged_legacy_plan
     from network_retention import archived_plan as network_retention_plan, isolate as isolate_network_scene
+    from race_retention import archived_plan as race_retention_plan, isolate as isolate_race_scene
 
 
 def quota_recovery_plan(artifact, failed_run, candidate):
@@ -147,6 +149,8 @@ def network_recovery_plan(artifact, failed_run, candidate):
 
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
+    if list(artifact.glob("*/run/heal.race-unversioned-overwrite/cases/*.json")):
+        return race_retention_plan(artifact, failed_run, candidate)
     if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/cases/*.json")):
         if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/evidence/heal.outcome-counters-and-error-truth/DB/H1/unknown-negative/*-one-way-legacy-write-phase.json")):
             return acknowledged_legacy_plan(artifact, failed_run, candidate)
@@ -643,6 +647,9 @@ def main():
         if plan.get("buckets"):
             fleet.snapshot_buckets = plan["buckets"]
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
+        if plan.get("kind") == "unresolved-g01-race":
+            complete.append({"failedRunId": args.failed_run_id, **isolate_race_scene(fleet, plan)})
+            continue
         if plan.get("kind") == "unresolved-network-load":
             complete.append({"failedRunId": args.failed_run_id, **isolate_network_scene(fleet, plan)})
             continue
