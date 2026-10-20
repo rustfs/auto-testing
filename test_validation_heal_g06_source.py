@@ -122,6 +122,52 @@ class G06SourceTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         race.physical_transition(before, after, self.bucket, mapped, final, branch)
 
+    def metadata_scene(self):
+        before, after, mapped, final, _ = self.scene('copy-destination')
+        original = {(f['disk'], f['path']): f for f in before['node1']['files']}
+        for f in after['node1']['files']:
+            if f['path'].startswith(f'{self.bucket}/{race.G06_TARGET_KEY}/') and f['path'].endswith('/part.1'):
+                old_path = f'{self.bucket}/{race.G06_TARGET_KEY}/{uuid.UUID(int=100)}/part.1'
+                f['sha256'] = original[f['disk'], old_path]['sha256']
+        return before, after, mapped, final
+
+    def test_metadata_and_tags_allow_one_current_directory_with_original_coding_bytes(self):
+        # The frozen generation_proof requires replacement only for COPY and
+        # overwrite. Metadata/tag mutations still require the complete coding set.
+        for branch in ('replace-metadata', 'update-tags'):
+            for replace in (False, True):
+                with self.subTest(branch=branch, replace=replace):
+                    before, after, mapped, final = self.metadata_scene()
+                    if not replace: after = copy.deepcopy(before)
+                    _, proof = race.physical_transition(before, after, self.bucket, mapped, final, branch)
+                    self.assertTrue(proof['physicalProofBeforeGETOrRescue'])
+
+    def test_metadata_and_tags_reject_incomplete_mixed_or_wrong_coding_generations(self):
+        for branch in ('replace-metadata', 'update-tags'):
+            for fault in ('wrong-shard', 'wrong-index', 'missing-part', 'mixed-generation', 'old-leaf', 'control'):
+                with self.subTest(branch=branch, fault=fault):
+                    before, after, mapped, final = self.metadata_scene()
+                    rows = after['node1']['files']
+                    parts = [f for f in rows if f['path'].startswith(f'{self.bucket}/{race.G06_TARGET_KEY}/')
+                             and f['path'].endswith('/part.1')]
+                    if fault == 'wrong-shard': parts[0]['sha256'] = 'wrong'
+                    elif fault == 'wrong-index':
+                        parts[0]['sha256'], parts[1]['sha256'] = parts[1]['sha256'], parts[0]['sha256']
+                    elif fault == 'missing-part': rows.remove(parts[0])
+                    elif fault == 'mixed-generation':
+                        meta = next(f for f in rows if f['disk'] == 0
+                                    and f['path'] == f'{self.bucket}/{race.G06_TARGET_KEY}/xl.meta')
+                        meta['metadata']['versions'][0]['dataDir'] = str(uuid.UUID(int=100))
+                    elif fault == 'old-leaf':
+                        rows.append(copy.deepcopy(next(f for f in before['node1']['files']
+                            if f['path'].startswith(f'{self.bucket}/{race.G06_TARGET_KEY}/')
+                            and f['path'].endswith('/part.1'))))
+                    else:
+                        next(f for f in rows if f['path'].startswith(f'{self.bucket}/{race.G06_REFERENCE_KEY}/')
+                             and f['path'].endswith('/part.1'))['sha256'] = 'changed-control'
+                    with self.assertRaises(ValueError):
+                        race.physical_transition(before, after, self.bucket, mapped, final, branch)
+
 
 if __name__ == '__main__':
     unittest.main()

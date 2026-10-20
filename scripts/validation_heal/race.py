@@ -687,10 +687,11 @@ def physical_transition(before, after, bucket, mapped, final, branch):
                     == {part["index"]: (part["sha256"], part["size"]) for part in source["cohort"]},
                     "G06 copy did not publish a distinct target generation with source shard bytes")
         else:
-            require(target_after["dataDir"] == target_before["dataDir"]
-                    and [(part["index"], part["sha256"], part["size"]) for part in target_after["cohort"]]
-                    == [(part["index"], part["sha256"], part["size"]) for part in target_before["cohort"]],
-                    "G06 metadata/tag update changed the data generation")
+            # The frozen metadata/tag oracle permits a new current directory;
+            # every coding index must still contain the original payload bytes.
+            require({part["index"]: (part["sha256"], part["size"]) for part in target_after["cohort"]}
+                    == {part["index"]: (part["sha256"], part["size"]) for part in target_before["cohort"]},
+                    "G06 metadata/tag update changed the original coding bytes")
     else:
         remaining = {(row["key"], row["versionId"]) for row in final["entries"]}
         removed = [value for pair, value in mapped.items() if pair not in remaining]
