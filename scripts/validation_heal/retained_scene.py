@@ -1,6 +1,6 @@
 """Retain incomplete stopped fixtures by same-filesystem, non-overwriting rename.
 
-Only owner/binary and fixture/MRF bytes are read. Other entries, including
+Only owner/binary and scoped fixture/MRF/multipart bytes are read. Other entries, including
 credentials, are retained by inode and metadata without reading their contents.
 """
 
@@ -88,9 +88,9 @@ def parent_ready(parent, boundary, node, *, create=False):
                 and info.st_dev == boundary.stat().st_dev, "retained archive parent is not private on the original filesystem")
 
 
-def census(folder, owner, *, state, node):
+def census(folder, owner, *, state, node, mpu_keys=()):
     """Hash the complete inode inventory; read only explicitly scoped content."""
-    rows, content_count = [], 0
+    rows, content_count, mpu_bytes_hashed = [], 0, 0
     boundary_device = folder.lstat().st_dev
     network = owner.get("runtimeProfile") == "lock-quorum"
     fixture_buckets = {owner["bucket"]}
@@ -99,8 +99,11 @@ def census(folder, owner, *, state, node):
     multipart_keys = {hashlib.sha256(f"{owner['bucket']}/dl/{endpoint}/{name}.bin".encode()).hexdigest()
                       for endpoint in ("node1", "node3", "node4")
                       for name in ("abort", "complete", "create", "upload")} if network else set()
+    if mpu_keys and owner.get('runtimeProfile') == 'manual':
+        node['mpu_scene_backend'].validate_scope(owner, mpu_keys)
+        multipart_keys = {hashlib.sha256(f"{owner['bucket']}/{key}".encode()).hexdigest() for key in mpu_keys}
     def visit(path):
-        nonlocal content_count
+        nonlocal content_count, mpu_bytes_hashed
         node["checked"](path, folder)
         info = path.lstat()
         require(info.st_dev == boundary_device and (stat.S_ISDIR(info.st_mode)
@@ -123,7 +126,7 @@ def census(folder, owner, *, state, node):
         else:
             parts = Path(relative).parts
             fixture = not state and len(parts) > 2 and parts[0] == "data" and parts[1] in fixture_buckets
-            network_mpu = (not state and network and len(parts) > 4
+            network_mpu = (not state and (network or mpu_keys) and len(parts) > 4
                            and parts[:3] == ("data", ".rustfs.sys", "multipart") and parts[3] in multipart_keys)
             network_backup = (not state and network and len(parts) == 2 and parts[0] == "quarantine"
                               and re.fullmatch(r"I03-missing-target\.(original|intent\.json|applied\.json)", parts[1]))
@@ -138,7 +141,12 @@ def census(folder, owner, *, state, node):
                              and re.fullmatch(r"J02-[0-9a-f]{32}\.(original|intent\.json|applied\.json|failed-[0-9a-f]{64})", parts[1]))
             race_backup = (not state and owner.get("runtimeProfile") == "manual"
                            and len(parts) == 2 and parts[0] == "quarantine"
-                           and re.fullmatch(r"(?:G0[126]|A09)-[a-z0-9-]{1,48}\.(original|intent\.json|applied\.json)", parts[1]))
+                           and re.fullmatch(r"(?:G0[1256]|A09)-[a-z0-9-]{1,48}\.(original|intent\.json|applied\.json)", parts[1]))
+            if network_mpu and not network:
+                require(info.st_size <= 64 * 1024**2
+                        and mpu_bytes_hashed + info.st_size <= node['mpu_scene_backend'].MAX_BYTES,
+                        'G05 retained multipart content exceeds its byte budget')
+                mpu_bytes_hashed += info.st_size
             if (state and relative == "rustfs") or fixture or mrf or backup or opaque_backup or network_mpu or network_backup or race_backup:
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
@@ -218,7 +226,7 @@ def inspect(request, node):
             require(not any((folder / name).exists() for name in (
                 "drive-gate.json", "write-quorum-gate.json", "network-gate.json", "disk-replacement.json")),
                 "retained scene still has a gate or replacement intent")
-        witnesses.append(census(folder, expected, state=index == 4, node=node))
+        witnesses.append(census(folder, expected, state=index == 4, node=node, mpu_keys=request.get('mpuKeys', ())))
     baseline = {"runId": request["runId"], "ownerSha256": sha(expected), "roots": witnesses[:4], "state": witnesses[4]}
     if per_run:
         baseline["archiveLayout"] = "per-run-parent"
@@ -230,7 +238,9 @@ def inspect(request, node):
         require(re.fullmatch(r"[0-9a-f]{64}", original_sha) is not None,
                 "restored fixture requires its original physical scene digest")
         baseline["originalSceneSha256"] = original_sha
-        if network:
+        multipart = network or expected['runtimeProfile'] == 'manual' and 'mpuKeys' in request
+        if multipart:
+            node['mpu_scene_backend'].validate_scope(expected, request['mpuKeys'])
             require(re.fullmatch(r"[0-9a-f]{64}", request.get("expectedMpuSceneSha256", "")) is not None,
                     "network retention requires its stopped original MPU scene digest")
             baseline["originalMpuSceneSha256"] = request["expectedMpuSceneSha256"]
@@ -244,7 +254,7 @@ def inspect(request, node):
                     and scene.get("binarySha256") == expected["binarySha256"]
                     and sha({key: scene[key] for key in ("files", "formats")}) == original_sha,
                     "restored fixture differs from the original business scene")
-            if network:
+            if multipart:
                 mpu = node["mpu_scene_backend"].run({"runId": request["runId"], "action": "mpu-scene",
                     "bucket": expected["bucket"], "keys": request["mpuKeys"],
                     "expectedBinarySha256": expected["binarySha256"]}, node)
@@ -261,7 +271,9 @@ def run(request, node):
     fields = {"runId", "action", "expectedOwner"}
     if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual"}:
         fields.add("expectedOriginalSceneSha256")
-    if request.get("expectedOwner", {}).get("runtimeProfile") == "lock-quorum":
+    if request.get("expectedOwner", {}).get("runtimeProfile") == "lock-quorum" or (
+            request.get('expectedOwner', {}).get('runtimeProfile') == 'manual'
+            and ('mpuKeys' in request or 'expectedMpuSceneSha256' in request)):
         fields.update({"expectedMpuSceneSha256", "mpuKeys"})
     if request["action"] == "retained-scene-isolate":
         fields.add("expectedBaseline")

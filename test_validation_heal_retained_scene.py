@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from scripts.validation_heal import fleet_node, retained_scene as retained, recover_environment as recovery
+from scripts.validation_heal import fleet_node, retained_scene as retained, recover_environment as recovery, mpu_scene
 from scripts.validation_heal.healthy import Fleet
 
 
@@ -177,6 +177,72 @@ class RetainedSceneTests(unittest.TestCase):
             retained.rename_new(Path("/original/run"), Path("/retained/run"))
         call.assert_called_once_with(-100, b"/original/run", -100, b"/retained/run", 1)
         self.assertEqual(sync.call_args_list, [unittest.mock.call(Path("/original")), unittest.mock.call(Path("/retained"))])
+
+    def mpu_partial_scene(self, directory):
+        state, roots, node, request = self.scene(directory)
+        shutil.copytree(roots[1], roots[0])
+        owner = request['expectedOwner'];owner['runtimeProfile'] = 'manual'
+        for folder in (*roots, state): (folder/'owner.json').write_text(json.dumps(owner))
+        snapshot = {'files':[], 'formats':[], 'pid':0, 'quiescent':True, 'binarySha256':owner['binarySha256']}
+        node.update(owned=lambda run:(state, roots, copy.deepcopy(owner)),
+                    snapshot=lambda value:copy.deepcopy(snapshot), mpu_scene_backend=mpu_scene)
+        key_hash = hashlib.sha256(f"{owner['bucket']}/{mpu_scene.G05_KEY}".encode()).hexdigest()
+        for root in roots:
+            folder = root/'data/.rustfs.sys/multipart'/key_hash/'unknown-create-before-ACK'
+            folder.mkdir(parents=True)
+            (folder/'part.1').write_bytes(b'unknown MPU original bytes')
+            (root/'quarantine/G05-partial.original').write_bytes(b'original missing-shard backup')
+        raw = mpu_scene.run({'runId':request['runId'], 'action':'mpu-scene', 'bucket':owner['bucket'],
+            'keys':[mpu_scene.G05_KEY], 'expectedBinarySha256':owner['binarySha256']}, node)
+        request.update(expectedOriginalSceneSha256=retained.sha({k:snapshot[k] for k in ('files','formats')}),
+                       mpuKeys=[mpu_scene.G05_KEY], expectedMpuSceneSha256=raw['sceneSha256'])
+        return state, roots, node, request
+
+    def test_g05_unknown_partial_seed_isolates_original_mpu_inodes_without_reading_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, roots, node, request = self.mpu_partial_scene(directory)
+            original = {p:(p.stat().st_ino,p.read_bytes()) for root in roots
+                        for p in root.rglob('*') if p.is_file()}
+            opened, real_open = [], os.open
+            def record(path, *args, **kwargs):
+                opened.append(str(path));return real_open(path, *args, **kwargs)
+            with self.root_stats(), patch.object(os,'open',side_effect=record), \
+                 patch.object(retained,'rename_new',side_effect=self.local_rename):
+                before = retained.run(request,node)
+                self.assertTrue(all(row['contentFilesHashed']==3 for row in before['baseline']['roots']))
+                change = {**request,'action':'retained-scene-isolate','expectedBaseline':before['baseline']}
+                def interrupted(source, target):
+                    self.local_rename(source, target)
+                    if source == roots[0]: raise RuntimeError('lost response after first MPU root move')
+                with patch.object(retained,'rename_new',side_effect=interrupted),self.assertRaises(RuntimeError):
+                    retained.run(change,node)
+                result = retained.run(change,node)
+                self.assertEqual(result['baseline'],before['baseline'])
+                self.assertEqual(result['locations'],['retained']*5)
+                self.assertTrue(result['activeNamespaceIsolated'])
+                self.assertFalse(result['originalSceneRestored'] or result['canonicalPassClaimed'])
+                _, targets = retained.destinations(state,roots,per_run_parent=True)
+                for old,(inode,raw) in original.items():
+                    index = next(i for i,root in enumerate(roots) if old.is_relative_to(root))
+                    new = targets[index]/old.relative_to(roots[index])
+                    self.assertEqual((new.stat().st_ino,new.read_bytes()),(inode,raw))
+            self.assertFalse(any(p.endswith(('service.env','credential')) for p in opened))
+
+    def test_g05_unknown_mpu_scope_or_digest_drift_refuses_before_any_move(self):
+        for fault in ('scope','digest','missing-digest','changed-content','byte-cap'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
+                state,roots,node,request = self.mpu_partial_scene(directory)
+                with self.root_stats():
+                    before = retained.run(request,node)
+                    if fault == 'scope': request['mpuKeys'] = ['objects-0255.bin']
+                    elif fault == 'digest': request['expectedMpuSceneSha256'] = 'f'*64
+                    elif fault == 'missing-digest': request.pop('expectedMpuSceneSha256')
+                    elif fault == 'changed-content': next((roots[0]/'data/.rustfs.sys/multipart').rglob('part.1')).write_bytes(b'changed MPU')
+                    with patch.object(retained,'rename_new') as move, \
+                         patch.object(mpu_scene,'MAX_BYTES',1 if fault == 'byte-cap' else mpu_scene.MAX_BYTES), \
+                         self.assertRaises(ValueError):
+                        retained.run({**request,'action':'retained-scene-isolate','expectedBaseline':before['baseline']},node)
+                    move.assert_not_called()
 
 
 class IncompleteFleetIsolationTests(unittest.TestCase):

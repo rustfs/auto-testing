@@ -113,6 +113,30 @@ class MultipartSceneTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'owner or original roots changed'): scene.run(request, node)
             self.assertEqual(len(calls), 2)
 
+    def test_g05_partial_seed_captures_unknown_upload_ids_and_empty_drives(self):
+        with tempfile.TemporaryDirectory() as d:
+            request, node, roots, _ = self.fixture(Path(d))
+            owner = node['owned'](request['runId'])[2]
+            owner.update(runtimeProfile='manual', bucket='rv-heal-0123456789abcdef')
+            request.update(bucket=owner['bucket'], keys=[scene.G05_KEY])
+            key_hash = hashlib.sha256(f"{owner['bucket']}/{scene.G05_KEY}".encode()).hexdigest()
+            expected = {}
+            for disk, root in enumerate(roots[:3]):
+                upload = root/'data/.rustfs.sys/multipart'/key_hash/f'unknown-create-{disk}'
+                upload.mkdir(parents=True)
+                file = upload/'partial-part';file.write_bytes(b'uncertain original bytes'+bytes([disk]))
+                expected[disk, file.relative_to(root/'data').as_posix()] = hashlib.sha256(file.read_bytes()).hexdigest()
+            result = scene.run(request, node)
+            self.assertEqual({(r['disk'],r['path']):r['sha256'] for r in result['files']}, expected)
+            self.assertEqual([r['present'] for r in result['scopes']], [True,True,True,False])
+            self.assertFalse(result['payloadIntegrityClaimed'] or result['rawContentsExported'])
+            for bad in ([], [scene.G05_KEY, scene.G05_KEY], ['objects-0255.bin']):
+                with self.subTest(keys=bad), self.assertRaises(ValueError):
+                    scene.run({**request, 'keys':bad}, node)
+            for index in range(3): (roots[0]/'data/.rustfs.sys/multipart'/key_hash/f'extra-{index}').mkdir()
+            with self.assertRaisesRegex(ValueError, 'directory population'):
+                scene.run(request, node)
+
 
 if __name__ == '__main__':
     unittest.main()

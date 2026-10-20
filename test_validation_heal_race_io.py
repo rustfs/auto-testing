@@ -120,6 +120,73 @@ class RaceIoTests(unittest.TestCase):
                     '8:4 rbps=max wbps=max riops=max wiops=max\n'*2, 'x'*65537):
             with self.subTest(raw=raw[:80]), self.assertRaises(ValueError): race_io.limits(raw)
 
+    def observation(self):
+        request, node, kernel, process, owner = self.fixture()
+        request.pop('enabled')
+        request.update(action='race-io-observe', caseId=race.CASE_IDS[4], branch='complete')
+        original = node['command']
+        kernel['ancestors'] = {'/sys/fs/cgroup/system.slice/io.max': '', '/sys/fs/cgroup/io.max': ''}
+        kernel['reads'] = []
+        def command(*args, **kwargs):
+            if args[0] == 'cat' and args[1].endswith('/io.max'):
+                kernel['reads'].append(args[1])
+                if args[1] in kernel['ancestors']:
+                    return SimpleNamespace(stdout=kernel['ancestors'][args[1]], stderr='', returncode=0)
+            return original(*args, **kwargs)
+        node['command'] = command
+        return request, node, kernel, process, owner
+
+    def test_g05_observes_owned_and_inherited_io_limits_without_writes(self):
+        request, node, kernel, _, _ = self.observation()
+        for branch in ('upload-continue', 'complete', 'abort'):
+            result = race_io.run({**request, 'branch': branch}, node)
+            self.assertTrue(result['inspectionOnly'] and result['actualKernelNoLimitVerifiedAtSamples'])
+            self.assertFalse(result['mutated'] or result['continuousNoLimitProved'] or result['ioCapRequested'])
+            self.assertEqual(len(result['beforeIoScopes']), 3)
+            self.assertEqual(result['beforeIoScopes'], result['afterIoScopes'])
+        self.assertFalse(kernel['writes'])
+        self.assertEqual(len(kernel['reads']), 18)
+
+    def test_g05_refuses_each_ancestor_cap_and_cannot_release_a_foreign_limit(self):
+        for where in ('owned', '/sys/fs/cgroup/system.slice/io.max', '/sys/fs/cgroup/io.max'):
+            for limit in ('rbps', 'wbps', 'riops', 'wiops'):
+                with self.subTest(where=where, limit=limit):
+                    request, node, kernel, _, _ = self.observation()
+                    raw = '8:4 ' + ' '.join(f'{k}={65536 if k == limit else "max"}'
+                        for k in ('rbps', 'wbps', 'riops', 'wiops')) + '\n'
+                    if where == 'owned': kernel['raw'] = raw
+                    else: kernel['ancestors'][where] = raw
+                    with self.assertRaisesRegex(ValueError, 'inherited kernel IO cap'):
+                        race_io.run(request, node)
+                    self.assertFalse(kernel['writes'])
+
+    def test_g05_observation_rejects_scope_changes_and_mutation_parameters(self):
+        for fault in ('case', 'branch', 'enabled', 'process', 'group', 'runtime', 'mount', 'late-cap', 'late-birth', 'late-group'):
+            with self.subTest(fault=fault):
+                request, node, kernel, process, owner = self.observation()
+                if fault == 'case': request['caseId'] = race.CASE_IDS[0]
+                elif fault == 'branch': request['branch'] = 'copy-source'
+                elif fault == 'enabled': request['enabled'] = False
+                elif fault == 'process': process['startTicks'] += 1
+                elif fault == 'group': kernel['membership'] = '0::/system.slice/other.service\n'
+                elif fault == 'runtime': owner['runtimeProfile'] = 'lock-quorum'
+                elif fault == 'mount':
+                    mounts = copy.deepcopy(owner['mounts'])
+                    mounts[0]['maj:min'] = '8:99'
+                    node['mounts'] = lambda: mounts
+                else:
+                    original = node['command']
+                    def change(*args, **kwargs):
+                        result = original(*args, **kwargs)
+                        if len(kernel['reads']) == 3:
+                            if fault == 'late-cap': kernel['ancestors']['/sys/fs/cgroup/io.max'] = '8:4 rbps=max wbps=7 riops=max wiops=max\n'
+                            elif fault == 'late-birth': process['startTicks'] += 1
+                            else: kernel['membership'] = '0::/system.slice/foreign.service\n'
+                        return result
+                    node['command'] = change
+                with self.assertRaises(ValueError): race_io.run(request, node)
+                self.assertFalse(kernel['writes'])
+
     def test_missing_unenabled_controller_is_accepted_only_for_an_existing_owned_group(self):
         for group_exists in (True, False):
             with self.subTest(group_exists=group_exists):

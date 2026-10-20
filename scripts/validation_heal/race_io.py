@@ -37,9 +37,14 @@ def limits(raw):
 
 
 def run(request, node):
-    require(set(request) == {'runId', 'action', 'caseId', 'branch', 'enabled', 'expectedProcess'}
-            and request['action'] == 'race-io-cap' and type(request['enabled']) is bool
-            and request['branch'] in CAP_BRANCHES.get(request['caseId'], ()),
+    observing = request.get('action') == 'race-io-observe'
+    fields = {'runId', 'action', 'caseId', 'branch', 'expectedProcess'}
+    require((observing and set(request) == fields
+             and request['caseId'] == 'heal.race-multipart-complete-abort'
+             and request['branch'] in ('upload-continue', 'complete', 'abort'))
+            or (not observing and set(request) == fields | {'enabled'}
+                and request['action'] == 'race-io-cap' and type(request['enabled']) is bool
+                and request['branch'] in CAP_BRANCHES.get(request['caseId'], ())),
             'write cap requires a registered frozen public race; G05 forbids this cap')
     state, roots, owner = node['owned'](request['runId'])
     require(owner.get('runtimeProfile') == 'manual' and len(roots) == len(node['MOUNTS']) == 4,
@@ -70,16 +75,42 @@ def run(request, node):
                 'write cap process or unit moved to another cgroup')
         return {'systemdControlGroup': systemd_group, 'processCgroup': membership}
     scope()
-    def evidence():
-        value = node['command']('cat', str(cgroup / 'io.max'), check=False)
+    def evidence(directory=cgroup):
+        value = node['command']('cat', str(directory / 'io.max'), check=False)
         if value.returncode:
             # A fresh unthrottled unit need not have its IO controller enabled.
             # Verify the group still exists; any other cat error remains fatal.
             require(value.returncode == 1 and 'No such file or directory' in value.stderr
-                    and node['command']('test', '-d', str(cgroup), check=False).returncode == 0,
+                    and node['command']('test', '-d', str(directory), check=False).returncode == 0,
                     'owned cgroup IO limits could not be read')
             return '', {}
         return value.stdout, limits(value.stdout)
+    if observing:
+        def sample():
+            result = []
+            # io.max is hierarchical; an empty owned unit does not rule out an
+            # inherited cap on system.slice. These paths follow the fixed group.
+            for directory in (cgroup, cgroup.parent, cgroup.parent.parent):
+                raw, parsed = evidence(directory)
+                require(all(all(value == 'max' for value in device.values()) for device in parsed.values()),
+                        'G05 functional race has an owned or inherited kernel IO cap')
+                result.append({'cgroup': str(directory), 'ioMax': raw})
+            return result
+        before_scope = scope()
+        before_sample = sample()
+        process()
+        after_scope = scope()
+        after_sample = sample()
+        process()
+        require(scope() == after_scope == before_scope,
+                'G05 IO observation process or unit moved during sampling')
+        require(node['owned'](request['runId']) == (state, roots, owner) and node['mounts']() == owner['mounts'],
+                'G05 IO observation owner or mount changed during sampling')
+        return {'process': original, 'controlGroup': group, 'beforeScope': before_scope, 'afterScope': after_scope,
+                'beforeIoScopes': before_sample, 'afterIoScopes': after_sample,
+                'actualKernelNoLimitVerifiedAtSamples': True, 'continuousNoLimitProved': False,
+                'inspectionOnly': True, 'mutated': False, 'ioCapRequested': False,
+                'publicOverlapProved': False, 'canonicalCasePassClaimed': False}
     raw_before, before = evidence()
     device = target['maj:min']
     defaults = dict.fromkeys(('rbps','wbps','riops','wiops'), 'max')
