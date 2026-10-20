@@ -872,8 +872,9 @@ def run_branch(args, topology, nodes, branch):
                    if row["key"] != current_target_key or row["versionId"] == target_version["versionId"]]
         require(len(targets) == OBJECTS, "G01/G03 fault plan omitted a key or changed its source dimension")
         receipts = []
+        case_code = select(args.case_id)[0]["code"]
         for index, target in enumerate(targets):
-            params = {"disk": target["disk"], "faultId": bounded_fault_id("G01/G03", branch, index)}
+            params = {"disk": target["disk"], "faultId": bounded_fault_id(case_code, branch, index)}
             fleet.faults.append((target["node"], params))
             if target["key"] == current_target_key: changed_target_registered = target["node"], params
             receipts.append(fleet.record("exact-missing-part", {"node": target["node"], **fleet.remote(

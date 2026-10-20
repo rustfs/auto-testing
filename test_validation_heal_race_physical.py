@@ -1,6 +1,12 @@
 """Exercise the real G04 physical transition oracle with decoded disk scenes."""
 import copy
+from contextlib import ExitStack
+from pathlib import Path
+import re
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 import uuid
 
 import test_validation_heal as physical_fixtures
@@ -97,6 +103,45 @@ class MarkerPhysicalTests(unittest.TestCase):
                     else:
                         value["files"].append({**part, "path": f"{self.bucket}/{race.TARGET_KEY}/{uuid.UUID(int=999)}/part.1"})
                     with self.assertRaises(ValueError): race.physical_transition(before, after, self.bucket, mapped, final, branch)
+
+
+class RaceFaultAdmissionTests(unittest.TestCase):
+    def test_real_runner_uses_each_registered_case_code_before_first_fault(self):
+        class FaultBoundaryReached(BaseException):
+            pass
+        for case_id, branches in race.CASE_BRANCHES.items():
+            with self.subTest(case_id=case_id), tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
+                root = Path(folder)
+                candidate = root / "candidate.json"
+                candidate.write_text('{"source_sha":"072b57b37559fbe626aeda8abf61617fdcbdd926","package_sha256":"digest"}')
+                rc = root / "rc"
+                rc.write_bytes(b"fixture-client")
+                branch = branches[0]
+                target_key = race.target_key(branch)
+                expected = [{"key": key, "versionId": "null", "isLatest": True}
+                            for key in ("control/a", "control/b", target_key)]
+                mapped = {(row["key"], "null"): {**row, "disk": 0, "node": "vm000", "relativePath": row["key"],
+                                                "sha256": "original"} for row in expected}
+                fleet = Mock()
+                fleet.record.side_effect = lambda label, value: value
+                fleet.snapshot.return_value = {"vm000": {"files": []}}
+                fleet.cleanup.return_value = True
+                def remote(node, action, **params):
+                    self.assertEqual(action, "apply-fault")
+                    self.assertTrue(re.fullmatch(r"G0[1-6]-[0-9a-f]{32}", params["faultId"]))
+                    self.assertTrue(params["faultId"].startswith(race.select(case_id)[0]["code"] + "-"))
+                    raise FaultBoundaryReached()
+                fleet.remote.side_effect = remote
+                for name, value in {"Fleet": Mock(return_value=fleet), "verify_inspector": Mock(return_value={}),
+                                    "validate_topology": Mock(return_value={}), "Probe": Mock(),
+                                    "seed_fixture": Mock(return_value=expected), "verify_seed": Mock(),
+                                    "operation_plan": Mock(return_value=[]), "map_fixture": Mock(return_value=mapped),
+                                    "verify_part_manifest": Mock(), "OBJECTS": 3}.items():
+                    stack.enter_context(patch.object(race, name, value))
+                stack.enter_context(patch.dict(race.os.environ, {"GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1"}))
+                args = SimpleNamespace(evidence=root / "evidence", candidate=candidate, rc_bin=rc,
+                                       tool_directory=root, testing_commit="helper", binary_sha="binary", case_id=case_id)
+                with self.assertRaises(FaultBoundaryReached): race.run_branch(args, "H1", ["vm000"], branch)
 
 
 if __name__ == "__main__":
