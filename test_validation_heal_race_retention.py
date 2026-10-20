@@ -285,6 +285,7 @@ class RaceRetentionTests(unittest.TestCase):
             summary['results'][0]['caseId'] = 'foreign-case'
             (evidence / 'healthy-summary.json').write_text(json.dumps(summary))
             with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
+
             del summary['results'][0]['caseId']
             (evidence / 'healthy-summary.json').write_text(json.dumps(summary))
             with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
@@ -292,6 +293,100 @@ class RaceRetentionTests(unittest.TestCase):
             (evidence / 'healthy-summary.json').write_text(json.dumps(summary))
             path.write_text(json.dumps({'runId': 'gh-12345-1-h2', 'operation': 'abort_multipart_upload'}))
             with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
+
+    def mpu_archive(self, directory, *, foreground=False):
+        root,candidate,folder = self.archive(directory)
+        original = next(root.glob('*/run/*'));case = 'heal.race-multipart-complete-abort'
+        run = original.with_name(case);original.rename(run)
+        old = run/'cases'/(controller.CASE+'.json');value = json.loads(old.read_text());value['case_id'] = case
+        old.rename(old.with_name(case+'.json'));(run/'cases'/(case+'.json')).write_text(json.dumps(value))
+        old = run/'evidence'/controller.CASE;evidence = old.with_name(case);old.rename(evidence)
+        old = evidence/'H2/overwrite-vs-deep';folder = old.with_name('upload-continue');old.rename(folder)
+        summary = {'caseId':case,'cleanup':'FAIL','results':[{'caseId':case,'cleanup':'FAIL','verdict':'FAIL',
+                                                            'topology':'H2','branch':'upload-continue'}]}
+        (evidence/'healthy-summary.json').write_text(json.dumps(summary))
+        binding = json.loads((folder/'00001-binding.json').read_text())
+        request = {'runId':binding['runId'],'operation':'create_multipart_upload',
+                   'params':{'Bucket':binding['bucketPrefix'],'Key':'objects-0256.bin'}}
+        path = folder/'seed-ACKs/000001-request.json';path.write_text(json.dumps(request))
+        receipt = {'runId':binding['runId'],'requestFile':path.name,
+                   'requestSha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+                   'observation':{'acknowledged':False,'resultUnknown':True}}
+        (path.parent/'000001-ack.json').write_text(json.dumps(receipt))
+        (path.parent/'mpu-manifest-0001.json').write_text(json.dumps({'bucket':binding['bucketPrefix'],
+            'key':'objects-0256.bin','fixture':'DM','poisoned':'unknown Create response','items':{}}))
+        fg = folder/'foreground-ACKs/000001-request.json'
+        if foreground: fg.write_text(json.dumps({**request,'operation':'complete_multipart_upload'}))
+        else: fg.unlink()
+        raw = {}
+        for node in ('vm000','vm001','vm002','vm003'):
+            value = {'bucket':binding['bucketPrefix'],'keys':['objects-0256.bin'], 'scopes':[],
+                     'directories':[], 'files':[], 'bytesHashed':0}
+            raw[node] = {**value,'sceneSha256':controller.digest(value),'runId':binding['runId'],
+                         'binarySha256':binding['candidateBinarySha256'],'quiescent':True,'readOnly':True,
+                         'originalPhysicalDrives':4,'payloadIntegrityClaimed':False}
+        (folder/'00007-raw-mpu-failure-scene.json').write_text(json.dumps(raw))
+        return root,candidate,folder
+
+    def test_g05_unknown_create_or_complete_retains_raw_scene_without_inventing_ack(self):
+        for foreground in (False,True):
+            with self.subTest(foreground=foreground),tempfile.TemporaryDirectory() as d:
+                root,candidate,folder = self.mpu_archive(d,foreground=foreground)
+                plan = recovery.recovery_plan(root,12345,candidate)[0]
+                self.assertEqual(plan['kind'],'unresolved-g05-race')
+                self.assertEqual(plan['mpuKeys'],['objects-0256.bin'])
+                self.assertEqual(set(plan['mpuSceneSha256']),set(plan['nodes']))
+                before = plan['ackFilesSha256'];path = folder/'seed-ACKs/mpu-manifest-0001.json'
+                value = json.loads(path.read_text());value['poisoned'] = 'original uncertainty, no retry'
+                path.write_text(json.dumps(value))
+                self.assertNotEqual(recovery.recovery_plan(root,12345,candidate)[0]['ackFilesSha256'],before)
+
+    def test_g05_archive_rejects_missing_foreign_or_unbound_multipart_witnesses(self):
+        for fault in ('missing-peer','run','binary','live','digest','key','sdk-key','sdk-bucket','receipt',
+                      'model-only','foreign-manifest','forbidden-operation'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as d:
+                root,candidate,folder = self.mpu_archive(d)
+                raw_path = folder/'00007-raw-mpu-failure-scene.json';raw = json.loads(raw_path.read_text())
+                if fault == 'missing-peer': raw.pop('vm003')
+                elif fault in ('run','binary','live','digest','key'):
+                    field = {'run':'runId','binary':'binarySha256','live':'quiescent','digest':'sceneSha256','key':'keys'}[fault]
+                    raw['vm003'][field] = False if fault == 'live' else ['foreign-key'] if fault == 'key' else 'foreign'
+                elif fault in ('sdk-key','sdk-bucket','forbidden-operation'):
+                    path = folder/'seed-ACKs/000001-request.json';value = json.loads(path.read_text())
+                    if fault == 'forbidden-operation': value['operation'] = 'delete_bucket'
+                    else: value['params']['Key' if fault == 'sdk-key' else 'Bucket'] = 'foreign'
+                    path.write_text(json.dumps(value))
+                elif fault == 'receipt':
+                    path = folder/'seed-ACKs/000001-ack.json';value = json.loads(path.read_text());value['requestSha256']='f'*64
+                    path.write_text(json.dumps(value))
+                elif fault == 'model-only':
+                    (folder/'seed-ACKs/000001-request.json').unlink();(folder/'seed-ACKs/000001-ack.json').unlink()
+                else:
+                    path = folder/'seed-ACKs/mpu-manifest-0001.json';value = json.loads(path.read_text());value['key']='foreign'
+                    path.write_text(json.dumps(value))
+                raw_path.write_text(json.dumps(raw))
+                with self.assertRaises(ValueError): recovery.recovery_plan(root,12345,candidate)
+
+    def test_g05_controller_preflights_all_original_mpu_peers_before_any_move(self):
+        with tempfile.TemporaryDirectory() as d:
+            root,candidate,_ = self.mpu_archive(d);plan = recovery.recovery_plan(root,12345,candidate)[0]
+            audits = {};calls = []
+            def remote(node,action,**params):
+                calls.append((node,action))
+                if action == 'logs': return {}
+                self.assertEqual(params['mpuKeys'],['objects-0256.bin'])
+                self.assertEqual(params['expectedMpuSceneSha256'],plan['mpuSceneSha256'][node])
+                if action == 'retained-scene-isolate':
+                    self.assertEqual(set(audits),set(plan['nodes']))
+                    return {'baseline':audits[node],'activeNamespaceIsolated':True,'originalSceneRestored':False,
+                            'backupRestorationUsed':False,'canonicalPassClaimed':False,'credentialContentsRead':False}
+                post = node in audits;audits[node] = {'node':node}
+                return {'baseline':audits[node],'inspectionOnly':True,'mutated':False,'credentialContentsRead':False,
+                        'activeNamespaceIsolated':post,'privateArchiveParents':[{'exists':True,'uid':0,'mode':0o700}]*5}
+            fleet = SimpleNamespace(run_id=plan['runId'],nodes=plan['nodes'],remote=remote,record=lambda label,value:value)
+            result = controller.isolate(fleet,plan)
+            self.assertEqual(result['cleanup'],'ISOLATED');self.assertFalse(result['namespaceDeletionPerformed'])
+            self.assertTrue(all(action == 'retained-scene-audit' for _,action in calls[:4]))
 
     def test_g02_original_quarantine_contents_are_hashed_without_reading_credentials(self):
         with tempfile.TemporaryDirectory() as directory:

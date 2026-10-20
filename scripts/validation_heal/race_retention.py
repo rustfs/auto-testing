@@ -16,6 +16,7 @@ CASE = 'heal.race-unversioned-overwrite'
 CASES = {CASE: ('unresolved-g01-race', {'overwrite-vs-deep', 'overwrite-vs-read-repair'}),
          'heal.race-versioned-put': ('unresolved-g02-race', {'new-version-vs-historical-heal', 'read-all-versions-during-heal'}),
          'heal.admin-nolock-safety': ('unresolved-a09-race', {'overwrite-nolock', 'delete-nolock'}),
+         'heal.race-multipart-complete-abort': ('unresolved-g05-race', {'upload-continue', 'complete', 'abort'}),
          'heal.race-copy-and-metadata-update': ('unresolved-g06-race', {'copy-source', 'copy-destination', 'replace-metadata', 'update-tags'})}
 
 
@@ -24,9 +25,11 @@ def digest(value):
 
 
 def validate(plan):
-    require(set(plan) == {'kind', 'runId', 'nodes', 'bucket', 'owners', 'businessSceneSha256',
-                         'candidateCommit', 'harnessCommit', 'binarySha256', 'ackFilesSha256'}
-            and plan['kind'] in {'unresolved-g01-race', 'unresolved-g02-race', 'unresolved-a09-race', 'unresolved-g06-race'}
+    multipart = plan.get('kind') == 'unresolved-g05-race'
+    fields = {'kind', 'runId', 'nodes', 'bucket', 'owners', 'businessSceneSha256',
+              'candidateCommit', 'harnessCommit', 'binarySha256', 'ackFilesSha256'}
+    require(set(plan) == fields | ({'mpuKeys', 'mpuSceneSha256'} if multipart else set())
+            and plan['kind'] in {kind for kind, _ in CASES.values()}
             and re.fullmatch(r'gh-[1-9][0-9]*-[1-9][0-9]*-h[12]', plan['runId'])
             and len(plan['nodes']) == len(set(plan['nodes'])) == (1 if plan['runId'].endswith('-h1') else 4)
             and all(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', node) for node in plan['nodes'])
@@ -45,6 +48,10 @@ def validate(plan):
                 'G01/G02 isolation lost its exact reserved owner or stopped physical scene')
     require(len({owner['hostname'] for owner in plan['owners'].values()}) == len(plan['nodes']),
             'G01/G02 isolation host aliases overlap')
+    if multipart:
+        require(plan['mpuKeys'] == ['objects-0256.bin'] and set(plan['mpuSceneSha256']) == set(plan['nodes'])
+                and all(re.fullmatch(r'[0-9a-f]{64}', value) for value in plan['mpuSceneSha256'].values()),
+                'G05 isolation lost its exact same-key stopped multipart scene')
 
 
 def archived_plan(artifact, failed_run, candidate):
@@ -89,14 +96,26 @@ def archived_plan(artifact, failed_run, candidate):
     require(len(owners) == len(reservations) == len(scene) and set(owners) == set(scene)
             and all(item.get('reserved') is True for item in reservations), 'G01/G02 isolation lacks all reserved hosts')
     ack_files = {}
-    for name in ('seed-ACKs', 'foreground-ACKs', 'historical-read-ACKs'):
+    multipart = kind == 'unresolved-g05-race'
+    for name in ('seed-ACKs', 'foreground-ACKs', 'historical-read-ACKs', *(['mpu-read-ACKs'] if multipart else [])):
         journal = folder / name
         entries = sorted(journal.glob('*.json'))
-        if name == 'historical-read-ACKs':
+        if name in {'historical-read-ACKs', 'mpu-read-ACKs'} or multipart and name == 'foreground-ACKs':
             require(len(entries) <= 1024, 'G02 historical journal exceeds its bound')
             if not entries: continue
         require(0 < len(entries) <= 1024, 'G01/G02 isolation lacks its bounded original request/ACK journal')
+        if multipart and name == 'seed-ACKs':
+            require(any(re.fullmatch(r'[0-9]{6}-request\.json', path.name) for path in entries),
+                    'G05 isolation requires an original SDK request, not only a model manifest')
         for path in entries:
+            if multipart and re.fullmatch(r'mpu-manifest-[0-9]{4}\.json', path.name):
+                require(path.stat().st_size <= 1024**2, 'G05 isolation multipart manifest exceeds its bound')
+                item = json.loads(path.read_text())
+                require(item.get('bucket') == binding['bucketPrefix']
+                        and item.get('key') == 'objects-0256.bin' and item.get('fixture') == 'DM',
+                        'G05 isolation has a foreign multipart manifest')
+                ack_files[name + '/' + path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+                continue
             require(re.fullmatch(r'[0-9]{6}-(request|ack)\.json', path.name) and path.stat().st_size <= 1024**2,
                     'G01/G02 isolation journal contains an unexpected member')
             item = json.loads(path.read_text())
@@ -104,7 +123,32 @@ def archived_plan(artifact, failed_run, candidate):
             # A missing/unknown ACK remains unknown. Isolation never infers its
             # effect or sends another request, including for explicit refusals.
             operation = item.get('operation') if path.name.endswith('-request.json') else (item.get('observation') or {}).get('operation')
-            allowed = ({'get_object'} if name == 'historical-read-ACKs' else
+            if multipart:
+                request_item = item
+                if path.name.endswith('-ack.json'):
+                    request_name = item.get('requestFile', '')
+                    require(re.fullmatch(r'[0-9]{6}-request\.json', request_name)
+                            and request_name == path.name.replace('-ack.json', '-request.json'),
+                            'G05 isolation receipt lacks its exact original request')
+                    request_path = journal / request_name
+                    require(request_path.is_file() and request_path.stat().st_size <= 1024**2
+                            and hashlib.sha256(request_path.read_bytes()).hexdigest() == item.get('requestSha256'),
+                            'G05 isolation receipt changed its original request bytes')
+                    request_item = json.loads(request_path.read_text())
+                    require(operation is None or operation == request_item.get('operation'),
+                            'G05 isolation receipt reports a different SDK operation')
+                operation = request_item.get('operation')
+                params = request_item.get('params') or {}
+                require(request_item.get('runId') == binding['runId'] and params.get('Bucket') == binding['bucketPrefix'],
+                        'G05 isolation SDK request belongs to another reserved bucket')
+                if operation in {'create_multipart_upload', 'upload_part', 'complete_multipart_upload',
+                                 'abort_multipart_upload', 'list_parts', 'get_object', 'head_object', 'get_object_tagging'}:
+                    require(params.get('Key') == 'objects-0256.bin', 'G05 isolation SDK request changed its frozen multipart key')
+            allowed = ({'list_multipart_uploads', 'list_parts', 'list_object_versions', 'get_object', 'head_object',
+                        'get_object_tagging'} if multipart and name == 'mpu-read-ACKs' else
+                       {'get_object'} if name == 'historical-read-ACKs' else
+                       {'create_bucket', 'put_bucket_versioning', 'put_object', 'create_multipart_upload',
+                        'upload_part', 'complete_multipart_upload', 'abort_multipart_upload'} if multipart else
                        {'create_bucket', 'put_object', 'copy_object', 'put_object_tagging'} if kind == 'unresolved-g06-race' else
                        {'create_bucket', 'put_bucket_versioning', 'put_object', 'delete_object'} if kind == 'unresolved-a09-race' else
                        {'create_bucket', 'put_bucket_versioning', 'put_object'} if kind == 'unresolved-g02-race' else
@@ -116,6 +160,17 @@ def archived_plan(artifact, failed_run, candidate):
             'harnessCommit': binding['harnessCommit'], 'binarySha256': binding['candidateBinarySha256'],
             'businessSceneSha256': {node: digest(value) for node, value in physical_content(scene).items()},
             'ackFilesSha256': digest(ack_files)}
+    if multipart:
+        mpu = one('raw-mpu-failure-scene')
+        require(set(mpu) == set(owners), 'G05 isolation omitted an original stopped MPU peer')
+        for value in mpu.values():
+            require(value.get('runId') == binding['runId'] and value.get('bucket') == binding['bucketPrefix']
+                    and value.get('keys') == ['objects-0256.bin'] and value.get('quiescent') is True
+                    and value.get('readOnly') is True and value.get('originalPhysicalDrives') == 4
+                    and value.get('binarySha256') == binding['candidateBinarySha256']
+                    and digest({key: value[key] for key in ('bucket', 'keys', 'scopes', 'directories', 'files', 'bytesHashed')})
+                        == value.get('sceneSha256'), 'G05 isolation original raw MPU capture differs')
+        plan.update(mpuKeys=['objects-0256.bin'], mpuSceneSha256={node: value['sceneSha256'] for node, value in mpu.items()})
     validate(plan)
     for node, value in scene.items():
         require(value.get('quiescent') is True and type(value.get('pid')) is int and value['pid'] == 0
@@ -131,7 +186,9 @@ def isolate(fleet, plan):
     validate(plan)
     require(fleet.run_id == plan['runId'] and list(fleet.nodes) == plan['nodes'], 'G01/G02 isolation changed its fleet')
     def params(node):
-        return {'expectedOwner': plan['owners'][node], 'expectedOriginalSceneSha256': plan['businessSceneSha256'][node]}
+        return {'expectedOwner': plan['owners'][node], 'expectedOriginalSceneSha256': plan['businessSceneSha256'][node],
+                **({'mpuKeys': plan['mpuKeys'], 'expectedMpuSceneSha256': plan['mpuSceneSha256'][node]}
+                   if plan['kind'] == 'unresolved-g05-race' else {})}
     audits = {}
     for node in fleet.nodes:
         audit = audits[node] = fleet.record('race-retention-preflight', {'node': node,

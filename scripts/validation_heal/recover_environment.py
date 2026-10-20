@@ -152,7 +152,8 @@ def recovery_plan(artifact, failed_run, candidate):
     if (list(artifact.glob("*/run/heal.race-unversioned-overwrite/cases/*.json"))
             or list(artifact.glob("*/run/heal.race-versioned-put/cases/*.json"))
             or list(artifact.glob("*/run/heal.admin-nolock-safety/cases/*.json"))
-            or list(artifact.glob("*/run/heal.race-copy-and-metadata-update/cases/*.json"))):
+            or list(artifact.glob("*/run/heal.race-copy-and-metadata-update/cases/*.json"))
+            or list(artifact.glob("*/run/heal.race-multipart-complete-abort/cases/*.json"))):
         return race_retention_plan(artifact, failed_run, candidate)
     if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/cases/*.json")):
         if list(artifact.glob("*/run/heal.outcome-counters-and-error-truth/evidence/heal.outcome-counters-and-error-truth/DB/H1/unknown-negative/*-one-way-legacy-write-phase.json")):
@@ -650,7 +651,7 @@ def main():
         if plan.get("buckets"):
             fleet.snapshot_buckets = plan["buckets"]
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
-        if plan.get("kind") in {"unresolved-g01-race", "unresolved-g02-race", "unresolved-a09-race", "unresolved-g06-race"}:
+        if plan.get("kind") in {"unresolved-g01-race", "unresolved-g02-race", "unresolved-a09-race", "unresolved-g05-race", "unresolved-g06-race"}:
             complete.append({"failedRunId": args.failed_run_id, **isolate_race_scene(fleet, plan)})
             continue
         if plan.get("kind") == "unresolved-network-load":
