@@ -88,10 +88,16 @@ NATIVE_REFERENCE = {
 VERSION_CANDIDATE = 'bd0671ba781d8ebf509f4f03533228dfb44496f1'
 VERSION_REFERENCE = {**NATIVE_REFERENCE, 'candidateCommit': VERSION_CANDIDATE,
     'nativeFence': 'exact-source Heal cleanup and explicit-version commit and deletion fences'}
+MARKER_CANDIDATE = '8380466f3a27c3c3ef4115084178a0ab99a78f32'
+MARKER_REFERENCE = {**VERSION_REFERENCE, 'candidateCommit': MARKER_CANDIDATE,
+    'nativeFence': 'exact-source Heal cleanup, version and marker/batch-delete commit fences'}
 NATIVE_RUNTIME = {
     NATIVE_CANDIDATE: {'reference': NATIVE_REFERENCE, 'cases': ('heal.race-unversioned-overwrite',)},
     VERSION_CANDIDATE: {'reference': VERSION_REFERENCE,
         'cases': ('heal.race-unversioned-overwrite', 'heal.race-versioned-put', 'heal.race-version-delete')},
+    MARKER_CANDIDATE: {'reference': MARKER_REFERENCE,
+        'cases': ('heal.race-unversioned-overwrite', 'heal.race-versioned-put', 'heal.race-version-delete',
+                  'heal.race-markers-and-batch-delete')},
 }
 # Registry subsets do not enable a fleet case. Its reviewed runtime source and
 # complete case-specific native group must both be present before bootstrap.
@@ -99,6 +105,7 @@ FULL_NATIVE_GROUPS = {
     'heal.race-unversioned-overwrite': ['committed-overwrite-cleanup', 'stale-read-repair-final-rename'],
     'heal.race-versioned-put': ['versioned-read-repair-lock-owner', 'explicit-version-append-final-rename'],
     'heal.race-version-delete': ['explicit-version-delete-final-rename'],
+    'heal.race-markers-and-batch-delete': ['marker-and-batch-delete-final-rename'],
 }
 
 

@@ -61,7 +61,7 @@ class RaceNativeTests(unittest.TestCase):
     def test_runtime_case_opt_in_does_not_change_the_exact_source_or_enable_other_native_groups(self):
         wrong_source = copy.deepcopy(race.NATIVE_REFERENCE)
         wrong_source['candidateCommit'] = 'e' * 40
-        for reference, case in [(wrong_source, CASE), (race.NATIVE_REFERENCE, 'heal.race-markers-and-batch-delete')]:
+        for reference, case in [(wrong_source, CASE), (race.NATIVE_REFERENCE, 'heal.race-multipart-complete-abort')]:
             with self.subTest(case=case), patch.dict(race.NATIVE_RUNTIME, {SOURCE: {'reference': reference, 'cases': (case,)}}):
                 with self.assertRaisesRegex(ValueError, 'race candidate/case contract is not reviewed'):
                     race.native_preflight(CANDIDATE, HELPER, case, '/never-used')
@@ -84,6 +84,34 @@ class RaceNativeTests(unittest.TestCase):
                 for case in race.CASE_IDS[3:]:
                     with self.subTest(case=case), self.assertRaises(ValueError):
                         race.native_preflight(candidate, HELPER, case, root)
+
+    def test_marker_source_requires_the_complete_four_mutation_group_and_keeps_later_cases_closed(self):
+        source = race.MARKER_CANDIDATE
+        candidate = {**CANDIDATE, 'source_sha': source}
+        case = 'heal.race-markers-and-batch-delete'
+        contract = suite.contract_for(source)
+        label = 'marker-and-batch-delete-final-rename'
+        self.assertEqual(contract['cases'][case], [label])
+        self.assertEqual(len(contract['regressions'][label]['milestones']), 24)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root, source=source)
+            with patch.object(suite.subprocess, 'run', side_effect=AssertionError('must not execute artifacts')):
+                for selected in race.CASE_IDS[:4]:
+                    proof = race.native_preflight(candidate, HELPER, selected, root)
+                    self.assertEqual(proof['requiredRegressionLabels'], race.FULL_NATIVE_GROUPS[selected])
+                    self.assertTrue(proof['requiredNativeSubsetPassed'])
+                    self.assertFalse(proof['wholeCasePassClaimed'])
+                    self.assertFalse(proof['canonicalCasePassClaimed'])
+                for selected in race.CASE_IDS[4:]:
+                    with self.subTest(case=selected), self.assertRaises(ValueError):
+                        race.native_preflight(candidate, HELPER, selected, root)
+            summary = root / 'native-evidence/race-native-results.json'
+            value = json.loads(summary.read_text())
+            value['results'] = [row for row in value['results'] if row['label'] != label]
+            self.write(summary, value)
+            with self.assertRaisesRegex(ValueError, 'omit or duplicate'):
+                race.native_preflight(candidate, HELPER, case, root)
 
     def fixture(self, root, *, source=SOURCE):
         tools, evidence = root / 'native-tools', root / 'native-evidence'
