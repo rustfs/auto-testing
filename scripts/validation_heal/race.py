@@ -455,15 +455,6 @@ def final_inventory(baseline, branch, plan, responses):
             require(responses[0].get("VersionId") in {None, "null"} and responses[0].get("DeleteMarker") in {None, False},
                     "G04 unversioned delete ACK changed object identity")
             result["entries"] = [row for row in result["entries"] if row["key"] != TARGET_KEY]
-    elif branch in G04_BRANCHES:
-        if branch == "unversioned-delete":
-            require(len(original_target) == 1 and not current_target_values,
-                    "G04 unversioned DELETE retained or replaced the committed target")
-        else:
-            require(len(original_target) >= 1 and len(current_target_values) >= 1,
-                    "G04 marker operation lost the retained data generation")
-            require(current_target_values[0]["dataDir"] in {target["dataDir"] for target in original_target},
-                    "G04 marker operation changed the committed data generation")
     elif branch in G05_BRANCHES:
         runtime = plan[0].get("runtime") or {}
         upload_id = runtime.get("uploadIds", {}).get(branch.split("-", 1)[-1])
@@ -561,6 +552,36 @@ def physical_transition(before, after, bucket, mapped, final, branch):
         require(all(any(part["size"] == SIZE for part in target["cohort"])
                     for target in current_target_values if target["dataDir"] in new_dirs),
                 "G02 new version physical parts are incomplete")
+    elif branch in G04_BRANCHES:
+        require(len(original_target) == (1 if branch == "unversioned-delete" else 3),
+                "G04 baseline has the wrong acknowledged data-version count")
+        old_versions = {target["versionId"] for target in original_target}
+        remaining = {target["versionId"] for target in current_target_values}
+        expected_remaining = (set() if branch == "unversioned-delete" else
+                              {original_target[-1]["versionId"]} if branch == "batch-version-delete" else old_versions)
+        require(remaining == expected_remaining,
+                "G04 operation lost, replaced or retained the wrong acknowledged data versions")
+        for target in current_target_values:
+            original = mapped[current_target, target["versionId"]]
+            require({name: value for name, value in target["logical"].items() if name != "isLatest"}
+                    == {name: value for name, value in original["logical"].items() if name != "isLatest"}
+                    and [(part["index"], part["sha256"], part["size"]) for part in target["cohort"]]
+                    == [(part["index"], part["sha256"], part["size"]) for part in original["cohort"]],
+                    "G04 marker/delete changed another retained data generation or shard")
+        if current_target_values:
+            expected_versions = sorted((row["versionId"], row["isLatest"], row["deleteMarker"])
+                                       for row in final["entries"] if row["key"] == current_target)
+            indexed = files(after)
+            for node, value in after.items():
+                for drive in value["formats"]:
+                    metadata = indexed[node, drive["disk"], f"{bucket}/{current_target}/xl.meta"]["metadata"]
+                    versions = metadata.get("versions", [])
+                    require(all(type(version.get("isLatest")) is bool and type(version.get("deleted")) is bool
+                                for version in versions), "G04 physical version flags are missing or untyped")
+                    actual_versions = sorted((public_version_id(version.get("versionId")),
+                                              version["isLatest"], version["deleted"]) for version in versions)
+                    require(actual_versions == expected_versions,
+                            "G04 physical data/marker version set differs from exact foreground ACKs")
     elif branch in G05_BRANCHES:
         require(len(original_target) == len(current_target_values) == 1,
                 "G05 multipart transition changed the target identity count")
