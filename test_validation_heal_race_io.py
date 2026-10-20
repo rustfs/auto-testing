@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.validation_heal import fleet_node, race, race_io
+from scripts.validation_heal import fleet_node, nolock, race, race_io
 from scripts.validation_heal.healthy import Fleet
 import test_validation_heal as physical_fixtures
 
@@ -174,12 +174,14 @@ class RaceIoTests(unittest.TestCase):
 
     def test_real_runner_arms_before_admin_and_releases_after_foreground_before_terminal(self):
         class ReachedTerminalBoundary(BaseException): pass
-        for case_id, branch in [(race.CASE_IDS[0],'overwrite-vs-deep'),(race.CASE_IDS[4],'upload-continue')]:
+        for driver, case_id, branch in [(race,race.CASE_IDS[0],'overwrite-vs-deep'),
+                                       (race,race.CASE_IDS[4],'upload-continue'),
+                                       (nolock,nolock.CASE_ID,'overwrite-nolock')]:
             with self.subTest(case=case_id), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
                 root = Path(tmp); candidate = root/'candidate.json'
                 candidate.write_text('{"source_sha":"072b57b37559fbe626aeda8abf61617fdcbdd926","package_sha256":"digest"}')
                 rc = root/'rc'; rc.write_bytes(b'client')
-                selected = race.target_key(branch)
+                selected = race.target_key(branch) if driver is race else nolock.TARGET_KEY
                 expected = [{'key':key,'versionId':'null','isLatest':True} for key in ('control/a','control/b',selected)]
                 mapped = {(r['key'],'null'):{**r,'disk':0,'node':'vm000','relativePath':r['key'],'sha256':'original'} for r in expected}
                 trace = []
@@ -198,15 +200,16 @@ class RaceIoTests(unittest.TestCase):
                           'validate_topology':Mock(),'seed_fixture':Mock(return_value=expected),'verify_seed':Mock(),
                           'operation_plan':Mock(return_value=[{}]),'map_fixture':Mock(return_value=mapped),'verify_part_manifest':Mock(),
                           'validate_missing_batch':Mock(),'wait_running':Mock(),'race':Mock(side_effect=foreground),
-                          'final_inventory':Mock(return_value={'entries':expected}),'verify_multipart_state':Mock(),
+                          'final_inventory':Mock(return_value={'entries':expected}),
                           'wait_terminal':Mock(side_effect=terminal),'set_race_io_cap':Mock(side_effect=cap),'OBJECTS':3}
-                for name,value in values.items(): stack.enter_context(patch.object(race,name,value))
+                if driver is race: values['verify_multipart_state'] = Mock()
+                for name,value in values.items(): stack.enter_context(patch.object(driver,name,value))
                 stack.enter_context(patch.dict(race.os.environ,{'GITHUB_RUN_ID':'12345','GITHUB_RUN_ATTEMPT':'1'}))
                 args = SimpleNamespace(evidence=root/'evidence',candidate=candidate,rc_bin=rc,tool_directory=root,
                                        testing_commit='helper',binary_sha='binary',case_id=case_id)
-                with self.assertRaises(ReachedTerminalBoundary): race.run_branch(args,'H1',['vm000'],branch)
-                self.assertEqual(trace[:trace.index('terminal')+1],['cap-on','admin','foreground','cap-off','terminal'] if case_id == race.CASE_IDS[0]
-                                 else ['admin','foreground','terminal'])
+                with self.assertRaises(ReachedTerminalBoundary): driver.run_branch(args,'H1',['vm000'],branch)
+                self.assertEqual(trace[:trace.index('terminal')+1],['admin','foreground','terminal'] if case_id == race.CASE_IDS[4]
+                                 else ['cap-on','admin','foreground','cap-off','terminal'])
 
 
 if __name__ == '__main__': unittest.main()

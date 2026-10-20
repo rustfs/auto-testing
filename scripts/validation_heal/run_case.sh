@@ -96,8 +96,8 @@ fi
 [ "${driver}" = healthy.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "physical Heal cases require candidate-bound bitrot tools"
 evidence="${artifacts}/evidence/${case_id}"
 mkdir -p "${artifacts}/cases" "${evidence}"
-if [ "${driver}" = race.py ]; then
-  python3 -B "${ROOT}/scripts/validation_heal/race.py" preflight \
+if [ "${driver}" = race.py ] || [ "${driver}" = nolock.py ]; then
+  python3 -B "${ROOT}/scripts/validation_heal/${driver}" preflight \
     --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
     > "${evidence}/native-preflight.json"
 fi

@@ -1,13 +1,103 @@
 import copy
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.validation_heal import nolock
 from scripts.validation_heal.matrix import AUTOMATIC_CASES, select
+import test_validation_heal_race_native as native_fixtures
+
+HELPER = native_fixtures.HELPER
 
 
 class NolockTests(unittest.TestCase):
+    def test_source_specific_nolock_wire_true_and_effective_false_are_exact(self):
+        for source in (nolock.REFERENCE['candidateCommit'],nolock.COPY_CANDIDATE):
+            with self.subTest(source=source):
+                ref = nolock.source_contract({'source_sha':source})
+                self.assertEqual(ref['candidateCommit'],source)
+                self.assertIs(ref['requested']['nolock'],True)
+                self.assertIs(ref['effective']['nolock'],False)
+                value = {'httpStatus':200,'response':{'summary':'running','settings':copy.deepcopy(ref['effective'])}}
+                nolock.settings(value,ref)
+                for field,wrong in [('nolock',True),('pool',0),('set',False),('recursive',1),('readRepair',True)]:
+                    bad = copy.deepcopy(value);bad['response']['settings'][field] = wrong
+                    with self.subTest(field=field),self.assertRaises(ValueError):nolock.settings(bad,ref)
+
+    def test_exact_owner_group_admits_a09_only_and_never_executes_downloaded_native(self):
+        candidate = {'source_sha':nolock.COPY_CANDIDATE,'package_sha256':'b'*64}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            native_fixtures.RaceNativeTests().fixture(root,source=nolock.COPY_CANDIDATE)
+            with patch('scripts.validation_heal.race_native.subprocess.run',side_effect=AssertionError('no executable')):
+                proof = nolock.native_preflight(candidate,HELPER,root)
+                self.assertEqual(proof['requiredRegressionLabels'],['default-heal-exclusive-owner'])
+                self.assertTrue(proof['requiredNativeSubsetPassed'])
+                self.assertFalse(proof['wholeCasePassClaimed'] or proof['canonicalCasePassClaimed'])
+                self.assertIsNone(nolock.native_preflight({'source_sha':nolock.REFERENCE['candidateCommit']},HELPER,''))
+                for source in ('e'*40,'bd0671ba781d8ebf509f4f03533228dfb44496f1'):
+                    with self.subTest(source=source),self.assertRaises(ValueError):
+                        nolock.native_preflight({**candidate,'source_sha':source},HELPER,root)
+                with self.assertRaises(ValueError):nolock.native_preflight(candidate,HELPER,'')
+                with self.assertRaises(ValueError):nolock.native_preflight(candidate,'f'*40,root)
+            summary = root/'native-evidence/race-native-results.json'
+            value = json.loads(summary.read_text())
+            value['results'] = [r for r in value['results'] if r['label'] != 'default-heal-exclusive-owner']
+            summary.write_text(json.dumps(value))
+            with self.assertRaisesRegex(ValueError,'omit or duplicate'):nolock.native_preflight(candidate,HELPER,root)
+
+    def test_real_preflight_cli_returns_before_fleet_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp);native = root/'native';native.mkdir()
+            native_fixtures.RaceNativeTests().fixture(native,source=nolock.COPY_CANDIDATE)
+            candidate = root/'candidate.json'
+            candidate.write_text(json.dumps({'source_sha':nolock.COPY_CANDIDATE,'package_sha256':'b'*64}))
+            argv = ['nolock.py','preflight','--candidate',str(candidate),'--case-id',nolock.CASE_ID,'--testing-commit',HELPER]
+            output = io.StringIO()
+            with patch.object(nolock.sys,'argv',argv),patch.dict(nolock.os.environ,{'VALIDATION_HEAL_NATIVE_DIRECTORY':str(native)}),\
+                 patch.object(nolock,'Fleet',side_effect=AssertionError('preflight must not create fleet')),redirect_stdout(output):
+                nolock.main()
+            proof = json.loads(output.getvalue())
+            self.assertFalse(proof['fleetMutationRequested'] or proof['canonicalCasePassClaimed'])
+            self.assertEqual(proof['nativeProof']['requiredRegressionLabels'],nolock.NATIVE_GROUP)
+
+    def test_real_main_keeps_every_public_branch_and_stops_after_dirty_cleanup(self):
+        for dirty in (False,True):
+            with self.subTest(dirty=dirty),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);native=root/'native';native.mkdir();evidence=root/'evidence';evidence.mkdir()
+                native_fixtures.RaceNativeTests().fixture(native,source=nolock.COPY_CANDIDATE)
+                candidate=root/'candidate.json'
+                candidate.write_text(json.dumps({'source_sha':nolock.COPY_CANDIDATE,'package_sha256':'b'*64}))
+                argv=['nolock.py','--candidate',str(candidate),'--rc-bin',str(root/'rc'),'--evidence',str(evidence),
+                      '--tool-directory',str(root),'--case-id',nolock.CASE_ID,'--testing-commit',HELPER,'--binary-sha','c'*64]
+                calls=[]
+                def run(args,topology,nodes,branch):
+                    calls.append((topology,len(nodes),branch))
+                    return {'topology':topology,'branch':branch,'verdict':'FAIL' if dirty else 'PASS',
+                            'cleanup':'FAIL' if dirty else 'PASS','canonicalCasePassClaimed':False}
+                with patch.object(nolock.sys,'argv',argv),patch.object(nolock.signal,'signal'),\
+                     patch.dict(nolock.os.environ,{'VALIDATION_HEAL_NATIVE_DIRECTORY':str(native),'GITHUB_RUN_ID':'12345',
+                                                  'RUSTFS_NODES':'vm000 vm001 vm002 vm003'}),\
+                     patch.object(nolock,'run_branch',side_effect=run),\
+                     patch.object(nolock,'Fleet',side_effect=AssertionError('mock public branches do not create fleet')):
+                    if dirty:
+                        with self.assertRaisesRegex(ValueError,'coverage incomplete'):nolock.main()
+                    else:nolock.main()
+                summary=json.loads((evidence/'healthy-summary.json').read_text())
+                self.assertIs(summary['complete'],not dirty)
+                self.assertFalse(summary['canonicalCasePassClaimed'] or summary['nativePrerequisitesBlocked'])
+                self.assertEqual(len(calls),1 if dirty else 4)
+                if not dirty:self.assertEqual(calls,[(top,len(nodes),branch) for top,nodes in
+                    [('H1',['vm000']),('H2',['vm000','vm001','vm002','vm003'])] for branch in nolock.BLACK_BOX])
+                native_rows=[r for r in summary['results'] if r['branch']==nolock.BRANCHES[-1]]
+                self.assertEqual(len(native_rows),2)
+                self.assertTrue(all(r['nativeFenceProved'] and not r['fleetExecutionClaimed']
+                                    and r['nativeProof']['requiredRegressionLabels']==nolock.NATIVE_GROUP for r in native_rows))
+
     def test_source_branches_and_fixture_mapping_are_preserved(self):
         recipe = select(nolock.CASE_ID)[0]
         self.assertEqual(recipe["variants"], list(nolock.BRANCHES))

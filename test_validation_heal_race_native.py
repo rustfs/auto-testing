@@ -35,7 +35,8 @@ class RaceNativeTests(unittest.TestCase):
             self.assertIsNone(race.native_preflight({'source_sha': race.REFERENCE['candidateCommit']}, HELPER, CASE, ''))
             self.assertFalse(race.complete_results([], CASE))
         shell = Path('scripts/validation_heal/run_case.sh').read_text()
-        self.assertLess(shell.index('race.py" preflight'), shell.index('(bootstrap)'))
+        self.assertLess(shell.index('${driver}" preflight'), shell.index('(bootstrap)'))
+        self.assertIn('[ "${driver}" = nolock.py ]', shell)
 
     def test_source_specific_settings_keep_exact_types_selectors_and_lock_policy(self):
         reference = race.source_contract(CANDIDATE, CASE)
@@ -139,7 +140,7 @@ class RaceNativeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invented or omitted'):
                 consumer.verify(root, candidate, HELPER, case)
 
-    def test_default_owner_and_copy_source_collect_exact_groups_without_runtime_admission(self):
+    def test_default_owner_and_copy_source_keep_native_groups_separate_and_only_g06_race_runtime(self):
         source = '757b751482bb970bc321e92059690a7698554358'
         candidate = {**CANDIDATE, 'source_sha': source}
         contract = suite.contract_for(source)
@@ -164,8 +165,13 @@ class RaceNativeTests(unittest.TestCase):
                         self.assertFalse(proof['wholeCasePassClaimed'])
                         self.assertFalse(proof['canonicalCasePassClaimed'])
                 for case in race.CASE_IDS:
-                    with self.subTest(case=case), self.assertRaisesRegex(ValueError, 'case contract is not reviewed'):
-                        race.native_preflight(candidate, HELPER, case, root)
+                    with self.subTest(case=case):
+                        if case == 'heal.race-copy-and-metadata-update':
+                            proof = race.native_preflight(candidate, HELPER, case, root)
+                            self.assertEqual(proof['requiredRegressionLabels'], ['copy-and-metadata-final-rename'])
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'case contract is not reviewed'):
+                                race.native_preflight(candidate, HELPER, case, root)
 
     def test_default_owner_or_copy_cannot_omit_reverse_or_invent_native_events(self):
         source = '757b751482bb970bc321e92059690a7698554358'
