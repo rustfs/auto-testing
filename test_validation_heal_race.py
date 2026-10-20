@@ -48,6 +48,9 @@ class RaceTests(unittest.TestCase):
         self.assertEqual(race.reference_key("copy-source"), race.G06_REFERENCE_KEY)
 
     def test_g05_binds_multipart_operations_to_acknowledged_upload(self):
+        # The frozen DM fixture requires two nonfinal parts above 5 MiB.
+        self.assertEqual(race.G05_PART_SIZES,
+                         (5 * 1024 * 1024 + 17, 5 * 1024 * 1024 + 93, 1024 * 1024 + 47))
         expected = [{"key": race.G05_TARGET_KEY, "versionId": "null", "isLatest": True}]
         continued = race.operation_plan("rv-heal-0123456789abcdef", "upload-continue", expected)
         completed = race.operation_plan("rv-heal-0123456789abcdef", "complete", expected)

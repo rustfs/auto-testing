@@ -65,7 +65,7 @@ REFERENCE_KEY = "objects/0000.bin"
 G06_TARGET_KEY = "actual/slash/0256.bin"
 G06_REFERENCE_KEY = "space key/0000.bin"
 G05_TARGET_KEY = "multipart/target.bin"
-G05_PART_SIZES = (5 * 1024 * 1024 + 17, 1024 * 1024 + 93, 1024 * 1024 + 47)
+G05_PART_SIZES = (5 * 1024 * 1024 + 17, 5 * 1024 * 1024 + 93, 1024 * 1024 + 47)
 REFERENCE = {
     "candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926",
     "sourceFiles": {
