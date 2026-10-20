@@ -15,7 +15,8 @@ except ImportError:
 CASE = 'heal.race-unversioned-overwrite'
 CASES = {CASE: ('unresolved-g01-race', {'overwrite-vs-deep', 'overwrite-vs-read-repair'}),
          'heal.race-versioned-put': ('unresolved-g02-race', {'new-version-vs-historical-heal', 'read-all-versions-during-heal'}),
-         'heal.admin-nolock-safety': ('unresolved-a09-race', {'overwrite-nolock', 'delete-nolock'})}
+         'heal.admin-nolock-safety': ('unresolved-a09-race', {'overwrite-nolock', 'delete-nolock'}),
+         'heal.race-copy-and-metadata-update': ('unresolved-g06-race', {'copy-source', 'copy-destination', 'replace-metadata', 'update-tags'})}
 
 
 def digest(value):
@@ -25,7 +26,7 @@ def digest(value):
 def validate(plan):
     require(set(plan) == {'kind', 'runId', 'nodes', 'bucket', 'owners', 'businessSceneSha256',
                          'candidateCommit', 'harnessCommit', 'binarySha256', 'ackFilesSha256'}
-            and plan['kind'] in {'unresolved-g01-race', 'unresolved-g02-race', 'unresolved-a09-race'}
+            and plan['kind'] in {'unresolved-g01-race', 'unresolved-g02-race', 'unresolved-a09-race', 'unresolved-g06-race'}
             and re.fullmatch(r'gh-[1-9][0-9]*-[1-9][0-9]*-h[12]', plan['runId'])
             and len(plan['nodes']) == len(set(plan['nodes'])) == (1 if plan['runId'].endswith('-h1') else 4)
             and all(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', node) for node in plan['nodes'])
@@ -104,6 +105,7 @@ def archived_plan(artifact, failed_run, candidate):
             # effect or sends another request, including for explicit refusals.
             operation = item.get('operation') if path.name.endswith('-request.json') else (item.get('observation') or {}).get('operation')
             allowed = ({'get_object'} if name == 'historical-read-ACKs' else
+                       {'create_bucket', 'put_object', 'copy_object', 'put_object_tagging'} if kind == 'unresolved-g06-race' else
                        {'create_bucket', 'put_bucket_versioning', 'put_object', 'delete_object'} if kind == 'unresolved-a09-race' else
                        {'create_bucket', 'put_bucket_versioning', 'put_object'} if kind == 'unresolved-g02-race' else
                        {'create_bucket', 'put_object'})

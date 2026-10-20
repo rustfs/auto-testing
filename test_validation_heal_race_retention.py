@@ -258,6 +258,41 @@ class RaceRetentionTests(unittest.TestCase):
             path.write_text(json.dumps({'runId': 'gh-12345-1-h2', 'operation': 'abort_multipart_upload'}))
             with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
 
+    def test_g06_original_copy_and_metadata_journals_require_explicit_source_case_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, folder = self.archive(directory)
+            original = next(root.glob('*/run/*'))
+            case = 'heal.race-copy-and-metadata-update'
+            run = original.with_name(case); original.rename(run)
+            old_case = run / 'cases' / (controller.CASE + '.json')
+            value = json.loads(old_case.read_text()); value['case_id'] = case
+            old_case.rename(old_case.with_name(case + '.json'))
+            (run / 'cases' / (case + '.json')).write_text(json.dumps(value))
+            evidence = run / 'evidence' / controller.CASE
+            evidence.rename(evidence.with_name(case)); evidence = evidence.with_name(case)
+            summary = json.loads((evidence / 'healthy-summary.json').read_text()); summary['caseId'] = case
+            summary['results'][0].update(caseId=case, branch='copy-source')
+            (evidence / 'healthy-summary.json').write_text(json.dumps(summary))
+            branch = evidence / 'H2/overwrite-vs-deep'; branch.rename(branch.with_name('copy-source'))
+            branch = branch.with_name('copy-source')
+            path = branch / 'foreground-ACKs/000001-request.json'
+            path.write_text(json.dumps({'runId': 'gh-12345-1-h2', 'operation': 'copy_object'}))
+            plan = recovery.recovery_plan(root, 12345, candidate)[0]
+            self.assertEqual(plan['kind'], 'unresolved-g06-race')
+            before = plan['ackFilesSha256']
+            path.write_text(json.dumps({'runId': 'gh-12345-1-h2', 'operation': 'copy_object', 'identity': {'uncertain': True}}))
+            self.assertNotEqual(recovery.recovery_plan(root, 12345, candidate)[0]['ackFilesSha256'], before)
+            summary['results'][0]['caseId'] = 'foreign-case'
+            (evidence / 'healthy-summary.json').write_text(json.dumps(summary))
+            with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
+            del summary['results'][0]['caseId']
+            (evidence / 'healthy-summary.json').write_text(json.dumps(summary))
+            with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
+            summary['results'][0]['caseId'] = case
+            (evidence / 'healthy-summary.json').write_text(json.dumps(summary))
+            path.write_text(json.dumps({'runId': 'gh-12345-1-h2', 'operation': 'abort_multipart_upload'}))
+            with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
+
     def test_g02_original_quarantine_contents_are_hashed_without_reading_credentials(self):
         with tempfile.TemporaryDirectory() as directory:
             helper, state, roots, node, request, _ = self.scene(directory)
@@ -285,6 +320,21 @@ class RaceRetentionTests(unittest.TestCase):
             with helper.root_stats(), patch.object(os, 'open', side_effect=tracked):
                 result = retained.run(request, node)
             self.assertEqual(sum(path.endswith('A09-object-0256.original') for path in opened), 4)
+            self.assertFalse(any(path.endswith('service.env') or path.endswith('/credential') for path in opened))
+            self.assertFalse(result['canonicalPassClaimed'] or result['backupRestorationUsed'])
+
+    def test_g06_original_quarantine_contents_are_hashed_without_reading_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper, state, roots, node, request, _ = self.scene(directory)
+            for root in roots:
+                for path in (root / 'quarantine').glob('G01-*'):
+                    path.rename(path.with_name(path.name.replace('G01-', 'G06-', 1)))
+            opened, original_open = [], os.open
+            def tracked(path, *args, **kwargs):
+                opened.append(str(path)); return original_open(path, *args, **kwargs)
+            with helper.root_stats(), patch.object(os, 'open', side_effect=tracked):
+                result = retained.run(request, node)
+            self.assertEqual(sum(path.endswith('G06-object-0256.original') for path in opened), 4)
             self.assertFalse(any(path.endswith('service.env') or path.endswith('/credential') for path in opened))
             self.assertFalse(result['canonicalPassClaimed'] or result['backupRestorationUsed'])
 
