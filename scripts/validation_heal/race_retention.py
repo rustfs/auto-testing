@@ -1,4 +1,4 @@
-"""Isolate stopped G01/G02 scenes without replaying writes or restoring old shards."""
+"""Isolate stopped ACK-bearing races without replaying writes or restoring old shards."""
 
 import hashlib
 import json
@@ -14,7 +14,8 @@ except ImportError:
 
 CASE = 'heal.race-unversioned-overwrite'
 CASES = {CASE: ('unresolved-g01-race', {'overwrite-vs-deep', 'overwrite-vs-read-repair'}),
-         'heal.race-versioned-put': ('unresolved-g02-race', {'new-version-vs-historical-heal', 'read-all-versions-during-heal'})}
+         'heal.race-versioned-put': ('unresolved-g02-race', {'new-version-vs-historical-heal', 'read-all-versions-during-heal'}),
+         'heal.admin-nolock-safety': ('unresolved-a09-race', {'overwrite-nolock', 'delete-nolock'})}
 
 
 def digest(value):
@@ -24,7 +25,7 @@ def digest(value):
 def validate(plan):
     require(set(plan) == {'kind', 'runId', 'nodes', 'bucket', 'owners', 'businessSceneSha256',
                          'candidateCommit', 'harnessCommit', 'binarySha256', 'ackFilesSha256'}
-            and plan['kind'] in {'unresolved-g01-race', 'unresolved-g02-race'}
+            and plan['kind'] in {'unresolved-g01-race', 'unresolved-g02-race', 'unresolved-a09-race'}
             and re.fullmatch(r'gh-[1-9][0-9]*-[1-9][0-9]*-h[12]', plan['runId'])
             and len(plan['nodes']) == len(set(plan['nodes'])) == (1 if plan['runId'].endswith('-h1') else 4)
             and all(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', node) for node in plan['nodes'])
@@ -64,7 +65,7 @@ def archived_plan(artifact, failed_run, candidate):
     require(summary.get('caseId') == case and summary.get('cleanup') == 'FAIL' and len(retained) == 1
             and retained[0].get('verdict') == 'FAIL' and retained[0].get('topology') in {'H1', 'H2'}
             and retained[0].get('branch') in branches
-            and all(row.get('caseId') == case for row in rows),
+            and all(row.get('caseId', case if kind == 'unresolved-a09-race' else None) == case for row in rows),
             'G01/G02 isolation requires one unmixed retained public branch')
     row = retained[0]
     folder = evidence / row['topology'] / row['branch']
@@ -103,6 +104,7 @@ def archived_plan(artifact, failed_run, candidate):
             # effect or sends another request, including for explicit refusals.
             operation = item.get('operation') if path.name.endswith('-request.json') else (item.get('observation') or {}).get('operation')
             allowed = ({'get_object'} if name == 'historical-read-ACKs' else
+                       {'create_bucket', 'put_bucket_versioning', 'put_object', 'delete_object'} if kind == 'unresolved-a09-race' else
                        {'create_bucket', 'put_bucket_versioning', 'put_object'} if kind == 'unresolved-g02-race' else
                        {'create_bucket', 'put_object'})
             require(operation in allowed, 'G01/G02 isolation cannot omit a multipart mutation')
