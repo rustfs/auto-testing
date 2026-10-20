@@ -113,6 +113,32 @@ class RaceNativeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'omit or duplicate'):
                 race.native_preflight(candidate, HELPER, case, root)
 
+    def test_multipart_native_source_collects_all_ten_events_without_enabling_incomplete_runtime(self):
+        source = '09fb813a003e7964bd1b893efb7446a3c41bd3bf'
+        candidate = {**CANDIDATE, 'source_sha': source}
+        case = 'heal.race-multipart-complete-abort'
+        label = 'multipart-continue-complete-abort-final-rename'
+        contract = suite.contract_for(source)
+        self.assertEqual(contract['cases'][case], [label])
+        self.assertEqual(len(contract['regressions'][label]['milestones']), 10)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root, source=source)
+            with patch.object(suite.subprocess, 'run', side_effect=AssertionError('must not execute artifacts')):
+                proof = consumer.verify(root, candidate, HELPER, case)
+                self.assertTrue(proof['requiredNativeSubsetPassed'])
+                self.assertFalse(proof['wholeCasePassClaimed'])
+                self.assertFalse(proof['canonicalCasePassClaimed'])
+                with self.assertRaisesRegex(ValueError, 'race candidate/case contract is not reviewed'):
+                    race.native_preflight(candidate, HELPER, case, root)
+            summary = root / 'native-evidence/race-native-results.json'
+            value = json.loads(summary.read_text())
+            row = next(row for row in value['results'] if row['label'] == label)
+            row['milestones'].pop()
+            self.write(summary, value)
+            with self.assertRaisesRegex(ValueError, 'invented or omitted'):
+                consumer.verify(root, candidate, HELPER, case)
+
     def fixture(self, root, *, source=SOURCE):
         tools, evidence = root / 'native-tools', root / 'native-evidence'
         tools.mkdir()

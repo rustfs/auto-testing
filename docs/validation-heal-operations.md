@@ -672,6 +672,16 @@ Runtime sources opt in to specific cases separately from the native registry. Th
 
 All original H1/H2 black-box branches, SDK ACKs, manifests, overlap witnesses, exact Admin settings and physical/S3 checks remain required. Native logical disk shapes do not certify distributed VM execution. The original `072b57b37559fbe626aeda8abf61617fdcbdd926` route retains its blocked native rows. A09, G05/G06 and I05 still require their own complete native groups and executor evidence. G04 also remains unaccepted until its same-source hosted evidence and every original live branch pass independent audit. No source or case gains canonical acceptance from a registry entry or local native test; a successful exact-source hosted bundle, every live branch and independent original-evidence audit are required.
 
+### G05 same-key multipart components
+
+`mpu_race_fixture.py` migrates the frozen validation repository's `heal_mpu_race_fixture.py` model at `524eb5b32c3236497fdd8a9271df0494fa3d9974`. It uses the existing auto-testing `Recorder` and probe directly. Imports are local; no source validation checkout is needed at runtime. Part sizes follow the frozen common DM recipe: `5MiB+17`, `5MiB+93`, and `1MiB+47`.
+
+The caller supplies a fresh versioned owned bucket. One completed three-part object and two distinct pending uploads share `objects-0256.bin`: A initially has parts 1/2, B has parts 1/2/3. The model binds each mutation to its actual UploadId/part ETags and durable request/ACK files. A continues with part 3 and completes; B aborts. Unknown or malformed mutation results poison the model and prevent later sibling changes. Bounded paginated listings, exact terminal `404/NoSuchUpload`, all acknowledged historical/current versions and complete GET payloads verify sibling isolation. The model does not clean up uploads with uncertain outcomes.
+
+Immutable native source `09fb813a003e7964bd1b893efb7446a3c41bd3bf` adds `multipart-continue-complete-abort-final-rename`: ten ordered milestones across 4/2 and 16/4 logical geometries, using real three-part commits, same-key A/B pending parts and a paused shared Deep Heal. Completion tails drain before stale Heal release; exact retry disposition, old/sibling preservation, new committed bytes and upload retirement are asserted. The native test's unversioned logical scope is supplemental to the full versioned SDK/fleet case.
+
+Its native registry entry permits collecting this evidence only. G05 runtime admission remains closed until the executor integrates the complete same-key model, all pending/committed physical part witnesses, real public overlap and both original H1/H2 instances. Component tests and native bundles do not add canonical PASS.
+
 ### J02 original opaque metadata probe
 
 The `unknown-negative` diagnostic includes the source procedure before the supplemental legacy-object diagnostic. A separate acknowledged object first receives an independently healthy Deep receipt. With the owned services stopped, the existing descriptor-relative fault backend flips byte zero of every original `xl.meta` copy: four copies in H1 and sixteen in H2. Each mutation has its own original backup, receipt and complete physical delta; the candidate-bound decoder must refuse every exact damaged copy. No other metadata, part or format may change.
