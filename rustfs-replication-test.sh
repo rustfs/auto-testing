@@ -744,6 +744,8 @@ run_all_bucket_tests() {
   run_test REP-107 "ExistingObjectResync"               test_rep107
   run_test REP-108 "MultipartReplicates"                test_rep108
   run_test REP-109 "PeerTargetVisibility"               test_rep109
+  run_test REP-110 "DeleteReplicatedEndState"           test_rep110
+  run_test REP-111 "ExistingObjectsLateVersioning"      test_rep111
 }
 
 test_rep101() {
@@ -958,6 +960,98 @@ test_rep108() {
     || { rm_bucket_force main rep108-src; rm_bucket_force site2 rep108-dst; return 1; }
   rm_bucket_force main rep108-src
   rm_bucket_force site2 rep108-dst
+}
+
+test_rep110() {
+  # rustfs#8746: after a replicated delete the target must honor the delete,
+  # not keep serving the old object: the key must 404 on HEAD and vanish
+  # from ListObjectsV2. REP-105 only asserts the marker arrives; this case
+  # asserts the user-visible end state.
+  new_versioned_bucket main rep110-src || return 1
+  new_versioned_bucket site2 rep110-dst || return 1
+  local arn
+  arn="$(register_replication_target rep110-src rep110-dst)" \
+    || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
+  put_replication_rule rep110-src "${arn}" "Enabled" \
+    || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
+  make_test_file "${TEST_TMP}/rep110-v" 4096
+  aws_run s3api put-object --bucket "rep110-src" --key gone.txt --body "${TEST_TMP}/rep110-v"
+  assert_aws_ok "put-object gone.txt" \
+    || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
+  aws_wait_ep "${SITE2_ENDPOINT}" "object on target" \
+    s3api head-object --bucket rep110-dst --key gone.txt \
+    || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
+  aws_run s3api delete-object --bucket "rep110-src" --key gone.txt
+  assert_aws_ok "delete-object gone.txt" \
+    || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
+  # Wait for the delete marker to arrive, then assert the end state: HEAD
+  # must 404 and the listing must be empty.
+  aws_wait_ep "${SITE2_ENDPOINT}" "delete marker on target" \
+    s3api list-object-versions --bucket rep110-dst --prefix gone.txt \
+      --query 'length(DeleteMarkers || `[]`) > `0`' --output text \
+    || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
+  local deadline=$(( $(date +%s) + 120 )) gone=0
+  while [ "$(date +%s)" -lt "${deadline}" ]; do
+    aws_run s3api head-object --bucket rep110-dst --key gone.txt
+    if [ "${AWS_CODE}" -ne 0 ]; then
+      printf '%s' "${AWS_OUT}" | grep -q 'Not Found' \
+        || { echo "target HEAD failed unexpectedly (want 404 Not Found): ${AWS_OUT}"; break; }
+      gone=1
+      break
+    fi
+    sleep 3
+  done
+  if [ "${gone}" -ne 1 ]; then
+    echo "target still serves the deleted object 120s after replication (rustfs#8746)"
+    rm_bucket_force main rep110-src
+    rm_bucket_force site2 rep110-dst
+    return 1
+  fi
+  aws_run s3api list-objects-v2 --bucket rep110-dst
+  printf '%s' "${AWS_OUT}" | jq -e '(.Contents // [] | length) == 0' >/dev/null \
+    || { echo "deleted object still listed on target: ${AWS_OUT}"; rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
+  rm_bucket_force main rep110-src
+  rm_bucket_force site2 rep110-dst
+}
+
+test_rep111() {
+  # rustfs#8747: objects uploaded while the source bucket was NOT versioned
+  # must still be picked up by existing-object replication once versioning
+  # and the rule are in place (REP-107 covers the versioned-from-the-start
+  # variant).
+  aws_run s3api create-bucket --bucket rep111-src
+  assert_aws_ok "create-bucket rep111-src (unversioned)" || return 1
+  new_versioned_bucket site2 rep111-dst \
+    || { rm_bucket_force main rep111-src; return 1; }
+  make_test_file "${TEST_TMP}/rep111-a" 2048
+  make_test_file "${TEST_TMP}/rep111-b" 8192
+  aws_run s3api put-object --bucket rep111-src --key early-a.bin --body "${TEST_TMP}/rep111-a"
+  aws_run s3api put-object --bucket rep111-src --key early-b.bin --body "${TEST_TMP}/rep111-b"
+  assert_aws_ok "put early objects into the unversioned bucket" \
+    || { rm_bucket_force main rep111-src; rm_bucket_force site2 rep111-dst; return 1; }
+  aws_run s3api put-bucket-versioning --bucket rep111-src --versioning-configuration Status=Enabled
+  assert_aws_ok "enable versioning after the uploads" \
+    || { rm_bucket_force main rep111-src; rm_bucket_force site2 rep111-dst; return 1; }
+  local arn body
+  arn="$(register_replication_target rep111-src rep111-dst)" \
+    || { rm_bucket_force main rep111-src; rm_bucket_force site2 rep111-dst; return 1; }
+  put_replication_rule rep111-src "${arn}" "Enabled" \
+    || { rm_bucket_force main rep111-src; rm_bucket_force site2 rep111-dst; return 1; }
+  # Trigger the existing-object resync the way `mc --replicate
+  # existing-objects` does: PUT ?replication-reset on the source bucket.
+  body="$(signed_request "http://$(endpoint_host_prefix)1:9000" PUT "/rep111-src" "replication-reset")"
+  [ "$(signed_code)" = "200" ] \
+    || { echo "replication-reset HTTP $(signed_code): ${body}"; rm_bucket_force main rep111-src; rm_bucket_force site2 rep111-dst; return 1; }
+  printf '%s' "${body}" | jq -e '.target[0].arn != null and .target[0].resetid != null' >/dev/null 2>&1 \
+    || { echo "replication-reset response missing target[0].arn/resetid: ${body}"; rm_bucket_force main rep111-src; rm_bucket_force site2 rep111-dst; return 1; }
+  aws_wait_ep "${SITE2_ENDPOINT}" "early-a replicated after resync" \
+    s3api head-object --bucket rep111-dst --key early-a.bin \
+    || { rm_bucket_force main rep111-src; rm_bucket_force site2 rep111-dst; return 1; }
+  aws_wait_ep "${SITE2_ENDPOINT}" "early-b replicated after resync" \
+    s3api head-object --bucket rep111-dst --key early-b.bin \
+    || { rm_bucket_force main rep111-src; rm_bucket_force site2 rep111-dst; return 1; }
+  rm_bucket_force main rep111-src
+  rm_bucket_force site2 rep111-dst
 }
 
 # ==================== Site replication test cases ====================

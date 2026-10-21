@@ -1137,6 +1137,27 @@ step7_analyze_results() {
       log "HEAL-STEP 8 MRF intent leak: ${mrf_leak}"
     fi
 
+    # HEAL-STEP 9: inline-object heal rollback backups must not be stranded
+    # (rustfs#8608). A leftover rustfs_inline_rb/xl.meta.bkp under a live
+    # object keeps the durable MRF repair retrying that object with SlowDown
+    # forever; after a completed heal no such residue may remain.
+    local bkp_residue="" node_residue
+    for node in "${NODES[@]}"; do
+      node_residue="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+        "find /data/rustfs* -name '.rustfs.sys' -prune -o \\( -name 'xl.meta.bkp' -o -type d -name 'rustfs_inline_rb' \\) -print 2>/dev/null" || true)"
+      if [ -n "${node_residue}" ]; then
+        bkp_residue="${bkp_residue}
+${node}:
+${node_residue}"
+      fi
+    done
+    if [ -n "${bkp_residue}" ]; then
+      warn "HEAL-STEP 9 rollback-backup residue after heal (rustfs#8608):
+${bkp_residue}"
+    else
+      log "HEAL-STEP 9: no rollback-backup residue on any drive"
+    fi
+
     return 0
   fi
   die "heal test FAILED: summary=${summary} failed=${failed_n} ${NODES[${OUTAGE_NODE_INDEX}]}_used=${outage_used}GB"
