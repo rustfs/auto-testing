@@ -348,7 +348,8 @@ def operation_plan(bucket, branch, expected):
     require(len(target) == 3 and len({row["versionId"] for row in target}) == 3
             and target[-1]["isLatest"], "G01/G03 DV lacks three ACK-ordered versions")
     return [{"operation": "delete_object", "params": {"Bucket": bucket, "Key": current_target,
-                                                      "VersionId": (target[0] if branch == G03_BRANCHES[0] else target[-1])["versionId"]}}]
+                                                      "VersionId": (target[0] if branch == G03_BRANCHES[0] else target[-1])["versionId"]},
+             "seedVersionOrder": [row['versionId'] for row in target]}]
 
 
 def version_put_entries(baseline, plan, responses):
@@ -455,9 +456,21 @@ def final_inventory(baseline, branch, plan, responses):
     else:
         version = plan[0]["params"]["VersionId"]
         require(responses[0].get("VersionId") == version, "G01/G03 DELETE response changed the selected VersionId")
+        order = plan[0].get('seedVersionOrder')
+        target_rows = [row for row in result['entries'] if row['key'] == current_target]
+        require(branch in G03_BRANCHES and isinstance(order, list) and len(order) == len(set(order)) == 3
+                and set(order) == {row['versionId'] for row in target_rows}
+                and all(row['deleteMarker'] is False and row['isLatest'] is (row['versionId'] == order[-1])
+                        for row in target_rows)
+                and version == order[0 if branch == G03_BRANCHES[0] else -1],
+                'G03 DELETE lost its original serial seed ACK order or selected version')
         result["entries"] = [row for row in result["entries"]
                              if (row["key"], row["versionId"]) != (current_target, version)]
         require(len(result["entries"]) + 1 == len(baseline["entries"]), "G01/G03 deleted a foreign/missing version")
+        latest = next(item for item in reversed(order) if item != version)
+        for row in result['entries']:
+            if row['key'] == current_target:
+                row['isLatest'] = row['versionId'] == latest
     return result
 
 
@@ -604,10 +617,20 @@ def physical_transition(before, after, bucket, mapped, final, branch):
         require(len(removed) == 1, "G01/G03 delete transition lacks one exact deleted version")
         for target in current_target_values:
             original = mapped[current_target, target["versionId"]]
-            require(target["logical"] == original["logical"]
+            require({name: value for name, value in target['logical'].items() if name != 'isLatest'}
+                    == {name: value for name, value in original['logical'].items() if name != 'isLatest'}
                     and [(row["index"], row["sha256"], row["size"]) for row in target["cohort"]]
                     == [(row["index"], row["sha256"], row["size"]) for row in original["cohort"]],
                     "G01/G03 delete changed another retained ACK generation")
+        wanted = sorted((row['versionId'], row['isLatest'], row['deleteMarker'])
+                        for row in final['entries'] if row['key'] == current_target)
+        indexed = files(after)
+        for node, value in after.items():
+            for drive in value['formats']:
+                versions = indexed[node, drive['disk'], f'{bucket}/{current_target}/xl.meta']['metadata']['versions']
+                require(all(type(row.get('isLatest')) is bool and type(row.get('deleted')) is bool for row in versions)
+                        and sorted((row['versionId'], row['isLatest'], row['deleted']) for row in versions) == wanted,
+                        'G03 physical version/latest population differs from retained serial ACKs')
     inspected_keys = {current_target, changed_key} if branch in G06_BRANCHES else {current_target}
     for value in after.values():
         for row in value["files"]:

@@ -680,6 +680,10 @@ Source `757b751482bb970bc321e92059690a7698554358` adds two collector-only groups
 
 The G06 public adapter uses the existing DS workload: all 257 original keys, including Chinese, spaces, literal `%2F`, actual slashes and parent-like prefixes. The observed missing key is `中文/文件/0252.bin`; its companion is `literal%2Fslash/0254.bin`. `copy-source` copies from the observed key into the companion; `copy-destination` copies in the reverse direction. Default COPY expectations inherit the source payload, content properties, metadata and tags. Both directions verify the unchanged source, exact destination coding-index shard bytes and a distinct destination generation before GET, rejecting retained old destination directories. Registry, fixture and local transition tests do not establish public overlap or complete canonical PASS.
 
+### G03 serial deletion authority
+
+G03's frozen `VersionLedger.history` determines the new current version after an explicit DELETE. The public S3 inventory is UUID-sorted and cannot supply that order. Each original foreground plan now carries the three seed ACK version IDs in order; the final oracle rejects missing, duplicate, foreign or differently selected identities, removes exactly the acknowledged version and promotes the last retained seed ACK. The physical oracle permits only that `isLatest` change while preserving every other retained descriptor, coding-index byte and data directory. Every original drive must contain exactly the retained version/latest population, with no extra marker or duplicate version. Focused tests use nonmonotonic UUIDs, both delete branches and corrupted physical populations. This source adaptation adds no native or live acceptance.
+
 ### G05 same-key multipart components
 
 `mpu_race_fixture.py` migrates the frozen validation repository's `heal_mpu_race_fixture.py` model at `524eb5b32c3236497fdd8a9271df0494fa3d9974`. It uses the existing auto-testing `Recorder` and probe directly. Imports are local; no source validation checkout is needed at runtime. Part sizes follow the frozen common DM recipe: `5MiB+17`, `5MiB+93`, and `1MiB+47`.
