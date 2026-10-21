@@ -33,15 +33,16 @@ class FaultToleranceHarnessTests(unittest.TestCase):
                 text=True,
             )
 
-    def test_all_manifest_has_38_unique_cases(self) -> None:
+    def test_scenario_manifest_counts_are_unique(self) -> None:
         result = self.run_bash(
             """
             register_scenarios A B C C2 D
-            printf '%s\n' "${#EXPECTED_CASES[@]}" "$(printf '%s\n' "${EXPECTED_CASES[@]}" | sort -u | wc -l)"
+            printf '%s\\n' "${#EXPECTED_CASES[@]}" "$(printf '%s\\n' "${EXPECTED_CASES[@]}" | sort -u | wc -l)"
             """
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["38", "38"])
+        # A=9, B=12 (B5 covers rustfs#8270), C=6, C2=6, D=6
+        self.assertEqual(result.stdout.splitlines(), ["39", "39"])
 
     def test_all_dry_run_reaches_every_scenario_without_remote_calls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -60,7 +61,7 @@ class FaultToleranceHarnessTests(unittest.TestCase):
                 text=True,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        for scenario in ("=== A:", "=== B:", "=== C:", "=== C2:", "=== D:"):
+        for scenario in ("=== A:", "=== B:", "=== C:", "=== C2:", "=== D:", "=== F:"):
             self.assertIn(scenario, result.stdout)
         self.assertIn("fault-tolerance dry-run complete", result.stdout)
 
@@ -92,9 +93,9 @@ class FaultToleranceHarnessTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result_path.read_text())
         self.assertFalse(payload["complete"])
-        self.assertEqual(payload["counts"]["expected"], 38)
+        self.assertEqual(payload["counts"]["expected"], 39)
         self.assertEqual(payload["counts"]["seen"], 17)
-        self.assertEqual(len(payload["missing_cases"]), 21)
+        self.assertEqual(len(payload["missing_cases"]), 22)
 
     def test_complete_results_require_every_unique_case(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -131,7 +132,7 @@ class FaultToleranceHarnessTests(unittest.TestCase):
         self.assertTrue(payload["complete"])
         self.assertEqual(payload["selected_scenarios"], ["A", "B", "C", "C2", "D"])
         self.assertEqual(payload["auto_testing_sha"], "a" * 40)
-        self.assertEqual(payload["counts"]["seen"], 38)
+        self.assertEqual(payload["counts"]["seen"], 39)
 
     def test_aws_cli_syntax_failure_is_a_harness_error(self) -> None:
         result = self.run_bash(
