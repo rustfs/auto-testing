@@ -139,8 +139,8 @@ EVIDENCE_BLOCKED_CASES = {
     ),
     "heal.lock-timeout-and-caller-abort": _native(
         "I05", "NATIVE_LOCK_OWNER_ABORT_BARRIER",
-        "需要真实 lock owner、超时、调用方断开和 stale read-repair 的服务端所有权/提交顺序；黑盒请求耗时只能证明 TCP 断开，不能证明锁提交屏障，候选包没有 reviewed e2e-test-hooks。",
-        ("server_lock_owner", "lock_timeout_fence", "caller_abort_sequence", "stale_read_repair_fence", "reviewed_e2e_test_hooks"),
+        "已有同候选源码的 lock owner、取消物理 unlink 与 stale read-repair 原生子集，以及单次签名历史版本 GET 的客户端 TCP 断开组件；仍缺服务端请求 admission/所有权绑定、完整 timeout/stale-generation 编排和 H1/H2 最终对象/锁/FD 验收。精确源码 cfg(test) 原生证据可独立构建，不要求给优化服务候选加入隐藏 hook；客户端断开或原生子集不能充作完整 canonical PASS。",
+        ("server_lock_owner", "lock_timeout_fence", "caller_abort_sequence", "stale_read_repair_fence", "exact_source_native_evidence", "complete_live_orchestrator", "final_object_lock_fd_closure"),
     ),
     "heal.outcome-counters-and-error-truth": _native(
         "J02", "EVIDENCE_MIXED_OUTCOME_ORCHESTRATION",

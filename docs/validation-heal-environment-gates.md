@@ -40,10 +40,10 @@ These observations do not certify a clean environment. Independently audit retai
 | --- | --- | --- | --- |
 | C11 | `heal.bucket-incarnation-recreation` | H1/H2 旧元数据盘重返、原始 checkpoint/resume 与 committed MRF 重放编排已实现；精确候选的 9 项存储原生回归和 3 项 manager incarnation 前置证据已独立核验。完整现场分支尚无独立审计结果 | 旧/新 incarnation、正常 S3 删除与新 ACK、物理范围和原生 artifact 精确绑定；单分支不提升整例 |
 | F07 | `heal.checkpoint-and-mrf-corruption` | 已实现 H1/H2 checkpoint 截断、未来 schema、committed MRF CRC 故障及独立安全重扫；10 项原生回归作为前置证据。真实较早代次回放与私有限额卷的 journal ENOSPC 已实现；仍缺完整 native cut 审核，完整 live 尚未审计 | 真实 durable 记录故障与 publication 证据绑定；现有 interruption hooks 不等于每个 fsync 或断电 |
-| I05 | `heal.lock-timeout-and-caller-abort` | 请求耗时/TCP 断开不能证明服务端锁 owner 与提交顺序 | lock owner、timeout、caller abort 和 stale read-repair 的服务端屏障 |
+| I05 | `heal.lock-timeout-and-caller-abort` | 已有同源码 native owner/取消/stale 子集和单连接签名历史版本 GET 断开组件；缺完整 controller 与 live 证据 | 实际服务端 admission/owner 绑定、timeout/stale-generation 编排、H1/H2 最终对象/锁/FD 闭环；原生与客户端证据独立保留 |
 | J02 | `heal.outcome-counters-and-error-truth` | 全部夹具与 manifest 对账均已实现。候选 `7951bb629821246868ee3761b321dd07c06db45c` 修复整桶重试覆盖 repaired 记录，210 项 manager 与 5 项独立进程集成测试通过。新实机 `38874900846/1` 完成 20 个分支：16 个报告通过，4 个原始全元数据损坏探针返回永久 Failed，保留 NOT_OBSERVED；四组混合任务与全部 50 条节点清理记录已独立审计。真实 legacy Unknown 已观察，不能代替原始探针 | 原始元数据损坏分支的 Unknown 仍未观察；完整 source-procedure 验收尚未闭合。原始 Failed、NOT_OBSERVED 和完整用例门控保持不变 |
 
-I05 和已接入 A09、G01–G06 的精确屏障分支仍受候选包对应、经过审核的 `e2e-test-hooks` 限制。第一批 G07/G08 的 native 分支与 H04 容量锁窗口也保留 BLOCKED；不能用外部请求重试或最终对象正确来声称精确 lock/version/marker/MPU/copy 提交屏障已命中。
+I05 与 A09、G01–G06 的精确屏障证据允许使用同一不可变候选源码单独构建的 `cfg(test)` 原生测试执行文件。不得给优化服务候选加入隐藏 hook 冒充原包，也不能把缺少 release hook 本身归为外部环境阻塞。原生子集、完整服务调用和现场最终 ACK/物理检查分别验收；已验收 native 证据不能代替尚缺的 controller 或完整 live 结果。第一批 G07/G08 的 native 分支与 H04 容量锁窗口保留各自未完成条件；外部请求重试或最终对象正确均不能证明精确锁或提交窗口。
 
 资源适配器协议使用 stdin/stdout JSON，不调用 shell。runtime 中的 `adapter` 包含绝对可执行路径、SHA-256 和操作 allowlist；`environment_cases.required_operations(case_id)` 给出所需操作。每个请求携带 run ID、原候选 commit、sequence、拓扑/分支 scope、bucket prefix、租约和参数。响应必须回显上述身份、按 `heal_probe.canonical(request)` 的 UTF-8 SHA-256 绑定原请求，并把真实观察写在 `observation`，禁止返回 verdict。资源适配器需独立实现平台 power control、故障层、pool lifecycle 或 KMS/tier 隔离；本 PR 未向当前共享环境部署适配器。
 
