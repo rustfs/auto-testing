@@ -122,7 +122,8 @@ FULL_NATIVE_GROUPS = {
 def source_contract(candidate, case_id):
     require(case_id in CASE_IDS, 'unregistered race case')
     if candidate.get('source_sha') == REFERENCE['candidateCommit']:
-        require(case_id != 'heal.race-multipart-complete-abort', 'G05 requires its exact-source multipart native group')
+        require(case_id not in ('heal.race-multipart-complete-abort','heal.race-markers-and-batch-delete'),
+                'G04/G05 require their exact-source multipart or marker/batch native group')
         return REFERENCE
     entry = NATIVE_RUNTIME.get(candidate.get('source_sha'))
     require(entry is not None and case_id in entry['cases'] and case_id in FULL_NATIVE_GROUPS
@@ -160,8 +161,6 @@ class RaceRecorder(Recorder):
     def __init__(self, *args, versioned, **kwargs):
         super().__init__(*args, **kwargs)
         self.versioned, self.pending, self.seen = versioned, None, set()
-        self.marker_branch = None
-        self.batch_expected_ids = set()
 
     def call(self, operation, params, body=None, **kwargs):
         self.pending = {"operation": operation, "params": copy.deepcopy(params)}
@@ -177,32 +176,10 @@ class RaceRecorder(Recorder):
             else:
                 require(version in {None, "null"}, "G01/G03 never-versioned PUT created a real version")
         elif operation == "delete_object":
-            if self.marker_branch in G04_BRANCHES:
-                known = {value for key, value in self.seen if key == params["Key"]}
-                if params.get("VersionId") is None:
-                    if self.versioned:
-                        require(result.get("DeleteMarker") is True and isinstance(version, str)
-                                and version not in known, "G04 marker creation ACK lacks a new marker identity")
-                        self.seen.add((params["Key"], version))
-                    else:
-                        require(version in {None, "null"} and result.get("DeleteMarker") in {None, False},
-                                "G04 unversioned DELETE ACK created an unexpected marker")
-                else:
-                    require(self.versioned and params["VersionId"] in known and version == params["VersionId"]
-                            and result.get("DeleteMarker") is True,
-                            "G04 marker removal ACK changed the selected marker identity")
-            else:
-                require(self.versioned and params.get("VersionId") in {
-                    value for key, value in self.seen if key == params["Key"]}
-                    and version == params["VersionId"] and result.get("DeleteMarker") in {None, False},
-                    "G01/G03 DELETE ACK changed the exact known data-version identity")
-        elif operation == "delete_objects" and self.marker_branch == "batch-version-delete":
-            deleted = result.get("Deleted") or []
-            errors = result.get("Errors") or []
-            deleted_ids = {row.get("VersionId") for row in deleted}
-            require(not errors and deleted_ids == self.batch_expected_ids
-                    and all(isinstance(value, str) for value in deleted_ids),
-                    "G04 batch DELETE ACK has errors or incomplete per-item receipts")
+            require(self.versioned and params.get("VersionId") in {
+                value for key, value in self.seen if key == params["Key"]}
+                and version == params["VersionId"] and result.get("DeleteMarker") in {None, False},
+                "G01/G03 DELETE ACK changed the exact known data-version identity")
         self.pending = None
         return result
 
@@ -233,43 +210,11 @@ def sample_overlap(ack, observed, path, token, reference=REFERENCE):
 
 
 def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
-    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES, *G06_BRANCHES) and type(count) is int and 3 <= count <= OBJECTS, "G01/G02/G03/G04/G05/G06 unregistered fixture")
+    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G06_BRANCHES) and type(count) is int and 3 <= count <= OBJECTS, "G01/G02/G03/G04/G05/G06 unregistered fixture")
     if branch in G06_BRANCHES:
         require(count == OBJECTS, "G06 requires the frozen complete 257-key DS population")
         return seed_workload(recorder, bucket, "DS", count, [SIZE])
     recorder.call("create_bucket", {"Bucket": bucket})
-    if branch in G04_BRANCHES:
-        versioned = branch != "unversioned-delete"
-        if versioned:
-            recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})
-        entries = []
-        for index in range(count - 1):
-            key = f"objects/{index:04d}.bin"
-            body = payload(f"{bucket}/{key}/0", SIZE)
-            response = recorder.call("put_object", {"Bucket": bucket, "Key": key,
-                "ContentType": "application/octet-stream", "Metadata": {"heal-fixture": "G04", "nonce": str(index)},
-                "Tagging": "suite=heal&fixture=G04"}, body)
-            entries.append({"key": key, "versionId": public_version_id(response.get("VersionId")),
-                "isLatest": True, "deleteMarker": False,
-                "payload": {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}})
-        target_versions = 1 if not versioned else 3
-        for generation in range(target_versions):
-            body = payload(f"{bucket}/{TARGET_KEY}/{generation}", SIZE)
-            response = recorder.call("put_object", {"Bucket": bucket, "Key": TARGET_KEY,
-                "ContentType": "application/octet-stream", "Metadata": {"heal-fixture": "G04", "generation": str(generation)},
-                "Tagging": "suite=heal&fixture=G04"}, body)
-            version = public_version_id(response.get("VersionId"))
-            for row in entries:
-                if row["key"] == TARGET_KEY: row["isLatest"] = False
-            entries.append({"key": TARGET_KEY, "versionId": version, "isLatest": generation == target_versions - 1,
-                "deleteMarker": False, "payload": {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}})
-        if branch == "delete-marker":
-            marker = recorder.call("delete_object", {"Bucket": bucket, "Key": TARGET_KEY})
-            marker_id = marker.get("VersionId")
-            for row in entries:
-                if row["key"] == TARGET_KEY: row["isLatest"] = False
-            entries.append({"key": TARGET_KEY, "versionId": marker_id, "isLatest": True, "deleteMarker": True})
-        return entries
     if branch in (*G02_BRANCHES, *G03_BRANCHES):
         recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})
     entries = []
@@ -290,7 +235,7 @@ def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
 
 
 def operation_plan(bucket, branch, expected):
-    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES, *G06_BRANCHES), "G01/G02/G03/G04/G05/G06 unregistered foreground branch")
+    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G06_BRANCHES), "G01/G02/G03/G04/G05/G06 unregistered foreground branch")
     if branch in G01_BRANCHES:
         # Three distinct serial commits; the final independent reference was
         # written before injection, allowing a coding-index byte comparison.
@@ -309,27 +254,6 @@ def operation_plan(bucket, branch, expected):
                  "nonce": f"{bucket}/objects/{index:04d}.bin/0", "referenceKey": f"objects/{index:04d}.bin",
                  }
                 for index in range(3)]
-    if branch in G04_BRANCHES:
-        target = [row for row in expected if row["key"] == TARGET_KEY]
-        if branch == "create-marker":
-            require(len(target) == 3 and target[-1]["isLatest"], "G04 create-marker fixture lacks current data")
-            return [{"operation": "delete_object", "params": {"Bucket": bucket, "Key": TARGET_KEY},
-                     "nonce": "create-marker"}]
-        if branch == "delete-marker":
-            marker = next((row for row in target if row["deleteMarker"] and row["isLatest"]), None)
-            require(marker is not None, "G04 delete-marker fixture lacks an acknowledged current marker")
-            return [{"operation": "delete_object", "params": {"Bucket": bucket, "Key": TARGET_KEY,
-                                                                  "VersionId": marker["versionId"]},
-                     "nonce": "delete-marker"}]
-        if branch == "batch-version-delete":
-            data = [row for row in target if not row["deleteMarker"]]
-            require(len(data) == 3, "G04 batch fixture lacks three data versions")
-            return [{"operation": "delete_objects", "params": {"Bucket": bucket,
-                "Delete": {"Objects": [{"Key": TARGET_KEY, "VersionId": data[0]["versionId"]},
-                                         {"Key": TARGET_KEY, "VersionId": data[1]["versionId"]}],
-                            "Quiet": False}}, "nonce": "batch-version-delete"}]
-        return [{"operation": "delete_object", "params": {"Bucket": bucket, "Key": TARGET_KEY},
-                 "nonce": "unversioned-delete"}]
     if branch in G06_BRANCHES:
         if branch == "copy-source":
             return [{"operation": "copy_object", "params": {"Bucket": bucket, "Key": current_reference,
@@ -405,35 +329,6 @@ def final_inventory(baseline, branch, plan, responses):
                      tags=[{"Key": "race", "Value": "overwrite"}])
         entry["properties"].update(ETag=ack["ETag"], ContentLength=len(body), ContentType="application/octet-stream",
                                    Metadata=step["params"]["Metadata"])
-    elif branch in G04_BRANCHES:
-        require(len(responses) == 1, "G04 foreground plan/ACK sequence is incomplete")
-        target_rows = [row for row in result["entries"] if row["key"] == TARGET_KEY]
-        if branch == "create-marker":
-            marker = responses[0].get("VersionId")
-            require(responses[0].get("DeleteMarker") is True and isinstance(marker, str),
-                    "G04 marker creation ACK lacks its exact marker identity")
-            for row in target_rows: row["isLatest"] = False
-            result["entries"].append({"key": TARGET_KEY, "versionId": marker,
-                                      "isLatest": True, "deleteMarker": True})
-        elif branch == "delete-marker":
-            marker = next(row for row in target_rows if row["deleteMarker"] and row["isLatest"])
-            require(responses[0].get("DeleteMarker") is True and responses[0].get("VersionId") == marker["versionId"],
-                    "G04 marker delete ACK changed the selected marker identity")
-            result["entries"] = [row for row in result["entries"] if row is not marker]
-            data = [row for row in result["entries"] if row["key"] == TARGET_KEY and not row["deleteMarker"]]
-            require(data, "G04 marker delete removed every retained data version")
-            for row in data: row["isLatest"] = row is data[-1]
-        elif branch == "batch-version-delete":
-            deleted = responses[0].get("Deleted") or []
-            deleted_ids = {row.get("VersionId") for row in deleted}
-            require(len(deleted_ids) == 2 and not responses[0].get("Errors"),
-                    "G04 batch delete ACK is not a complete per-item success")
-            result["entries"] = [row for row in result["entries"]
-                                 if not (row["key"] == TARGET_KEY and row["versionId"] in deleted_ids)]
-        else:
-            require(responses[0].get("VersionId") in {None, "null"} and responses[0].get("DeleteMarker") in {None, False},
-                    "G04 unversioned delete ACK changed object identity")
-            result["entries"] = [row for row in result["entries"] if row["key"] != TARGET_KEY]
     elif branch in G06_BRANCHES:
         entry = next(row for row in result["entries"] if row["key"] == current_target)
         copy_result = responses[-1].get("CopyObjectResult") or {}
@@ -565,36 +460,6 @@ def physical_transition(before, after, bucket, mapped, final, branch):
                 require(all(type(v.get('isLatest')) is bool and type(v.get('deleted')) is bool for v in versions)
                         and sorted((public_version_id(v.get('versionId')), v['isLatest'], v['deleted']) for v in versions)
                         == expected_versions, 'G02 physical version population differs from all original and new ACKs')
-    elif branch in G04_BRANCHES:
-        require(len(original_target) == (1 if branch == "unversioned-delete" else 3),
-                "G04 baseline has the wrong acknowledged data-version count")
-        old_versions = {target["versionId"] for target in original_target}
-        remaining = {target["versionId"] for target in current_target_values}
-        expected_remaining = (set() if branch == "unversioned-delete" else
-                              {original_target[-1]["versionId"]} if branch == "batch-version-delete" else old_versions)
-        require(remaining == expected_remaining,
-                "G04 operation lost, replaced or retained the wrong acknowledged data versions")
-        for target in current_target_values:
-            original = mapped[current_target, target["versionId"]]
-            require({name: value for name, value in target["logical"].items() if name != "isLatest"}
-                    == {name: value for name, value in original["logical"].items() if name != "isLatest"}
-                    and [(part["index"], part["sha256"], part["size"]) for part in target["cohort"]]
-                    == [(part["index"], part["sha256"], part["size"]) for part in original["cohort"]],
-                    "G04 marker/delete changed another retained data generation or shard")
-        if current_target_values:
-            expected_versions = sorted((row["versionId"], row["isLatest"], row["deleteMarker"])
-                                       for row in final["entries"] if row["key"] == current_target)
-            indexed = files(after)
-            for node, value in after.items():
-                for drive in value["formats"]:
-                    metadata = indexed[node, drive["disk"], f"{bucket}/{current_target}/xl.meta"]["metadata"]
-                    versions = metadata.get("versions", [])
-                    require(all(type(version.get("isLatest")) is bool and type(version.get("deleted")) is bool
-                                for version in versions), "G04 physical version flags are missing or untyped")
-                    actual_versions = sorted((public_version_id(version.get("versionId")),
-                                              version["isLatest"], version["deleted"]) for version in versions)
-                    require(actual_versions == expected_versions,
-                            "G04 physical data/marker version set differs from exact foreground ACKs")
     elif branch in G06_BRANCHES:
         target_after = next(value for (key, _), value in survivors.items() if key == changed_key)
         target_before = next(value for (key, _), value in mapped.items() if key == changed_key)
@@ -638,8 +503,6 @@ def physical_transition(before, after, bucket, mapped, final, branch):
             if key is None: continue
             prefix = f"{bucket}/{key}/"
             current_dirs = {target["dataDir"] for (name, _), target in survivors.items() if name == key}
-            if branch == "unversioned-delete":
-                raise ValueError("G04 unversioned DELETE left a physical target leaf")
             suffix = row["path"][len(prefix):]
             require(suffix == "xl.meta" or suffix.split("/")[0] in current_dirs,
                     "G01/G03 resurrected an old/deleted data directory or left an unbound target leaf")
@@ -863,6 +726,14 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
 
 
 def run_branch(args, topology, nodes, branch):
+    if args.case_id == 'heal.race-markers-and-batch-delete':
+        try:
+            from .version_race_runner import run_branch as run_marker_branch
+        except ImportError:
+            from version_race_runner import run_branch as run_marker_branch
+        source_contract(json.loads(args.candidate.read_text()), args.case_id)
+        return run_marker_branch(args, topology, nodes, branch)
+
     if args.case_id == 'heal.race-multipart-complete-abort':
         # Lazy import keeps the generic controller and G05's model acyclic.
         try:
@@ -894,19 +765,17 @@ def run_branch(args, topology, nodes, branch):
         "requiredPUTs": 3 if branch in (*G01_BRANCHES, *G02_BRANCHES) else 0, "serverCommitOverlapProved": False})
     probe, active, recorder, writer = Probe(binding), [], None, None
     result = {"topology": topology, "branch": branch,
-              "fixture": "DL" if branch in (*G01_BRANCHES, "unversioned-delete") else "DV" if branch in G04_BRANCHES
-              else "DS" if branch in G06_BRANCHES else "DV",
+              "fixture": "DL" if branch in G01_BRANCHES else "DS" if branch in G06_BRANCHES else "DV",
               "verdict": "RUNNING", "cleanup": "PENDING", "canonicalCasePassClaimed": False}
     changed_target_registered, target_authority = None, False
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         recorder = RaceRecorder(probe, directory / "seed-ACKs",
-                                versioned=branch in (*G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES[:3]))
-        recorder.marker_branch = branch if branch in G04_BRANCHES else None
+                                versioned=branch in (*G02_BRANCHES, *G03_BRANCHES))
         expected = seed_fixture(recorder, bucket, branch)
         baseline = fleet.record("complete-baseline-S3", probe.inventory(
-            bucket, unversioned_current_tags=branch in (*G01_BRANCHES, "unversioned-delete", *G06_BRANCHES)))
+            bucket, unversioned_current_tags=branch in (*G01_BRANCHES, *G06_BRANCHES)))
         verify_seed(expected, baseline)
         plan = operation_plan(bucket, branch, expected)
         for step in plan:
@@ -952,11 +821,8 @@ def run_branch(args, topology, nodes, branch):
         if (target["node"], target["disk"], target["relativePath"]) in files(witness):
             raise WindowNotObserved("G01/G03 old target already repaired before foreground mutations")
         writer = RaceRecorder(probe, directory / "foreground-ACKs",
-                              versioned=branch in (*G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES[:3]))
-        writer.marker_branch = branch if branch in G04_BRANCHES else None
+                              versioned=branch in (*G02_BRANCHES, *G03_BRANCHES))
         writer.seen.update((row["key"], row["versionId"]) for row in expected)
-        if branch == "batch-version-delete":
-            writer.batch_expected_ids = {item["VersionId"] for item in plan[0]["params"]["Delete"]["Objects"]}
         if branch in G02_BRANCHES:
             responses, overlapped = race(writer, plan, probe, fleet, path, token, reference, baseline=baseline)
         else:
@@ -995,7 +861,7 @@ def run_branch(args, topology, nodes, branch):
         fleet.start()
         for endpoint in binding["endpoints"]:
             current = fleet.record("all-peer-final-S3", {"endpoint": endpoint, **Probe(binding, endpoint).inventory(
-                bucket, unversioned_current_tags=branch in (*G01_BRANCHES, "unversioned-delete", *G06_BRANCHES))})
+                bucket, unversioned_current_tags=branch in (*G01_BRANCHES, *G06_BRANCHES))})
             compare_inventories(final, current)
             if branch in G03_BRANCHES:
                 negative = fleet.record("all-peer-deleted-version-GET", Probe(binding, endpoint).s3("get_object", plan[0]["params"]))

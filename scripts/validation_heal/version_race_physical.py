@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Version-addressed H1 physical oracle; inputs must be archived before S3 reads.
+"""Version-addressed H1/H2 physical oracle; inputs must be archived before S3 reads.
 
 No metadata majority selection: every drive must agree with the ACK ledger.
 Unreferenced bytes of explicitly deleted old generations are reported, not
@@ -27,11 +27,12 @@ def canonical_version(value):
     return value
 
 
-def file_index(snapshot):
+def file_index(snapshot,*,disk_count=4):
+    require(type(disk_count) is int and disk_count in (4,16),'only complete H1/H2 sets are supported')
     rows=snapshot['files'];indexed={}
-    require(isinstance(rows,list) and len(rows)<=257*12,'bounded physical snapshot required')
+    require(isinstance(rows,list) and len(rows)<=257*12*(disk_count//4),'bounded physical snapshot required')
     for row in rows:
-        require(type(row['disk']) is int and row['disk'] in range(4),'invalid H1 physical disk')
+        require(type(row['disk']) is int and row['disk'] in range(disk_count),'invalid H1 physical disk')
         require(isinstance(row['path'],str) and not row['path'].startswith('/') and
                 all(v not in ('','.','..') for v in row['path'].split('/')),'unsafe physical path')
         require(type(row['size']) is int and row['size']>=0 and
@@ -41,8 +42,8 @@ def file_index(snapshot):
     return indexed
 
 
-def key_state(snapshot,metadata,bucket,key,expected,*,inspector_sha,allowed_orphans=(),allowed_backups=None,allow_multipart=False):
-    """Bind the exact expected versions to 4 xl.meta decodes and coding indices.
+def key_state(snapshot,metadata,bucket,key,expected,*,inspector_sha,disk_count=4,allowed_orphans=(),allowed_backups=None,allow_multipart=False):
+    """Bind exact expected versions to every set member and coding index.
 
     `expected` is an immutable ACK-ledger slice, not a version list discovered
     from this same snapshot. `allowed_orphans` are exact old dataDir UUIDs from
@@ -60,9 +61,9 @@ def key_state(snapshot,metadata,bucket,key,expected,*,inspector_sha,allowed_orph
     require(not wanted or sum(v.get('isLatest') is True for v in wanted.values())==1,
             'expected ACK ledger must have exactly one latest entry')
     rows=[v for v in metadata['rows'] if v['key']==key]
-    require(len(rows)==4 and all(type(v['disk']) is int for v in rows) and
-            {v['disk'] for v in rows}==set(range(4)),'four distinct metadata observations required')
-    files=file_index(snapshot);prefix=f'{bucket}/{key}/'
+    require(len(rows)==disk_count and all(type(v['disk']) is int for v in rows) and
+            {v['disk'] for v in rows}==set(range(disk_count)),'complete distinct set metadata observations required')
+    files=file_index(snapshot,disk_count=disk_count);prefix=f'{bucket}/{key}/'
     members={i:v for i,v in files.items() if i[1].startswith(prefix)}
     used=set();versions={};directories=set();multipart_sidecars=[]
     for row in rows:
@@ -108,13 +109,13 @@ def key_state(snapshot,metadata,bucket,key,expected,*,inspector_sha,allowed_orph
                 require(len(parts)==1 and type(parts[0]['number']) is int and parts[0]['number']==1
                         and parts[0]['size']==entry['payload']['size'],'single-part external fixture required')
             ec=v['erasure'];index=ec['index']
-            require(type(index) is int and index in range(1,5) and index not in item['coding'],
+            require(type(index) is int and index in range(1,disk_count+1) and index not in item['coding'],
                     'invalid or duplicate erasure index')
-            require(type(ec['data_blocks']) is int and ec['data_blocks']==2 and
-                    type(ec['parity_blocks']) is int and ec['parity_blocks']==2 and
+            require(type(ec['data_blocks']) is int and ec['data_blocks']==(2 if disk_count==4 else 12) and
+                    type(ec['parity_blocks']) is int and ec['parity_blocks']==(2 if disk_count==4 else 4) and
                     type(ec['block_size']) is int and ec['block_size']>0 and
-                    len(ec['distribution'])==4 and all(type(i) is int for i in ec['distribution']) and
-                    set(ec['distribution'])==set(range(1,5)),'invalid H1 EC2+2 geometry')
+                    len(ec['distribution'])==disk_count and all(type(i) is int for i in ec['distribution']) and
+                    set(ec['distribution'])==set(range(1,disk_count+1)),'invalid registered H1/H2 EC geometry')
             require(ec['distribution'][disk]==index,'erasure index differs from disk distribution')
             coding={}
             for descriptor in parts:
@@ -137,7 +138,7 @@ def key_state(snapshot,metadata,bucket,key,expected,*,inspector_sha,allowed_orph
             item['descriptors'].append({k:copy.deepcopy(v[k]) for k in ('size','parts')})
     for item in versions.values():
         if item['deleteMarker']:continue
-        require(set(item['coding'])==set(range(1,5)) and len(set(item['dataDirs']))==1 and
+        require(set(item['coding'])==set(range(1,disk_count+1)) and len(set(item['dataDirs']))==1 and
                 all(v==item['layouts'][0] for v in item['layouts']) and
                 all(v==item['descriptors'][0] for v in item['descriptors']),
                 'live version generation/layout/parts differ across drives')
@@ -158,12 +159,12 @@ def key_state(snapshot,metadata,bucket,key,expected,*,inspector_sha,allowed_orph
         require(len(relative)==2 and relative[0] in allowed and relative[1]=='part.1',
                 'unregistered/orphan physical member not bound to a deleted generation')
         orphans.append(copy.deepcopy(row))
-    return dict(versions=versions,unreferencedDeletedGenerationFiles=orphans,verifiedMetadataBackups=backups,allLiveVersionsFourShards=True,
+    return dict(versions=versions,unreferencedDeletedGenerationFiles=orphans,verifiedMetadataBackups=backups,allLiveVersionsFourShards=disk_count==4,allLiveVersionsFullSet=True,shardsPerVersion=disk_count,
                 observedMultipartSidecars=multipart_sidecars,
                 casePassClaimed=False,deletedGenerationFilesAbsent=not orphans,garbageCollectorResponsibilityProved=False)
 
 
-def additive_backups(after,before_metadata,after_metadata,bucket,key,before_entries,after_entries,order,allowed,observations,*,inspector_sha):
+def additive_backups(after,before_metadata,after_metadata,bucket,key,before_entries,after_entries,order,allowed,observations,*,inspector_sha,disk_count=4):
     """Validate exposed decoder semantics, not arbitrary bytes or live authority.
 
     Only serial additive PUTs are admitted. A rollback view may represent any
@@ -177,7 +178,7 @@ def additive_backups(after,before_metadata,after_metadata,bucket,key,before_entr
     require(all({k:v for k,v in old[vid].items() if k!='isLatest'}==
                 {k:v for k,v in new[vid].items() if k!='isLatest'} for vid in old) and
             [v['versionId'] for v in after_entries if v['isLatest']]==[order[-1]],'additive ACK population/order differs')
-    files=file_index(after);prefix=f'{bucket}/{key}/'
+    files=file_index(after,disk_count=disk_count);prefix=f'{bucket}/{key}/'
     candidates={i:v for i,v in files.items() if i[1].startswith(prefix) and i[1].endswith('/xl.meta.bkp')}
     changed={i:v for i,v in candidates.items() if i not in allowed or
              any(v[k]!=allowed[i][k] for k in ('size','sha256'))}
@@ -218,7 +219,7 @@ def additive_backups(after,before_metadata,after_metadata,bucket,key,before_entr
     return result,proofs
 
 
-def transition(before,after,before_metadata,after_metadata,bucket,key,before_entries,after_entries,*,inspector_sha,references=None,
+def transition(before,after,before_metadata,after_metadata,bucket,key,before_entries,after_entries,*,inspector_sha,disk_count=4,references=None,
                append_order=None,backup_metadata=None):
     """Retained versions stay byte-identical; new ones match immutable references.
 
@@ -227,18 +228,18 @@ def transition(before,after,before_metadata,after_metadata,bucket,key,before_ent
     Marker creation/deletion changes only the ACK-derived version population.
     """
     require(before['formats']==after['formats'],'format changed during version race')
-    old=key_state(before,before_metadata,bucket,key,before_entries,inspector_sha=inspector_sha)
+    old=key_state(before,before_metadata,bucket,key,before_entries,inspector_sha=inspector_sha,disk_count=disk_count)
     old_ids={v['versionId'] for v in before_entries};new_ids={v['versionId'] for v in after_entries}
     deleted=old_ids-new_ids
     allowed=[old['versions'][vid]['dataDir'] for vid in deleted if not old['versions'][vid]['deleteMarker']]
-    originals=file_index(before)
+    originals=file_index(before,disk_count=disk_count)
     backups={(disk,f'{bucket}/{key}/{v["dataDir"]}/xl.meta.bkp'):originals[(disk,f'{bucket}/{key}/xl.meta')]
-             for v in old['versions'].values() if not v['deleteMarker'] for disk in range(4)}
+             for v in old['versions'].values() if not v['deleteMarker'] for disk in range(disk_count)}
     backup_proofs=[]
     if append_order is not None:
         backups,backup_proofs=additive_backups(after,before_metadata,after_metadata,bucket,key,before_entries,
-                                             after_entries,append_order,backups,backup_metadata,inspector_sha=inspector_sha)
-    new=key_state(after,after_metadata,bucket,key,after_entries,inspector_sha=inspector_sha,allowed_orphans=allowed,allowed_backups=backups)
+                                             after_entries,append_order,backups,backup_metadata,inspector_sha=inspector_sha,disk_count=disk_count)
+    new=key_state(after,after_metadata,bucket,key,after_entries,inspector_sha=inspector_sha,disk_count=disk_count,allowed_orphans=allowed,allowed_backups=backups)
     refs=references or {};needed={vid for vid in new_ids-old_ids if not new['versions'][vid]['deleteMarker']}
     require(set(refs)==needed,'exact independent references required for every new data version')
     retained=[];created=[]
@@ -254,7 +255,7 @@ def transition(before,after,before_metadata,after_metadata,bucket,key,before_ent
                     'new version reference must be a separate exact baseline control')
             expected=next(v for v in after_entries if v['versionId']==vid)
             require(expected['payload']==ref['entry']['payload'],'new version ACK bytes differ from reference payload')
-            reference=key_state(before,before_metadata,bucket,ref['key'],[ref['entry']],inspector_sha=inspector_sha)['versions'][ref['versionId']]
+            reference=key_state(before,before_metadata,bucket,ref['key'],[ref['entry']],inspector_sha=inspector_sha,disk_count=disk_count)['versions'][ref['versionId']]
             require(item['coding']==reference['coding'] and
                     all(item['layout'][k]==reference['layout'][k] for k in ('data_blocks','parity_blocks','block_size')),
                     'new version coding-index bytes differ from immutable reference')
@@ -266,5 +267,5 @@ def transition(before,after,before_metadata,after_metadata,bucket,key,before_ent
                 verifiedMetadataBackups=new['verifiedMetadataBackups'],
                 backupSemanticProofs=backup_proofs,
                 deletedGenerationFilesAbsent=new['deletedGenerationFilesAbsent'],garbageCollectorResponsibilityProved=False,
-                allLiveVersionsFourShards=True,exactAckVersionPopulation=True,casePassClaimed=False,
+                allLiveVersionsFourShards=disk_count==4,allLiveVersionsFullSet=True,shardsPerVersion=disk_count,exactAckVersionPopulation=True,casePassClaimed=False,
                 overlapProved=False,publicApiDeletionProved=False)

@@ -286,7 +286,7 @@ def run_branch(args, topology, nodes, branch):
     reference = race.COPY_REFERENCE
     directory = args.evidence / topology / branch; directory.mkdir(parents=True, exist_ok=False)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
-    fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile='manual')
+    fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile='frozen-race-legacy')
     inspector = fleet.record('inspector-build', verify_inspector(args.tool_directory, candidate))
     bucket = 'rv-heal-' + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)

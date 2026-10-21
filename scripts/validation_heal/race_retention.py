@@ -15,6 +15,7 @@ except ImportError:
 CASE = 'heal.race-unversioned-overwrite'
 CASES = {CASE: ('unresolved-g01-race', {'overwrite-vs-deep', 'overwrite-vs-read-repair'}),
          'heal.race-versioned-put': ('unresolved-g02-race', {'new-version-vs-historical-heal', 'read-all-versions-during-heal'}),
+         'heal.race-markers-and-batch-delete': ('unresolved-g04-race', {'create-marker','delete-marker','batch-version-delete','unversioned-delete'}),
          'heal.admin-nolock-safety': ('unresolved-a09-race', {'overwrite-nolock', 'delete-nolock'}),
          'heal.race-multipart-complete-abort': ('unresolved-g05-race', {'upload-continue', 'complete', 'abort'}),
          'heal.race-copy-and-metadata-update': ('unresolved-g06-race', {'copy-source', 'copy-destination', 'replace-metadata', 'update-tags'})}
@@ -41,7 +42,10 @@ def validate(plan):
     for node in plan['nodes']:
         owner = plan['owners'][node]
         require(owner.get('runId') == plan['runId'] and owner.get('bucket') == plan['bucket']
-                and owner.get('runtimeProfile') == 'manual' and owner.get('binarySha256') == plan['binarySha256']
+                and (owner.get('runtimeProfile') == 'manual' or
+                     owner.get('runtimeProfile') == 'frozen-race-legacy'
+                     and plan['kind'] in {'unresolved-g04-race', 'unresolved-g05-race'})
+                and owner.get('binarySha256') == plan['binarySha256']
                 and owner.get('unit') == 'rustfs-validation-heal-' + plan['runId'] + '.service'
                 and len(owner.get('mounts', [])) == 4
                 and re.fullmatch(r'[0-9a-f]{64}', plan['businessSceneSha256'][node]),
@@ -71,7 +75,8 @@ def archived_plan(artifact, failed_run, candidate):
     rows = summary.get('results', [])
     retained = [row for row in rows if row.get('cleanup') != 'PASS']
     require(summary.get('caseId') == case and summary.get('cleanup') == 'FAIL' and len(retained) == 1
-            and retained[0].get('verdict') == 'FAIL' and retained[0].get('topology') in {'H1', 'H2'}
+            and retained[0].get('verdict') in ({'FAIL','NOT_OBSERVED'} if kind=='unresolved-g04-race' else {'FAIL'})
+            and retained[0].get('topology') in {'H1', 'H2'}
             and retained[0].get('branch') in branches
             and all(row.get('caseId', case if kind == 'unresolved-a09-race' else None) == case for row in rows),
             'G01/G02 isolation requires one unmixed retained public branch')
@@ -97,15 +102,19 @@ def archived_plan(artifact, failed_run, candidate):
             and all(item.get('reserved') is True for item in reservations), 'G01/G02 isolation lacks all reserved hosts')
     ack_files = {}
     multipart = kind == 'unresolved-g05-race'
+    markers = kind == 'unresolved-g04-race'
     read_journals = (['mpu-read-ACKs', *['final-read-ACKs-node' + str(i) for i in range(1, len(owners) + 1)]]
-                     if multipart else [])
+                     if multipart else ['negative-read-ACKs-node'+str(i) for i in range(1,len(owners)+1)] if markers else [])
     if multipart:
         require({path.name for path in folder.glob('final-read-ACKs-*')} <= set(read_journals),
                 'G05 isolation has an unbound final peer read journal')
+    if markers:
+        require({path.name for path in folder.glob('negative-read-ACKs-*')} <= set(read_journals),
+                'G04 isolation has an unbound negative peer read journal')
     for name in ('seed-ACKs', 'foreground-ACKs', 'historical-read-ACKs', *read_journals):
         journal = folder / name
         entries = sorted(journal.glob('*.json'))
-        if name == 'historical-read-ACKs' or name in read_journals or multipart and name == 'foreground-ACKs':
+        if name == 'historical-read-ACKs' or name in read_journals or (multipart or markers) and name == 'foreground-ACKs':
             require(len(entries) <= 1024, 'G02 historical journal exceeds its bound')
             if not entries: continue
         require(0 < len(entries) <= 1024, 'G01/G02 isolation lacks its bounded original request/ACK journal')
@@ -113,6 +122,15 @@ def archived_plan(artifact, failed_run, candidate):
             require(any(re.fullmatch(r'[0-9]{6}-request\.json', path.name) for path in entries),
                     'G05 isolation requires an original SDK request, not only a model manifest')
         for path in entries:
+            if markers and name in read_journals and re.fullmatch(r'[0-9]{6}-negative-proof\.json',path.name):
+                require(path.stat().st_size<=1024**2,'G04 negative proof exceeds its evidence bound')
+                item=json.loads(path.read_text());expected=item.get('expected') or {};params=expected.get('params') or {}
+                require(params.get('Bucket')==binding['bucketPrefix']
+                        and params.get('Key') in {f'objects-{i:04d}.bin' for i in range(257)}
+                        and expected.get('httpStatus') in (404,405) and item.get('state') in ('PASS','FAIL')
+                        and item.get('canonicalCasePassClaimed') is False,
+                        'G04 negative proof belongs to another object or contract')
+                ack_files[name+'/'+path.name]=hashlib.sha256(path.read_bytes()).hexdigest();continue
             if multipart and re.fullmatch(r'mpu-manifest-[0-9]{4}\.json', path.name):
                 require(path.stat().st_size <= 1024**2, 'G05 isolation multipart manifest exceeds its bound')
                 item = json.loads(path.read_text())
@@ -128,7 +146,7 @@ def archived_plan(artifact, failed_run, candidate):
             # A missing/unknown ACK remains unknown. Isolation never infers its
             # effect or sends another request, including for explicit refusals.
             operation = item.get('operation') if path.name.endswith('-request.json') else (item.get('observation') or {}).get('operation')
-            if multipart:
+            if multipart or markers:
                 request_item = item
                 if path.name.endswith('-ack.json'):
                     request_name = item.get('requestFile', '')
@@ -148,10 +166,17 @@ def archived_plan(artifact, failed_run, candidate):
                         'G05 isolation SDK request belongs to another reserved bucket')
                 if operation in {'create_multipart_upload', 'upload_part', 'complete_multipart_upload',
                                  'abort_multipart_upload', 'list_parts', 'get_object', 'head_object', 'get_object_tagging'}:
-                    require(params.get('Key') == 'objects-0256.bin', 'G05 isolation SDK request changed its frozen multipart key')
+                    if multipart:require(params.get('Key') == 'objects-0256.bin', 'G05 isolation SDK request changed its frozen multipart key')
+                if markers:
+                    keys=([v.get('Key') for v in params.get('Delete',{}).get('Objects',[])] if operation=='delete_objects'
+                          else [params.get('Key')] if 'Key' in params else [])
+                    require(all(isinstance(key,str) and key in {f'objects-{i:04d}.bin' for i in range(257)} for key in keys)
+                            and (operation!='delete_objects' or 0<len(keys)<=4),
+                            'G04 isolation SDK request changed its bounded flat key set')
             allowed = ({'list_multipart_uploads', 'list_parts', 'list_object_versions', 'get_object', 'head_object',
                         'get_object_tagging'} if multipart and name in read_journals else
-                       {'get_object'} if name == 'historical-read-ACKs' else
+                       {'get_object'} if name == 'historical-read-ACKs' or markers and name in read_journals else
+                       {'create_bucket','put_bucket_versioning','put_object','delete_object','delete_objects'} if markers else
                        {'create_bucket', 'put_bucket_versioning', 'put_object', 'create_multipart_upload',
                         'upload_part', 'complete_multipart_upload', 'abort_multipart_upload'} if multipart else
                        {'create_bucket', 'put_object', 'copy_object', 'put_object_tagging'} if kind == 'unresolved-g06-race' else

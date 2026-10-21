@@ -47,8 +47,11 @@ def run(request, node):
                 and request['branch'] in CAP_BRANCHES.get(request['caseId'], ())),
             'write cap requires a registered frozen public race; G05 forbids this cap')
     state, roots, owner = node['owned'](request['runId'])
-    require(owner.get('runtimeProfile') == 'manual' and len(roots) == len(node['MOUNTS']) == 4,
-            'write cap requires the original four-drive manual owner')
+    legacy_case = (observing or request['caseId'] == 'heal.race-markers-and-batch-delete')
+    require((owner.get('runtimeProfile') == 'manual' or
+             owner.get('runtimeProfile') == 'frozen-race-legacy' and legacy_case)
+            and len(roots) == len(node['MOUNTS']) == 4,
+            'write cap requires the original four-drive race owner')
     expected = request['expectedProcess']
     def process():
         actual = node['process'](request)

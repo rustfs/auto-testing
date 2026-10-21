@@ -294,6 +294,60 @@ class RaceRetentionTests(unittest.TestCase):
             path.write_text(json.dumps({'runId': 'gh-12345-1-h2', 'operation': 'abort_multipart_upload'}))
             with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
 
+    def test_g04_unknown_batch_and_all_negative_peer_proofs_stay_bound_for_isolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root,candidate,folder=self.archive(directory)
+            original=next(root.glob('*/run/*'));case='heal.race-markers-and-batch-delete'
+            run=original.with_name(case);original.rename(run)
+            old=run/'cases'/(controller.CASE+'.json');value=json.loads(old.read_text());value['case_id']=case
+            old.rename(old.with_name(case+'.json'));(run/'cases'/(case+'.json')).write_text(json.dumps(value))
+            old=run/'evidence'/controller.CASE;evidence=old.with_name(case);old.rename(evidence)
+            old=evidence/'H2/overwrite-vs-deep';folder=old.with_name('batch-version-delete');old.rename(folder)
+            summary={'caseId':case,'cleanup':'FAIL','results':[{'caseId':case,'cleanup':'FAIL','verdict':'FAIL',
+                     'topology':'H2','branch':'batch-version-delete'}]}
+            (evidence/'healthy-summary.json').write_text(json.dumps(summary))
+            binding=json.loads((folder/'00001-binding.json').read_text());bucket=binding['bucketPrefix']
+            for journal,operation,params in [('seed-ACKs','put_object',{'Bucket':bucket,'Key':'objects-0256.bin'}),
+                ('foreground-ACKs','delete_objects',{'Bucket':bucket,'Delete':{'Quiet':False,'Objects':[
+                    {'Key':key,'VersionId':str(i)} for i,key in enumerate(['objects-0256.bin']*3+['objects-0002.bin'])]}})]:
+                request={'runId':binding['runId'],'operation':operation,'params':params}
+                (folder/journal/'000001-request.json').write_text(json.dumps(request))
+            # All peers may have read-only diagnostics even after another final assertion failed.
+            for i in range(1,5):
+                journal=folder/f'negative-read-ACKs-node{i}';journal.mkdir()
+                params={'Bucket':bucket,'Key':'objects-0256.bin','VersionId':'old'}
+                request={'runId':binding['runId'],'operation':'get_object','params':params}
+                path=journal/'000001-request.json';path.write_text(json.dumps(request))
+                (journal/'000001-ack.json').write_text(json.dumps({'runId':binding['runId'],'requestFile':path.name,
+                    'requestSha256':hashlib.sha256(path.read_bytes()).hexdigest(),'observation':{'operation':'get_object'}}))
+                (journal/'000001-negative-proof.json').write_text(json.dumps({'expected':{'params':params,'httpStatus':404},
+                    'state':'FAIL','canonicalCasePassClaimed':False}))
+            plan=recovery.recovery_plan(root,12345,candidate)[0]
+            self.assertEqual(plan['kind'],'unresolved-g04-race')
+            proof=folder/'negative-read-ACKs-node4/000001-negative-proof.json'
+            original=proof.read_bytes();value=json.loads(original);value['state']='PASS';proof.write_text(json.dumps(value))
+            self.assertNotEqual(recovery.recovery_plan(root,12345,candidate)[0]['ackFilesSha256'],plan['ackFilesSha256'])
+            for fault in ('foreign-bucket','foreign-key','unexpected-operation','digest','foreign-peer'):
+                with self.subTest(fault=fault):
+                    proof.write_bytes(original);request=folder/'negative-read-ACKs-node4/000001-request.json';raw=request.read_bytes()
+                    if fault=='foreign-peer':
+                        foreign=folder/'negative-read-ACKs-node5';foreign.mkdir()
+                    elif fault=='digest':request.write_text(raw.decode()+' ')
+                    elif fault=='unexpected-operation':
+                        item=json.loads(raw);item['operation']='delete_object';request.write_text(json.dumps(item))
+                    else:
+                        item=json.loads(original);item['expected']['params']['Bucket' if fault=='foreign-bucket' else 'Key']='foreign'
+                        proof.write_text(json.dumps(item))
+                    with self.assertRaises(ValueError):recovery.recovery_plan(root,12345,candidate)
+                    request.write_bytes(raw)
+                    if fault=='foreign-peer':foreign.rmdir()
+            proof.write_bytes(original)
+            # A pre-foreground failure retains seed uncertainty without inventing a writer receipt.
+            shutil.rmtree(folder/'foreground-ACKs')
+            summary['results'][0]['verdict']='NOT_OBSERVED';(evidence/'healthy-summary.json').write_text(json.dumps(summary))
+            self.assertEqual(recovery.recovery_plan(root,12345,candidate)[0]['kind'],'unresolved-g04-race')
+
+
     def mpu_archive(self, directory, *, foreground=False):
         root,candidate,folder = self.archive(directory)
         original = next(root.glob('*/run/*'));case = 'heal.race-multipart-complete-abort'

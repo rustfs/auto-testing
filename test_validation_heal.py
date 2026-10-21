@@ -963,6 +963,12 @@ class HealNodeOutageTest(unittest.TestCase):
 
     def test_mrf_profile_is_explicit_and_cannot_enable_unrelated_background_sources(self):
         self.assertEqual(runtime_config("manual"), BACKGROUND_CONFIG)
+        legacy = runtime_config("frozen-race-legacy")
+        self.assertEqual(legacy["RUSTFS_SHARD_INTEGRITY_WRITE"], "false")
+        self.assertEqual(legacy["RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED"], "false")
+        self.assertEqual(legacy["RUSTFS_PUT_RENAME_EARLY_ACK_ENABLE"], "false")
+        self.assertEqual(legacy["RUSTFS_HEAL_MAX_CONCURRENT_HEALS"], "1")
+        self.assertEqual(legacy["RUST_LOG"], "info")
         replay = runtime_config("offline-replay")
         self.assertEqual(replay.pop("RUSTFS_HEAL_MRF_ENABLE"), "true")
         self.assertEqual(replay, {key: value for key, value in BACKGROUND_CONFIG.items() if key != "RUSTFS_HEAL_MRF_ENABLE"})

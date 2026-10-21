@@ -26,7 +26,7 @@ def keys_for(endpoints):
 
 
 def validate_scope(owner, keys):
-    if owner.get('runtimeProfile') == 'manual':
+    if owner.get('runtimeProfile') in {'manual', 'frozen-race-legacy'}:
         require(re.fullmatch(r'rv-heal-[0-9a-f]{16}', owner.get('bucket', ''))
                 and keys == [G05_KEY], 'G05 MPU retention requires its one frozen same-key prefix')
         return 'the original G05 bucket/key SHA-256 prefix, including unknown upload IDs; not a bitrot/EC proof'
@@ -47,7 +47,7 @@ def run(request, node):
     require(set(request) == {'runId', 'action', 'bucket', 'keys', 'expectedBinarySha256'}
             and request['action'] == 'mpu-scene', 'MPU scene accepts only an exact owned read-only scope')
     state, roots, owner = node['owned'](request['runId'])
-    require(owner.get('runtimeProfile') in {'lock-quorum', 'manual'} and owner.get('bucket') == request['bucket']
+    require(owner.get('runtimeProfile') in {'lock-quorum', 'manual', 'frozen-race-legacy'} and owner.get('bucket') == request['bucket']
             and owner.get('binarySha256') == request['expectedBinarySha256']
             and re.fullmatch(r'[0-9a-f]{64}', request['expectedBinarySha256']) is not None and len(roots) == 4,
             'MPU scene candidate/runtime/primary bucket differs from the owned H2 fixture')
@@ -79,7 +79,7 @@ def run(request, node):
                     directories.append({'disk': disk, 'path': relative, 'key': key})
                     children = []
                     for child in path.iterdir():
-                        require(len(children) < (3 if depth == 0 and owner['runtimeProfile'] == 'manual' else MAX_FILES),
+                        require(len(children) < (3 if depth == 0 and owner['runtimeProfile'] in {'manual', 'frozen-race-legacy'} else MAX_FILES),
                                 'MPU scene directory population exceeded its bound')
                         children.append(child)
                     for child in sorted(children):

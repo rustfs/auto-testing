@@ -54,7 +54,7 @@ def run(request, node):
             and request['action'] == 'mpu-race-scene' and type(request['quiescent']) is bool,
             'G05 census accepts an exact owned read-only upload scope')
     state, roots, owner = node['owned'](request['runId'])
-    require(owner.get('runtimeProfile') == 'manual' and owner.get('bucket') == request['bucket']
+    require(owner.get('runtimeProfile') in {'manual', 'frozen-race-legacy'} and owner.get('bucket') == request['bucket']
             and owner.get('binarySha256') == request['expectedBinarySha256']
             and re.fullmatch(r'[0-9a-f]{64}', request['expectedBinarySha256']) and len(roots) == 4,
             'G05 census owner/runtime/binary differs')

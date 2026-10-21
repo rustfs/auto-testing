@@ -72,7 +72,7 @@ class RaceTests(unittest.TestCase):
             with patch('scripts.validation_heal.mpu_race_runner.run_branch', return_value={'owned': True}) as execute, \
                  patch.object(race, 'Fleet', side_effect=AssertionError('generic fleet must not run')):
                 candidate.write_text(json.dumps({'source_sha': race.REFERENCE['candidateCommit']}))
-                with self.assertRaisesRegex(ValueError, 'exact-source multipart'):
+                with self.assertRaisesRegex(ValueError, 'exact-source multipart or marker'):
                     race.run_branch(args, 'H1', ['vm000'], 'upload-continue')
                 execute.assert_not_called()
                 candidate.write_text(json.dumps({'source_sha': race.COPY_CANDIDATE}))
@@ -80,17 +80,18 @@ class RaceTests(unittest.TestCase):
                     self.assertEqual(race.run_branch(args, 'H1', ['vm000'], branch), {'owned': True})
                     execute.assert_called_with(args, 'H1', ['vm000'], branch)
 
-    def test_g04_preserves_marker_and_batch_delete_semantics(self):
-        expected = [{"key": race.TARGET_KEY, "versionId": value, "isLatest": value == "v2",
-                     "deleteMarker": False} for value in ("v0", "v1", "v2")]
-        with_marker = [*expected, {"key": race.TARGET_KEY, "versionId": "marker", "isLatest": True, "deleteMarker": True}]
-        self.assertEqual(race.operation_plan("rv-heal-0123456789abcdef", "create-marker", expected)[0]["operation"],
-                         "delete_object")
-        self.assertEqual(race.operation_plan("rv-heal-0123456789abcdef", "delete-marker", with_marker)[0]["params"]["VersionId"],
-                         "marker")
-        batch = race.operation_plan("rv-heal-0123456789abcdef", "batch-version-delete", expected)[0]
-        self.assertEqual(batch["operation"], "delete_objects")
-        self.assertEqual(len(batch["params"]["Delete"]["Objects"]), 2)
+    def test_g04_uses_complete_frozen_marker_controller_and_rejects_legacy_before_bootstrap(self):
+        with tempfile.TemporaryDirectory() as d:
+            candidate=Path(d)/'candidate.json';args=SimpleNamespace(case_id=race.CASE_IDS[3],candidate=candidate)
+            with patch('scripts.validation_heal.version_race_runner.run_branch',return_value={'owned':True}) as execute, \
+                 patch.object(race,'Fleet',side_effect=AssertionError('generic fleet must not run')):
+                candidate.write_text(json.dumps({'source_sha':race.REFERENCE['candidateCommit']}))
+                with self.assertRaisesRegex(ValueError,'exact-source'):race.run_branch(args,'H1',['vm000'],'create-marker')
+                execute.assert_not_called()
+                candidate.write_text(json.dumps({'source_sha':race.MARKER_CANDIDATE}))
+                for branch in race.G04_BRANCHES:
+                    self.assertEqual(race.run_branch(args,'H1',['vm000'],branch),{'owned':True})
+                    execute.assert_called_with(args,'H1',['vm000'],branch)
 
     def test_native_branch_remains_in_denominator_for_each_case(self):
         for case_id, branches in race.CASE_BRANCHES.items():

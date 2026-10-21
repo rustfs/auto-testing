@@ -33,6 +33,13 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
+    if profile == "frozen-race-legacy":
+        # The frozen G04/G05 fixture predates protected shard sidecars. Keep
+        # its exact file population and serial Heal scheduling explicit.
+        return {**BACKGROUND_CONFIG, "RUSTFS_SHARD_INTEGRITY_WRITE": "false",
+                "RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED": "false",
+                "RUSTFS_PUT_RENAME_EARLY_ACK_ENABLE": "false",
+                "RUSTFS_HEAL_MAX_CONCURRENT_HEALS": "1", "RUST_LOG": "info"}
     if profile in {"incarnation-checkpoint", "incarnation-mrf"}:
         logging_filter = "info,rustfs::heal::manager=debug,rustfs::heal::task=debug,rustfs::heal::mrf=debug"
         return {**BACKGROUND_CONFIG, "RUSTFS_HEAL_MRF_ENABLE": "true" if profile == "incarnation-mrf" else "false",
@@ -544,7 +551,7 @@ def start(request):
                 "J02 phase commit is incomplete; service cannot start")
         if owner.get("outcomePhase") == "legacy":
             outcome_legacy_phase({"runId": owner["runId"], "action": "outcome-legacy-phase"})
-    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf", "outcome-legacy"}:
+    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf", "outcome-legacy", "frozen-race-legacy"}:
         runtime_configuration(state, owner)
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",

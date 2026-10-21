@@ -28,7 +28,9 @@ def run(request,node):
     key = KEY if request['action']=='mpu-race-backups' else 'objects/0256.bin'
     generations = 3 if request['action']=='mpu-race-backups' else 6
     state,roots,owner=node['owned'](request['runId'])
-    require(owner.get('runtimeProfile')=='manual' and owner.get('bucket')==request['bucket']
+    require((owner.get('runtimeProfile')=='manual' or
+             owner.get('runtimeProfile')=='frozen-race-legacy' and request['action']=='mpu-race-backups')
+            and owner.get('bucket')==request['bucket']
             and owner.get('binarySha256')==request['expectedBinarySha256']
             and owner.get('inspectorSha256')==request['expectedInspectorSha256']
             and all(re.fullmatch(r'[0-9a-f]{64}',request[k]) for k in ('expectedBinarySha256','expectedInspectorSha256'))

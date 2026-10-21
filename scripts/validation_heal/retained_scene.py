@@ -99,7 +99,7 @@ def census(folder, owner, *, state, node, mpu_keys=()):
     multipart_keys = {hashlib.sha256(f"{owner['bucket']}/dl/{endpoint}/{name}.bin".encode()).hexdigest()
                       for endpoint in ("node1", "node3", "node4")
                       for name in ("abort", "complete", "create", "upload")} if network else set()
-    if mpu_keys and owner.get('runtimeProfile') == 'manual':
+    if mpu_keys and owner.get('runtimeProfile') in {'manual', 'frozen-race-legacy'}:
         node['mpu_scene_backend'].validate_scope(owner, mpu_keys)
         multipart_keys = {hashlib.sha256(f"{owner['bucket']}/{key}".encode()).hexdigest() for key in mpu_keys}
     def visit(path):
@@ -139,9 +139,10 @@ def census(folder, owner, *, state, node, mpu_keys=()):
             opaque_backup = (not state and owner.get("runtimeProfile") == "outcome-legacy"
                              and len(parts) == 2 and parts[0] == "quarantine"
                              and re.fullmatch(r"J02-[0-9a-f]{32}\.(original|intent\.json|applied\.json|failed-[0-9a-f]{64})", parts[1]))
-            race_backup = (not state and owner.get("runtimeProfile") == "manual"
+            race_backup = (not state and owner.get("runtimeProfile") in {"manual", "frozen-race-legacy"}
                            and len(parts) == 2 and parts[0] == "quarantine"
-                           and re.fullmatch(r"(?:G0[1256]|A09)-[a-z0-9-]{1,48}\.(original|intent\.json|applied\.json)", parts[1]))
+                           and re.fullmatch((r"G0[45]" if owner.get("runtimeProfile") == "frozen-race-legacy" else r"(?:G0[12456]|A09)")
+                                           + r"-[a-z0-9-]{1,48}\.(original|intent\.json|applied\.json)", parts[1]))
             if network_mpu and not network:
                 require(info.st_size <= 64 * 1024**2
                         and mpu_bytes_hashed + info.st_size <= node['mpu_scene_backend'].MAX_BYTES,
@@ -179,7 +180,7 @@ def mounted_paths():
 def inspect(request, node):
     state, roots = node["paths"](request["runId"])
     expected = request["expectedOwner"]
-    per_run = expected.get("runtimeProfile") in {"outcome-legacy", "lock-quorum", "manual"}
+    per_run = expected.get("runtimeProfile") in {"outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy"}
     retained_state, retained_roots = destinations(state, roots, per_run_parent=per_run)
     if per_run:
         old_state, old_roots = destinations(state, roots)
@@ -189,7 +190,7 @@ def inspect(request, node):
     require(isinstance(expected, dict) and expected.get("runId") == request["runId"]
             and expected.get("unit") == node["unit"](request["runId"])
             and expected.get("hostname") == node["socket"].gethostname()
-            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual"}, "retained scene archived owner differs")
+            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy"}, "retained scene archived owner differs")
     current = node["mounts"]()
     require(len(current) == len(expected.get("mounts", [])) == 4
             and all(all(actual[key] == old[key] for key in ("target", "source", "fstype", "uuid", "maj:min"))
@@ -233,12 +234,12 @@ def inspect(request, node):
     intent = retained_state.parent / (request["runId"] + ".intent.json")
     node["checked"](intent, state.parent)
     network = expected["runtimeProfile"] == "lock-quorum"
-    if expected["runtimeProfile"] in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual"}:
+    if expected["runtimeProfile"] in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy"}:
         original_sha = request.get("expectedOriginalSceneSha256", "")
         require(re.fullmatch(r"[0-9a-f]{64}", original_sha) is not None,
                 "restored fixture requires its original physical scene digest")
         baseline["originalSceneSha256"] = original_sha
-        multipart = network or expected['runtimeProfile'] == 'manual' and 'mpuKeys' in request
+        multipart = network or expected['runtimeProfile'] in {'manual', 'frozen-race-legacy'} and 'mpuKeys' in request
         if multipart:
             node['mpu_scene_backend'].validate_scope(expected, request['mpuKeys'])
             require(re.fullmatch(r"[0-9a-f]{64}", request.get("expectedMpuSceneSha256", "")) is not None,
@@ -269,10 +270,10 @@ def inspect(request, node):
 
 def run(request, node):
     fields = {"runId", "action", "expectedOwner"}
-    if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual"}:
+    if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy"}:
         fields.add("expectedOriginalSceneSha256")
     if request.get("expectedOwner", {}).get("runtimeProfile") == "lock-quorum" or (
-            request.get('expectedOwner', {}).get('runtimeProfile') == 'manual'
+            request.get('expectedOwner', {}).get('runtimeProfile') in {'manual', 'frozen-race-legacy'}
             and ('mpuKeys' in request or 'expectedMpuSceneSha256' in request)):
         fields.update({"expectedMpuSceneSha256", "mpuKeys"})
     if request["action"] == "retained-scene-isolate":
@@ -308,7 +309,7 @@ def run(request, node):
             "originalSceneRestored": False, "canonicalPassClaimed": False, "backupRestorationUsed": False,
             "credentialContentsRead": False, "inspectionOnly": request["action"] == "retained-scene-audit",
             "mutated": mutated, "activeNamespaceIsolated": "active" not in locations}
-    if request["expectedOwner"].get("runtimeProfile") in {"outcome-legacy", "lock-quorum", "manual"}:
+    if request["expectedOwner"].get("runtimeProfile") in {"outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy"}:
         result["privateArchiveParents"] = []
         for target in (*retained_roots, retained_state):
             info = target.parent.lstat() if target.parent.exists() else None
