@@ -18,7 +18,7 @@ except ImportError:
     from heal_probe import CLOCK_DOMAIN, Probe, canonical, require, save, validate_binding, validate_s3_request
 
 
-def disconnect_get(probe, bucket, key, version_id, output):
+def disconnect_get(probe, bucket, key, version_id, output, *, before_disconnect=None):
     """Record intent, send once, close the caller socket, retain UNKNOWN.
 
     The caller must independently establish server admission, lock ownership,
@@ -36,6 +36,7 @@ def disconnect_get(probe, bucket, key, version_id, output):
             and probe.endpoint == probe.binding['endpoints'][probe.endpoint_name].rstrip('/'),
             'caller endpoint differs from the current binding')
     endpoint = urlsplit(probe.endpoint)
+    marker = 'auto-testing-i05/' + str(uuid.uuid4())
     path = '/' + quote(bucket, safe='') + '/' + quote(key, safe='/~')
     target = path + '?' + urlencode({'versionId': version_id})
     from botocore.auth import S3SigV4Auth
@@ -45,7 +46,7 @@ def disconnect_get(probe, bucket, key, version_id, output):
     token = None if probe.credential_pair else os.environ.get('HEAL_SESSION_TOKEN')
     outgoing = AWSRequest(method='GET', url=probe.endpoint + target, headers={
         'Host': endpoint.netloc, 'x-amz-content-sha256': hashlib.sha256(b'').hexdigest(),
-        'Connection': 'close', 'Content-Length': '0'})
+        'Connection': 'close', 'Content-Length': '0', 'User-Agent': marker})
     S3SigV4Auth(Credentials(access, secret, token), 's3', 'us-east-1').add_auth(outgoing)
     output = Path(output)
     output.mkdir(exist_ok=False)
@@ -62,10 +63,12 @@ def disconnect_get(probe, bucket, key, version_id, output):
         'bindingSha256': hashlib.sha256(bound.encode()).hexdigest(),
         'endpoint': probe.endpoint_name, 'endpointUrl': probe.endpoint,
         'operation': 'get_object', 'params': params,
+        'callerMarker': marker, 'requestTarget': target,
         'clockDomain': CLOCK_DOMAIN, 'preparedMonotonicNs': time.monotonic_ns(),
         'retryAllowed': False, 'canonicalCasePassClaimed': False})
     evidence = {'schemaVersion': 1, 'runId': probe.binding['runId'],
         'requestSha256': hashlib.sha256(intent_path.read_bytes()).hexdigest(),
+        'callerMarker': marker, 'requestTarget': target,
         'clockDomain': CLOCK_DOMAIN, 'requestInvocationStarted': False, 'requestWriteCompleted': False,
         'responseObserved': False, 'resultUnknown': True, 'acknowledged': False,
         'retryAllowed': False, 'serverOwnershipProven': False, 'canonicalCasePassClaimed': False}
@@ -92,6 +95,12 @@ def disconnect_get(probe, bucket, key, version_id, output):
         connection.request('GET', target, headers=dict(outgoing.headers.items()))
         evidence.update(requestWriteCompleted=True, requestWrittenMonotonicNs=time.monotonic_ns())
         save(output / 'request-written.json', evidence)
+        if before_disconnect is not None:
+            # Observe the service without reading this request's response.
+            # An observer failure still reaches the socket-closing finally.
+            before_disconnect(json.loads(json.dumps(evidence)))
+            validate_binding(probe.binding)
+            require(canonical(probe.binding) == bound, 'caller binding changed during service observation')
         evidence['disconnectStartedMonotonicNs'] = time.monotonic_ns()
         sock.shutdown(socket.SHUT_RDWR)
         evidence['shutdownCompleted'] = True

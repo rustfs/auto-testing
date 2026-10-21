@@ -33,6 +33,12 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
 
 
 def runtime_config(profile):
+    if profile == "lock-timeout":
+        logging_filter = "info,rustfs_ecstore::object_lock_diag=trace"
+        return {**BACKGROUND_CONFIG, "RUSTFS_OBJECT_LOCK_DIAG_ENABLE": "true",
+                "RUSTFS_OBJECT_LOCK_ACQUIRE_TIMEOUT": "1",
+                "RUSTFS_PUT_RENAME_EARLY_ACK_ENABLE": "false",
+                "RUSTFS_OBS_LOGGER_LEVEL": logging_filter, "RUST_LOG": logging_filter}
     if profile == "frozen-race-legacy":
         # The frozen G04/G05 fixture predates protected shard sidecars. Keep
         # its exact file population and serial Heal scheduling explicit.
@@ -551,7 +557,7 @@ def start(request):
                 "J02 phase commit is incomplete; service cannot start")
         if owner.get("outcomePhase") == "legacy":
             outcome_legacy_phase({"runId": owner["runId"], "action": "outcome-legacy-phase"})
-    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf", "outcome-legacy", "frozen-race-legacy"}:
+    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf", "outcome-legacy", "frozen-race-legacy", "lock-timeout"}:
         runtime_configuration(state, owner)
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
@@ -1866,6 +1872,7 @@ def main(request):
     actions.update({"replace-drive": replace_drive, "replacement-state": replacement_state, "replacement-probe": replacement_probe})
     actions.update({"format-export": format_export, "foreign-format": foreign_format, "restore-replacement": restore_replacement})
     actions.update({"process": process, "process-metrics": process_metrics, "process-signal": process_signal, "process-graceful": process_graceful, "process-crash": process_crash})
+    actions["caller-socket"] = lambda req: caller_socket_backend.run(req, globals())
     require(request.get("action") in actions, "unsupported node operation")
     try:
         result = actions[request["action"]](request)

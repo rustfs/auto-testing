@@ -60,7 +60,7 @@ class CallerAbortTests(unittest.TestCase):
     def invoke(self, output=None, **changes):
         return caller_abort.disconnect_get(self.probe, changes.get('bucket', self.binding['bucketPrefix']),
             changes.get('key', '中文/literal%2F space.bin'), changes.get('version', VERSION),
-            output or self.root / 'call')
+            output or self.root / 'call', before_disconnect=changes.get('before_disconnect'))
 
     def test_one_signed_exact_version_get_closes_real_socket_and_retains_unknown(self):
         proof = self.invoke()
@@ -71,6 +71,8 @@ class CallerAbortTests(unittest.TestCase):
         self.assertEqual(path, '/rv-heal-0123456789abcdef/%E4%B8%AD%E6%96%87/literal%252F%20space.bin?versionId=' + VERSION)
         self.assertTrue(headers['Authorization'].startswith('AWS4-HMAC-SHA256 Credential=private-test-access/'))
         self.assertEqual(headers['Host'], f'127.0.0.1:{self.server.server_port}')
+        self.assertEqual(headers['User-Agent'], proof['callerMarker'])
+        self.assertEqual(path, proof['requestTarget'])
         from botocore.auth import S3SigV4Auth
         from botocore.awsrequest import AWSRequest
         from botocore.credentials import Credentials
@@ -96,6 +98,37 @@ class CallerAbortTests(unittest.TestCase):
         text = ''.join(p.read_text() for p in (self.root / 'call').iterdir())
         for secret in ('private-test-access', 'private-test-secret', 'Authorization'):
             self.assertNotIn(secret, text)
+
+    def test_observer_runs_after_durable_write_while_caller_socket_is_open(self):
+        observations = []
+        def observer(sent):
+            self.assertEqual(json.loads((self.root / 'call/request-written.json').read_text()), sent)
+            self.assertFalse(self.server.disconnected.is_set())
+            observations.append(sent['callerMarker'])
+            sent['serverOwnershipProven'] = True
+        proof = self.invoke(before_disconnect=observer)
+        self.assertEqual(observations, [proof['callerMarker']])
+        self.assertFalse(proof['serverOwnershipProven'])
+        self.assertTrue(self.server.disconnected.wait(3))
+
+    def test_observer_failure_closes_only_the_caller_and_retains_unknown(self):
+        def observer(sent):
+            raise ValueError('no service ownership window')
+        with self.assertRaisesRegex(ValueError, 'no service ownership'):
+            self.invoke(before_disconnect=observer)
+        self.assertTrue(self.server.disconnected.wait(3))
+        proof = json.loads((self.root / 'call/disconnected.json').read_text())
+        self.assertTrue(proof['clientSocketClosed'] and proof['resultUnknown'])
+        self.assertNotIn('disconnectStartedMonotonicNs', proof)
+        self.assertEqual(len(self.server.requests), 1)
+
+    def test_observer_binding_drift_aborts_and_closes_without_another_request(self):
+        def observer(sent):
+            self.probe.binding['candidateCommit'] = 'f' * 40
+        with self.assertRaisesRegex(ValueError, 'binding changed during'):
+            self.invoke(before_disconnect=observer)
+        self.assertTrue(self.server.disconnected.wait(3))
+        self.assertEqual(len(self.server.requests), 1)
 
     def test_existing_evidence_directory_prevents_replay_without_another_connection(self):
         self.invoke()

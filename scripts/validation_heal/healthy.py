@@ -137,7 +137,7 @@ def validate_healthy(status, bucket, key, disposition):
 
 class Fleet:
     def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
-        require(runtime_profile in {"frozen-race-legacy", "outcome-legacy", "outcome-grace", "queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation", "incarnation-checkpoint", "incarnation-mrf"}, "unsupported Heal runtime profile")
+        require(runtime_profile in {"lock-timeout", "frozen-race-legacy", "outcome-legacy", "outcome-grace", "queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation", "incarnation-checkpoint", "incarnation-mrf"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
@@ -185,6 +185,9 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
+        if action == "caller-socket":
+            source += "\nimport types\ncaller_socket_backend = types.ModuleType('caller_socket')\nexec(" + repr(
+                NODE_SOURCE.with_name("caller_socket.py").read_text()) + ", caller_socket_backend.__dict__)\n"
         if action in {"mpu-race-backups", "version-race-backups"}:
             source += "\nimport types\nmpu_race_backups_backend = types.ModuleType('mpu_race_backups')\nexec(" + repr(
                 NODE_SOURCE.with_name("mpu_race_backups.py").read_text()) + ", mpu_race_backups_backend.__dict__)\n"

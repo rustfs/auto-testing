@@ -30,9 +30,10 @@ def null_version(value):
 
 
 class JournalWindow:
-    def __init__(self, fleet, label, *, event_targets=None):
+    def __init__(self, fleet, label, *, event_targets=None, strict_json=False):
         self.fleet, self.label = fleet, label
         self.event_targets = event_targets
+        self.strict_json = strict_json
         self.events = {node: [] for node in fleet.nodes}
         self.cursors = {}
         for node in fleet.nodes:
@@ -52,7 +53,10 @@ class JournalWindow:
                 self.cursors[node] = observed["afterCursor"]
                 for line in observed.get("journal", "").splitlines():
                     try: event = json.loads(line)
-                    except json.JSONDecodeError: continue
+                    except json.JSONDecodeError:
+                        require(not self.strict_json, "journal window contains a malformed JSON event")
+                        continue
+                    require(not self.strict_json or isinstance(event, dict), "journal window contains a non-object JSON event")
                     # Raw pages remain in immutable evidence; keep only source
                     # attribution events in memory, not unrelated debug noise.
                     if isinstance(event, dict) and (self.event_targets is None

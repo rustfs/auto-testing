@@ -1770,7 +1770,7 @@ Topologies: H1,H2. Branches: object-lock-timeout, caller-disconnect, stale-read-
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`NATIVE_LOCK_OWNER_ABORT_BARRIER`): 已有同候选源码的 lock owner、取消物理 unlink 与 stale read-repair 原生子集，以及单次签名历史版本 GET 的客户端 TCP 断开组件；仍缺服务端请求 admission/所有权绑定、完整 timeout/stale-generation 编排和 H1/H2 最终对象/锁/FD 验收。精确源码 cfg(test) 原生证据可独立构建，不要求给优化服务候选加入隐藏 hook；客户端断开或原生子集不能充作完整 canonical PASS。
+Blocked reason (`NATIVE_LOCK_OWNER_ABORT_BARRIER`): 已有同候选源码的 lock owner、取消物理 unlink 与 stale read-repair 原生子集、单连接历史 GET 断开和服务 admission/owner/socket 观测编排；观测编排尚无 live 验收。仍缺实际断连边界的精确所有权、完整 timeout/stale-generation controller 和 H1/H2 对象/锁/FD 闭环。精确源码 cfg(test) 原生证据独立保留；诊断观测、客户端断开或原生子集不能充作完整 canonical PASS。
 
 1. LOCK_WINDOW用本例慢IO/受控原生锁屏障持有目标对象锁，先证明真实争用超过预注册预算。
 2. 同时heal/覆盖或删除；调用方断开实例仅断本次TCP连接，不杀服务器或关闭跳板机；记录请求开始/断开/服务在途结束。
