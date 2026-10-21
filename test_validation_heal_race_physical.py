@@ -110,6 +110,10 @@ class RaceFaultAdmissionTests(unittest.TestCase):
         class FaultBoundaryReached(BaseException):
             pass
         for case_id, branches in race.CASE_BRANCHES.items():
+            # G05's dedicated controller checks all 257 fourth-drive G05 fault
+            # IDs in MpuRunnerTests.test_complete_controller_proves_physical_before_final_get_and_only_then_cleans.
+            if case_id == 'heal.race-multipart-complete-abort':
+                continue
             with self.subTest(case_id=case_id), tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
                 root = Path(folder)
                 candidate = root / "candidate.json"

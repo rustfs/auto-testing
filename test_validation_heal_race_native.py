@@ -62,10 +62,16 @@ class RaceNativeTests(unittest.TestCase):
     def test_runtime_case_opt_in_does_not_change_the_exact_source_or_enable_other_native_groups(self):
         wrong_source = copy.deepcopy(race.NATIVE_REFERENCE)
         wrong_source['candidateCommit'] = 'e' * 40
-        for reference, case in [(wrong_source, CASE), (race.NATIVE_REFERENCE, 'heal.race-multipart-complete-abort')]:
+        for reference, case in [(wrong_source, CASE)]:
             with self.subTest(case=case), patch.dict(race.NATIVE_RUNTIME, {SOURCE: {'reference': reference, 'cases': (case,)}}):
                 with self.assertRaisesRegex(ValueError, 'race candidate/case contract is not reviewed'):
                     race.native_preflight(CANDIDATE, HELPER, case, '/never-used')
+        case = 'heal.race-multipart-complete-abort'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); self.fixture(root)
+            with patch.dict(race.NATIVE_RUNTIME, {SOURCE: {'reference': race.NATIVE_REFERENCE, 'cases': (case,)}}):
+                with self.assertRaises(ValueError):
+                    race.native_preflight(CANDIDATE, HELPER, case, root)
 
     def test_version_source_admits_only_three_complete_native_groups_without_executing_artifacts(self):
         source = race.VERSION_CANDIDATE
@@ -140,7 +146,7 @@ class RaceNativeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invented or omitted'):
                 consumer.verify(root, candidate, HELPER, case)
 
-    def test_default_owner_and_copy_source_keep_native_groups_separate_and_only_g06_race_runtime(self):
+    def test_default_owner_copy_and_mpu_source_keep_complete_native_groups_separate(self):
         source = '757b751482bb970bc321e92059690a7698554358'
         candidate = {**CANDIDATE, 'source_sha': source}
         contract = suite.contract_for(source)
@@ -155,6 +161,7 @@ class RaceNativeTests(unittest.TestCase):
                 for case, label, count in [
                     ('heal.admin-nolock-safety', 'default-heal-exclusive-owner', 16),
                     ('heal.race-copy-and-metadata-update', 'copy-and-metadata-final-rename', 24),
+                    ('heal.race-multipart-complete-abort', 'multipart-continue-complete-abort-final-rename', 10),
                 ]:
                     with self.subTest(case=case):
                         self.assertEqual(contract['cases'][case], [label])
@@ -166,9 +173,9 @@ class RaceNativeTests(unittest.TestCase):
                         self.assertFalse(proof['canonicalCasePassClaimed'])
                 for case in race.CASE_IDS:
                     with self.subTest(case=case):
-                        if case == 'heal.race-copy-and-metadata-update':
+                        if case in {'heal.race-copy-and-metadata-update', 'heal.race-multipart-complete-abort'}:
                             proof = race.native_preflight(candidate, HELPER, case, root)
-                            self.assertEqual(proof['requiredRegressionLabels'], ['copy-and-metadata-final-rename'])
+                            self.assertEqual(proof['requiredRegressionLabels'], race.FULL_NATIVE_GROUPS[case])
                         else:
                             with self.assertRaisesRegex(ValueError, 'case contract is not reviewed'):
                                 race.native_preflight(candidate, HELPER, case, root)

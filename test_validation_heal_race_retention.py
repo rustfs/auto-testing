@@ -367,6 +367,28 @@ class RaceRetentionTests(unittest.TestCase):
                 raw_path.write_text(json.dumps(raw))
                 with self.assertRaises(ValueError): recovery.recovery_plan(root,12345,candidate)
 
+    def test_g05_final_peer_read_journals_bind_original_requests_and_cannot_authorize_mutations(self):
+        for fault in ('changed', 'foreign-peer', 'foreign-key', 'mutation'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as d:
+                root,candidate,folder=self.mpu_archive(d)
+                binding=json.loads((folder/'00001-binding.json').read_text())
+                journal=folder/'final-read-ACKs-node4';journal.mkdir()
+                path=journal/'000001-request.json'
+                request={'runId':binding['runId'],'operation':'get_object',
+                         'params':{'Bucket':binding['bucketPrefix'],'Key':'objects-0256.bin'}}
+                path.write_text(json.dumps(request))
+                before=recovery.recovery_plan(root,12345,candidate)[0]['ackFilesSha256']
+                if fault=='foreign-peer':journal.rename(journal.with_name('final-read-ACKs-node5'))
+                else:
+                    if fault=='changed':request['identity']={'original':'read'}
+                    elif fault=='foreign-key':request['params']['Key']='foreign'
+                    else:request['operation']='abort_multipart_upload'
+                    path.write_text(json.dumps(request))
+                if fault=='changed':
+                    self.assertNotEqual(recovery.recovery_plan(root,12345,candidate)[0]['ackFilesSha256'],before)
+                else:
+                    with self.assertRaises(ValueError):recovery.recovery_plan(root,12345,candidate)
+
     def test_g05_controller_preflights_all_original_mpu_peers_before_any_move(self):
         with tempfile.TemporaryDirectory() as d:
             root,candidate,_ = self.mpu_archive(d);plan = recovery.recovery_plan(root,12345,candidate)[0]

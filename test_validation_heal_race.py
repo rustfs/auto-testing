@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+import tempfile
 
 from scripts.validation_heal import race
 from scripts.validation_heal.matrix import AUTOMATIC_CASES, select
@@ -48,50 +51,34 @@ class RaceTests(unittest.TestCase):
         self.assertEqual(race.target_key("copy-source"), race.G06_TARGET_KEY)
         self.assertEqual(race.reference_key("copy-source"), race.G06_REFERENCE_KEY)
 
-    def test_g05_binds_multipart_operations_to_acknowledged_upload(self):
-        # The frozen DM fixture requires two nonfinal parts above 5 MiB.
-        self.assertEqual(race.G05_PART_SIZES,
-                         (5 * 1024 * 1024 + 17, 5 * 1024 * 1024 + 93, 1024 * 1024 + 47))
-        expected = [{"key": race.G05_TARGET_KEY, "versionId": "null", "isLatest": True}]
-        continued = race.operation_plan("rv-heal-0123456789abcdef", "upload-continue", expected)
-        completed = race.operation_plan("rv-heal-0123456789abcdef", "complete", expected)
-        aborted = race.operation_plan("rv-heal-0123456789abcdef", "abort", expected)
-        self.assertEqual([step["operation"] for step in continued], ["create_multipart_upload", "upload_part"])
-        self.assertEqual([step["operation"] for step in completed],
-                         ["create_multipart_upload", "upload_part", "upload_part", "upload_part",
-                          "complete_multipart_upload"])
-        self.assertEqual([step["operation"] for step in aborted],
-                         ["create_multipart_upload", "upload_part", "abort_multipart_upload"])
-        self.assertEqual([step["size"] for step in completed[1:4]], list(race.G05_PART_SIZES))
-        self.assertEqual(completed[-1]["params"]["MultipartUpload"]["Parts"], [])
-        self.assertEqual(race.target_key("complete"), race.G05_TARGET_KEY)
+    def test_g05_cannot_use_the_superseded_unversioned_fixture_or_generic_plan(self):
+        recorder = Mock()
+        for branch in race.G05_BRANCHES:
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                race.seed_fixture(recorder, 'rv-heal-0123456789abcdef', branch)
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                race.operation_plan('rv-heal-0123456789abcdef', branch, [])
+        recorder.call.assert_not_called()
+        for operation in ('create_multipart_upload', 'upload_part', 'complete_multipart_upload', 'abort_multipart_upload'):
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                race.foreground(recorder, [{'operation': operation}])
+        recorder.call.assert_not_called()
 
-    def test_g05_foreground_resolves_upload_id_and_part_etags_from_ack(self):
-        class FakeRecorder:
-            def __init__(self):
-                self.calls = []
-
-            def call(self, operation, params, body=None):
-                self.calls.append((operation, params, body))
-                if operation == "create_multipart_upload":
-                    return {"UploadId": "upload-ack"}
-                if operation == "upload_part":
-                    return {"ETag": f"etag-{params['PartNumber']}"}
-                return {"ETag": "complete-etag", "VersionId": "null"}
-
-        recorder = FakeRecorder()
-        plan = race.operation_plan("rv-heal-0123456789abcdef", "complete", [])
-        responses, runtime = race.foreground(recorder, plan)
-        self.assertEqual(runtime["uploadIds"]["complete"], "upload-ack")
-        self.assertEqual(recorder.calls[1][1]["UploadId"], "upload-ack")
-        self.assertEqual(recorder.calls[-1][1]["UploadId"], "upload-ack")
-        self.assertEqual(recorder.calls[-1][1]["MultipartUpload"], {
-            "Parts": [{"PartNumber": 1, "ETag": "etag-1"},
-                      {"PartNumber": 2, "ETag": "etag-2"},
-                      {"PartNumber": 3, "ETag": "etag-3"}]})
-        self.assertEqual([len(call[2]) if call[2] is not None else None for call in recorder.calls],
-                         [None, *race.G05_PART_SIZES, None])
-        self.assertEqual(len(responses), 5)
+    def test_g05_controller_delegates_all_public_branches_and_refuses_old_source_before_bootstrap(self):
+        case = race.CASE_IDS[4]
+        with tempfile.TemporaryDirectory() as d:
+            candidate = Path(d) / 'candidate.json'
+            args = SimpleNamespace(case_id=case, candidate=candidate)
+            with patch('scripts.validation_heal.mpu_race_runner.run_branch', return_value={'owned': True}) as execute, \
+                 patch.object(race, 'Fleet', side_effect=AssertionError('generic fleet must not run')):
+                candidate.write_text(json.dumps({'source_sha': race.REFERENCE['candidateCommit']}))
+                with self.assertRaisesRegex(ValueError, 'exact-source multipart'):
+                    race.run_branch(args, 'H1', ['vm000'], 'upload-continue')
+                execute.assert_not_called()
+                candidate.write_text(json.dumps({'source_sha': race.COPY_CANDIDATE}))
+                for branch in race.G05_BRANCHES:
+                    self.assertEqual(race.run_branch(args, 'H1', ['vm000'], branch), {'owned': True})
+                    execute.assert_called_with(args, 'H1', ['vm000'], branch)
 
     def test_g04_preserves_marker_and_batch_delete_semantics(self):
         expected = [{"key": race.TARGET_KEY, "versionId": value, "isLatest": value == "v2",

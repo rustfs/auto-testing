@@ -215,8 +215,10 @@ class RaceIoTests(unittest.TestCase):
             self.assertEqual(scope['race_io_backend'].RATE,'65536')
             self.assertTrue(callable(scope['race_io_backend'].run))
             return SimpleNamespace(returncode=0,stdout='{}',stderr='')
-        with tempfile.TemporaryDirectory() as tmp, patch('scripts.validation_heal.healthy.subprocess.run',side_effect=execute):
-            Fleet(['vm000'],Path(tmp),'gh-12345-1-h1').remote('vm000','race-io-cap')
+        for action in ('race-io-cap','race-io-observe'):
+            with self.subTest(action=action),tempfile.TemporaryDirectory() as tmp, \
+                 patch('scripts.validation_heal.healthy.subprocess.run',side_effect=execute):
+                Fleet(['vm000'],Path(tmp),'gh-12345-1-h1').remote('vm000',action)
 
     def test_controller_records_intent_before_single_call_and_never_retries_a_lost_result(self):
         fleet = Mock(); fleet.nodes = ['vm000','vm001']; trace = []
@@ -242,7 +244,6 @@ class RaceIoTests(unittest.TestCase):
     def test_real_runner_arms_before_admin_and_releases_after_foreground_before_terminal(self):
         class ReachedTerminalBoundary(BaseException): pass
         for driver, case_id, branch in [(race,race.CASE_IDS[0],'overwrite-vs-deep'),
-                                       (race,race.CASE_IDS[4],'upload-continue'),
                                        (nolock,nolock.CASE_ID,'overwrite-nolock')]:
             with self.subTest(case=case_id), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
                 root = Path(tmp); candidate = root/'candidate.json'
@@ -269,14 +270,12 @@ class RaceIoTests(unittest.TestCase):
                           'validate_missing_batch':Mock(),'wait_running':Mock(),'race':Mock(side_effect=foreground),
                           'final_inventory':Mock(return_value={'entries':expected}),
                           'wait_terminal':Mock(side_effect=terminal),'set_race_io_cap':Mock(side_effect=cap),'OBJECTS':3}
-                if driver is race: values['verify_multipart_state'] = Mock()
                 for name,value in values.items(): stack.enter_context(patch.object(driver,name,value))
                 stack.enter_context(patch.dict(race.os.environ,{'GITHUB_RUN_ID':'12345','GITHUB_RUN_ATTEMPT':'1'}))
                 args = SimpleNamespace(evidence=root/'evidence',candidate=candidate,rc_bin=rc,tool_directory=root,
                                        testing_commit='helper',binary_sha='binary',case_id=case_id)
                 with self.assertRaises(ReachedTerminalBoundary): driver.run_branch(args,'H1',['vm000'],branch)
-                self.assertEqual(trace[:trace.index('terminal')+1],['admin','foreground','terminal'] if case_id == race.CASE_IDS[4]
-                                 else ['cap-on','admin','foreground','cap-off','terminal'])
+                self.assertEqual(trace[:trace.index('terminal')+1],['cap-on','admin','foreground','cap-off','terminal'])
 
 
 if __name__ == '__main__': unittest.main()

@@ -69,8 +69,6 @@ TARGET_KEY = "objects/0256.bin"
 REFERENCE_KEY = "objects/0000.bin"
 G06_TARGET_KEY = "中文/文件/0252.bin"
 G06_REFERENCE_KEY = "literal%2Fslash/0254.bin"
-G05_TARGET_KEY = "multipart/target.bin"
-G05_PART_SIZES = (5 * 1024 * 1024 + 17, 5 * 1024 * 1024 + 93, 1024 * 1024 + 47)
 REFERENCE = {
     "candidateCommit": "072b57b37559fbe626aeda8abf61617fdcbdd926",
     "sourceFiles": {
@@ -106,7 +104,8 @@ NATIVE_RUNTIME = {
     MARKER_CANDIDATE: {'reference': MARKER_REFERENCE,
         'cases': ('heal.race-unversioned-overwrite', 'heal.race-versioned-put', 'heal.race-version-delete',
                   'heal.race-markers-and-batch-delete')},
-    COPY_CANDIDATE: {'reference': COPY_REFERENCE, 'cases': ('heal.race-copy-and-metadata-update',)},
+    COPY_CANDIDATE: {'reference': COPY_REFERENCE,
+        'cases': ('heal.race-copy-and-metadata-update', 'heal.race-multipart-complete-abort')},
 }
 # Registry subsets do not enable a fleet case. Its reviewed runtime source and
 # complete case-specific native group must both be present before bootstrap.
@@ -116,12 +115,14 @@ FULL_NATIVE_GROUPS = {
     'heal.race-version-delete': ['explicit-version-delete-final-rename'],
     'heal.race-markers-and-batch-delete': ['marker-and-batch-delete-final-rename'],
     'heal.race-copy-and-metadata-update': ['copy-and-metadata-final-rename'],
+    'heal.race-multipart-complete-abort': ['multipart-continue-complete-abort-final-rename'],
 }
 
 
 def source_contract(candidate, case_id):
     require(case_id in CASE_IDS, 'unregistered race case')
     if candidate.get('source_sha') == REFERENCE['candidateCommit']:
+        require(case_id != 'heal.race-multipart-complete-abort', 'G05 requires its exact-source multipart native group')
         return REFERENCE
     entry = NATIVE_RUNTIME.get(candidate.get('source_sha'))
     require(entry is not None and case_id in entry['cases'] and case_id in FULL_NATIVE_GROUPS
@@ -147,7 +148,6 @@ class WindowNotObserved(ValueError):
 
 
 def target_key(branch):
-    if branch in G05_BRANCHES: return G05_TARGET_KEY
     return G06_TARGET_KEY if branch in G06_BRANCHES else TARGET_KEY
 
 
@@ -233,7 +233,7 @@ def sample_overlap(ack, observed, path, token, reference=REFERENCE):
 
 
 def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
-    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES, *G05_BRANCHES, *G06_BRANCHES) and type(count) is int and 3 <= count <= OBJECTS, "G01/G02/G03/G04/G05/G06 unregistered fixture")
+    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES, *G06_BRANCHES) and type(count) is int and 3 <= count <= OBJECTS, "G01/G02/G03/G04/G05/G06 unregistered fixture")
     if branch in G06_BRANCHES:
         require(count == OBJECTS, "G06 requires the frozen complete 257-key DS population")
         return seed_workload(recorder, bucket, "DS", count, [SIZE])
@@ -270,31 +270,6 @@ def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
                 if row["key"] == TARGET_KEY: row["isLatest"] = False
             entries.append({"key": TARGET_KEY, "versionId": marker_id, "isLatest": True, "deleteMarker": True})
         return entries
-    if branch in G05_BRANCHES:
-        entries = []
-        for index in range(count - 1):
-            key = f"objects/{index:04d}.bin"
-            body = payload(f"{bucket}/{key}/0", SIZE)
-            response = recorder.call("put_object", {"Bucket": bucket, "Key": key,
-                "ContentType": "application/octet-stream", "Metadata": {"heal-fixture": "DM", "nonce": str(index)},
-                "Tagging": "suite=heal&fixture=DM"}, body)
-            entries.append({"key": key, "versionId": public_version_id(response.get("VersionId")),
-                "isLatest": True, "deleteMarker": False,
-                "payload": {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}})
-        upload = recorder.call("create_multipart_upload", {"Bucket": bucket, "Key": G05_TARGET_KEY,
-            "Metadata": {"heal-fixture": "DM", "multipart": "target"}, "ContentType": "application/octet-stream"})
-        parts, digest = [], hashlib.sha256()
-        for number, size in enumerate(G05_PART_SIZES, 1):
-            body = payload(f"{bucket}/{G05_TARGET_KEY}/{number}", size); digest.update(body)
-            response = recorder.call("upload_part", {"Bucket": bucket, "Key": G05_TARGET_KEY,
-                "UploadId": upload["UploadId"], "PartNumber": number}, body)
-            parts.append({"PartNumber": number, "ETag": response["ETag"]})
-        completed = recorder.call("complete_multipart_upload", {"Bucket": bucket, "Key": G05_TARGET_KEY,
-            "UploadId": upload["UploadId"], "MultipartUpload": {"Parts": parts}})
-        entries.append({"key": G05_TARGET_KEY, "versionId": public_version_id(completed.get("VersionId")),
-            "isLatest": True, "deleteMarker": False,
-            "payload": {"size": sum(G05_PART_SIZES), "sha256": digest.hexdigest()}})
-        return entries
     if branch in (*G02_BRANCHES, *G03_BRANCHES):
         recorder.call("put_bucket_versioning", {"Bucket": bucket, "VersioningConfiguration": {"Status": "Enabled"}})
     entries = []
@@ -315,7 +290,7 @@ def seed_fixture(recorder, bucket, branch, *, count=OBJECTS):
 
 
 def operation_plan(bucket, branch, expected):
-    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES, *G05_BRANCHES, *G06_BRANCHES), "G01/G02/G03/G04/G05/G06 unregistered foreground branch")
+    require(branch in (*G01_BRANCHES, *G02_BRANCHES, *G03_BRANCHES, *G04_BRANCHES, *G06_BRANCHES), "G01/G02/G03/G04/G05/G06 unregistered foreground branch")
     if branch in G01_BRANCHES:
         # Three distinct serial commits; the final independent reference was
         # written before injection, allowing a coding-index byte comparison.
@@ -355,38 +330,6 @@ def operation_plan(bucket, branch, expected):
                             "Quiet": False}}, "nonce": "batch-version-delete"}]
         return [{"operation": "delete_object", "params": {"Bucket": bucket, "Key": TARGET_KEY},
                  "nonce": "unversioned-delete"}]
-    if branch in G05_BRANCHES:
-        # Each branch uses a fresh UploadId for the same already committed
-        # object.  The foreground resolver binds every later request to the
-        # exact create ACK and never guesses an UploadId from LIST output.
-        if branch == "upload-continue":
-            return [
-                {"operation": "create_multipart_upload", "params": {"Bucket": bucket, "Key": G05_TARGET_KEY},
-                 "uploadName": "continue"},
-                {"operation": "upload_part", "params": {"Bucket": bucket, "Key": G05_TARGET_KEY,
-                 "UploadIdRef": "continue", "PartNumber": 1}, "nonce": f"{bucket}/{G05_TARGET_KEY}/continue/1",
-                 "size": G05_PART_SIZES[0]},
-            ]
-        if branch == "complete":
-            return [
-                {"operation": "create_multipart_upload", "params": {"Bucket": bucket, "Key": G05_TARGET_KEY},
-                 "uploadName": "complete"},
-                *[{"operation": "upload_part", "params": {"Bucket": bucket, "Key": G05_TARGET_KEY,
-                    "UploadIdRef": "complete", "PartNumber": number},
-                   "nonce": f"{bucket}/{G05_TARGET_KEY}/complete/{number}", "size": size}
-                  for number, size in enumerate(G05_PART_SIZES, 1)],
-                {"operation": "complete_multipart_upload", "params": {"Bucket": bucket, "Key": G05_TARGET_KEY,
-                 "UploadIdRef": "complete", "MultipartUpload": {"Parts": []}}, "uploadName": "completed"},
-            ]
-        return [
-            {"operation": "create_multipart_upload", "params": {"Bucket": bucket, "Key": G05_TARGET_KEY},
-             "uploadName": "abort"},
-            {"operation": "upload_part", "params": {"Bucket": bucket, "Key": G05_TARGET_KEY,
-             "UploadIdRef": "abort", "PartNumber": 1}, "nonce": f"{bucket}/{G05_TARGET_KEY}/abort/1",
-             "size": G05_PART_SIZES[0]},
-            {"operation": "abort_multipart_upload", "params": {"Bucket": bucket, "Key": G05_TARGET_KEY,
-             "UploadIdRef": "abort"}, "uploadName": "aborted"},
-        ]
     if branch in G06_BRANCHES:
         if branch == "copy-source":
             return [{"operation": "copy_object", "params": {"Bucket": bucket, "Key": current_reference,
@@ -439,7 +382,6 @@ def version_put_entries(baseline, plan, responses):
 
 def final_inventory(baseline, branch, plan, responses):
     expected_length = (3 if branch in (*G01_BRANCHES, *G02_BRANCHES)
-                       else len(plan) if branch in G05_BRANCHES
                        else 16 if branch == "update-tags" else 1)
     require(len(plan) == len(responses) == expected_length,
             "G01/G03/G05 foreground plan/ACK sequence is incomplete")
@@ -491,27 +433,6 @@ def final_inventory(baseline, branch, plan, responses):
             require(responses[0].get("VersionId") in {None, "null"} and responses[0].get("DeleteMarker") in {None, False},
                     "G04 unversioned delete ACK changed object identity")
             result["entries"] = [row for row in result["entries"] if row["key"] != TARGET_KEY]
-    elif branch in G05_BRANCHES:
-        runtime = plan[0].get("runtime") or {}
-        upload_id = runtime.get("uploadIds", {}).get(branch.split("-", 1)[-1])
-        require(isinstance(upload_id, str) and upload_id, "G05 foreground lost its exact UploadId")
-        if branch == "complete":
-            entry = next(row for row in result["entries"] if row["key"] == current_target)
-            digest = hashlib.sha256()
-            total = 0
-            for number, size in enumerate(G05_PART_SIZES, 1):
-                body = payload(f"{plan[0]['params']['Bucket']}/{G05_TARGET_KEY}/complete/{number}", size)
-                digest.update(body); total += len(body)
-            ack = responses[-1]
-            require(isinstance(ack.get("ETag"), str) and ack["ETag"],
-                    "G05 Complete ACK lacks its committed ETag")
-            entry.update(payload={"size": total, "sha256": digest.hexdigest()},
-                         versionId=public_version_id(ack.get("VersionId")), isLatest=True,
-                         deleteMarker=False)
-            entry.setdefault("properties", {}).update(ETag=ack["ETag"], ContentLength=total,
-                                                        ContentType="application/octet-stream")
-        else:
-            require(branch in {"upload-continue", "abort"}, "G05 unknown MPU branch")
     elif branch in G06_BRANCHES:
         entry = next(row for row in result["entries"] if row["key"] == current_target)
         copy_result = responses[-1].get("CopyObjectResult") or {}
@@ -661,21 +582,6 @@ def physical_transition(before, after, bucket, mapped, final, branch):
                                               version["isLatest"], version["deleted"]) for version in versions)
                     require(actual_versions == expected_versions,
                             "G04 physical data/marker version set differs from exact foreground ACKs")
-    elif branch in G05_BRANCHES:
-        require(len(original_target) == len(current_target_values) == 1,
-                "G05 multipart transition changed the target identity count")
-        if branch == "complete":
-            require(original_target[0]["dataDir"] != current_target_values[0]["dataDir"],
-                    "G05 Complete retained the old physical generation")
-            require(len(current_target_values[0]["cohort"]) == len(original_target[0]["cohort"])
-                    and all(part["size"] > 0 for part in current_target_values[0]["cohort"]),
-                    "G05 Complete physical parts are incomplete")
-        else:
-            require(original_target[0]["dataDir"] == current_target_values[0]["dataDir"],
-                    "G05 pending/aborted MPU changed the committed object generation")
-            require([(part["index"], part["sha256"], part["size"]) for part in original_target[0]["cohort"]]
-                    == [(part["index"], part["sha256"], part["size"]) for part in current_target_values[0]["cohort"]],
-                    "G05 pending/aborted MPU changed committed object bytes")
     elif branch in G06_BRANCHES:
         target_after = next(value for (key, _), value in survivors.items() if key == changed_key)
         target_before = next(value for (key, _), value in mapped.items() if key == changed_key)
@@ -814,37 +720,15 @@ def wait_version_window(probe, fleet, path, token, reference, before, targets, b
 
 def foreground(recorder, plan, *, committed=None):
     responses = []
-    upload_ids = {}
-    part_etags = {}
     for step in plan:
-        params = copy.deepcopy(step["params"])
-        upload_ref = params.pop("UploadIdRef", None)
-        if upload_ref is not None:
-            require(upload_ref in upload_ids, "G05 foreground referenced an unacknowledged UploadId")
-            params["UploadId"] = upload_ids[upload_ref]
-        if step["operation"] == "complete_multipart_upload":
-            parts = [{"PartNumber": number, "ETag": part_etags[(upload_ref, number)]}
-                     for number, _ in enumerate(G05_PART_SIZES, 1)]
-            params["MultipartUpload"] = {"Parts": parts}
-        body = None
-        if step["operation"] == "put_object":
-            body = payload(step["nonce"], SIZE)
-        elif step["operation"] == "upload_part":
-            body = payload(step["nonce"], step["size"])
-        response = recorder.call(step["operation"], params, body)
+        require(step['operation'] not in {'create_multipart_upload', 'upload_part', 'complete_multipart_upload',
+                                         'abort_multipart_upload'}, 'G05 requires its same-key ACK model and schedule')
+        body = payload(step['nonce'], SIZE) if step['operation'] == 'put_object' else None
+        response = recorder.call(step['operation'], copy.deepcopy(step['params']), body)
         responses.append(response)
         if committed is not None:
             committed(responses)
-        if step.get("uploadName") in {"continue", "complete", "abort"}:
-            require(isinstance(response.get("UploadId"), str) and response["UploadId"],
-                    "G05 CreateMultipartUpload ACK lacks UploadId")
-            upload_ids[step["uploadName"]] = response["UploadId"]
-        if step["operation"] == "upload_part":
-            require(isinstance(response.get("ETag"), str) and response["ETag"],
-                    "G05 UploadPart ACK lacks ETag")
-            part_etags[(upload_ref, params["PartNumber"])] = response["ETag"]
-    plan[0]["runtime"] = {"uploadIds": upload_ids, "partEtags": part_etags}
-    return responses, {"uploadIds": upload_ids, "partEtags": part_etags}
+    return responses, {}
 
 
 def read_versions(recorder, ledger, lock, done):
@@ -955,39 +839,15 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
     return responses, all(overlaps) and read_complete and reader_overlap
 
 
-def verify_multipart_state(probe, fleet, bucket, branch, runtime, expected_parts):
-    """Bind MPU control evidence to the foreground UploadId/part ACKs."""
-    require(branch in G05_BRANCHES and isinstance(runtime, dict), "G05 runtime receipt is missing")
-    name = branch.split("-", 1)[-1]
-    upload_id = (runtime.get("uploadIds") or {}).get(name)
-    require(isinstance(upload_id, str) and upload_id, "G05 runtime UploadId is missing")
-    listed = fleet.record("G05-list-multipart-uploads", probe.s3("list_multipart_uploads", {"Bucket": bucket}))
-    uploads = (listed.get("response") or {}).get("Uploads", [])
-    matching = [row for row in uploads if row.get("UploadId") == upload_id]
-    if branch == "upload-continue":
-        require(len(matching) == 1, "G05 continued UploadId disappeared from ListMultipartUploads")
-        parts = fleet.record("G05-list-parts", probe.s3("list_parts", {"Bucket": bucket, "Key": G05_TARGET_KEY,
-                                                                        "UploadId": upload_id}))
-        rows = (parts.get("response") or {}).get("Parts", [])
-        require(len(rows) == len(expected_parts) and all(
-            row.get("PartNumber") == number and row.get("ETag") == runtime["partEtags"][(name, number)]
-            and row.get("Size") == size for row, (number, size) in zip(rows, expected_parts)),
-            "G05 continued UploadId lost an acknowledged part")
-    else:
-        require(not matching, f"G05 {branch} left a completed/aborted UploadId visible")
-        if branch == "abort":
-            parts = fleet.record("G05-list-aborted-parts", probe.s3("list_parts", {"Bucket": bucket,
-                                                                                    "Key": G05_TARGET_KEY,
-                                                                                    "UploadId": upload_id}))
-            response = parts.get("response") or {}
-            require(parts.get("acknowledged") is False and parts.get("resultUnknown") is False
-                    and response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404,
-                    "G05 aborted UploadId still exposes acknowledged parts")
-    return {"uploadId": upload_id, "listedUploads": len(uploads), "branch": branch,
-            "acknowledgedParts": len(expected_parts) if branch == "upload-continue" else 0}
-
-
 def run_branch(args, topology, nodes, branch):
+    if args.case_id == 'heal.race-multipart-complete-abort':
+        # Lazy import keeps the generic controller and G05's model acyclic.
+        try:
+            from .mpu_race_runner import run_branch as run_mpu_branch
+        except ImportError:
+            from mpu_race_runner import run_branch as run_mpu_branch
+        source_contract(json.loads(args.candidate.read_text()), args.case_id)
+        return run_mpu_branch(args, topology, nodes, branch)
     directory = args.evidence / topology / branch
     directory.mkdir(parents=True, exist_ok=False)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
@@ -1012,10 +872,9 @@ def run_branch(args, topology, nodes, branch):
     probe, active, recorder, writer = Probe(binding), [], None, None
     result = {"topology": topology, "branch": branch,
               "fixture": "DL" if branch in (*G01_BRANCHES, "unversioned-delete") else "DV" if branch in G04_BRANCHES
-              else "DM" if branch in G05_BRANCHES
               else "DS" if branch in G06_BRANCHES else "DV",
               "verdict": "RUNNING", "cleanup": "PENDING", "canonicalCasePassClaimed": False}
-    changed_target_registered, target_authority, mpu_runtime = None, False, None
+    changed_target_registered, target_authority = None, False
     try:
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
@@ -1024,7 +883,7 @@ def run_branch(args, topology, nodes, branch):
         recorder.marker_branch = branch if branch in G04_BRANCHES else None
         expected = seed_fixture(recorder, bucket, branch)
         baseline = fleet.record("complete-baseline-S3", probe.inventory(
-            bucket, unversioned_current_tags=branch in (*G01_BRANCHES, "unversioned-delete", *G05_BRANCHES, *G06_BRANCHES)))
+            bucket, unversioned_current_tags=branch in (*G01_BRANCHES, "unversioned-delete", *G06_BRANCHES)))
         verify_seed(expected, baseline)
         plan = operation_plan(bucket, branch, expected)
         for step in plan:
@@ -1052,8 +911,7 @@ def run_branch(args, topology, nodes, branch):
         faulted = fleet.snapshot("complete-fault-physical", quiescent=True)
         fleet.record("fault-batch-proof", validate_missing_batch(before, faulted, targets, receipts))
         fleet.start()
-        if branch not in G05_BRANCHES:
-            set_race_io_cap(fleet, args.case_id, branch, True, nodes=sorted({target['node'] for target in targets}))
+        set_race_io_cap(fleet, args.case_id, branch, True, nodes=sorted({target['node'] for target in targets}))
         require(physical_content(faulted) == physical_content(fleet.snapshot("attribution-before-START")),
                 "NOT_OBSERVED: G01/G03 missing shards changed before manual admission")
         path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="")
@@ -1080,12 +938,7 @@ def run_branch(args, topology, nodes, branch):
             responses, overlapped = race(writer, plan, probe, fleet, path, token, reference, baseline=baseline)
         else:
             responses, overlapped = race(writer, plan, probe, fleet, path, token, reference)
-        if branch not in G05_BRANCHES:
-            set_race_io_cap(fleet, args.case_id, branch, False, nodes=sorted({target['node'] for target in targets}))
-        mpu_runtime = plan[0].get("runtime") if branch in G05_BRANCHES else None
-        if branch in G05_BRANCHES:
-            verify_multipart_state(probe, fleet, bucket, branch, mpu_runtime,
-                                    [(1, G05_PART_SIZES[0])] if branch != "complete" else list(enumerate(G05_PART_SIZES, 1)))
+        set_race_io_cap(fleet, args.case_id, branch, False, nodes=sorted({target['node'] for target in targets}))
         final = fleet.record("ACK-derived-final-manifest", final_inventory(baseline, branch, plan, responses))
         terminal = wait_terminal(probe, fleet, path, token, reference)
         active.remove((path, token))
@@ -1119,7 +972,7 @@ def run_branch(args, topology, nodes, branch):
         fleet.start()
         for endpoint in binding["endpoints"]:
             current = fleet.record("all-peer-final-S3", {"endpoint": endpoint, **Probe(binding, endpoint).inventory(
-                bucket, unversioned_current_tags=branch in (*G01_BRANCHES, "unversioned-delete", *G05_BRANCHES, *G06_BRANCHES))})
+                bucket, unversioned_current_tags=branch in (*G01_BRANCHES, "unversioned-delete", *G06_BRANCHES))})
             compare_inventories(final, current)
             if branch in G03_BRANCHES:
                 negative = fleet.record("all-peer-deleted-version-GET", Probe(binding, endpoint).s3("get_object", plan[0]["params"]))
@@ -1146,17 +999,6 @@ def run_branch(args, topology, nodes, branch):
         for path, token in active:
             try: fleet.record("cancel-original-token", probe.admin(path, [("clientToken", token), ("forceStop", "true")], b""))
             except Exception as exc: fleet.record("cancel-error", {"error": str(exc)})
-        if branch == "upload-continue" and mpu_runtime:
-            try:
-                fleet.start()
-                upload_id = mpu_runtime["uploadIds"]["continue"]
-                fleet.record("G05-cleanup-abort", probe.s3("abort_multipart_upload", {
-                    "Bucket": bucket, "Key": G05_TARGET_KEY, "UploadId": upload_id}))
-                fleet.record("G05-cleanup-abort-proof", verify_multipart_state(
-                    probe, fleet, bucket, "abort", {"uploadIds": {"abort": upload_id}, "partEtags": {}}, []))
-            except Exception as exc:
-                fleet.record("G05-cleanup-abort-error", {"error": str(exc), "uploadId": mpu_runtime.get("uploadIds", {}).get("continue")})
-                result["cleanup"] = "FAIL"
         unresolved = any(item is not None and item.pending is not None for item in (recorder, writer))
         mutated = writer is not None and writer.sequence > 0
         if unresolved or mutated and not target_authority:

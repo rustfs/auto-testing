@@ -188,7 +188,7 @@ class Fleet:
         if action in {"mpu-race-backups", "version-race-backups"}:
             source += "\nimport types\nmpu_race_backups_backend = types.ModuleType('mpu_race_backups')\nexec(" + repr(
                 NODE_SOURCE.with_name("mpu_race_backups.py").read_text()) + ", mpu_race_backups_backend.__dict__)\n"
-        if action == "race-io-cap":
+        if action in {"race-io-cap", "race-io-observe"}:
             source += "\nimport types\nrace_io_backend = types.ModuleType('race_io')\nexec(" + repr(
                 NODE_SOURCE.with_name("race_io.py").read_text()) + ", race_io_backend.__dict__)\n"
         if action == "mpu-race-scene":

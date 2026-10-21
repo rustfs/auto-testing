@@ -97,10 +97,15 @@ def archived_plan(artifact, failed_run, candidate):
             and all(item.get('reserved') is True for item in reservations), 'G01/G02 isolation lacks all reserved hosts')
     ack_files = {}
     multipart = kind == 'unresolved-g05-race'
-    for name in ('seed-ACKs', 'foreground-ACKs', 'historical-read-ACKs', *(['mpu-read-ACKs'] if multipart else [])):
+    read_journals = (['mpu-read-ACKs', *['final-read-ACKs-node' + str(i) for i in range(1, len(owners) + 1)]]
+                     if multipart else [])
+    if multipart:
+        require({path.name for path in folder.glob('final-read-ACKs-*')} <= set(read_journals),
+                'G05 isolation has an unbound final peer read journal')
+    for name in ('seed-ACKs', 'foreground-ACKs', 'historical-read-ACKs', *read_journals):
         journal = folder / name
         entries = sorted(journal.glob('*.json'))
-        if name in {'historical-read-ACKs', 'mpu-read-ACKs'} or multipart and name == 'foreground-ACKs':
+        if name == 'historical-read-ACKs' or name in read_journals or multipart and name == 'foreground-ACKs':
             require(len(entries) <= 1024, 'G02 historical journal exceeds its bound')
             if not entries: continue
         require(0 < len(entries) <= 1024, 'G01/G02 isolation lacks its bounded original request/ACK journal')
@@ -145,7 +150,7 @@ def archived_plan(artifact, failed_run, candidate):
                                  'abort_multipart_upload', 'list_parts', 'get_object', 'head_object', 'get_object_tagging'}:
                     require(params.get('Key') == 'objects-0256.bin', 'G05 isolation SDK request changed its frozen multipart key')
             allowed = ({'list_multipart_uploads', 'list_parts', 'list_object_versions', 'get_object', 'head_object',
-                        'get_object_tagging'} if multipart and name == 'mpu-read-ACKs' else
+                        'get_object_tagging'} if multipart and name in read_journals else
                        {'get_object'} if name == 'historical-read-ACKs' else
                        {'create_bucket', 'put_bucket_versioning', 'put_object', 'create_multipart_upload',
                         'upload_part', 'complete_multipart_upload', 'abort_multipart_upload'} if multipart else
