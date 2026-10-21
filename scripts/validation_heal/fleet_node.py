@@ -1376,7 +1376,11 @@ def advance_captured_checkpoint(request, roots, owner, module, fault, before, ca
 def journal_operation(request):
     state, roots, owner = owned(request["runId"])
     require(digest(state / "rustfs") == owner["binarySha256"], "durable-record candidate changed")
-    require(owner.get("runtimeProfile") in {"root-restart", "mrf-crash", "journal-bounded", "incarnation-checkpoint", "incarnation-mrf"}, "durable records require the owned recovery runtime")
+    race_root_census = (owner.get("runtimeProfile") in {"manual", "frozen-race-legacy"}
+                        and request.get("action") == "journal-census" and request.get("family") == "root"
+                        and set(request) == {"runId", "action", "family", "taskId"})
+    require(race_root_census or owner.get("runtimeProfile") in {"root-restart", "mrf-crash", "journal-bounded", "incarnation-checkpoint", "incarnation-mrf"},
+            "durable records require the owned recovery runtime or stopped read-only race root census")
     require(set(request) <= {"runId", "action", "family", "taskId", "disk", "relativePath", "faultId", "kind", "expectedBefore", "expected", "captureId", "mrfIdentity"},
             "durable-record adapter accepts no arbitrary system paths or commands")
     if owner.get("runtimeProfile") == "journal-bounded":

@@ -887,6 +887,40 @@ class DurableRecordFaultTests(unittest.TestCase):
                     with self.subTest(family=family, action=action), self.assertRaises(ValueError):
                         fleet_node.journal_operation({**request, 'family': family, 'action': action})
 
+    def test_race_root_census_reads_original_bytes_only_after_stopping_owned_service(self):
+        for profile in ('manual', 'frozen-race-legacy'):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as temp, \
+                 patch.object(fault, 'mount_id', return_value=1):
+                root = Path(temp).resolve(); owner, request, _, _ = self.fixture(root)
+                owner['runtimeProfile'] = profile
+                raw = json.dumps({'schema': 3, 'task_id': self.token, 'heal_type': {'type': 'erasure_set'}}).encode()
+                path = root / 'data/.rustfs.sys' / ('root-heal-' + self.token + '.json'); path.write_bytes(raw)
+                request = {'runId': owner['runId'], 'action': 'journal-census', 'family': 'root', 'taskId': self.token}
+                with patch.object(fleet_node, 'owned', return_value=(root, [root], owner)), \
+                     patch.object(fleet_node, 'digest', return_value=owner['binarySha256']), \
+                     patch.object(fleet_node, 'fault_module', return_value=fault), patch.object(fleet_node, 'stopped') as stopped, \
+                     patch.dict(fleet_node.__dict__, journal_fault_backend=journal):
+                    result = fleet_node.journal_operation(request)
+                    stopped.assert_called_once_with(owner)
+                    present = [row for row in result['records'] if row['present']]
+                    self.assertEqual(len(present), 1)
+                    self.assertEqual(base64.b64decode(present[0]['rawBase64']), raw)
+                    self.assertTrue(result['readOnly']); self.assertTrue(result['quiescent'])
+                    self.assertFalse(result['directoryEnumerationUsed'])
+                    self.assertEqual(path.read_bytes(), raw)
+                    with patch.object(fleet_node, 'stopped', side_effect=ValueError('service remains active')):
+                        with self.assertRaisesRegex(ValueError, 'service remains active'):
+                            fleet_node.journal_operation(request)
+                    for change in ({'family': 'checkpoint'}, {'family': 'mrf'}, {'action': 'journal-observe'},
+                                   {'action': 'journal-apply', 'disk': 0}, {'action': 'journal-recover', 'disk': 0},
+                                   {'expected': {}}, {'relativePath': '.rustfs.sys/foreign.json'}):
+                        with self.subTest(change=change), self.assertRaises(ValueError):
+                            fleet_node.journal_operation({**request, **change})
+                    self.assertEqual(path.read_bytes(), raw)
+                    path.unlink()
+                    result = fleet_node.journal_operation(request)
+                    self.assertTrue(all(not row['present'] for row in result['records']))
+
     def test_bounded_root_admission_reads_the_actual_service_view_without_mutating_it(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(fault, 'mount_id', return_value=1):
             root = Path(temp).resolve(); owner, request, _, _ = self.fixture(root)
