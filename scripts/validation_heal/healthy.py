@@ -294,7 +294,9 @@ class Fleet:
 
     def deploy(self, binary_sha, bucket, access, secret, *, before_start=None):
         self.secret_values.update({access, secret})
-        checked = {node: self.remote(node, "preflight", resourceProfile=self.resource_profile) for node in self.nodes}
+        checked = {node: self.remote(node, "preflight", resourceProfile=self.resource_profile,
+                   **({'runtimeProfile': 'lock-timeout'} if self.runtime_profile == 'lock-timeout' else {}))
+                   for node in self.nodes}
         self.record("preflight", checked)
         require(len({value["hostname"] for value in checked.values()}) == len(self.nodes),
                 "Heal node aliases must resolve to distinct actual hosts")

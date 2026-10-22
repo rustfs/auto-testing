@@ -786,8 +786,15 @@ business files and retain the same complete sixteen-disk format mapping.
 The planner requires those exact original owners, candidate, inspector,
 cleanup receipts and failure boundary before allowing the existing
 audit/isolate/post-audit protocol. It issues no workload request and changes
-neither the original FAIL nor canonical acceptance. Isolation remains pending
-until its independent post-audit completes.
+neither the original FAIL nor canonical acceptance.
+
+Isolation [39766457981/1](https://github.com/rustfs/rustfs/actions/runs/39766457981)
+completed `ISOLATED` with helper `fa0b659`. Independent audit byte-matched all
+102 original files and all four preflight/isolation/post-audit baselines.
+All twenty data/state archive parents are root-owned mode 0700 and on their
+original devices; original tree, owner and inode identities are unchanged.
+No S3 request, backup restoration, namespace deletion or original verdict
+rewrite occurred.
 
 `environment.inspect` now also records the selected bpftool path, installed
 `/usr/lib/linux-tools/*/bpftool` executables, resolved root-owned executable
@@ -796,6 +803,20 @@ query. A working installed executable is distinct from a broken PATH wrapper.
 This inventory does not install tools, attach programs, change PATH or certify
 the I05 service filter; the actual owned-service attachment checks remain
 mandatory before another diagnostic.
+
+Read-only inventory
+[39766570688/1](https://github.com/rustfs/rustfs/actions/runs/39766570688)
+found broken PATH wrappers on both vm002 and vm003, which run kernel
+`6.17.0-1022-azure`. All four peers already have
+`/usr/lib/linux-tools/7.0.0-1017-azure/bpftool` with executable SHA-256
+`aabc337b58169d62c42b3c8f1fccf605e5fc1e445a23feb0156638e9d9606991`.
+The executable reports bpftool 7.7.0/libbpf 1.7 and its root-cgroup query exits
+zero on each peer. That empty root query alone does not verify service BPF
+support. I05 now uses this exact installed executable with protected root-owned
+path, digest and version checks, records its identity beside the actual
+service attachments, and checks every peer before reserving any namespace.
+It changes no installed tool, global PATH or kernel. Service-bound ingress and
+egress program identity checks remain mandatory on the running kernel.
 
 `validation_cleanup_run_id=<failed-run-id>` selects the narrow I05 preservation
 route with the original package build and an immutable helper containing

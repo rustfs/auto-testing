@@ -145,6 +145,21 @@ class EnvironmentTests(unittest.TestCase):
 
 
 class I05PlatformFilterTests(unittest.TestCase):
+    def test_i05_checks_every_peer_tool_before_reserving_any_namespace(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fleet = Fleet(['vm000', 'vm001', 'vm002', 'vm003'], Path(folder), 'gh-123-1-h2',
+                          runtime_profile='lock-timeout')
+            def remote(node, action, **params):
+                self.assertEqual(action, 'preflight')
+                self.assertEqual(params['runtimeProfile'], 'lock-timeout')
+                if node == 'vm002': raise ValueError('reviewed tool unavailable')
+                return {'hostname': node}
+            with patch.object(fleet, 'remote', side_effect=remote) as calls, \
+                    self.assertRaisesRegex(ValueError, 'tool unavailable'):
+                fleet.deploy('a' * 64, 'rv-heal-' + 'a' * 16, 'access', 'secret')
+            self.assertEqual([call.args[0] for call in calls.call_args_list], ['vm000', 'vm001', 'vm002'])
+            self.assertEqual(fleet.reserved, [])
+
     def test_tool_inventory_keeps_broken_kernel_wrapper_separate_from_working_binary(self):
         wrapper = Path('/usr/sbin/bpftool')
         binary = Path('/usr/lib/linux-tools/6.17.0-1020-azure/bpftool')
@@ -176,7 +191,7 @@ class I05PlatformFilterTests(unittest.TestCase):
                 'unit': 'rustfs-validation-heal-gh-123-1-h1.service'}
 
     def test_only_i05_private_unit_receives_filter_and_missing_backend_refuses(self):
-        with patch.object(fleet_node.shutil, 'which', return_value='/usr/sbin/bpftool'), \
+        with patch.object(fleet_node, 'i05_bpf_tool', return_value={'path': 'reviewed'}), \
                 patch.object(fleet_node, 'paths'), \
                 patch.object(Path, 'is_file', return_value=True):
             properties = fleet_node.i05_filter_properties(self.owner())
@@ -184,9 +199,28 @@ class I05PlatformFilterTests(unittest.TestCase):
                                           '--property=IPAddressAllow='])
             with self.assertRaises(ValueError):
                 fleet_node.i05_filter_properties({**self.owner(), 'unit': 'rustfs.service'})
-        with patch.object(fleet_node.shutil, 'which', return_value=None):
+        with patch.object(fleet_node, 'i05_bpf_tool', side_effect=ValueError('missing reviewed tool')):
             with self.assertRaises(ValueError): fleet_node.i05_filter_properties(self.owner())
             self.assertEqual(fleet_node.i05_filter_properties({'runtimeProfile': 'manual'}), [])
+
+    def test_reviewed_tool_requires_digest_version_and_protected_executable(self):
+        for variant in ('valid', 'digest', 'version', 'owner', 'writable', 'executable'):
+            with self.subTest(variant=variant), \
+                    patch.object(Path, 'resolve', autospec=True, side_effect=lambda path, **kw: path), \
+                    patch.object(Path, 'is_file', return_value=True), \
+                    patch.object(Path, 'stat', return_value=types.SimpleNamespace(
+                        st_uid=1000 if variant == 'owner' else 0, st_mode=0o777 if variant == 'writable' else 0o755)), \
+                    patch.object(fleet_node.os, 'access', return_value=variant != 'executable'), \
+                    patch.object(fleet_node, 'digest', return_value='0' * 64 if variant == 'digest'
+                        else fleet_node.I05_BPFTOOL_SHA256), \
+                    patch.object(fleet_node, 'command', return_value=types.SimpleNamespace(
+                        stdout='unexpected' if variant == 'version' else 'bpftool v7.7.0\nusing libbpf v1.7\nfeatures:\n')):
+                if variant == 'valid':
+                    result = fleet_node.i05_bpf_tool()
+                    self.assertEqual(result['sha256'], fleet_node.I05_BPFTOOL_SHA256)
+                    self.assertFalse(result['serviceAttachmentsVerified'])
+                else:
+                    with self.assertRaises(ValueError): fleet_node.i05_bpf_tool()
 
     def policy(self, variant=None):
         owner = self.owner()
@@ -220,10 +254,10 @@ class I05PlatformFilterTests(unittest.TestCase):
         def invoke(*args, **kwargs):
             if args[:2] == ('systemctl', 'show'):
                 raw = '\n'.join(k + '=' + v for k, v in values.items())
-            elif args[:4] == ('bpftool', '-j', 'cgroup', 'show'):
+            elif args[:4] == ('/reviewed/bpftool', '-j', 'cgroup', 'show'):
                 if variant == 'query-failed': raise ValueError('kernel query refused')
                 raw = json.dumps(rows)
-            elif args[:5] == ('bpftool', '-j', 'prog', 'show', 'id'):
+            elif args[:5] == ('/reviewed/bpftool', '-j', 'prog', 'show', 'id'):
                 # Both bpftool versions' single-program JSON forms are accepted.
                 program = programs[int(args[5])]
                 raw = json.dumps([program] if int(args[5]) == 1 else program)
@@ -231,6 +265,7 @@ class I05PlatformFilterTests(unittest.TestCase):
             return types.SimpleNamespace(stdout=raw)
         membership = '0::' + (group if variant != 'process-cgroup' else '/foreign')
         with patch.object(fleet_node, 'command', side_effect=invoke) as command, \
+                patch.object(fleet_node, 'i05_bpf_tool', return_value={'resolvedPath': '/reviewed/bpftool'}), \
                 patch.object(fleet_node, 'paths'), \
                 patch.object(Path, 'read_text', return_value=membership + '\n'), \
                 patch.object(Path, 'is_dir', return_value=variant != 'missing-cgroup'), \
@@ -247,7 +282,7 @@ class I05PlatformFilterTests(unittest.TestCase):
         self.assertFalse(result['persistentNetworkSettingsChanged'])
         self.assertTrue(result['snapshotOnly'])
         self.assertEqual([call.args[0] for call in calls.call_args_list],
-                         ['systemctl', 'bpftool', 'bpftool', 'bpftool'])
+                         ['systemctl', '/reviewed/bpftool', '/reviewed/bpftool', '/reviewed/bpftool'])
 
     def test_libbpf_attach_names_keep_raw_kernel_evidence_and_same_directions(self):
         result, _ = self.policy('libbpf-names')

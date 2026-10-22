@@ -30,6 +30,8 @@ BACKGROUND_CONFIG = {"RUSTFS_SCANNER_ENABLED": "false", "RUSTFS_HEAL_ENABLED": "
                      "RUSTFS_HEAL_AUTO_HEAL_ENABLE": "false", "RUSTFS_HEAL_MRF_ENABLE": "false",
                      "RUSTFS_SHARD_INTEGRITY_WRITE": "true", "RUSTFS_SHARD_INTEGRITY_FLEET_CONFIRMED": "true",
                      "RUSTFS_OBS_LOGGER_LEVEL": "info"}
+I05_BPFTOOL = Path('/usr/lib/linux-tools/7.0.0-1017-azure/bpftool')
+I05_BPFTOOL_SHA256 = 'aabc337b58169d62c42b3c8f1fccf605e5fc1e445a23feb0156638e9d9606991'
 
 
 def runtime_config(profile):
@@ -399,6 +401,7 @@ def bpf_tool_inventory():
             'selectedByPath': str(path) == selected,
             'version': {'returncode': version.returncode, 'stdout': version.stdout[:4096], 'stderr': version.stderr[:4096]},
             'rootCgroupQuery': {'returncode': query.returncode, 'jsonListObserved': isinstance(rows, list),
+                                'stdout': query.stdout[:4096],
                                 'stderr': query.stderr[:4096]},
             'serviceAttachmentsVerified': False})
     return {'kernelRelease': os.uname().release, 'selectedPath': selected, 'tools': tools,
@@ -467,8 +470,11 @@ def preflight(request):
     limits = resource_limits(request.get("resourceProfile", "standard"))
     require(all(shutil.disk_usage(mount).free >= limits["minimumDriveFreeBytes"] for mount in MOUNTS),
             "insufficient free space for the explicit Heal resource profile")
-    return {"hostname": socket.gethostname(), "mounts": observed, "statePath": str(state),
-            "dataRoots": [str(root / "data") for root in roots], "resourceLimits": limits, "mutated": False}
+    result = {"hostname": socket.gethostname(), "mounts": observed, "statePath": str(state),
+              "dataRoots": [str(root / "data") for root in roots], "resourceLimits": limits, "mutated": False}
+    if request.get('runtimeProfile') == 'lock-timeout':
+        result['bpfTool'] = i05_bpf_tool()
+    return result
 
 
 def reserve(request):
@@ -611,13 +617,31 @@ def start(request):
     return result
 
 
+def i05_bpf_tool():
+    """Use the installed executable reviewed on all current auto-testing peers."""
+    resolved = I05_BPFTOOL.resolve(strict=True)
+    require(resolved.is_file() and os.access(resolved, os.X_OK), 'I05 reviewed bpftool is not executable')
+    for path in (resolved, *resolved.parents, I05_BPFTOOL, *I05_BPFTOOL.parents):
+        info = path.stat()
+        require(info.st_uid == 0 and not info.st_mode & 0o022,
+                'I05 reviewed bpftool path is not root-owned and protected')
+    require(digest(resolved) == I05_BPFTOOL_SHA256, 'I05 installed bpftool differs from its reviewed digest')
+    version = command(str(resolved), '--version')
+    require(version.stdout.startswith('bpftool v7.7.0\nusing libbpf v1.7\n'),
+            'I05 installed bpftool has an unexpected version')
+    return {'path': str(I05_BPFTOOL), 'resolvedPath': str(resolved), 'sha256': I05_BPFTOOL_SHA256,
+            'version': version.stdout.strip(), 'kernelRelease': os.uname().release,
+            'serviceAttachmentsVerified': False}
+
+
 def i05_filter_properties(owner):
     """Exclude the observed platform source only from the private I05 unit."""
     if owner.get("runtimeProfile") != "lock-timeout":
         return []
-    require(shutil.which('bpftool') and Path('/sys/fs/cgroup/cgroup.controllers').is_file(),
-            'I05 requires bpftool and cgroup v2 to verify its service network filter')
+    require(Path('/sys/fs/cgroup/cgroup.controllers').is_file(),
+            'I05 requires cgroup v2 to verify its service network filter')
     require(owner.get('unit') == unit(owner['runId']), 'I05 filter requires its exact owned service')
+    i05_bpf_tool()
     return ['--property=IPAddressDeny=168.63.129.16/32', '--property=IPAddressAllow=']
 
 
@@ -630,6 +654,7 @@ def i05_filter_policy(owner, expected_pid=None):
     """
     require(owner.get('runtimeProfile') == 'lock-timeout'
             and owner.get('unit') == unit(owner['runId']), 'I05 filter requires its exact owned service')
+    tool = i05_bpf_tool()
     names = ('IPAddressDeny', 'IPAddressAllow', 'ControlGroup', 'MainPID')
     raw = command('systemctl', 'show', owner['unit'],
                   *(part for name in names for part in ('-p', name))).stdout
@@ -647,7 +672,7 @@ def i05_filter_policy(owner, expected_pid=None):
     cgroup = Path('/sys/fs/cgroup') / group.lstrip('/')
     require(cgroup.is_dir() and cgroup.resolve(strict=True) == cgroup,
             'I05 filtered service cgroup is missing or aliased')
-    rows = json.loads(command('bpftool', '-j', 'cgroup', 'show', str(cgroup)).stdout)
+    rows = json.loads(command(tool['resolvedPath'], '-j', 'cgroup', 'show', str(cgroup)).stdout)
     expected = {'ingress': 'sd_fw_ingress', 'egress': 'sd_fw_egress'}
     # Newer bpftool uses libbpf's full enum names for the same attach types.
     directions = {'ingress': 'ingress', 'egress': 'egress',
@@ -663,7 +688,7 @@ def i05_filter_policy(owner, expected_pid=None):
             'I05 kernel service BPF attachments are missing, foreign or incomplete')
     programs = []
     for row in sorted(rows, key=lambda item: item['attach_type']):
-        program = json.loads(command('bpftool', '-j', 'prog', 'show', 'id', str(row['id'])).stdout)
+        program = json.loads(command(tool['resolvedPath'], '-j', 'prog', 'show', 'id', str(row['id'])).stdout)
         if isinstance(program, list):
             require(len(program) == 1, 'I05 kernel filter program is ambiguous')
             program = program[0]
@@ -676,6 +701,7 @@ def i05_filter_policy(owner, expected_pid=None):
                          'type': program['type'], 'tag': program['tag'], 'uid': program['uid']})
     return {'unit': owner['unit'], 'pid': pid, 'controlGroup': group,
             'deniedAddress': '168.63.129.16/32', 'effectiveProperties': values,
+            'bpfTool': tool,
             'kernelPrograms': programs, 'scope': 'owned I05 service only',
             'hostFirewallChanged': False, 'persistentNetworkSettingsChanged': False,
             'snapshotOnly': True, 'canonicalPassClaimed': False}
