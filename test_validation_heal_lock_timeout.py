@@ -71,8 +71,24 @@ class TimeoutFlowTests(unittest.TestCase):
             'lock_attempt_id': '40000000-0000-4000-8000-000000000001',
             'state': state, 'level': 'TRACE' if state == 'acquiring' else 'ERROR',
             'timeout_ms': 1000, 'acquire_ms': 0 if state == 'acquiring' else 1001,
+            'spans': [{'name': 'http-request', 'request_id': CONTENDER, 'method': 'PUT',
+                       'uri': f'/{fixture.BUCKET}/{self.entry["key"]}'}],
             **({} if state == 'acquiring' else {'failure': 'timeout'}),
         } for state in ('acquiring', 'failed')]
+        if self.change in ('bucket-read', 'extra-write-lock'):
+            self.scene.contender_rows[:0] = [{
+                'target': fixture.observer.TARGET, 'request_id': CONTENDER,
+                'event': 'object_namespace_lock', 'component': 'ecstore', 'subsystem': 'object_lock',
+                'op': 'get_object', 'mode': 'read', 'bucket': '.rustfs.sys',
+                'object': f'buckets/{fixture.BUCKET}/.bucket-incarnation',
+                'namespace': 'namespace-one', 'owner': 'owner-one',
+                'lock_attempt_id': '40000000-0000-4000-8000-000000000002',
+                'state': state, 'level': 'TRACE', 'timeout_ms': 1000, 'acquire_ms': 0,
+            } for state in ('acquiring', 'acquired', 'guard_dropped')]
+        if self.change == 'extra-write-lock':
+            self.scene.contender_rows.append({**self.scene.contender_rows[-1],
+                'op': 'delete_object', 'mode': 'write', 'object': self.entry['key'],
+                'lock_attempt_id': '40000000-0000-4000-8000-000000000003'})
         if self.change == 'no-journal': self.scene.contender_rows = []
         response = {'ResponseMetadata': {'HTTPStatusCode': 503, 'RetryAttempts': 0, 'RequestId': CONTENDER,
             'HTTPHeaders': {'retry-after': '1'}}, 'Error': {'Code': 'ServiceUnavailable'}}
@@ -106,6 +122,34 @@ class TimeoutFlowTests(unittest.TestCase):
         self.assertEqual(transport['receiveBufferBytesRequested'], lock_timeout.CALLER_RECEIVE_BUFFER_BYTES)
         self.assertTrue((self.output / 'contender/000001-request.json').is_file())
         self.assertTrue((self.output / 'contender/000001-ack.json').is_file())
+
+    def test_bucket_incarnation_read_lock_does_not_mask_target_write_timeout(self):
+        self.change = 'bucket-read'
+        proof = self.invoke()
+        self.assertTrue(proof['diagnosticComplete'])
+        self.assertTrue(proof['callerObservation']['admittedWork']['typedTimeoutBeyondBudgetObserved'])
+
+    def test_an_additional_write_lock_attempt_is_rejected(self):
+        self.change = 'extra-write-lock'
+        with self.assertRaisesRegex(ValueError, 'another namespace write-lock attempt'):
+            self.invoke()
+        self.assertTrue(self.scene.wire.server.disconnected.wait(3))
+        self.assertFalse((self.output / 'diagnostic.json').exists())
+
+    def test_incomplete_bucket_incarnation_read_lock_lifecycle_is_rejected(self):
+        self.change = 'bucket-read'
+        original = self.probe.s3
+        def s3(operation, params, body=None):
+            value = original(operation, params, body)
+            if operation == 'put_object':
+                self.scene.contender_rows = [row for row in self.scene.contender_rows
+                    if not (row.get('mode') == 'read' and row.get('state') == 'guard_dropped')]
+            return value
+        self.probe.s3 = s3
+        with self.assertRaisesRegex(ValueError, 'bucket-incarnation read lock has an incomplete lifecycle'):
+            self.invoke()
+        self.assertTrue(self.scene.wire.server.disconnected.wait(3))
+        self.assertFalse((self.output / 'diagnostic.json').exists())
 
     def test_small_target_is_not_observed_without_sending_contender_or_get(self):
         self.entry['payload']['size'] = 1

@@ -70,7 +70,8 @@ def require_exact_inventory_entry(inventory, bucket, entry):
     return matches[0]
 
 
-def validate_timeout_ack(ack, request, request_bytes, run_id, endpoint_name, bucket, key, body):
+def validate_timeout_ack(ack, request, request_bytes, run_id, endpoint_name, bucket, key, body,
+                         *, clock_domain=CLOCK_DOMAIN):
     expected_params = {'Bucket': bucket, 'Key': key,
                        'Metadata': {'heal-fixture': 'I05-timeout-contender'}}
     expected_payload = {'size': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
@@ -85,12 +86,12 @@ def validate_timeout_ack(ack, request, request_bytes, run_id, endpoint_name, buc
             and request.get('expectHttp') == 503
             and request.get('casePassClaimed') is False
             and request.get('payload') == expected_payload
-            and ack.get('clockDomain') == request.get('clockDomain') == CLOCK_DOMAIN,
+            and ack.get('clockDomain') == request.get('clockDomain') == clock_domain,
             'I05 timeout ACK is not durably bound to the exact contender PUT')
     observation = ack.get('observation')
     require(isinstance(observation, dict) and observation.get('endpoint') == endpoint_name
             and observation.get('operation') == 'put_object' and observation.get('params') == expected_params
-            and observation.get('payload') == expected_payload and observation.get('clockDomain') == CLOCK_DOMAIN
+            and observation.get('payload') == expected_payload and observation.get('clockDomain') == clock_domain
             and observation.get('clientCallInvoked') is True
             and observation.get('acknowledged') is False and observation.get('resultUnknown') is False
             and observation.get('clientCleanupError') is None
@@ -120,7 +121,34 @@ def timeout_proof(rows, response, holder, bucket, key):
             and isinstance(request_id, str) and str(uuid.UUID(request_id)) == request_id and uuid.UUID(request_id).int
             and request_id != holder['request_id'] and response.get('VersionId') is None,
             'I05 contender lacks an exact structured lock-timeout refusal')
-    selected = [row for row in rows if row.get('target') == lock_observer.TARGET and row.get('request_id') == request_id]
+    request_rows = [row for row in rows if row.get('target') == lock_observer.TARGET
+                    and row.get('request_id') == request_id]
+    require(all(row.get('mode') in ('read', 'write') for row in request_rows),
+            'I05 contender emitted an unknown namespace lock mode')
+    read_rows = [row for row in request_rows if row.get('mode') == 'read']
+    write_rows = [row for row in request_rows if row.get('mode') == 'write']
+    selected = [row for row in write_rows if row.get('op') == 'put_object_commit'
+                and row.get('bucket') == bucket and row.get('object') == key]
+    require(len(selected) == len(write_rows),
+            'I05 contender made another namespace write-lock attempt')
+    if read_rows:
+        require([row.get('state') for row in read_rows] == ['acquiring', 'acquired', 'guard_dropped']
+                and len({(row.get('owner'), row.get('namespace'), row.get('lock_attempt_id'))
+                         for row in read_rows}) == 1,
+                'I05 contender bucket-incarnation read lock has an incomplete lifecycle')
+        for row in read_rows:
+            require(row.get('event') == 'object_namespace_lock' and row.get('component') == 'ecstore'
+                    and row.get('subsystem') == 'object_lock' and row.get('op') == 'get_object'
+                    and row.get('bucket') == '.rustfs.sys'
+                    and row.get('object') == f'buckets/{bucket}/.bucket-incarnation'
+                    and row.get('namespace') == holder['namespace'] and row.get('owner') == holder['owner']
+                    and row.get('requested_version_id') is None
+                    and type(row.get('timeout_ms')) is int and row['timeout_ms'] == 1000
+                    and type(row.get('acquire_ms')) is int and row['acquire_ms'] >= 0
+                    and isinstance(row.get('lock_attempt_id'), str)
+                    and str(uuid.UUID(row['lock_attempt_id'])) == row['lock_attempt_id']
+                    and uuid.UUID(row['lock_attempt_id']).int,
+                    'I05 contender bucket-incarnation read lock changed identity or budget')
     if not selected:
         return None
     require([row.get('state') for row in selected] in (['acquiring'], ['acquiring', 'failed']),
@@ -139,6 +167,14 @@ def timeout_proof(rows, response, holder, bucket, key):
                 and str(uuid.UUID(row['lock_attempt_id'])) == row['lock_attempt_id']
                 and uuid.UUID(row['lock_attempt_id']).int and row['lock_attempt_id'] != holder['lock_attempt_id'],
                 'I05 contender has another lock budget, object, namespace or owner')
+        http_spans = [span for span in [row.get('span'), *row.get('spans', [])]
+                      if isinstance(span, dict) and span.get('name') == 'http-request']
+        if http_spans:
+            unique_http_spans = {canonical(span): span for span in http_spans}
+            require(len(unique_http_spans) == 1 and all(
+                    span.get('request_id') == request_id and span.get('method') == 'PUT'
+                    and span.get('uri') == f'/{bucket}/{key}' for span in unique_http_spans.values()),
+                    'I05 contender lock attempt is not bound to its exact PUT request')
     require(len({(row['owner'], row['lock_attempt_id']) for row in selected}) == 1,
             'I05 contender changed its original write owner')
     if len(selected) == 1:

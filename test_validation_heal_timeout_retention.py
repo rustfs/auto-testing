@@ -12,6 +12,8 @@ import zipfile
 
 from scripts.validation_heal import timeout_retention as controller, retained_scene as retained
 from scripts.validation_heal import race_retention, recover_environment as recovery
+from scripts.validation_heal.heal_probe import canonical, payload
+from scripts.validation_heal.lock_timeout import CONTENDER_BYTES
 import test_validation_heal_race_retention as race_tests
 
 
@@ -28,6 +30,125 @@ class TimeoutRetentionTests(unittest.TestCase):
         folder = artifact / 'run' / controller.CASE / 'evidence' / controller.CASE / 'H1'
         return root, candidate, folder
 
+    def add_contender_archive(self, root, candidate, folder):
+        def read(path): return json.loads(path.read_text())
+        def write(path, value): path.write_text(json.dumps(value, sort_keys=True, separators=(',', ':')))
+
+        result_path = folder.parents[2] / 'cases' / f'{controller.CASE}.json'
+        result = read(result_path)
+        result['provenance']['testing_commit'] = controller.CONTENDER_HELPER
+        write(result_path, result)
+        binding_path = folder / '00001-binding.json'
+        binding = read(binding_path)
+        binding['harnessCommit'] = controller.CONTENDER_HELPER
+        write(binding_path, binding)
+        binding_hash = hashlib.sha256(canonical(binding).encode()).hexdigest()
+
+        summary_path = folder.parent / 'healthy-summary.json'
+        summary = read(summary_path)
+        row = dict(summary['diagnostics'][0])
+        row['failure'] = controller.FAILURES[controller.CONTENDER_HELPER]
+        summary['diagnostics'] = [row]
+        write(summary_path, summary)
+        diagnostic_path = folder / '00021-diagnostic-result.json'
+        diagnostic = read(diagnostic_path)
+        diagnostic['failure'] = controller.FAILURES[controller.CONTENDER_HELPER]
+        write(diagnostic_path, diagnostic)
+
+        renamed = (
+            ('00018-quiescent.json', '00022-quiescent.json'),
+            ('00019-original-failure-scene.json', '00023-original-failure-scene.json'),
+            ('00020-original-failure-logs.json', '00024-original-failure-logs.json'),
+            ('00021-diagnostic-result.json', '00025-diagnostic-result.json'),
+        )
+        for old, new in renamed: (folder / old).rename(folder / new)
+
+        first = read(folder / '00017-I05-caller-window.json')
+        first_after = first['afterCursor']
+        middle_after = first_after + '-middle'
+        last_after = middle_after + '-last'
+        for name, before, after in (
+                ('00019-I05-caller-window.json', first_after, middle_after),
+                ('00021-I05-caller-window.json', middle_after, last_after)):
+            write(folder / name, {'node': 'vm000', 'unit': 'rustfs-validation-heal-' +
+                binding['runId'] + '.service', 'complete': True, 'beforeCursor': before,
+                'afterCursor': after, 'hasMore': False, 'sourceMessageLoss': [], 'journal': ''})
+        write(folder / '00018-I05-caller-before-disconnect-socket.json', {'readOnly': True})
+        write(folder / '00020-I05-caller-admission-resources.json', {'readOnly': True})
+
+        scope_path = folder / 'timeout/scope.json'
+        scope = read(scope_path)
+        scope['bindingSha256'] = binding_hash
+        write(scope_path, scope)
+        run_id, bucket, key = scope['runId'], binding['bucketPrefix'], scope['entry']['key']
+        caller_path = folder / 'timeout/caller'
+        for name in ('request.json', 'request-written.json', 'disconnected.json'):
+            request_path = caller_path / 'transport' / name
+            caller_request = read(request_path)
+            caller_request['harnessCommit'] = controller.CONTENDER_HELPER
+            caller_request['bindingSha256'] = binding_hash
+            write(request_path, caller_request)
+        caller_request_bytes = (caller_path / 'transport/request.json').read_bytes()
+        for name in ('request-written.json', 'disconnected.json'):
+            request_path = caller_path / 'transport' / name
+            caller_request = read(request_path)
+            caller_request['requestSha256'] = hashlib.sha256(caller_request_bytes).hexdigest()
+            write(request_path, caller_request)
+        caller_request = read(caller_path / 'transport/request.json')
+        domain = caller_request['clockDomain']
+        contender = folder / 'timeout/contender'
+        contender.mkdir()
+        body = payload(f'{run_id}/I05-timeout-contender', CONTENDER_BYTES)
+        params = {'Bucket': bucket, 'Key': key, 'Metadata': {'heal-fixture': 'I05-timeout-contender'}}
+        request = {'schemaVersion': 2, 'runId': run_id, 'sequence': 1, 'operation': 'put_object',
+            'params': params, 'identity': None, 'expectHttp': 503, 'clockDomain': domain,
+            'preparedMonotonicNs': 1000000, 'preparedAt': '2026-10-22T00:00:00+00:00',
+            'casePassClaimed': False,
+            'payload': {'size': len(body), 'sha256': hashlib.sha256(body).hexdigest()}}
+        request_bytes = json.dumps(request, sort_keys=True, separators=(',', ':')).encode()
+        (contender / '000001-request.json').write_bytes(request_bytes)
+        request_id = '30000000-0000-4000-8000-000000000001'
+        response = {'Error': {'Code': 'ServiceUnavailable', 'Message': 'retry'},
+            'ResponseMetadata': {'RequestId': request_id, 'HostId': '', 'HTTPStatusCode': 503,
+                'HTTPHeaders': {'retry-after': '1', 'x-amz-request-id': request_id}, 'RetryAttempts': 0}}
+        ack = {'schemaVersion': 2, 'runId': run_id, 'sequence': 1, 'requestFile': '000001-request.json',
+            'requestSha256': hashlib.sha256(request_bytes).hexdigest(), 'operationCheck': 'PASS',
+            'casePassClaimed': False, 'clockDomain': domain,
+            'collectorCallStartedMonotonicNs': 1001000, 'collectorCallFinishedMonotonicNs': 2001000,
+            'recordedMonotonicNs': 2002000, 'observation': {'endpoint': 'node1', 'operation': 'put_object',
+                'params': params, 'payload': request['payload'], 'clockDomain': domain,
+                'clientCallInvoked': True, 'acknowledged': False, 'resultUnknown': False,
+                'clientCleanupError': None, 'callStartedMonotonicNs': 1002000,
+                'callFinishedMonotonicNs': 2000000, 'response': response}}
+        write(contender / '000001-ack.json', ack)
+
+        admission = {'node': 'vm000', 'attempt': {'request_id': '20000000-0000-4000-8000-000000000001',
+            'lock_attempt_id': '20000000-0000-4000-8000-000000000002', 'owner': ':::9000',
+            'namespace': 'pool-0', 'admitted': True, 'observedAcquiredWithoutDrop': True}}
+        write(caller_path / 'admission.json', admission)
+        rows = []
+        def lock_row(mode, op, obj, attempt, state, **extra):
+            return {'target': 'rustfs_ecstore::object_lock_diag', 'request_id': request_id,
+                'event': 'object_namespace_lock', 'component': 'ecstore', 'subsystem': 'object_lock',
+                'op': op, 'mode': mode, 'bucket': '.rustfs.sys' if mode == 'read' else bucket,
+                'object': obj, 'namespace': 'pool-0', 'owner': ':::9000', 'lock_attempt_id': attempt,
+                'requested_version_id': None, 'timeout_ms': 1000, 'acquire_ms': 1001 if state == 'failed' else 0,
+                'state': state, 'level': 'ERROR' if state == 'failed' else 'TRACE',
+                'span': {'name': 'put_object_with_old_current_size'},
+                'spans': [{'name': 'http-request', 'request_id': request_id, 'method': 'PUT',
+                           'uri': f'/{bucket}/{key}'}], **extra}
+        read_attempt = '20000000-0000-4000-8000-000000000003'
+        for state in ('acquiring', 'acquired', 'guard_dropped'):
+            rows.append(lock_row('read', 'get_object', f'buckets/{bucket}/.bucket-incarnation', read_attempt, state))
+        write_attempt = '20000000-0000-4000-8000-000000000004'
+        rows.append(lock_row('write', 'put_object_commit', key, write_attempt, 'acquiring'))
+        rows.append(lock_row('write', 'put_object_commit', key, write_attempt, 'failed', failure='timeout'))
+        write(folder / '00021-I05-caller-window.json', {'node': 'vm000', 'unit': 'rustfs-validation-heal-' +
+            binding['runId'] + '.service', 'complete': True, 'beforeCursor': middle_after,
+            'afterCursor': last_after, 'hasMore': False, 'sourceMessageLoss': [],
+            'journal': '\n'.join(json.dumps(row, sort_keys=True, separators=(',', ':')) for row in rows)})
+        return contender
+
     def test_original_live_failure_yields_exact_pre_contender_preservation_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             root, candidate, _ = self.archive(directory)
@@ -40,6 +161,48 @@ class TimeoutRetentionTests(unittest.TestCase):
             self.assertEqual(plan['ackFilesSha256'], 'fc8576efabec0e2163f8b434d0971f307b3334b01c3afae90459e2280722b70c')
             self.assertEqual(plan['businessSceneSha256'], {'vm000':
                 '6c9e808ff0c6d03cb5dfd5546bd588c3d3e1bcee3c167877dec21c4399fc1e6d'})
+
+    def test_new_helper_failed_refusal_yields_exact_contender_preservation_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, folder = self.archive(directory)
+            self.add_contender_archive(root, candidate, folder)
+            plan, = recovery.recovery_plan(root, 39711742431, candidate)
+            self.assertEqual(plan['kind'], 'unresolved-i05-timeout')
+            self.assertEqual(plan['harnessCommit'], controller.CONTENDER_HELPER)
+            self.assertEqual(plan['nodes'], ['vm000'])
+            self.assertEqual(plan['businessSceneSha256'], {'vm000':
+                '6c9e808ff0c6d03cb5dfd5546bd588c3d3e1bcee3c167877dec21c4399fc1e6d'})
+
+    def test_new_helper_refuses_unknown_success_or_corrupt_lock_lifecycle(self):
+        for variant in ('unknown', 'success', 'acquired', 'read-lifecycle', 'extra-action'):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, candidate, folder = self.archive(directory)
+                contender = self.add_contender_archive(root, candidate, folder)
+                ack_path = contender / '000001-ack.json'
+                ack = json.loads(ack_path.read_text())
+                if variant == 'unknown': ack['observation']['resultUnknown'] = True
+                elif variant == 'success':
+                    ack['observation']['response']['ResponseMetadata']['HTTPStatusCode'] = 200
+                elif variant == 'extra-action':
+                    (contender / '000002-request.json').write_text('{}')
+                elif variant == 'acquired':
+                    window_path = folder / '00021-I05-caller-window.json'
+                    window = json.loads(window_path.read_text())
+                    events = [json.loads(line) for line in window['journal'].splitlines()]
+                    events[-1]['state'] = 'acquired'
+                    window['journal'] = '\n'.join(json.dumps(event) for event in events)
+                    window_path.write_text(json.dumps(window))
+                elif variant == 'read-lifecycle':
+                    window_path = folder / '00021-I05-caller-window.json'
+                    window = json.loads(window_path.read_text())
+                    events = [json.loads(line) for line in window['journal'].splitlines()]
+                    events[2]['object'] = 'buckets/foreign/.bucket-incarnation'
+                    window['journal'] = '\n'.join(json.dumps(event) for event in events)
+                    window_path.write_text(json.dumps(window))
+                ack_path.write_text(json.dumps(ack))
+                with patch.object(recovery, 'Fleet') as fleet, self.assertRaises((ValueError, KeyError)):
+                    recovery.recovery_plan(root, 39711742431, candidate)
+                fleet.assert_not_called()
 
     def test_tampered_or_unresolved_evidence_refuses_before_fleet_creation(self):
         variants = ('candidate', 'helper', 'missing-ack', 'ack-hash', 'ack-unknown', 'ack-operation',

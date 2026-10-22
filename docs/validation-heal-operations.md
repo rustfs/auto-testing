@@ -772,22 +772,32 @@ The `unknown-negative` diagnostic includes the source procedure before the suppl
 A separate protected prefix is checked during the fault. The original key-level task must retain complete truthful counters and an unresolved disposition, with no invented healthy, repaired, absent, version or incarnation claim. Unknown must be counted within skipped and carry the legacy warning. If the candidate reports another truthful unresolved disposition, record `NOT_OBSERVED`; the legacy diagnostic cannot promote it to PASS. Archive the original terminal result and unchanged complete fault scene before restoring original metadata bytes. Verify the full original physical and SDK inventories and the unchanged original token after restoration. Fixture rescue is never product repair. J02 remains outside canonical dispatch until the separate version-specific grace Deferred/new-token procedure and complete live evidence are available.
 
 
-### I05 pre-contender retained-scene isolation
+### I05 retained-scene isolation
 
 `validation_cleanup_run_id=39711742431` selects the narrow I05 preservation
-route with the original package build 39364893106/1 and an immutable helper
-containing `timeout_retention.py`. The driver must remain on the original
-Functional Chain branch. First check the shared current auto-testing fleet
-for other work. The planner accepts only original helper 704bd60's failed H1
-boundary before contender submission: nine exact successful seed request/ACK
-pairs, complete version/marker/payload/public metadata baseline, the single
-closed historical GET, original owner/candidate/inspector and unchanged stopped
-four-drive scene. Unknown writes, additional actions or H2 evidence refuse it.
-It reuses retained-scene audit/isolate/post-audit, retaining all four roots and
-state under private per-run parents without S3 calls, backup restoration or
-deletion. Verify all original archived files byte-for-byte and all five final
-private parents independently before recording active namespace isolation.
-`ISOLATED` never changes the original FAIL or supplies canonical acceptance.
+route with the original package build and an immutable helper containing
+`timeout_retention.py`. The driver must remain on the original Functional Chain
+branch. First check the shared current auto-testing fleet for other work. The
+planner accepts the original helper 704bd60 failure before contender
+submission, and the reviewed helper d100abeb failure after one exact known 503
+contender refusal. Both require nine exact successful seed request/ACK pairs,
+complete version/marker/payload/public metadata baseline, a closed read-only
+historical GET, original owner/candidate/inspector and unchanged stopped
+four-drive scene. The contender boundary also verifies its request/ACK digest,
+server request ID, full bucket-incarnation read-lock lifecycle, and exact
+failed target write-lock lifecycle. Unknown or successful writes, another
+action, H2 evidence or physical drift refuse recovery.
+
+The recovery reuses retained-scene audit/isolate/post-audit, retaining all four
+roots and state under private per-run parents without S3 calls, backup
+restoration or deletion. Verify all original archived files byte-for-byte and
+all five final private parents independently before recording active namespace
+isolation. `ISOLATED` never changes the original FAIL or supplies canonical
+acceptance. In run 39733064688, the server refused the contender after a 1001
+ms target write-lock timeout while the exact GET held its read lock for 4.148
+s; the validator failed because it combined the same PUT's bucket-incarnation
+read-lock events with the target write-lock events. The failure and physical
+scene remain preserved pending evidence-based isolation.
 
 The first live run's GET already dropped its lock before observation. The
 version-field correction correlates those original events but cannot reopen

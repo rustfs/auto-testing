@@ -2330,20 +2330,37 @@ one; that difference is not yet explained. Neither a wrong package nor a
 source mix is inferred from it. Do not replay the same warmed baseline premise
 or claim that the field correction establishes lock contention.
 
-`timeout_retention.py` admits only this old helper's H1 pre-contender failure
-boundary, exact candidate/package/binary/inspector and owner, all nine successful
-seed request/ACK pairs, deterministic bytes, public metadata/tags/versions,
-closed read-only historical GET and unchanged stopped four-drive physical
-scene. Another case, H2, contender, uncertain write or physical drift refuses
-recovery. Existing retained-scene isolation preserves four data roots plus the
-private state by same-filesystem non-overwriting renames with durable intent,
-all-peer preflight, interrupted-move retries and five private archive parents.
-It sends no S3 request and never restores backups, deletes the namespace or
-rewrites the original FAIL. Recovery [39715499193/1](https://github.com/rustfs/rustfs/actions/runs/39715499193)
-completed `ISOLATED`: all 58 original artifact files match byte-for-byte,
-pre/move/post physical baselines match, and four data roots plus private state
-were moved into five root-owned mode-0700 same-device archive parents.
-Canonical acceptance and its count are unchanged.
+`timeout_retention.py` recognizes two exact H1 evidence boundaries: the first
+helper's failure before a contender, and the reviewed `d100abeb` helper's
+failure after one contender PUT received a known 503. Both require the exact
+candidate/package/binary/inspector and owner, all nine successful seed
+request/ACK pairs, deterministic bytes, public metadata/tags/versions, closed
+read-only historical GET and unchanged stopped four-drive physical scene.
+The contender boundary additionally checks its only durable request/ACK,
+request digest and clock ordering, structured `ServiceUnavailable` response,
+request-correlated bucket-incarnation read-lock lifecycle, and exact failed
+`put_object_commit` write-lock lifecycle. Unknown or successful writes, changed
+physical evidence, another case, H2 or extra actions refuse recovery.
+
+Recovery reuses retained-scene isolation with same-filesystem non-overwriting
+renames, durable intent, preflight, interrupted-move retries and five private
+archive parents. It makes no S3 request and never restores backups, deletes the
+namespace or rewrites the original FAIL. The first failure recovery
+[39715499193/1](https://github.com/rustfs/rustfs/actions/runs/39715499193)
+completed `ISOLATED`; all 58 original artifact files matched byte-for-byte and
+the five scene roots moved into private archive parents. The second diagnostic
+[39733064688/1](https://github.com/rustfs/rustfs/actions/runs/39733064688)
+also remains FAIL/cleanup FAIL. Its server returned the expected 503 after a
+1001 ms target write-lock timeout while the GET read lock was held for 4.148 s
+and its service socket retained an 8.17 MB send queue. The validator rejected
+the event sequence because it grouped the PUT's bucket-incarnation read lock
+with its target write lock. The before/after stopped four-drive physical
+census matched; the complete S3 inventory was captured before the contender,
+and the server returned a known 503 with no successful VersionId. A
+post-contender S3 inventory was not captured. The new recovery planner accepts
+this exact archived boundary for preservation; it does not make a canonical
+PASS claim or authorize replay.
+Canonical acceptance and its 104/158 count remain unchanged.
 
 
 I05 lock-window diagnosis (2026-10-22): exact candidate source

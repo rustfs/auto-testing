@@ -1,4 +1,4 @@
-"""Isolate the archived I05 H1 failure before any contender was invoked."""
+"""Isolate archived I05 H1 failures with bounded, understood request effects."""
 
 import hashlib
 import json
@@ -10,32 +10,45 @@ try:
     from .heal_workload import verify_seed
     from .healthy import physical_content
     from .lock_observer import CANDIDATE
+    from .lock_timeout import CONTENDER_BYTES, timeout_proof, validate_timeout_ack
     from .race_retention import digest, validate
 except ImportError:
     from heal_probe import canonical, payload, require
     from heal_workload import verify_seed
     from healthy import physical_content
     from lock_observer import CANDIDATE
+    from lock_timeout import CONTENDER_BYTES, timeout_proof, validate_timeout_ack
     from race_retention import digest, validate
 
 
 CASE = 'heal.lock-timeout-and-caller-abort'
-HELPER = '704bd606071676dded130dca91d3d5278455bcaa'
-FAILURE = {'type': 'ValueError',
-           'message': 'caller lock diagnostic escaped its exact GET identity or runtime budget'}
-LABELS = ('binding', 'inspector-build', 'preflight', 'integrity-fleet-attestation', 'reserved',
+PRE_CONTENDER_HELPER = '704bd606071676dded130dca91d3d5278455bcaa'
+CONTENDER_HELPER = 'd100abeb8e85c4000a493aa994031e4a5d01518e'
+FAILURES = {
+    PRE_CONTENDER_HELPER: {'type': 'ValueError',
+        'message': 'caller lock diagnostic escaped its exact GET identity or runtime budget'},
+    CONTENDER_HELPER: {'type': 'ValueError',
+        'message': 'I05 contender acquired a lock or lost its exact timeout lifecycle'},
+}
+COMMON_LABELS = ('binding', 'inspector-build', 'preflight', 'integrity-fleet-attestation', 'reserved',
           'inspector-upload', 'started', 'deployed-topology', 'actual-topology', 'original-ACK-bound-S3',
           'original-ACK-proof', 'I05-timeout-original-physical', 'I05-timeout-original-S3',
           'I05-timeout-baseline-physical-after-public-read', 'I05-caller-baseline-resources',
-          'I05-caller-checkpoint', 'I05-caller-window', 'quiescent', 'original-failure-scene',
-          'original-failure-logs', 'diagnostic-result')
+          'I05-caller-checkpoint')
+LABELS = {
+    PRE_CONTENDER_HELPER: COMMON_LABELS + ('I05-caller-window', 'quiescent',
+        'original-failure-scene', 'original-failure-logs', 'diagnostic-result'),
+    CONTENDER_HELPER: COMMON_LABELS + ('I05-caller-window', 'I05-caller-before-disconnect-socket',
+        'I05-caller-window', 'I05-caller-admission-resources', 'I05-caller-window', 'quiescent',
+        'original-failure-scene', 'original-failure-logs', 'diagnostic-result'),
+}
 
 
 def archived_plan(artifact, failed_run, candidate):
-    """Refuse uncertain seed effects, later actions, mixed cases and physical drift.
+    """Refuse uncertain effects, later actions, mixed cases and physical drift.
 
     This is preservation, with no S3 call, backup restoration or verdict change.
-    The old helper's exact pre-contender boundary is deliberately the only route.
+    A contender is accepted only for the reviewed helper's exact refused PUT.
     """
     require(type(failed_run) is int and failed_run > 0, 'I05 requires an exact failed run')
     paths = list(artifact.glob('*/run/*/cases/*.json'))
@@ -49,25 +62,32 @@ def archived_plan(artifact, failed_run, candidate):
     require(result.get('case_id') == CASE and result.get('verdict') == result.get('cleanup_status') == 'FAIL'
             and provenance.get('source_commit') == candidate.get('source_sha') == CANDIDATE
             and provenance.get('candidate_sha256') == candidate.get('package_sha256')
-            and provenance.get('testing_commit') == HELPER,
-            'I05 requires its original failed candidate and pre-contender helper')
+            and provenance.get('testing_commit') in FAILURES,
+            'I05 requires its original failed candidate and reviewed helper boundary')
+    helper = provenance['testing_commit']
+    failure = FAILURES[helper]
     evidence = paths[0].parents[1] / 'evidence' / CASE
     summary = read(evidence / 'healthy-summary.json')
     row = {'topology': 'H1', 'diagnosticComplete': False, 'cleanup': 'FAIL',
            'wholeCasePassClaimed': False, 'canonicalCasePassClaimed': False,
-           'failure': FAILURE, 'namespacesRetained': True}
+           'failure': failure, 'namespacesRetained': True}
     require(summary.get('caseId') == CASE and summary.get('cleanup') == 'FAIL'
             and summary.get('diagnostics') == [row] and summary.get('complete') is False
             and summary.get('diagnosticComplete') is False
             and summary.get('requestedTopologies') == ['H1', 'H2']
             and summary.get('canonicalCasePassClaimed') is False
-            and not (evidence / 'H2').exists(), 'I05 requires the sole retained pre-contender H1')
+            and not (evidence / 'H2').exists(), 'I05 requires the sole retained H1 failure')
     folder = evidence / 'H1'
-    numbered = {label: f'{index:05d}-{label}.json' for index, label in enumerate(LABELS, 1)}
-    require({path.name for path in folder.iterdir()} == set(numbered.values()) | {'fixture', 'timeout'},
+    labels = LABELS[helper]
+    numbered = [(label, f'{index:05d}-{label}.json') for index, label in enumerate(labels, 1)]
+    require({path.name for path in folder.iterdir()} == {name for _, name in numbered} | {'fixture', 'timeout'},
             'I05 archive contains another action or lacks its original boundary')
     def one(label):
-        return read(folder / numbered[label])
+        matches = [name for current, name in numbered if current == label]
+        require(len(matches) == 1, 'I05 archive lacks one exact ' + label)
+        return read(folder / matches[0])
+    def many(label):
+        return [read(folder / name) for current, name in numbered if current == label]
     binding, reservation, scene = one('binding'), one('reserved'), one('original-failure-scene')
     run_id, bucket = binding.get('runId', ''), binding.get('bucketPrefix', '')
     require(re.fullmatch(rf'gh-{failed_run}-[1-9][0-9]*-h1', run_id)
@@ -75,7 +95,7 @@ def archived_plan(artifact, failed_run, candidate):
             and binding.get('candidateCommit') == CANDIDATE
             and binding.get('candidatePackageSha256') == candidate['package_sha256']
             and binding.get('candidateBinarySha256') == provenance.get('binary_sha256')
-            and binding.get('harnessCommit') == HELPER
+            and binding.get('harnessCommit') == helper
             and binding.get('endpoints') == {'node1': 'http://rustfs-node1:9000'}
             and binding.get('defaultEndpoint') == 'node1' and one('diagnostic-result') == row,
             'I05 original run, package, helper, binary or failure boundary differs')
@@ -173,9 +193,14 @@ def archived_plan(artifact, failed_run, candidate):
                 'I05 original public metadata, ETag or tags differ from seed request/ACK')
 
     timeout = folder / 'timeout'
-    require({p.name for p in timeout.iterdir()} == {'scope.json', 'failure.json', 'caller'}
-            and {p.name for p in (timeout / 'caller').iterdir()} == {'scope.json', 'failure.json', 'transport'},
-            'I05 contender or later controller action may have been invoked')
+    expected_timeout_items = {'scope.json', 'failure.json', 'caller'}
+    expected_caller_items = {'scope.json', 'failure.json', 'transport'}
+    if helper == CONTENDER_HELPER:
+        expected_timeout_items.add('contender')
+        expected_caller_items.add('admission.json')
+    require({p.name for p in timeout.iterdir()} == expected_timeout_items
+            and {p.name for p in (timeout / 'caller').iterdir()} == expected_caller_items,
+            'I05 archive contains an unreviewed action or lacks its exact failure boundary')
     scope = read(timeout / 'scope.json')
     entry = scope.get('entry')
     require(entry in expected and entry.get('key') == 'objects/0000.bin' and not entry['isLatest']
@@ -211,11 +236,52 @@ def archived_plan(artifact, failed_run, candidate):
                 and value.get('resultUnknown') is True and value.get('acknowledged') is False
                 and value.get('serverOwnershipProven') is False,
                 'I05 closed caller was retried or promoted to an acknowledged result')
+    if helper == CONTENDER_HELPER:
+        contender = timeout / 'contender'
+        require({p.name for p in contender.iterdir()} == {'000001-request.json', '000001-ack.json'},
+                'I05 contender archive is not the sole one-shot request and ACK')
+        request_path, ack_path = contender / '000001-request.json', contender / '000001-ack.json'
+        request_bytes = request_path.read_bytes()
+        request, ack = read(request_path), read(ack_path)
+        body = payload(f'{run_id}/I05-timeout-contender', CONTENDER_BYTES)
+        response = validate_timeout_ack(ack, request, request_bytes, run_id, 'node1', bucket,
+                                        entry['key'], body, clock_domain=domain)
+        require(ack.get('operationCheck') == 'PASS'
+                and ack.get('observation', {}).get('acknowledged') is False
+                and ack.get('observation', {}).get('resultUnknown') is False,
+                'I05 contender result is not a durable, known refusal')
+        holder = (read(timeout / 'caller/admission.json').get('attempt') or {})
+        require(holder.get('admitted') is True and holder.get('observedAcquiredWithoutDrop') is True,
+                'I05 contender lacks its original admitted GET lock holder')
+        windows = many('I05-caller-window')
+        require(len(windows) == 3, 'I05 contender archive lacks all three caller journal windows')
+        rows = []
+        previous_cursor = None
+        for window in windows:
+            require(window.get('complete') is True and window.get('node') == 'vm000'
+                    and window.get('unit') == owner['unit'] and not window.get('sourceMessageLoss')
+                    and isinstance(window.get('beforeCursor'), str)
+                    and isinstance(window.get('afterCursor'), str)
+                    and (previous_cursor is None or window['beforeCursor'] == previous_cursor)
+                    and isinstance(window.get('journal'), str),
+                    'I05 contender lock journal is incomplete or belongs to another service')
+            previous_cursor = window['afterCursor']
+            for line in window['journal'].splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError('I05 contender lock journal contains malformed JSON') from error
+                require(isinstance(event, dict), 'I05 contender lock journal contains a non-object event')
+                rows.append(event)
+        proof = timeout_proof(rows, response, holder, bucket, entry['key'])
+        require(proof is not None and proof.get('typedTimeoutBeyondBudgetObserved') is True
+                and proof.get('writeLockAcquired') is False,
+                'I05 contender ACK lacks its exact failed target write-lock attempt')
     for path in timeout.rglob('*.json'):
         read(path)
         journal[path.relative_to(folder).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     plan = {'kind': 'unresolved-i05-timeout', 'runId': run_id, 'nodes': ['vm000'], 'bucket': bucket,
-            'owners': {'vm000': owner}, 'candidateCommit': CANDIDATE, 'harnessCommit': HELPER,
+            'owners': {'vm000': owner}, 'candidateCommit': CANDIDATE, 'harnessCommit': helper,
             'binarySha256': binding['candidateBinarySha256'], 'ackFilesSha256': digest(journal),
             'businessSceneSha256': {'vm000': digest(physical_content(scene)['vm000'])}}
     validate(plan)
