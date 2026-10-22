@@ -73,6 +73,23 @@ def successor_attempt(rows, marker, holder, bucket, key):
                 and span.get('uri') == '/' + quote(bucket, safe='') + '/' + quote(key, safe='/~'),
                 'I05 successor server request, method or exact URI differs')
         request_ids.add(request_id)
+        # Slow-acquire warnings share the target but carry no lock lifecycle.
+        # Bind this auxiliary row to the preceding acquired write observation.
+        if row.get('message') == 'object namespace lock acquisition exceeded threshold':
+            require(row.get('level') == 'WARN' and row.get('op') == 'put_object_commit'
+                    and row.get('bucket') == bucket and row.get('object') == key
+                    and row.get('mode') == 'write' and row.get('owner') == holder['owner']
+                    and not any(name in row for name in ('event', 'component', 'subsystem', 'state',
+                        'namespace', 'lock_attempt_id', 'timeout_ms', 'hold_ms', 'requested_version_id'))
+                    and all(isinstance(row.get(name), str) and row[name].isascii()
+                            and row[name].isdecimal() and str(int(row[name])) == row[name]
+                            for name in ('acquire_ms', 'threshold_ms'))
+                    and int(row['acquire_ms']) >= int(row['threshold_ms']) > 0
+                    and selected and selected[-1]['state'] == 'acquired'
+                    and selected[-1]['request_id'] == request_id
+                    and int(row['acquire_ms']) >= selected[-1]['acquire_ms'],
+                    'I05 successor slow-acquire warning lacks its exact acquired write')
+            continue
         # Bucket fencing reads both persisted metadata objects within this PUT.
         # They share its HTTP identity, but cannot establish write admission.
         metadata_read = (row.get('mode') == 'read' and row.get('op') == 'get_object'

@@ -70,8 +70,34 @@ shard verifier on a running service. Its original FAIL/cleanup FAIL and
 [39799657074/1](https://github.com/rustfs/rustfs/actions/runs/39799657074).
 The controller now finishes all online peer/FD observations before stopping
 the service and checking streaming shard integrity, with matching physical
-snapshots before and after verification. Fresh tools and live acceptance
-of that sequence remain pending. Acceptance stays **108/158**.
+snapshots before and after verification. Tools
+[39803149039/1](https://github.com/rustfs/rustfs/actions/runs/39803149039),
+bound to helper `6fbc3c4`, passed independent official archive/source/native
+and inspector audits. Live
+[39810035277/1](https://github.com/rustfs/rustfs/actions/runs/39810035277)
+completed H1 including stopped integrity and cleanup. H2 started and queued
+its PUT, then the parser treated a same-target slow-acquire WARN as a lock
+lifecycle row. The original result stays FAIL/cleanup FAIL. Isolation
+[39811143272/1](https://github.com/rustfs/rustfs/actions/runs/39811143272)
+preserves all 180 original files and twenty same-device private archive
+parents; every four-node pre/move/post tree, device and inode baseline
+matches. The parser now recognizes only the exact auxiliary warning bound
+to an already acquired target write; it cannot replace lifecycle evidence.
+The original sixteen-event H2 trace and incremental prefixes are covered by
+positive and negative regression tests. Fresh helper-bound tools and H1/H2
+live acceptance remain required. Acceptance stays **108/158**.
+
+Fresh D03 [39801936817/1](https://github.com/rustfs/rustfs/actions/runs/39801936817)
+retains FAIL/cleanup PASS. Independent H1 re-evaluation verified all four
+branch physical and strict version-responsibility oracles, sixteen seed
+request/ACK pairs, fourteen versions/markers, 48 HEAD observations and 144
+range payloads. H2 failed before seeding when a `pool.bin` write returned
+`SystemMetadataRepairRequired` and the pool transaction remained blocked
+at `transaction_unknown/prepare_cas`. All 392 original files and five node
+cleanup receipts were independently checked. The exact candidate's bounded
+owner-repair retries only cover identity metadata, so ordinary init retries
+do not discharge this `pool.bin` responsibility. The initial replica/network
+cause remains unproven; no D03 historical failure is disproved or promoted.
 
 [J02 diagnostic 38874900846/1](https://github.com/rustfs/rustfs/actions/runs/38874900846) completed all 20 H1/H2 × DB/DV branch instances on that exact candidate. Sixteen branches report PASS; the four original all-metadata-corruption probes report permanent Failed rather than Unknown and retain NOT_OBSERVED. Independent archive and provenance audits passed. Independent mixed-branch audits verified all four repaired shards against original complete bytes, exact receipts and counters, surviving below-quorum failures, original terminal preservation and post-rescue S3 inventories. All 50 node namespace finalization receipts passed audit. Real legacy writes separately produce Unknown with zero repairs and unchanged physical files, but do not replace the original source procedure. Full J02 canonical acceptance remains blocked; these partial results add no canonical acceptance.
 

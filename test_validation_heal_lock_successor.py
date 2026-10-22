@@ -114,6 +114,47 @@ class SuccessorEvidenceTests(unittest.TestCase):
             with self.subTest(rows=changed), self.assertRaises(ValueError):
                 successor.successor_attempt(changed, marker, holder, bucket, 'objects/0000.bin')
 
+    def test_real_slow_acquire_warning_never_replaces_target_lifecycle(self):
+        path = Path(__file__).with_name('testdata') / 'i05-successor-slow-acquire-39810035277.ndjson'
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        marker = 'auto-testing-i05-successor/5a37a691-d1d8-4591-b5a4-f174b7fe4818'
+        holder = {'request_id': fixture.REQUEST, 'lock_attempt_id': fixture.ATTEMPT,
+                  'owner': 'rustfs-node1:9000', 'namespace': 'pool-0'}
+        bucket = 'rv-heal-e9da35d01389c2ae'
+        warning = next(i for i, row in enumerate(rows) if row['level'] == 'WARN')
+        for length in range(1, len(rows) + 1):
+            proof = successor.successor_attempt(rows[:length], marker, holder, bucket, 'objects/0000.bin')
+            writes = [row for row in rows[:length] if row.get('event') == 'object_namespace_lock'
+                      and row['mode'] == 'write']
+            if writes:
+                self.assertEqual(proof['events'], writes)
+                self.assertEqual(proof['lockAttemptId'], 'de759fe0-8dfe-4b32-841a-047a23b8ed7c')
+            else:
+                self.assertIsNone(proof)
+        mutations = [lambda r: r.update(event='object_namespace_lock'),
+            lambda r: r.update(state='acquired'), lambda r: r.update(level='ERROR'),
+            lambda r: r.update(namespace='pool-0'), lambda r: r.update(owner='foreign'),
+            lambda r: r.update(object='foreign'), lambda r: r.update(bucket='foreign'),
+            lambda r: r.update(mode='read'), lambda r: r.update(op='get_object'),
+            lambda r: r.update(acquire_ms=True), lambda r: r.update(acquire_ms='499'),
+            lambda r: r.update(threshold_ms='0'), lambda r: r.update(threshold_ms='0500'),
+            lambda r: r.update(message='unreviewed lock warning')]
+        for mutate in mutations:
+            changed = copy.deepcopy(rows); mutate(changed[warning])
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                successor.successor_attempt(changed, marker, holder, bucket, 'objects/0000.bin')
+        for changed in [rows[:warning - 1] + rows[warning:],
+                        [rows[warning]], rows[:warning - 1] + [rows[warning]] + rows[warning - 1:]]:
+            with self.subTest(rows=changed), self.assertRaises(ValueError):
+                successor.successor_attempt(changed, marker, holder, bucket, 'objects/0000.bin')
+        # Removing the auxiliary warning leaves the same three target events.
+        plain = successor.successor_attempt(rows[:warning] + rows[warning + 1:], marker, holder, bucket, 'objects/0000.bin')
+        self.assertEqual(plain['states'], ['acquiring', 'acquired', 'guard_dropped'])
+        undrained = [row for row in rows if not (row.get('mode') == 'write' and row.get('state') == 'guard_dropped')]
+        proof = successor.successor_attempt(undrained, marker, holder, bucket, 'objects/0000.bin')
+        self.assertEqual(proof['states'], ['acquiring', 'acquired'])
+        self.assertNotIn('guard_dropped', proof['states'])
+
     def test_real_recorder_ack_binding_rejects_unknown_retry_wrong_content_and_time(self):
         with tempfile.TemporaryDirectory() as folder:
             probe = type('Probe', (), {'binding': {

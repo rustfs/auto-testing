@@ -1041,8 +1041,28 @@ and inode baselines. The new shard's streaming checksums now run only after
 all online peer reads and FD observations, under the unchanged stopped-only
 verifier. Stopped physical snapshots must match the ACK-bound pre-read scene
 both before and after the checksum pass. Drift or checksum failure retains
-the original scene and prevents cleanup. Fresh helper-bound tools and
-independent live acceptance are still required.
+the original scene and prevents cleanup. Exact helper `6fbc3c4` tools
+[39803149039/1](https://github.com/rustfs/rustfs/actions/runs/39803149039)
+passed independent audits of all three official ZIPs, 22 original members,
+ten exact native tests, 104 ordered milestones and inspector contracts.
+Live [39810035277/1](https://github.com/rustfs/rustfs/actions/runs/39810035277)
+completed the new H1 stopped-integrity sequence and cleanup, then retained
+H2 because a slow-acquire WARN sharing the diagnostic target was parsed as
+a lifecycle event. The WARN has no event/state/attempt/namespace fields;
+it reports a 1214 ms acquisition against a 500 ms warning threshold. It is
+not a timeout or a separate write attempt. The selector recognizes this
+exact auxiliary shape only after the same request's acquired target write,
+retaining strict HTTP identity, owner, numeric timing and lifecycle checks.
+Unknown warnings and lifecycle substitutions still refuse; the auxiliary
+warning cannot establish acquisition or guard drop.
+
+Isolation [39811143272/1](https://github.com/rustfs/rustfs/actions/runs/39811143272)
+preserved all 180 original failed files without modification. Independent
+archive audit verified all four nodes' pre/move/post tree, device and inode
+baselines and twenty root-owned 0700 archive parents on their original
+devices. No S3 replay, namespace deletion, old-generation restoration or
+original verdict rewrite occurred. Rebuild exact-helper tools before the
+next H1/H2 live attempt.
 Every successful diagnostic
 remains `BLOCKED/cleanup PASS` with `canonicalCasePassClaimed=false`. Exact
 disconnect-edge ownership, complete native timeout/stale fences, the
