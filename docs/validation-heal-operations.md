@@ -838,8 +838,9 @@ absence-of-leaks proof. All five node cleanup receipts show stopped services
 and removed owned roots. The original result is `BLOCKED/cleanup PASS`:
 the workflow fails its deliberately retained canonical gate despite successful
 diagnostic execution. Exact disconnect-edge ownership, distributed release,
-complete native timeout/stale fences, stale-generation/queued-successor
-controllers and full source H1/H2 DL/DV coverage remain unaccepted. No new
+complete native timeout/stale fences, the stale-generation controller
+and full source H1/H2 DL/DV coverage remain unaccepted. The separately audited
+queued-successor diagnostic is recorded below. No new
 canonical case is counted.
 
 `validation_cleanup_run_id=<failed-run-id>` selects the narrow I05 preservation
@@ -1061,8 +1062,27 @@ preserved all 180 original failed files without modification. Independent
 archive audit verified all four nodes' pre/move/post tree, device and inode
 baselines and twenty root-owned 0700 archive parents on their original
 devices. No S3 replay, namespace deletion, old-generation restoration or
-original verdict rewrite occurred. Rebuild exact-helper tools before the
-next H1/H2 live attempt.
+original verdict rewrite occurred.
+
+Exact helper `3012a65` tools
+[39812960916/1](https://github.com/rustfs/rustfs/actions/runs/39812960916)
+passed independent verification of three official ZIPs, 22 original members,
+ten exact native tests, 104 ordered milestones, actual hosted checkouts,
+source/tree/Cargo.lock, optimized ELF and inspector quorum/size contracts.
+Fresh live
+[39817606025/1](https://github.com/rustfs/rustfs/actions/runs/39817606025)
+completed H1 and H2 with five passing node cleanup receipts. Independent
+audit byte-matched all 246 official files and verified nine seed request/ACK
+pairs, eight final versions/markers per topology, one unretried successor
+PUT ACK, retained historical physical generations, actual lock lifecycle
+events and every peer's complete inventory. Stopped physical snapshots match
+the ACK-bound scene before and after all four H1 and sixteen H2 new-shard
+streaming receipts. Final FD counts were H1 vm000 `22 -> 22`; H2 vm000
+`108 -> 96`, vm001 `117 -> 113`, vm002 `105 -> 101`, vm003 `108 -> 104`.
+Both diagnostic branches are independently accepted, with the original
+`BLOCKED/cleanup PASS` unchanged. Precise disconnect-edge ownership,
+distributed release and global absence of leaks are explicitly unproven;
+the complete source DL/DV fixtures were not covered.
 Every successful diagnostic
 remains `BLOCKED/cleanup PASS` with `canonicalCasePassClaimed=false`. Exact
 disconnect-edge ownership, complete native timeout/stale fences, the

@@ -51,8 +51,8 @@ Independent audit of 211 artifact files verified exact 1001 ms write-lock
 timeouts, closed caller sockets, unchanged physical content, full diagnostic
 seed ACK/peer inventories and final FD counts at or below baseline. The
 original canonical result remains `BLOCKED/cleanup PASS`; source DL/DV,
-exact disconnect/native fences, stale-generation coverage and independent
-queued-successor live acceptance remain outstanding. Exact-helper native/tools
+exact disconnect/native fences and stale-generation coverage remain outstanding.
+Independent queued-successor diagnostic acceptance is recorded below. Exact-helper native/tools
 [39783997956/1](https://github.com/rustfs/rustfs/actions/runs/39783997956)
 passed independent audit. The initial successor live
 [39788321908/1](https://github.com/rustfs/rustfs/actions/runs/39788321908)
@@ -84,8 +84,18 @@ parents; every four-node pre/move/post tree, device and inode baseline
 matches. The parser now recognizes only the exact auxiliary warning bound
 to an already acquired target write; it cannot replace lifecycle evidence.
 The original sixteen-event H2 trace and incremental prefixes are covered by
-positive and negative regression tests. Fresh helper-bound tools and H1/H2
-live acceptance remain required. Acceptance stays **108/158**.
+positive and negative regression tests. Exact helper `3012a65` tools
+[39812960916/1](https://github.com/rustfs/rustfs/actions/runs/39812960916)
+passed independent archive/source/native and inspector audits. Fresh successor
+[39817606025/1](https://github.com/rustfs/rustfs/actions/runs/39817606025)
+completed H1/H2 and all five node cleanups. Independent audit byte-matched all
+246 official files, nine seed request/ACK pairs and eight final versions/markers
+per topology, one successor ACK, historical generations, lock events, every
+peer inventory, ACK-bound stopped physical invariance and four/sixteen streaming
+shard receipts. FD counts returned to or below each peer's baseline. The original
+result remains `BLOCKED/cleanup PASS`; exact disconnect-edge ownership,
+distributed release, global no-leak and full source DL/DV coverage are unproven.
+Acceptance stays **108/158**.
 
 Fresh D03 [39801936817/1](https://github.com/rustfs/rustfs/actions/runs/39801936817)
 retains FAIL/cleanup PASS. Independent H1 re-evaluation verified all four
@@ -297,7 +307,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-Four Heal cases remain outside canonical dispatch: C11, F07, I05 and J02. All four have explicit diagnostic routes that preserve their blocking canonical verdicts; I05 has a live-audited timeout diagnostic and an implemented queued-successor diagnostic with exact-source native prerequisites and stopped-scene isolation. The successor branch still needs independent live acceptance; exact server barriers and other source branches remain required. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
+Four Heal cases remain outside canonical dispatch: C11, F07, I05 and J02. All four have explicit diagnostic routes that preserve their blocking canonical verdicts; I05's H1/H2 timeout and queued-successor diagnostics have independently audited live results, exact-source native prerequisites and stopped-scene isolation. Exact server barriers and the complete source DL/DV branches remain required. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
 
