@@ -1492,6 +1492,9 @@ class HealScannerSourceTest(unittest.TestCase):
 
     def test_scanner_profile_enables_only_scanner_source_and_fixed_deep_timing(self):
         config = runtime_config("scanner")
+        logging_filter = "info,rustfs::scanner=debug,rustfs::heal=debug"
+        self.assertEqual(config["RUSTFS_OBS_LOGGER_LEVEL"], logging_filter)
+        self.assertEqual(config["RUST_LOG"], logging_filter)
         self.assertEqual(config["RUSTFS_SCANNER_ENABLED"], "true")
         for name in ("RUSTFS_HEAL_AUTO_HEAL_ENABLE", "RUSTFS_HEAL_MRF_ENABLE"):
             self.assertEqual(config[name], "false")

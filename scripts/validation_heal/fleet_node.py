@@ -112,7 +112,9 @@ def runtime_config(profile):
         logging_filter = "info,rustfs_ecstore=debug,rustfs::heal=debug"
         return {**BACKGROUND_CONFIG, "RUSTFS_OBS_LOGGER_LEVEL": logging_filter, "RUST_LOG": logging_filter}
     if profile == "scanner":
-        return {**BACKGROUND_CONFIG, "RUSTFS_SCANNER_ENABLED": "true", "RUSTFS_OBS_LOGGER_LEVEL": "debug",
+        logging_filter = "info,rustfs::scanner=debug,rustfs::heal=debug"
+        return {**BACKGROUND_CONFIG, "RUSTFS_SCANNER_ENABLED": "true",
+                "RUSTFS_OBS_LOGGER_LEVEL": logging_filter, "RUST_LOG": logging_filter,
                 "RUSTFS_SCANNER_START_DELAY_SECS": "5", "RUSTFS_SCANNER_CYCLE": "5",
                 "RUSTFS_SCANNER_SPEED": "fastest", "RUSTFS_SCANNER_DELAY": "0",
                 "RUSTFS_SCANNER_BITROT_CYCLE_SECS": "0", "RUSTFS_SCANNER_DEEP_VERIFY_COOLDOWN_SECS": "0",
