@@ -1,7 +1,9 @@
 """I05 timeout controller: real caller socket, durable PUT receipts, honest scope."""
 
 import copy
+import http.server
 import json
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -128,6 +130,45 @@ class TimeoutFlowTests(unittest.TestCase):
         proof = self.invoke()
         self.assertTrue(proof['diagnosticComplete'])
         self.assertTrue(proof['callerObservation']['admittedWork']['typedTimeoutBeyondBudgetObserved'])
+
+    def test_actual_probe_closes_known_503_keepalive_socket_without_retry(self):
+        from scripts.validation_heal.heal_probe import Probe
+        closed, received = threading.Event(), []
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+            def log_message(self, *args): pass
+            def do_PUT(self):
+                received.append(self.rfile.read(int(self.headers['Content-Length'])))
+                body = b'<Error><Code>ServiceUnavailable</Code><RequestId>one-refusal</RequestId></Error>'
+                self.send_response(503)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Content-Type', 'application/xml')
+                self.send_header('x-amz-request-id', 'one-refusal')
+                self.send_header('Retry-After', '1')
+                self.end_headers()
+                self.wfile.write(body); self.wfile.flush()
+                self.connection.settimeout(3)
+                try:
+                    if self.rfile.read(1) == b'': closed.set()
+                except TimeoutError: pass
+                self.close_connection = True
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            binding = copy.deepcopy(self.probe.binding)
+            binding['endpoints'] = {'node1': f'http://127.0.0.1:{server.server_port}'}
+            probe = Probe(binding, credential_pair=('test-access', 'test-secret'))
+            result = probe.s3('put_object', {'Bucket': fixture.BUCKET, 'Key': self.entry['key'],
+                'Metadata': {'heal-fixture': 'I05-timeout-contender'}}, b'one-refused-body')
+            self.assertFalse(result['acknowledged'] or result['resultUnknown'])
+            self.assertEqual(result['response']['ResponseMetadata']['HTTPStatusCode'], 503)
+            self.assertEqual(result['response']['ResponseMetadata']['RetryAttempts'], 0)
+            self.assertNotIn('clientCleanupError', result)
+            self.assertTrue(closed.wait(4), 'actual SDK close must reach the server socket')
+            self.assertEqual(received, [b'one-refused-body'])
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
 
     def test_an_additional_write_lock_attempt_is_rejected(self):
         self.change = 'extra-write-lock'

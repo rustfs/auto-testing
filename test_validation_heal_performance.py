@@ -181,6 +181,7 @@ class PerformanceTests(unittest.TestCase):
             def read_text(self): return proc[self.name]
             def iterdir(self): return iter(range(7))
         with patch.object(node, "Path", return_value=Proc()), patch.object(node, "process", return_value=identity), \
+                patch.object(node, "owned", return_value=(None, None, {"runtimeProfile": "manual"})), \
                 patch.object(node.os, "sysconf", side_effect=lambda name: 100 if name == "SC_CLK_TCK" else 4096):
             value = node.process_metrics({"runId": "gh-1-1-h2", "action": "process-metrics"})
             self.assertEqual(value["cpuTicks"], 150)

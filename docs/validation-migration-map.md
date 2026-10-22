@@ -2436,3 +2436,35 @@ nine seed ACK pairs. Unknown or successful writes, extra requests, missing
 samples, changed process identity or physical drift refuse before Fleet
 creation. The archived failure remains `FAIL/cleanup FAIL`; no canonical PASS,
 backup restoration, namespace deletion or verdict rewrite is authorized.
+
+I05 drain-budget scene isolation [39750591531/1](https://github.com/rustfs/rustfs/actions/runs/39750591531)
+completed `ISOLATED` using helper `b56b848`. Independent audit compared all 101
+original artifact files byte-for-byte, rechecked the unchanged original
+`FAIL/cleanup FAIL`, and verified identical preflight/move/post-audit tree,
+owner, device and inode baselines. The original business scene digest remains
+`c438f5bf295f56ddd168e9e840b41281863c3da06c0973eb9abead95edd63e89`.
+Four data roots and private state remain in five root-owned mode-0700
+same-device archive parents. No S3 request, backup restoration, namespace
+deletion or original verdict rewrite occurred. This preservation result adds
+no canonical acceptance; the documented count remains 104/158.
+
+The retained run proves the caller socket disappeared and its diagnostic read
+guard dropped, while the process FD count remained 23 against baseline 22.
+It does not identify the extra FD. I05 resource and socket samples now include
+bounded descriptor kinds and target fingerprints plus TCP rows joined to the
+original process's owned socket inodes. File contents and raw descriptor paths
+are excluded. The same original process birth and network namespace must
+survive collection; snapshots still make no global no-leak claim. The FD
+threshold and thirty-second drain budget are unchanged. A real local HTTP/1.1
+503 integration confirms the actual `Probe.s3` SDK path closes its keepalive
+socket without retry, but does not identify the original production FD. Fresh
+live descriptor evidence is required before attributing or correcting it.
+
+Verification: all 70 focused observer/timeout/transport/performance checks
+passed in Linux, including actual `/proc` descriptors and network-namespace
+refusal. The nine direct socket/census components also passed without network
+access in Linux. All 63 retention/runner/migration checks passed on macOS;
+catalog 158, matrix 84/302/534 and whitespace checks passed. The macOS focused
+suite encountered the previously recorded receive-buffer prerequisite in one
+physical-change negative test; that test passed independently and in the full
+Linux suite. The prerequisite and failure oracle were not relaxed.

@@ -694,6 +694,12 @@ def process_metrics(request):
               "threads": int(fields[17]), "fileDescriptors": sum(1 for _ in (root / "fd").iterdir()),
               "io": {name: io[name] for name in sorted(required_io)}, "readOnly": True,
               "ioScope": "owned process counters; cached logical IO and storage IO reported separately"}
+    if owned(request["runId"])[2].get("runtimeProfile") == "lock-timeout":
+        namespace = os.readlink(root / "ns/net")
+        result["descriptorCensus"] = caller_socket_backend.descriptor_census(root)
+        result["fileDescriptors"] = result["descriptorCensus"]["fileDescriptors"]
+        require(os.readlink(root / "ns/net") == namespace, "resource sample crossed a network namespace change")
+        result["networkNamespace"] = namespace
     after = process(request)
     require(all(after.get(name) == before[name] for name in PROCESS_FIELDS), "resource sample crossed a service identity change")
     return result

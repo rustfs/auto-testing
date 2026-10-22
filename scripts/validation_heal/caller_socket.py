@@ -1,5 +1,6 @@
 """Read the exact caller socket from one run-owned Linux candidate process."""
 
+import hashlib
 import ipaddress
 import os
 from pathlib import Path
@@ -35,7 +36,7 @@ def proc_address(value, ipv6):
     return str(ip), int(parts[1], 16)
 
 
-def connections(raw, ipv6, client, server):
+def tcp_rows(raw, ipv6):
     require(isinstance(raw, str) and len(raw.encode()) <= 4 * 1024**2, 'bounded Linux TCP table required')
     lines = raw.splitlines()
     require(lines and 'local_address' in lines[0] and 'inode' in lines[0], 'Linux TCP table header differs')
@@ -45,14 +46,62 @@ def connections(raw, ipv6, client, server):
         require(len(fields) >= 10 and fields[9].isdigit() and re.fullmatch(r'[0-9A-Fa-f]{2}', fields[3]),
                 'incomplete Linux TCP connection row')
         local, remote = proc_address(fields[1], ipv6), proc_address(fields[2], ipv6)
-        if local == server and remote == client:
-            queues = fields[4].split(':')
-            require(len(queues) == 2 and all(re.fullmatch(r'[0-9A-Fa-f]+', value) for value in queues),
-                    'invalid Linux TCP queue counters')
-            found.append({'inode': int(fields[9]), 'state': fields[3].upper(),
-                          'txQueueBytes': int(queues[0], 16), 'rxQueueBytes': int(queues[1], 16)})
+        queues = fields[4].split(':')
+        require(len(queues) == 2 and all(re.fullmatch(r'[0-9A-Fa-f]+', value) for value in queues),
+                'invalid Linux TCP queue counters')
+        found.append({'inode': int(fields[9]), 'state': fields[3].upper(),
+                      'localAddress': list(local), 'remoteAddress': list(remote),
+                      'txQueueBytes': int(queues[0], 16), 'rxQueueBytes': int(queues[1], 16)})
+    return found
+
+
+def connections(raw, ipv6, client, server):
+    found = [{k: v for k, v in row.items() if k not in {'localAddress', 'remoteAddress'}}
+             for row in tcp_rows(raw, ipv6)
+             if tuple(row['localAddress']) == server and tuple(row['remoteAddress']) == client]
     require(len(found) <= 1, 'ambiguous exact TCP connection in network namespace')
     return found
+
+
+def descriptor_census(root):
+    """Read owned FD links and TCP metadata, never descriptor contents or paths.
+
+    This is a bounded snapshot. A descriptor may disappear or be reused while
+    it is read; neither a stable count nor these fingerprints proves no leak.
+    The caller binds process birth and network namespace around this census.
+    """
+    started = time.monotonic_ns()
+    fds = list((root / 'fd').iterdir())
+    require(len(fds) <= 65536, 'owned process descriptor census exceeds its budget')
+    descriptors, vanished, owned_sockets = [], 0, {}
+    for fd in sorted(fds, key=lambda entry: int(entry.name)):
+        try:
+            target = os.readlink(fd)
+        except FileNotFoundError:
+            vanished += 1
+            continue
+        match = re.fullmatch(r'(socket|pipe):\[([0-9]+)\]', target)
+        kind = match[1] if match else ('anonymous' if target.startswith('anon_inode:') else 'path')
+        row = {'descriptor': int(fd.name), 'kind': kind,
+               'targetSha256': hashlib.sha256(os.fsencode(target)).hexdigest()}
+        if match:
+            row['inode'] = int(match[2])
+            if kind == 'socket':
+                owned_sockets.setdefault(row['inode'], []).append(row['descriptor'])
+        descriptors.append(row)
+    tcp = []
+    for table, ipv6 in (('tcp', False), ('tcp6', True)):
+        # The namespace table alone does not establish process ownership.
+        with (root / 'net' / table).open() as stream:
+            raw = stream.read(4 * 1024**2 + 1)
+        for row in tcp_rows(raw, ipv6):
+            if row['inode'] in owned_sockets:
+                tcp.append({**row, 'descriptors': owned_sockets[row['inode']], 'table': table})
+    return {'startedMonotonicNs': started, 'finishedMonotonicNs': time.monotonic_ns(),
+            'fileDescriptors': len(fds), 'vanishedDescriptors': vanished,
+            'descriptors': descriptors, 'ownedTcpConnections': tcp,
+            'descriptorContentsRead': False, 'rawDescriptorPathsIncluded': False,
+            'snapshotOnly': True, 'noLeakProven': False}
 
 
 def run(request, node):
@@ -75,32 +124,14 @@ def run(request, node):
     root = Path(f'/proc/{before["pid"]}')
     network_namespace = os.readlink(root / 'ns/net')
     def sample():
-        started = time.monotonic_ns()
-        fds, vanished, owned_sockets = list((root / 'fd').iterdir()), 0, {}
-        require(len(fds) <= 65536, 'owned process descriptor census exceeds its budget')
-        for fd in fds:
-            try:
-                target = os.readlink(fd)
-            except FileNotFoundError:
-                vanished += 1
-                continue
-            match = re.fullmatch(r'socket:\[([0-9]+)\]', target)
-            if match:
-                owned_sockets.setdefault(int(match[1]), []).append(int(fd.name))
-        matches = []
-        for table, ipv6 in (('tcp', False), ('tcp6', True)):
-            # /proc/PID/net describes the namespace, not process ownership.
-            # Only a matching descriptor inode establishes the latter.
-            with (root / 'net' / table).open() as stream:
-                raw = stream.read(4 * 1024**2 + 1)
-            for row in connections(raw, ipv6, client, server):
-                if row['inode'] in owned_sockets:
-                    matches.append({**row, 'descriptors': sorted(owned_sockets[row['inode']]), 'table': table})
+        census = descriptor_census(root)
+        matches = [{k: v for k, v in row.items() if k not in {'localAddress', 'remoteAddress'}}
+                   for row in census['ownedTcpConnections']
+                   if tuple(row['localAddress']) == server and tuple(row['remoteAddress']) == client]
         require(len(matches) <= 1, 'caller TCP connection maps to ambiguous owned sockets')
         process()
         require(os.readlink(root / 'ns/net') == network_namespace, 'caller socket network namespace changed')
-        return {'startedMonotonicNs': started, 'finishedMonotonicNs': time.monotonic_ns(),
-                'fileDescriptors': len(fds), 'vanishedDescriptors': vanished, 'ownedMatches': matches}
+        return {**census, 'ownedMatches': matches}
     samples = [sample(), sample()]
     process()
     return {'process': {name: before[name] for name in node['PROCESS_FIELDS']}, 'clockDomain': before['bootId'],

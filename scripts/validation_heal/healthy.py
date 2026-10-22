@@ -185,7 +185,7 @@ class Fleet:
             params["buckets"] = self.snapshot_buckets
         value = {"runId": self.run_id, "action": action, **params}
         source = NODE_SOURCE.read_text()
-        if action == "caller-socket":
+        if action in {"caller-socket", "process-metrics"}:
             source += "\nimport types\ncaller_socket_backend = types.ModuleType('caller_socket')\nexec(" + repr(
                 NODE_SOURCE.with_name("caller_socket.py").read_text()) + ", caller_socket_backend.__dict__)\n"
         if action in {"mpu-race-backups", "version-race-backups"}:

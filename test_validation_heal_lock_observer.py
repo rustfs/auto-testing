@@ -251,6 +251,36 @@ class CallerSocketTests(unittest.TestCase):
         return {'owned': lambda run: (None, None, {'runtimeProfile': 'lock-timeout'}),
                 'process': lambda request: identity(), 'PROCESS_FIELDS': fleet_node.PROCESS_FIELDS}
 
+    def test_descriptor_census_distinguishes_owned_tcp_and_hashes_private_paths_without_opening_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'fd').mkdir(); (root / 'net').mkdir()
+            private = '/private/test-secret/credentials.env'
+            for fd, target in ((3, 'socket:[678]'), (4, 'pipe:[999]'),
+                               (5, private), (6, 'anon_inode:[eventpoll]')):
+                (root / f'fd/{fd}').symlink_to(target)
+            (root / 'net/tcp').write_text(HEADER
+                + '\n0: 0100007F:2328 0100007F:9859 01 0:0 00:0 0 1000 0 678'
+                + '\n1: 0100007F:2328 0100007F:985A 08 0:0 00:0 0 1000 0 777\n')
+            (root / 'net/tcp6').write_text(HEADER + '\n')
+            proof = sockets.descriptor_census(root)
+            self.assertEqual(proof['fileDescriptors'], 4)
+            self.assertEqual([row['kind'] for row in proof['descriptors']], ['socket', 'pipe', 'path', 'anonymous'])
+            self.assertEqual(proof['descriptors'][2]['targetSha256'], hashlib.sha256(os.fsencode(private)).hexdigest())
+            self.assertNotIn(private, json.dumps(proof))
+            self.assertEqual(len(proof['ownedTcpConnections']), 1)
+            self.assertEqual(proof['ownedTcpConnections'][0]['descriptors'], [3])
+            self.assertFalse(proof['descriptorContentsRead'] or proof['rawDescriptorPathsIncluded'] or proof['noLeakProven'])
+            readlink = os.readlink
+            def vanish(path):
+                if Path(path).name == '4': raise FileNotFoundError('closed during census')
+                return readlink(path)
+            with patch.object(sockets.os, 'readlink', side_effect=vanish):
+                changed = sockets.descriptor_census(root)
+            self.assertEqual(changed['vanishedDescriptors'], 1)
+            self.assertEqual(changed['fileDescriptors'], 4)
+            self.assertEqual(len(changed['descriptors']), 3)
+
     def test_frozen_linux_tables_include_zero_port_listeners_and_mapped_ipv6(self):
         ipv4 = HEADER + '\n 0: 0100007F:2328 0100007F:9859 01 0:0 00:0 0 1000 0 678\n'
         ipv4 += ' 1: 00000000:2328 00000000:0000 0A 0:0 00:0 0 1000 0 123\n'
@@ -304,6 +334,43 @@ class CallerSocketTests(unittest.TestCase):
             fleet = observer.Fleet(['vm000'], Path(tmp), 'gh-12345-1-h1', runtime_profile='lock-timeout')
             self.assertEqual(fleet.remote('vm000', 'caller-socket', **{k: v for k, v in self.request().items()
                                                                    if k not in {'runId', 'action'}}), {})
+
+    def test_fleet_metrics_embed_the_same_descriptor_backend(self):
+        def execute(*args, **kwargs):
+            source = kwargs['input'].rsplit('\nmain(', 1)[0]
+            scope = {'__name__': '__i05_metrics_test__'}
+            exec(compile(source, 'i05-metrics-node', 'exec'), scope)
+            self.assertTrue(callable(scope['caller_socket_backend'].descriptor_census))
+            return SimpleNamespace(returncode=0, stdout='{}', stderr='')
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch('scripts.validation_heal.healthy.subprocess.run', side_effect=execute):
+            from scripts.validation_heal.healthy import Fleet
+            fleet = Fleet(['vm000'], Path(tmp), 'gh-12345-1-h1', runtime_profile='lock-timeout')
+            self.assertEqual(fleet.remote('vm000', 'process-metrics'), {})
+
+    @unittest.skipUnless(sys.platform == 'linux', 'requires actual Linux /proc descriptor tables')
+    def test_metrics_keep_same_process_fd_fingerprints_for_live_file_and_socket(self):
+        actual = {**identity(), 'pid': os.getpid(),
+            'startTicks': int(Path('/proc/self/stat').read_text().rpartition(') ')[2].split()[19])}
+        with tempfile.TemporaryFile() as file, socket.socket() as sock, \
+                patch.object(fleet_node, 'process', return_value=actual), \
+                patch.object(fleet_node, 'owned', return_value=(None, None, {'runtimeProfile': 'lock-timeout'})), \
+                patch.object(fleet_node, 'caller_socket_backend', sockets, create=True):
+            proof = fleet_node.process_metrics({'runId': 'gh-12345-1-h1', 'action': 'process-metrics'})
+            census = proof['descriptorCensus']
+            by_fd = {row['descriptor']: row for row in census['descriptors']}
+            self.assertEqual(by_fd[file.fileno()]['kind'], 'path')
+            self.assertEqual(by_fd[sock.fileno()]['kind'], 'socket')
+            self.assertEqual(proof['networkNamespace'], os.readlink('/proc/self/ns/net'))
+            self.assertEqual(proof['fileDescriptors'], census['fileDescriptors'])
+            self.assertTrue(census['snapshotOnly'])
+            with patch.object(fleet_node, 'process', side_effect=[actual, {**actual, 'startTicks': 1}]):
+                with self.assertRaisesRegex(ValueError, 'identity change'):
+                    fleet_node.process_metrics({'runId': 'gh-12345-1-h1', 'action': 'process-metrics'})
+            with patch.object(fleet_node.os, 'readlink', side_effect=['net:[1]', 'net:[2]']), \
+                    patch.object(sockets, 'descriptor_census', return_value=census):
+                with self.assertRaisesRegex(ValueError, 'network namespace change'):
+                    fleet_node.process_metrics({'runId': 'gh-12345-1-h1', 'action': 'process-metrics'})
 
     @unittest.skipUnless(sys.platform == 'linux', 'requires actual Linux /proc TCP tables')
     def test_actual_linux_backpressured_response_has_an_owned_nonempty_send_queue(self):
