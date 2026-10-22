@@ -12,13 +12,13 @@ import uuid
 try:
     from .caller_abort import disconnect_get
     from .fleet_node import PROCESS_FIELDS, runtime_config
-    from .heal_probe import Probe, canonical, require, save, validate_binding
+    from .heal_probe import MAX_BODY, Probe, canonical, require, save, validate_binding, validate_s3_request
     from .healthy import Fleet
     from .scanner_repair import JournalWindow
 except ImportError:
     from caller_abort import disconnect_get
     from fleet_node import PROCESS_FIELDS, runtime_config
-    from heal_probe import Probe, canonical, require, save, validate_binding
+    from heal_probe import MAX_BODY, Probe, canonical, require, save, validate_binding, validate_s3_request
     from healthy import Fleet
     from scanner_repair import JournalWindow
 
@@ -93,22 +93,39 @@ def same_process(observed, expected):
             for name in PROCESS_FIELDS), 'I05 observation crossed a service process birth or runtime change')
 
 
-def observe_disconnect(probe, fleet, bucket, entry, output):
-    """Use an already deployed exclusive I05 service; do not alter the fleet."""
+def validate_scope(probe, fleet, bucket, entry):
+    """Refuse another service, source or target before any remote observation."""
     validate_binding(probe.binding)
     require(fleet.runtime_profile == 'lock-timeout' and fleet.run_id == probe.binding['runId']
             and probe.binding['candidateCommit'] == CANDIDATE,
             'caller observation requires its reviewed candidate and isolated runtime')
     endpoints = {f'node{index}': f'http://rustfs-node{index}:9000' for index in range(1, len(fleet.nodes) + 1)}
-    require(probe.binding['endpoints'] == endpoints and len(set(fleet.nodes)) == len(fleet.nodes)
+    expected_nodes = ['vm000'] if len(fleet.nodes) == 1 else ['vm000', 'vm001', 'vm002', 'vm003']
+    require(probe.binding['endpoints'] == endpoints and fleet.nodes == expected_nodes
             and ((len(fleet.nodes) == 1 and fleet.run_id.endswith('-h1'))
                  or (len(fleet.nodes) == 4 and fleet.run_id.endswith('-h2'))),
             'I05 caller endpoints differ from the H1/H2 fleet')
-    require(entry.get('deleteMarker') is False and isinstance(entry.get('payload'), dict)
+    require(probe.endpoint_name in endpoints
+            and probe.endpoint == endpoints[probe.endpoint_name].rstrip('/'),
+            'I05 caller endpoint differs from its binding')
+    require(isinstance(entry, dict) and entry.get('deleteMarker') is False
+            and isinstance(entry.get('key'), str) and 0 < len(entry['key'].encode()) <= 1024
+            and isinstance(entry.get('versionId'), str)
+            and str(uuid.UUID(entry['versionId'])) == entry['versionId'] and uuid.UUID(entry['versionId']).int
+            and isinstance(entry.get('payload'), dict)
             and set(entry['payload']) == {'size', 'sha256'} and type(entry['payload']['size']) is int
-            and 0 < entry['payload']['size'] <= probe.binding['maxInventoryBytes']
+            and 0 < entry['payload']['size'] <= min(MAX_BODY, probe.binding['maxInventoryBytes'])
+            and isinstance(entry['payload']['sha256'], str)
             and re.fullmatch(r'[0-9a-f]{64}', entry['payload']['sha256']),
             'caller drain requires an acknowledged historical content manifest')
+    validate_s3_request(probe.binding, 'get_object', {
+        'Bucket': bucket, 'Key': entry.get('key'), 'VersionId': entry['versionId']})
+
+
+def observe_disconnect(probe, fleet, bucket, entry, output, *, while_admitted=None,
+                       receive_buffer_bytes=None, before_verification=None):
+    """Use an already deployed exclusive I05 service; do not alter the fleet."""
+    validate_scope(probe, fleet, bucket, entry)
     output = Path(output)
     output.mkdir(exist_ok=False)
     bound = canonical(probe.binding)
@@ -134,8 +151,9 @@ def observe_disconnect(probe, fleet, bucket, entry, output):
         return values
     baseline = metrics('I05-caller-baseline-resources')
     window = JournalWindow(fleet, 'I05-caller', event_targets={TARGET}, strict_json=True)
-    node = fleet.nodes[list(endpoints).index(probe.endpoint_name)]
+    node = fleet.nodes[int(probe.endpoint_name.removeprefix('node')) - 1]
     admitted = None
+    admitted_work = None
     network_namespace = None
     def capture(sent):
         validate_binding(probe.binding)
@@ -160,7 +178,7 @@ def observe_disconnect(probe, fleet, bucket, entry, output):
         network_namespace = namespace
         return value
     def before_disconnect(sent):
-        nonlocal admitted
+        nonlocal admitted, admitted_work
         deadline = time.monotonic() + ADMISSION_SECONDS
         while True:
             observed = capture(sent)
@@ -182,12 +200,17 @@ def observe_disconnect(probe, fleet, bucket, entry, output):
                     require(time.monotonic() <= deadline, 'NOT_OBSERVED: caller admission observation exceeded its budget')
                     admitted = {'node': node, 'attempt': observed, 'socket': connection}
                     save(output / 'admission.json', admitted)
+                    if while_admitted is not None:
+                        admitted_work = while_admitted(sent, admitted, window)
                     return
             require(time.monotonic() < deadline, 'NOT_OBSERVED: caller lock acquisition window was not observed')
             time.sleep(.1)
     try:
+        transport_options = {'before_disconnect': before_disconnect}
+        if receive_buffer_bytes is not None:
+            transport_options['receive_buffer_bytes'] = receive_buffer_bytes
         sent = disconnect_get(probe, bucket, entry['key'], entry['versionId'], output / 'transport',
-                              before_disconnect=before_disconnect)
+                              **transport_options)
         deadline = time.monotonic() + DRAIN_SECONDS
         while True:
             observed = capture(sent)
@@ -203,6 +226,7 @@ def observe_disconnect(probe, fleet, bucket, entry, output):
                 break
             require(time.monotonic() < deadline, 'NOT_OBSERVED: caller diagnostic, socket or FD count did not drain')
             time.sleep(.2)
+        verification_precondition = before_verification() if before_verification is not None else None
         read = fleet.record('I05-caller-final-exact-version', probe.s3('get_object',
             {'Bucket': bucket, 'Key': entry['key'], 'VersionId': entry['versionId']}))
         require(read.get('acknowledged') is True and read.get('resultUnknown') is False
@@ -217,7 +241,10 @@ def observe_disconnect(probe, fleet, bucket, entry, output):
                 break
             require(time.monotonic() < deadline, 'NOT_OBSERVED: I05 verification did not return to its FD count baseline')
             time.sleep(.2)
-        result = {'observationComplete': True, 'admission': admitted, 'finalAttempt': observed,
+        result = {'observationComplete': True, 'baselineResources': baseline,
+            'admission': admitted, 'finalAttempt': observed,
+            'admittedWork': admitted_work,
+            'verificationPrecondition': verification_precondition,
             'finalSocket': connection, 'finalResources': resources, 'afterVerificationResources': verified_resources,
             'exactHistoricalContentPreserved': True,
             'callerResultUnknown': True, 'heldAtDisconnectProven': False, 'distributedReleaseProven': False,

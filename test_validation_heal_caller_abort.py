@@ -60,7 +60,8 @@ class CallerAbortTests(unittest.TestCase):
     def invoke(self, output=None, **changes):
         return caller_abort.disconnect_get(self.probe, changes.get('bucket', self.binding['bucketPrefix']),
             changes.get('key', '中文/literal%2F space.bin'), changes.get('version', VERSION),
-            output or self.root / 'call', before_disconnect=changes.get('before_disconnect'))
+            output or self.root / 'call', before_disconnect=changes.get('before_disconnect'),
+            receive_buffer_bytes=changes.get('receive_buffer_bytes'))
 
     def test_one_signed_exact_version_get_closes_real_socket_and_retains_unknown(self):
         proof = self.invoke()
@@ -84,6 +85,8 @@ class CallerAbortTests(unittest.TestCase):
         expected = auth.signature(auth.string_to_sign(checked, auth.canonical_request(checked)), checked)
         self.assertEqual(headers['Authorization'].split('Signature=')[1], expected)
         self.assertEqual(proof['connectionAttempts'], 1)
+        self.assertIsNone(proof['receiveBufferBytesRequested'])
+        self.assertIsNone(proof['receiveBufferBytesEffective'])
         self.assertTrue(proof['requestWriteCompleted'] and proof['clientSocketClosed'] and proof['shutdownCompleted'])
         self.assertTrue(proof['resultUnknown'])
         for field in ('responseObserved', 'acknowledged', 'retryAllowed', 'serverOwnershipProven', 'canonicalCasePassClaimed'):
@@ -110,6 +113,21 @@ class CallerAbortTests(unittest.TestCase):
         self.assertEqual(observations, [proof['callerMarker']])
         self.assertFalse(proof['serverOwnershipProven'])
         self.assertTrue(self.server.disconnected.wait(3))
+
+    def test_small_bounded_receive_buffer_is_persisted_and_applied_to_real_socket(self):
+        proof = self.invoke(receive_buffer_bytes=4096)
+        intent = json.loads((self.root / 'call/request.json').read_text())
+        self.assertEqual(intent['receiveBufferBytesRequested'], 4096)
+        self.assertEqual(proof['receiveBufferBytesRequested'], 4096)
+        self.assertGreaterEqual(proof['receiveBufferBytesEffective'], 4096)
+        self.assertLessEqual(proof['receiveBufferBytesEffective'], 4096 * 4)
+        self.assertTrue(self.server.disconnected.wait(3))
+
+    def test_invalid_receive_buffer_is_rejected_before_output_or_network(self):
+        with self.assertRaises(ValueError):
+            self.invoke(receive_buffer_bytes=1)
+        self.assertFalse((self.root / 'call').exists())
+        self.assertEqual(self.server.requests, [])
 
     def test_observer_failure_closes_only_the_caller_and_retains_unknown(self):
         def observer(sent):

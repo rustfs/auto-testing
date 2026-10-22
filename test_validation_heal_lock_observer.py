@@ -7,12 +7,14 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from scripts.validation_heal import caller_socket as sockets
 from scripts.validation_heal import fleet_node, lock_observer as observer
+from scripts.validation_heal import lock_timeout
 import test_validation_heal_caller_abort as wire_fixture
 
 VERSION = wire_fixture.VERSION
@@ -101,6 +103,113 @@ class LockEventTests(unittest.TestCase):
             proof = observer.caller_attempt([event('acquiring'), end], SENT, BUCKET, 'target.bin')
             self.assertFalse(proof['diagnosticGuardDropped'] or proof['observedAcquiredWithoutDrop'])
 
+    def test_timeout_proof_requires_server_request_id_and_exact_write_lock_timeout(self):
+        holder = {'request_id': REQUEST, 'lock_attempt_id': ATTEMPT, 'owner': 'owner-one', 'namespace': 'namespace-one'}
+        contender = '30000000-0000-4000-8000-000000000001'
+        response = {'ResponseMetadata': {'HTTPStatusCode': 503, 'RetryAttempts': 0, 'RequestId': contender,
+                     'HTTPHeaders': {'retry-after': '1'}},
+                    'Error': {'Code': 'ServiceUnavailable'}}
+        rows = [
+            {'target': observer.TARGET, 'request_id': contender, 'event': 'object_namespace_lock',
+             'component': 'ecstore', 'subsystem': 'object_lock', 'state': 'acquiring', 'level': 'TRACE',
+             'op': 'put_object_commit', 'mode': 'write', 'bucket': BUCKET, 'object': 'target.bin',
+             'namespace': 'namespace-one', 'owner': 'owner-one', 'lock_attempt_id': '40000000-0000-4000-8000-000000000001',
+             'requested_version_id': None, 'timeout_ms': 1000, 'acquire_ms': 0},
+            {'target': observer.TARGET, 'request_id': contender, 'event': 'object_namespace_lock',
+             'component': 'ecstore', 'subsystem': 'object_lock', 'state': 'failed', 'level': 'ERROR',
+             'op': 'put_object_commit', 'mode': 'write', 'bucket': BUCKET, 'object': 'target.bin',
+             'namespace': 'namespace-one', 'owner': 'owner-one', 'lock_attempt_id': '40000000-0000-4000-8000-000000000001',
+             'requested_version_id': None, 'timeout_ms': 1000, 'acquire_ms': 1001, 'failure': 'timeout'},
+        ]
+        proof = lock_timeout.timeout_proof(rows, response, holder, BUCKET, 'target.bin')
+        self.assertTrue(proof['typedTimeoutBeyondBudgetObserved'] and not proof['writeLockAcquired'])
+        for mutation in (
+            (lambda r, q: r[1].update(owner='foreign-owner')),
+            (lambda r, q: r[1].update(lock_attempt_id=ATTEMPT)),
+            (lambda r, q: q['ResponseMetadata'].update(RequestId=REQUEST)),
+            (lambda r, q: r[1].update(acquire_ms=999)),
+            (lambda r, q: r[1].update(namespace='other')),
+            (lambda r, q: q['ResponseMetadata']['HTTPHeaders'].clear()),
+            (lambda r, q: q['ResponseMetadata'].update(RetryAttempts=1)),
+            (lambda r, q: r[1].update(state='acquired')),
+        ):
+            copy_rows = json.loads(json.dumps(rows)); copy_response = json.loads(json.dumps(response))
+            mutation(copy_rows, copy_response)
+            with self.assertRaises(ValueError):
+                lock_timeout.timeout_proof(copy_rows, copy_response, holder, BUCKET, 'target.bin')
+
+    def test_timeout_inventory_requires_complete_cross_checked_exact_target(self):
+        entry = {'key': 'target.bin', 'versionId': VERSION, 'deleteMarker': False, 'isLatest': True,
+                 'payload': {'size': 5, 'sha256': 'a' * 64}}
+        inventory = {'bucket': BUCKET, 'entries': [entry], 'objectsAndMarkers': 1,
+            'bytesRead': 5, 'pagination': {'versionPageSizes': [1], 'currentPageSizes': [1]}}
+        self.assertEqual(lock_timeout.require_exact_inventory_entry(inventory, BUCKET, entry), entry)
+        mutations = [
+            lambda value: value.pop('pagination'),
+            lambda value: value.update(objectsAndMarkers=0),
+            lambda value: value.update(bytesRead=4),
+            lambda value: value['pagination'].update(currentPageSizes=[0]),
+            lambda value: value['entries'][0].update(versionId='foreign'),
+            lambda value: value['entries'][0].update(payload={'size': 5, 'sha256': 'b' * 64}),
+            lambda value: value['pagination'].update(versionPageSizes=[True]),
+            lambda value: value['pagination'].update(currentPageSizes=[-1, 2]),
+            lambda value: value['entries'][0].update(isLatest=1),
+            lambda value: value['entries'].append(dict(value['entries'][0])),
+            lambda value: value['entries'][0].update(payload={'size': True, 'sha256': 'a' * 64}),
+        ]
+        for mutate in mutations:
+            broken = json.loads(json.dumps(inventory))
+            mutate(broken)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                lock_timeout.require_exact_inventory_entry(broken, BUCKET, entry)
+
+    def test_timeout_ack_requires_exact_durable_put_receipt_and_endpoint(self):
+        body = b'contender'
+        request = {'schemaVersion': 2, 'runId': 'gh-12345-1-h1', 'sequence': 1,
+            'operation': 'put_object', 'params': {'Bucket': BUCKET, 'Key': 'target.bin',
+                'Metadata': {'heal-fixture': 'I05-timeout-contender'}}, 'identity': None,
+            'expectHttp': 503, 'casePassClaimed': False,
+            'clockDomain': lock_timeout.CLOCK_DOMAIN, 'preparedMonotonicNs': 50,
+            'payload': {'size': len(body), 'sha256': hashlib.sha256(body).hexdigest()}}
+        request_bytes = json.dumps(request, sort_keys=True).encode()
+        response = {'ResponseMetadata': {'HTTPStatusCode': 503, 'RetryAttempts': 0,
+            'RequestId': '30000000-0000-4000-8000-000000000001',
+            'HTTPHeaders': {'retry-after': '1'}}, 'Error': {'Code': 'ServiceUnavailable'}}
+        ack = {'schemaVersion': 2, 'runId': request['runId'], 'sequence': 1,
+            'requestFile': '000001-request.json',
+            'requestSha256': hashlib.sha256(request_bytes).hexdigest(), 'operationCheck': 'PASS',
+            'casePassClaimed': False,
+            'clockDomain': lock_timeout.CLOCK_DOMAIN, 'collectorCallStartedMonotonicNs': 75,
+            'collectorCallFinishedMonotonicNs': 225, 'recordedMonotonicNs': 250,
+            'observation': {'endpoint': 'node1', 'clientCallInvoked': True,
+                'operation': 'put_object', 'params': request['params'], 'payload': request['payload'],
+                'clockDomain': lock_timeout.CLOCK_DOMAIN,
+                'acknowledged': False, 'resultUnknown': False, 'response': response,
+                'callStartedMonotonicNs': 100, 'callFinishedMonotonicNs': 200}}
+        self.assertEqual(lock_timeout.validate_timeout_ack(ack, request, request_bytes,
+            request['runId'], 'node1', BUCKET, 'target.bin', body), response)
+        for mutation in (
+            lambda a, r: a.update(requestSha256='0' * 64),
+            lambda a, r: a['observation'].update(endpoint='node2'),
+            lambda a, r: a['observation'].update(resultUnknown=True),
+            lambda a, r: r['params'].update(Key='foreign.bin'),
+            lambda a, r: r.update(expectHttp=200),
+            lambda a, r: a['observation'].update(clientCleanupError={'type': 'Error'}),
+            lambda a, r: a['observation'].update(operation='copy_object'),
+            lambda a, r: a['observation'].update(payload={'size': 1, 'sha256': '0' * 64}),
+            lambda a, r: a['observation'].update(clockDomain='foreign'),
+            lambda a, r: a.update(collectorCallStartedMonotonicNs=150),
+            lambda a, r: a.update(recordedMonotonicNs=150),
+        ):
+            broken_ack = json.loads(json.dumps(ack)); broken_request = json.loads(json.dumps(request))
+            mutation(broken_ack, broken_request)
+            broken_bytes = json.dumps(broken_request, sort_keys=True).encode()
+            if broken_request != request:
+                broken_ack['requestSha256'] = hashlib.sha256(broken_bytes).hexdigest()
+            with self.subTest(mutate=mutation), self.assertRaises(ValueError):
+                lock_timeout.validate_timeout_ack(broken_ack, broken_request, broken_bytes,
+                    request['runId'], 'node1', BUCKET, 'target.bin', body)
+
 
 class CallerSocketTests(unittest.TestCase):
     def request(self):
@@ -115,7 +224,7 @@ class CallerSocketTests(unittest.TestCase):
         ipv4 = HEADER + '\n 0: 0100007F:2328 0100007F:9859 01 0:0 00:0 0 1000 0 678\n'
         ipv4 += ' 1: 00000000:2328 00000000:0000 0A 0:0 00:0 0 1000 0 123\n'
         self.assertEqual(sockets.connections(ipv4, False, ('127.0.0.1', 39001), ('127.0.0.1', 9000)),
-                         [{'inode': 678, 'state': '01'}])
+                         [{'inode': 678, 'state': '01', 'txQueueBytes': 0, 'rxQueueBytes': 0}])
         self.assertEqual(sockets.proc_address('0000000000000000FFFF00000100007F:2328', True), ('127.0.0.1', 9000))
         self.assertEqual(sockets.proc_address('00000000000000000000000001000000:0000', True), ('::1', 0))
         for raw in ('', HEADER + '\n truncated', ipv4 + ipv4.splitlines()[1]):
@@ -164,6 +273,37 @@ class CallerSocketTests(unittest.TestCase):
                                                                    if k not in {'runId', 'action'}}), {})
 
     @unittest.skipUnless(sys.platform == 'linux', 'requires actual Linux /proc TCP tables')
+    def test_actual_linux_backpressured_response_has_an_owned_nonempty_send_queue(self):
+        with socket.socket() as listener, socket.socket() as client:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(('127.0.0.1', 9000)); listener.listen(1)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            client.connect(listener.getsockname())
+            accepted, _ = listener.accept()
+            try:
+                accepted.setblocking(False)
+                remaining = memoryview(b'x' * (8 * 1024**2))
+                deadline = time.monotonic() + 3
+                while remaining:
+                    try:
+                        remaining = remaining[accepted.send(remaining):]
+                    except BlockingIOError:
+                        break
+                    self.assertLess(time.monotonic(), deadline)
+                self.assertTrue(remaining, 'the unread response must hit actual TCP backpressure')
+                node = self.node()
+                actual = {**identity(), 'pid': os.getpid()}
+                node['process'] = lambda req: actual
+                req = {**self.request(), 'expectedProcess': actual, 'clientAddress': list(client.getsockname())}
+                proof = sockets.run(req, node)
+                for sample in proof['samples']:
+                    match = sample['ownedMatches'][0]
+                    self.assertEqual(match['descriptors'], [accepted.fileno()])
+                    self.assertGreater(match['txQueueBytes'], 0)
+            finally:
+                accepted.close()
+
+    @unittest.skipUnless(sys.platform == 'linux', 'requires actual Linux /proc TCP tables')
     def test_actual_linux_socket_is_bound_to_accepted_descriptor_and_disappears_after_close(self):
         with socket.socket() as listener, socket.socket() as client:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -207,6 +347,7 @@ class ObserverFlowTests(unittest.TestCase):
         self.sent = None
         self.change = None
         self.labels = []
+        self.contender_rows = []
         owner = self
         class Fleet:
             nodes = ['vm000']; run_id = owner.probe.binding['runId']; runtime_profile = 'lock-timeout'
@@ -218,7 +359,8 @@ class ObserverFlowTests(unittest.TestCase):
                     return {'identity': identity(), 'fileDescriptors': 10 if owner.change != 'leak' else
                             11 if owner.stage == 'after' else 10}
                 if action == 'caller-socket':
-                    matches = [{'state': '01', 'inode': 678, 'descriptors': [4]}] if owner.stage == 'before' else []
+                    matches = [{'state': '01', 'inode': 678, 'descriptors': [4],
+                                'txQueueBytes': 4096}] if owner.stage == 'before' else []
                     return {'process': identity(), 'clockDomain': identity()['bootId'], 'readOnly': True,
                             'networkNamespace': 'net:[2]' if owner.change == 'namespace' and owner.stage == 'after' else 'net:[1]',
                             'samples': [{'ownedMatches': matches, 'vanishedDescriptors': 0},
@@ -228,18 +370,21 @@ class ObserverFlowTests(unittest.TestCase):
             def __init__(self, *args, **kwargs): pass
             def capture(self):
                 rows = [event('acquiring', owner.sent), event('acquired', owner.sent)]
-                if owner.stage == 'after' or owner.change == 'early-drop': rows.append(event('guard_dropped', owner.sent))
+                if owner.stage == 'after' or owner.change == 'early-drop' or (
+                        owner.change == 'timeout-drop' and owner.contender_rows):
+                    rows.append(event('guard_dropped', owner.sent))
                 if owner.change == 'owner' and owner.stage == 'after': rows[-1]['owner'] = 'rebound'
-                return {'vm000': rows}
+                return {node: rows + owner.contender_rows if node == 'vm000' else []
+                        for node in owner.fleet.nodes}
         self.fleet = Fleet()
         self.window_patch = patch.object(observer, 'JournalWindow', Window); self.window_patch.start()
         self.addCleanup(self.window_patch.stop)
         original = observer.disconnect_get
-        def transport(probe, bucket, key, version, output, *, before_disconnect):
+        def transport(probe, bucket, key, version, output, *, before_disconnect, **options):
             def on_sent(sent):
                 owner.sent = sent
                 before_disconnect(sent)
-            value = original(probe, bucket, key, version, output, before_disconnect=on_sent)
+            value = original(probe, bucket, key, version, output, before_disconnect=on_sent, **options)
             self.stage = 'after'
             return value
         self.transport_patch = patch.object(observer, 'disconnect_get', side_effect=transport); self.transport_patch.start()

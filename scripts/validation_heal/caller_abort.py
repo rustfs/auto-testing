@@ -18,7 +18,8 @@ except ImportError:
     from heal_probe import CLOCK_DOMAIN, Probe, canonical, require, save, validate_binding, validate_s3_request
 
 
-def disconnect_get(probe, bucket, key, version_id, output, *, before_disconnect=None):
+def disconnect_get(probe, bucket, key, version_id, output, *, before_disconnect=None,
+                   receive_buffer_bytes=None):
     """Record intent, send once, close the caller socket, retain UNKNOWN.
 
     The caller must independently establish server admission, lock ownership,
@@ -26,6 +27,9 @@ def disconnect_get(probe, bucket, key, version_id, output, *, before_disconnect=
     A populated output directory prevents accidental replay of this request.
     """
     validate_binding(probe.binding)
+    require(receive_buffer_bytes is None or type(receive_buffer_bytes) is int
+            and 4096 <= receive_buffer_bytes <= 1024**2,
+            'invalid bounded caller receive buffer')
     require(isinstance(key, str) and 0 < len(key.encode()) <= 1024, 'bounded exact object key required')
     require(isinstance(version_id, str) and str(uuid.UUID(version_id)) == version_id
             and uuid.UUID(version_id).int != 0, 'exact nonnil historical version required')
@@ -64,6 +68,7 @@ def disconnect_get(probe, bucket, key, version_id, output, *, before_disconnect=
         'endpoint': probe.endpoint_name, 'endpointUrl': probe.endpoint,
         'operation': 'get_object', 'params': params,
         'callerMarker': marker, 'requestTarget': target,
+        'receiveBufferBytesRequested': receive_buffer_bytes,
         'clockDomain': CLOCK_DOMAIN, 'preparedMonotonicNs': time.monotonic_ns(),
         'retryAllowed': False, 'canonicalCasePassClaimed': False})
     evidence = {'schemaVersion': 1, 'runId': probe.binding['runId'],
@@ -87,8 +92,17 @@ def disconnect_get(probe, bucket, key, version_id, output, *, before_disconnect=
         connection.connect()
         sock = connection.sock
         require(sock is not None, 'caller socket unavailable')
+        receive_buffer_effective = None
+        if receive_buffer_bytes is not None:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer_bytes)
+            receive_buffer_effective = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+            require(type(receive_buffer_effective) is int and receive_buffer_bytes <= receive_buffer_effective
+                    <= receive_buffer_bytes * 4,
+                    'caller receive buffer did not retain its bounded setting')
         evidence.update(socketDescriptor=sock.fileno(), localAddress=list(sock.getsockname()),
-                        peerAddress=list(sock.getpeername()))
+                        peerAddress=list(sock.getpeername()),
+                        receiveBufferBytesRequested=receive_buffer_bytes,
+                        receiveBufferBytesEffective=receive_buffer_effective)
         validate_binding(probe.binding)
         require(canonical(probe.binding) == bound, 'caller binding changed before request')
         evidence.update(requestInvocationStarted=True, callStartedMonotonicNs=time.monotonic_ns())

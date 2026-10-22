@@ -46,7 +46,11 @@ def connections(raw, ipv6, client, server):
                 'incomplete Linux TCP connection row')
         local, remote = proc_address(fields[1], ipv6), proc_address(fields[2], ipv6)
         if local == server and remote == client:
-            found.append({'inode': int(fields[9]), 'state': fields[3].upper()})
+            queues = fields[4].split(':')
+            require(len(queues) == 2 and all(re.fullmatch(r'[0-9A-Fa-f]+', value) for value in queues),
+                    'invalid Linux TCP queue counters')
+            found.append({'inode': int(fields[9]), 'state': fields[3].upper(),
+                          'txQueueBytes': int(queues[0], 16), 'rxQueueBytes': int(queues[1], 16)})
     require(len(found) <= 1, 'ambiguous exact TCP connection in network namespace')
     return found
 
