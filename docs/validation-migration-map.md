@@ -38,6 +38,22 @@ All 158 canonical IDs are retained. Independent complete live acceptance is **10
 
 The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 37 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
 
+I05 progress (2026-10-22): four-node startup scene `39764496504/1` was
+independently verified and isolated by
+[39766457981/1](https://github.com/rustfs/rustfs/actions/runs/39766457981),
+preserving all 102 original artifact files and twenty same-device private
+archive parents. Read-only inspection identified broken kernel-selecting
+bpftool wrappers on vm002/vm003; the exact already-installed executable is
+now digest-bound and checked before reservations. Fresh diagnostic
+[39767336741/1](https://github.com/rustfs/rustfs/actions/runs/39767336741)
+completed H1 and H2 on helper `8cbdd51`, with all five node cleanups passing.
+Independent audit of 211 artifact files verified exact 1001 ms write-lock
+timeouts, closed caller sockets, unchanged physical content, full diagnostic
+seed ACK/peer inventories and final FD counts at or below baseline. The
+original canonical result remains `BLOCKED/cleanup PASS`; source DL/DV,
+exact disconnect/native fences, stale-generation and queued-successor
+coverage remain outstanding. Acceptance therefore stays **108/158**.
+
 [J02 diagnostic 38874900846/1](https://github.com/rustfs/rustfs/actions/runs/38874900846) completed all 20 H1/H2 × DB/DV branch instances on that exact candidate. Sixteen branches report PASS; the four original all-metadata-corruption probes report permanent Failed rather than Unknown and retain NOT_OBSERVED. Independent archive and provenance audits passed. Independent mixed-branch audits verified all four repaired shards against original complete bytes, exact receipts and counters, surviving below-quorum failures, original terminal preservation and post-rescue S3 inventories. All 50 node namespace finalization receipts passed audit. Real legacy writes separately produce Unknown with zero repairs and unchanged physical files, but do not replace the original source procedure. Full J02 canonical acceptance remains blocked; these partial results add no canonical acceptance.
 
 A10 run `39197088183/1` uses immutable helper `b16e6072679d6a60a044b9d4520b30b4a79b5557`, candidate `072b57b37559fbe626aeda8abf61617fdcbdd926`, package `38043283428/1` and inspector `38715612825/1`. All nine source variants across H1/H2 and DB/DV passed their 68 required execution instances. Independent audit checked original SDK request/ACK hashes and version/marker identities, physical set selection, exact task options/receipts/counter partitions, 27,096 complete shard-streaming proofs, physical closure before target GET or control rescue, complete peer inventories and all 170 node cleanup receipts. Full inventories are checked against ACK manifests; their endpoint iteration is established by the immutable executed helper source, since the inventory documents omit endpoint labels. The remove=true branch replays one complete below-quorum original object after exact DELETE and requires whole-orphan removal with unchanged live controls. Rescue restores only post-DELETE authority. The original failed A10 result remains byte-identical.

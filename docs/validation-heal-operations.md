@@ -818,6 +818,30 @@ service attachments, and checks every peer before reserving any namespace.
 It changes no installed tool, global PATH or kernel. Service-bound ingress and
 egress program identity checks remain mandatory on the running kernel.
 
+Diagnostic [39767336741/1](https://github.com/rustfs/rustfs/actions/runs/39767336741)
+completed both H1 and H2 with helper `8cbdd51` on the unchanged candidate
+`757b751482bb970bc321e92059690a7698554358`, package `39364893106/1` and
+inspector `39566504743/1`. Independent audit of all 211 official artifact
+files verified nine seed request/ACK pairs and seven versions/markers per
+topology, candidate/helper bindings, actual process-bound ingress/egress BPF
+programs on all peers, complete journal cursor chains and exact server
+request/lock attempt identities. Each contender returned a known non-retried
+503 after a 1001 ms write-lock timeout while the original GET remained
+backpressured. The caller connection disappeared and its diagnostic read
+guard dropped; original physical files remained identical before public
+verification and all one/four peer inventories agreed with seed ACKs.
+
+Final FD counts were H1 vm000 `22 -> 22`; H2 vm000 `106 -> 94`, vm001
+`108 -> 104`, vm002 `105 -> 101` and vm003 `101 -> 97`, with unchanged process
+birth and network namespace. These are bounded snapshots, not a global
+absence-of-leaks proof. All five node cleanup receipts show stopped services
+and removed owned roots. The original result is `BLOCKED/cleanup PASS`:
+the workflow fails its deliberately retained canonical gate despite successful
+diagnostic execution. Exact disconnect-edge ownership, distributed release,
+complete native timeout/stale fences, stale-generation/queued-successor
+controllers and full source H1/H2 DL/DV coverage remain unaccepted. No new
+canonical case is counted.
+
 `validation_cleanup_run_id=<failed-run-id>` selects the narrow I05 preservation
 route with the original package build and an immutable helper containing
 `timeout_retention.py`. The driver must remain on the original Functional Chain
