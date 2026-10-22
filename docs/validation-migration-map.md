@@ -657,6 +657,16 @@ configuration outside artifacts and are removed during finalization. Local
 coverage/uncertainty/startup/config-cleanup negatives passed; live evidence
 remains pending.
 
+J01 selects the official rc v0.1.36 Linux amd64 musl release in a new private
+artifact directory. Both archive and executable SHA-256 values are fixed and
+checked before execution; its manifest records the release source, target,
+version output and exact bytes. This release includes the existing CLI fix
+that preserves incomplete/unknown status in human-readable output. The musl
+build avoids depending on the runner's glibc version. Other Heal cases retain
+their existing client selection. The original failed J01 result is retained;
+the complete raw/CLI startup, disabled, missing-peer and recovery observations
+still require live acceptance with the fixed client.
+
 
 J03 `heal.incremental-cursor-and-truncation` now has a current-fleet DX
 executor with 1025 pre-registered external objects of 1MiB+73 bytes. The

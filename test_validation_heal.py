@@ -52,6 +52,7 @@ from scripts.validation_heal.stop import (partial_window, validate_retired_stop,
 from scripts.validation_heal.cancel_restart import validate_journal, BRANCHES as CANCEL_RESTART_BRANCHES
 from scripts.validation_heal.fleet_node import task_records as node_task_records
 from scripts.validation_heal import overlap
+from scripts.validation_heal import rc_binary
 from scripts.validation_heal import root_restart, fleet_node
 from scripts.validation_heal import quorum_boundary
 from scripts.validation_heal import stale_rejoin
@@ -1677,6 +1678,91 @@ class HealMarkerSemanticsTest(unittest.TestCase):
             self.assertIn("--mount=/proc/123/ns/mnt", command)
             self.assertIn("--bounding-set=-dac_override,-dac_read_search", command)
         self.assertEqual(invoke.call_args.args[0][-1], "/private/data/.rustfs.sys/format.json")
+
+
+class HealReleasedClientTest(unittest.TestCase):
+    def archive(self, root, *, extra=None):
+        import io
+        import tarfile
+        binary = bytearray(64)
+        binary[:6] = b"\x7fELF\x02\x01"
+        binary[18:20] = b"\x3e\x00"
+        archive = root / "client.tar.gz"
+        with tarfile.open(archive, "w:gz") as output:
+            for name, data in [("rc", bytes(binary)), ("LICENSE-MIT", b"MIT"), ("LICENSE-APACHE", b"Apache")]:
+                entry = tarfile.TarInfo(name)
+                entry.size = len(data)
+                output.addfile(entry, io.BytesIO(data))
+            if extra is not None:
+                output.addfile(extra)
+        return archive, bytes(binary)
+
+    def test_exact_archive_and_binary_are_required_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive, binary = self.archive(root)
+            with patch.object(rc_binary, "ARCHIVE_SHA256", hashlib.sha256(archive.read_bytes()).hexdigest()), \
+                 patch.object(rc_binary, "BINARY_SHA256", hashlib.sha256(binary).hexdigest()), \
+                 patch.object(rc_binary.subprocess, "run") as execute:
+                target = rc_binary.unpack(archive, root)
+                self.assertEqual(target.read_bytes(), binary)
+                self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+                execute.assert_not_called()
+                with self.assertRaises(FileExistsError):
+                    rc_binary.unpack(archive, root)
+
+    def test_archive_or_binary_digest_mismatch_does_not_create_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive, _ = self.archive(root)
+            with self.assertRaisesRegex(ValueError, "archive digest"):
+                rc_binary.unpack(archive, root)
+            with patch.object(rc_binary, "ARCHIVE_SHA256", hashlib.sha256(archive.read_bytes()).hexdigest()):
+                with self.assertRaisesRegex(ValueError, "binary digest"):
+                    rc_binary.unpack(archive, root)
+            self.assertFalse((root / "rc").exists())
+
+    def test_unexpected_or_link_members_are_rejected(self):
+        import tarfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, kind in [("../outside", tarfile.REGTYPE), ("alias", tarfile.SYMTYPE)]:
+                entry = tarfile.TarInfo(name)
+                entry.type = kind
+                entry.linkname = "rc" if kind == tarfile.SYMTYPE else ""
+                archive, binary = self.archive(root, extra=entry)
+                with patch.object(rc_binary, "ARCHIVE_SHA256", hashlib.sha256(archive.read_bytes()).hexdigest()), \
+                     patch.object(rc_binary, "BINARY_SHA256", hashlib.sha256(binary).hexdigest()):
+                    with self.assertRaisesRegex(ValueError, "unexpected members"):
+                        rc_binary.unpack(archive, root)
+                self.assertFalse((root / "rc").exists())
+
+    def test_prepare_records_pinned_identity_and_uses_private_client(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive, binary = self.archive(root)
+            raw = archive.read_bytes()
+            destination = root / "selected-client"
+            def invoke(command, **kwargs):
+                if command[0] == "curl":
+                    self.assertEqual(command[-1], rc_binary.URL)
+                    self.assertIn("--max-filesize", command)
+                    Path(command[command.index("--output") + 1]).write_bytes(raw)
+                    return types.SimpleNamespace(returncode=0)
+                self.assertEqual(command, [str((destination / "rc").resolve()), "--version"])
+                return types.SimpleNamespace(returncode=0, stdout="rc 0.1.36\n")
+            with patch.object(rc_binary, "ARCHIVE_SHA256", hashlib.sha256(raw).hexdigest()), \
+                 patch.object(rc_binary, "BINARY_SHA256", hashlib.sha256(binary).hexdigest()), \
+                 patch.object(rc_binary.subprocess, "run", side_effect=invoke) as execute:
+                target = rc_binary.prepare(destination)
+            self.assertEqual(execute.call_count, 2)
+            manifest = json.loads((destination / "manifest.json").read_text())
+            self.assertEqual(manifest["binaryPath"], str(target))
+            self.assertEqual(manifest["binarySha256"], hashlib.sha256(binary).hexdigest())
+            self.assertEqual(manifest["sourceCommit"], rc_binary.SOURCE)
+            self.assertEqual(manifest["versionOutput"], "rc 0.1.36")
+            with self.assertRaises(FileExistsError):
+                rc_binary.prepare(destination)
 
 
 class HealRuntimeStatusTest(unittest.TestCase):

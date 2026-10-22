@@ -109,6 +109,10 @@ fi
 [ "${driver}" = healthy.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "physical Heal cases require candidate-bound bitrot tools"
 evidence="${artifacts}/evidence/${case_id}"
 mkdir -p "${artifacts}/cases" "${evidence}"
+rc_binary="$(command -v rc)"
+if [ "${case_id}" = heal.status-partial-disabled-unknown ]; then
+  rc_binary="$(python3 -B "${ROOT}/scripts/validation_heal/rc_binary.py" --directory "${evidence}/rc-client")"
+fi
 if [ "${driver}" = race.py ] || [ "${driver}" = nolock.py ]; then
   python3 -B "${ROOT}/scripts/validation_heal/${driver}" preflight \
     --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
@@ -117,7 +121,7 @@ fi
 if [ "${driver}" = lock_timeout_runner.py ]; then
   python3 -B "${ROOT}/scripts/validation_heal/${driver}" preflight \
     --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
-    "${tool_args[@]}" "${i05_args[@]}" --rc-bin "$(command -v rc)" > "${evidence}/timeout-preflight.json"
+    "${tool_args[@]}" "${i05_args[@]}" --rc-bin "${rc_binary}" > "${evidence}/timeout-preflight.json"
 fi
 python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
   --result-file "${artifacts}/cases/${case_id}.json" --verdict RUNNING --cleanup-status PENDING
@@ -197,7 +201,7 @@ if [ "${bootstrap_rc}" -eq 0 ]; then
   python3 -B "${ROOT}/scripts/validation_heal/${driver}" --candidate "${candidate}" \
     --case-id "${case_id}" \
     "${tool_args[@]}" "${i05_args[@]}" \
-    --testing-commit "${testing_commit}" --binary-sha "${binary_sha}" --rc-bin "$(command -v rc)" \
+    --testing-commit "${testing_commit}" --binary-sha "${binary_sha}" --rc-bin "${rc_binary}" \
     --evidence "${evidence}" > "${evidence}/test.log" 2>&1 || case_rc=$?
   cat "${evidence}/test.log"
   jq -e '.cleanup == "PASS"' "${evidence}/healthy-summary.json" >/dev/null 2>&1 || cleanup_status=FAIL
@@ -210,7 +214,7 @@ cat "${evidence}/cleanup.log"
 [ -n "${binary_sha}" ] || {
   python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
     --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status "${cleanup_status}" \
-    --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "$(command -v rc)" \
+    --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
     --evidence "evidence/${case_id}/setup.log" --evidence "evidence/${case_id}/cleanup.log" \
     --reason "Heal candidate bootstrap failed before a verified binary was installed"
   exit 1
@@ -251,9 +255,12 @@ fi
 args=("${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool
   --result-file "${artifacts}/cases/${case_id}.json" --verdict "${verdict}" --cleanup-status "${cleanup_status}"
   --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --binary-sha256 "${binary_sha}"
-  --rc-bin "$(command -v rc)" --evidence "evidence/${case_id}/setup.log"
+  --rc-bin "${rc_binary}" --evidence "evidence/${case_id}/setup.log"
   --evidence "evidence/${case_id}/test.log" --evidence "evidence/${case_id}/cleanup.log"
   --evidence "evidence/${case_id}/healthy-summary.json")
+if [ "${case_id}" = heal.status-partial-disabled-unknown ]; then
+  args+=(--evidence "evidence/${case_id}/rc-client/manifest.json")
+fi
 if [ -n "${reason}" ]; then args+=(--reason "${reason}"); fi
 python3 -B "${args[@]}"
 [ "${verdict}" = PASS ]
