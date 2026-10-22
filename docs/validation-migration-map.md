@@ -2424,3 +2424,15 @@ unit from cancelled F07 run 38715204273/1. The inspection recorded
 `mutated=false`, `cleanStateCertified=false` and
 `globalWorkflowIdleCertified=false`; it neither changed that scene nor adds
 canonical acceptance.
+
+I05 drain-budget failure [39746002648/1](https://github.com/rustfs/rustfs/actions/runs/39746002648)
+is now recognized by the retention planner under helper `0442d4d`. The plan
+accepts only its H1 `NOT_OBSERVED` boundary: one closed, non-retried historical
+GET with an admitted lock owner, one known 503 contender PUT whose target write
+lock reached timeout without acquisition, the exact caller marker and lock
+lifecycle, the two backpressure socket samples, all repeated read-only drain
+socket/resource/journal samples, unchanged four-drive scene and the original
+nine seed ACK pairs. Unknown or successful writes, extra requests, missing
+samples, changed process identity or physical drift refuse before Fleet
+creation. The archived failure remains `FAIL/cleanup FAIL`; no canonical PASS,
+backup restoration, namespace deletion or verdict rewrite is authorized.

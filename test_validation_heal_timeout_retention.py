@@ -19,6 +19,7 @@ import test_validation_heal_race_retention as race_tests
 
 
 FIXTURE = Path(__file__).parent / 'testdata/validation/i05-pre-contender-39711742431.zip'
+DRAIN_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-drain-budget-39746002648.zip'
 
 
 class TimeoutRetentionTests(unittest.TestCase):
@@ -27,6 +28,15 @@ class TimeoutRetentionTests(unittest.TestCase):
         with zipfile.ZipFile(FIXTURE) as archive:
             archive.extractall(root)
         artifact = root / 'rustfs-validation-39711742431-1'
+        candidate = json.loads((artifact / 'candidate.json').read_text())
+        folder = artifact / 'run' / controller.CASE / 'evidence' / controller.CASE / 'H1'
+        return root, candidate, folder
+
+    def drain_archive(self, directory):
+        root = Path(directory) / 'drain-artifact'
+        with zipfile.ZipFile(DRAIN_FIXTURE) as archive:
+            archive.extractall(root)
+        artifact = root / 'rustfs-validation-39746002648-1'
         candidate = json.loads((artifact / 'candidate.json').read_text())
         folder = artifact / 'run' / controller.CASE / 'evidence' / controller.CASE / 'H1'
         return root, candidate, folder
@@ -397,6 +407,42 @@ class TimeoutRetentionTests(unittest.TestCase):
             self.assertEqual(plan['nodes'], ['vm000'])
             self.assertEqual(plan['businessSceneSha256'], {'vm000':
                 '6c9e808ff0c6d03cb5dfd5546bd588c3d3e1bcee3c167877dec21c4399fc1e6d'})
+
+    def test_drain_budget_failure_yields_exact_bounded_preservation_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, _ = self.drain_archive(directory)
+            plan, = recovery.recovery_plan(root, 39746002648, candidate)
+            self.assertEqual(plan['kind'], 'unresolved-i05-timeout')
+            self.assertEqual(plan['runId'], 'gh-39746002648-1-h1')
+            self.assertEqual(plan['harnessCommit'], controller.DRAIN_BUDGET_HELPER)
+            self.assertEqual(plan['nodes'], ['vm000'])
+            self.assertEqual(plan['ackFilesSha256'], '21e9471c9e9133186b88fb664f8a4deff4c93044761a9c399915a0b1db9d6f32')
+            self.assertEqual(plan['businessSceneSha256'], {'vm000':
+                'c438f5bf295f56ddd168e9e840b41281863c3da06c0973eb9abead95edd63e89'})
+
+    def test_drain_budget_failure_refuses_unknown_mutation_or_incomplete_sampling(self):
+        for variant in ('success', 'unknown', 'extra-action', 'missing-sample', 'physical-drift'):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, candidate, folder = self.drain_archive(directory)
+                if variant == 'success':
+                    ack = json.loads((folder / 'timeout/contender/000001-ack.json').read_text())
+                    ack['observation']['response']['ResponseMetadata']['HTTPStatusCode'] = 200
+                    (folder / 'timeout/contender/000001-ack.json').write_text(json.dumps(ack))
+                elif variant == 'unknown':
+                    ack = json.loads((folder / 'timeout/contender/000001-ack.json').read_text())
+                    ack['observation']['resultUnknown'] = True
+                    (folder / 'timeout/contender/000001-ack.json').write_text(json.dumps(ack))
+                elif variant == 'extra-action':
+                    (folder / 'timeout/contender/000002-request.json').write_text('{}')
+                elif variant == 'missing-sample':
+                    next(folder.glob('*-I05-caller-drain-resources.json')).unlink()
+                else:
+                    scene = json.loads((folder / '00058-original-failure-scene.json').read_text())
+                    scene['vm000']['formats'][0]['sha256'] = '0' * 64
+                    (folder / '00058-original-failure-scene.json').write_text(json.dumps(scene))
+                with patch.object(recovery, 'Fleet') as fleet, self.assertRaises((ValueError, KeyError)):
+                    recovery.recovery_plan(root, 39746002648, candidate)
+                fleet.assert_not_called()
 
     def test_h2_failure_after_clean_h1_yields_exact_four_node_plan(self):
         with tempfile.TemporaryDirectory() as directory:

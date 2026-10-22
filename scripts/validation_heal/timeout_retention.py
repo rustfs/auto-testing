@@ -10,16 +10,18 @@ try:
     from .heal_workload import verify_seed
     from .healthy import physical_content
     from .fleet_node import runtime_config
-    from .lock_observer import CANDIDATE, same_process
-    from .lock_timeout import CONTENDER_BYTES, timeout_proof, validate_timeout_ack
+    from .lock_observer import ADMISSION_SECONDS, CANDIDATE, DRAIN_SECONDS, TARGET, same_process
+    from .lock_timeout import (CALLER_RECEIVE_BUFFER_BYTES, CONTENDER_BYTES,
+                               MIN_BACKPRESSURE_BYTES, timeout_proof, validate_timeout_ack)
     from .race_retention import digest, validate
 except ImportError:
     from heal_probe import canonical, payload, require
     from heal_workload import verify_seed
     from healthy import physical_content
     from fleet_node import runtime_config
-    from lock_observer import CANDIDATE, same_process
-    from lock_timeout import CONTENDER_BYTES, timeout_proof, validate_timeout_ack
+    from lock_observer import ADMISSION_SECONDS, CANDIDATE, DRAIN_SECONDS, TARGET, same_process
+    from lock_timeout import (CALLER_RECEIVE_BUFFER_BYTES, CONTENDER_BYTES,
+                              MIN_BACKPRESSURE_BYTES, timeout_proof, validate_timeout_ack)
     from race_retention import digest, validate
 
 
@@ -27,6 +29,7 @@ CASE = 'heal.lock-timeout-and-caller-abort'
 PRE_CONTENDER_HELPER = '704bd606071676dded130dca91d3d5278455bcaa'
 CONTENDER_HELPER = 'd100abeb8e85c4000a493aa994031e4a5d01518e'
 H2_CONTENDER_HELPER = '1b88cad3581e755d8e904697cb2ec471e04b5f8f'
+DRAIN_BUDGET_HELPER = '0442d4dd814ebfb490dcbb3cc266fb6fbebb0365'
 FAILURES = {
     PRE_CONTENDER_HELPER: {'type': 'ValueError',
         'message': 'caller lock diagnostic escaped its exact GET identity or runtime budget'},
@@ -34,6 +37,8 @@ FAILURES = {
         'message': 'I05 contender acquired a lock or lost its exact timeout lifecycle'},
     H2_CONTENDER_HELPER: {'type': 'ValueError',
         'message': 'I05 contender acquired a lock or lost its exact timeout lifecycle'},
+    DRAIN_BUDGET_HELPER: {'type': 'ValueError',
+        'message': 'NOT_OBSERVED: caller drain observation exceeded its budget'},
 }
 COMMON_LABELS = ('binding', 'inspector-build', 'preflight', 'integrity-fleet-attestation', 'reserved',
           'inspector-upload', 'started', 'deployed-topology', 'actual-topology', 'original-ACK-bound-S3',
@@ -50,6 +55,10 @@ LABELS = {
         'I05-caller-window', 'I05-caller-admission-resources', 'I05-caller-window', 'quiescent',
         'original-failure-scene', 'original-failure-logs', 'diagnostic-result'),
 }
+DRAIN_PREFIX_LABELS = COMMON_LABELS + ('I05-caller-window', 'I05-caller-before-disconnect-socket',
+    'I05-caller-window', 'I05-caller-admission-resources', 'I05-caller-window',
+    'I05-timeout-caller-backpressure-socket')
+DRAIN_SUFFIX_LABELS = ('quiescent', 'original-failure-scene', 'original-failure-logs', 'diagnostic-result')
 
 
 def h2_labels(window_rounds=(1, 1, 1)):
@@ -66,6 +75,26 @@ def h2_labels(window_rounds=(1, 1, 1)):
             *('I05-caller-admission-resources' for _ in range(4)),
             *('I05-caller-window' for _ in range(4 * window_rounds[2])), 'quiescent', 'original-failure-scene',
             *('original-failure-logs' for _ in range(4)), 'diagnostic-result')
+
+
+def drain_failure_labels(folder):
+    """Accept only complete repeated H1 drain samples from the pinned failed helper."""
+    names = sorted(path.name for path in folder.glob('*.json'))
+    labels = [name[6:-5] for name in names]
+    prefix, suffix = list(DRAIN_PREFIX_LABELS), list(DRAIN_SUFFIX_LABELS)
+    require(labels[:len(prefix)] == prefix and labels[-len(suffix):] == suffix,
+            'I05 drain failure has a different caller or retained-scene boundary')
+    samples = labels[len(prefix):-len(suffix)]
+    first_drain = samples.index('I05-caller-drain-socket') if 'I05-caller-drain-socket' in samples else -1
+    caller_windows = samples[:first_drain]
+    rounds = samples[first_drain:]
+    complete_rounds, terminal = divmod(len(rounds), 3)
+    expected_rounds = ['I05-caller-drain-socket', 'I05-caller-drain-resources', 'I05-caller-window'] * complete_rounds
+    require(first_drain > 0 and all(label == 'I05-caller-window' for label in caller_windows)
+            and complete_rounds >= 1 and rounds[:len(expected_rounds)] == expected_rounds
+            and (terminal == 0 or rounds[-terminal:] == ['I05-caller-drain-socket', 'I05-caller-drain-resources']),
+            'I05 drain failure omits or reorders a complete socket/resource/journal sample')
+    return prefix + caller_windows + rounds + suffix
 
 
 def archived_plan(artifact, failed_run, candidate):
@@ -114,6 +143,9 @@ def archived_plan(artifact, failed_run, candidate):
                 and h1_result.get('canonicalCasePassClaimed') is False,
                 'I05 H1 diagnostic result does not prove completed cleanup')
         require(diagnostics[1] == row, 'I05 H2 failure differs from its exact known boundary')
+    elif helper == DRAIN_BUDGET_HELPER:
+        topology = 'H1'
+        require(diagnostics == [row], 'I05 drain failure differs from its exact H1 boundary')
     else:
         topology = 'H1'
         require(diagnostics == [row], 'I05 H1 failure differs from its exact known boundary')
@@ -142,6 +174,8 @@ def archived_plan(artifact, failed_run, candidate):
                 and first_quiescent - last_admission == 4 * window_rounds[2],
                 'I05 H2 lock windows do not contain complete four-peer sampling rounds')
         labels = h2_labels(window_rounds)
+    elif helper == DRAIN_BUDGET_HELPER:
+        labels = drain_failure_labels(folder)
     else:
         labels = LABELS[helper]
     numbered = [(label, f'{index:05d}-{label}.json') for index, label in enumerate(labels, 1)]
@@ -225,7 +259,8 @@ def archived_plan(artifact, failed_run, candidate):
         original = scene[node]
         node_owner = owners[node]
         require(original.get('quiescent') is True and type(original.get('pid')) is int and original['pid'] == 0
-                and original.get('hostname') == node_owner.get('hostname') and original.get('unit') == node_owner.get('unit')
+                and original.get('hostname') == node_owner.get('hostname')
+                and original.get('unit') == node_owner.get('unit')
                 and original.get('binarySha256') == node_owner.get('binarySha256') == binding['candidateBinarySha256']
                 and len(original.get('formats', [])) == 4
                 and {part.get('disk') for part in original['formats']} == set(range(4)),
@@ -257,7 +292,8 @@ def archived_plan(artifact, failed_run, candidate):
                 params.update(ContentType='application/octet-stream', Metadata={'heal-fixture': 'DV',
                               'nonce': f'{index}-{generation}'}, Tagging='suite=heal&fixture=DV')
         domain = domain or request.get('clockDomain')
-        require(isinstance(domain, str) and bool(domain) and request.get('schemaVersion') == ack.get('schemaVersion') == 2
+        require(isinstance(domain, str) and bool(domain)
+                and request.get('schemaVersion') == ack.get('schemaVersion') == 2
                 and request.get('runId') == ack.get('runId') == run_id
                 and request.get('sequence') == ack.get('sequence') == sequence
                 and request.get('operation') == operation and request.get('params') == params
@@ -312,23 +348,26 @@ def archived_plan(artifact, failed_run, candidate):
     timeout = folder / 'timeout'
     expected_timeout_items = {'scope.json', 'failure.json', 'caller'}
     expected_caller_items = {'scope.json', 'failure.json', 'transport'}
-    has_contender = helper in (CONTENDER_HELPER, H2_CONTENDER_HELPER)
+    has_contender = helper in (CONTENDER_HELPER, H2_CONTENDER_HELPER, DRAIN_BUDGET_HELPER)
     if has_contender:
         expected_timeout_items.add('contender')
         expected_caller_items.add('admission.json')
+    if helper == DRAIN_BUDGET_HELPER:
+        expected_timeout_items.add('timeout.json')
     require({p.name for p in timeout.iterdir()} == expected_timeout_items
             and {p.name for p in (timeout / 'caller').iterdir()} == expected_caller_items,
             'I05 archive contains an unreviewed action or lacks its exact failure boundary')
     timeout_failure = read(timeout / 'failure.json')
     caller_failure = read(timeout / 'caller/failure.json')
+    expected_failure_state = 'NOT_OBSERVED' if helper == DRAIN_BUDGET_HELPER else 'INCOMPLETE'
     require(timeout_failure.get('diagnosticComplete') is False
             and timeout_failure.get('errorType') == failure['type']
-            and timeout_failure.get('state') == 'INCOMPLETE'
+            and timeout_failure.get('state') == expected_failure_state
             and timeout_failure.get('canonicalCasePassClaimed') is False
             and timeout_failure.get('originalRequestsAndResponsesRetained') is True
             and caller_failure.get('observationComplete') is False
             and caller_failure.get('errorType') == failure['type']
-            and caller_failure.get('state') == 'INCOMPLETE'
+            and caller_failure.get('state') == expected_failure_state
             and caller_failure.get('canonicalCasePassClaimed') is False
             and caller_failure.get('originalTransportEvidenceRetained') is True,
             'I05 nested failure records differ from the exact retained diagnostic failure')
@@ -342,7 +381,9 @@ def archived_plan(artifact, failed_run, candidate):
     transport = timeout / 'caller/transport'
     require({p.name for p in transport.iterdir()} == {'request.json', 'request-written.json', 'disconnected.json'},
             'I05 caller transport contains another request or result')
-    request, sent, closed = (read(transport / name) for name in ('request.json', 'request-written.json', 'disconnected.json'))
+    request, sent, closed = (read(transport / name)
+                             for name in ('request.json', 'request-written.json', 'disconnected.json'))
+    caller_transport_request = request
     target = f'/{bucket}/{entry["key"]}?versionId={entry["versionId"]}'
     require(request.get('operation') == 'get_object' and request.get('params') == {
                 'Bucket': bucket, 'Key': entry['key'], 'VersionId': entry['versionId']}
@@ -367,6 +408,21 @@ def archived_plan(artifact, failed_run, candidate):
                 and value.get('resultUnknown') is True and value.get('acknowledged') is False
                 and value.get('serverOwnershipProven') is False,
                 'I05 closed caller was retried or promoted to an acknowledged result')
+    if helper == DRAIN_BUDGET_HELPER:
+        caller_scope = read(timeout / 'caller/scope.json')
+        require(caller_scope.get('runId') == run_id and caller_scope.get('candidateCommit') == CANDIDATE
+                and caller_scope.get('bindingSha256') == scope['bindingSha256']
+                and caller_scope.get('entry') == entry
+                and caller_scope.get('admissionSeconds') == ADMISSION_SECONDS
+                and caller_scope.get('drainSeconds') == DRAIN_SECONDS
+                and caller_scope.get('canonicalCasePassClaimed') is False
+                and caller_scope.get('mutatesServiceConfiguration') is False
+                and scope.get('minimumCallerPayloadBytes') == MIN_BACKPRESSURE_BYTES
+                and scope.get('receiveBufferBytesRequested') == CALLER_RECEIVE_BUFFER_BYTES
+                and request.get('receiveBufferBytesRequested') == CALLER_RECEIVE_BUFFER_BYTES
+                and sent.get('requestInvocationStarted') is True
+                and closed.get('responseObserved') is False and closed.get('connectionAttempts') == 1,
+                'I05 drain archive changed its bounded read-only caller or time budget')
     if has_contender:
         contender = timeout / 'contender'
         require({p.name for p in contender.iterdir()} == {'000001-request.json', '000001-ack.json'},
@@ -381,7 +437,8 @@ def archived_plan(artifact, failed_run, candidate):
                 and ack.get('observation', {}).get('acknowledged') is False
                 and ack.get('observation', {}).get('resultUnknown') is False,
                 'I05 contender result is not a durable, known refusal')
-        holder = (read(timeout / 'caller/admission.json').get('attempt') or {})
+        caller_admission = read(timeout / 'caller/admission.json')
+        holder = (caller_admission.get('attempt') or {})
         require(holder.get('admitted') is True and holder.get('observedAcquiredWithoutDrop') is True,
                 'I05 contender lacks its original admitted GET lock holder')
         require(set(baselines) == set(nodes) and len(windows) == sample_counts['vm000'] * len(nodes),
@@ -416,6 +473,131 @@ def archived_plan(artifact, failed_run, candidate):
         require(proof is not None and proof.get('typedTimeoutBeyondBudgetObserved') is True
                 and proof.get('writeLockAcquired') is False,
                 'I05 contender ACK lacks its exact failed target write-lock attempt')
+        if helper == DRAIN_BUDGET_HELPER:
+            caller_request_id = holder.get('request_id')
+            caller_lock_id = holder.get('lock_attempt_id')
+            caller_events = holder.get('events') or []
+            caller_socket = caller_admission.get('socket') or {}
+            require(caller_admission.get('node') == 'vm000'
+                    and holder.get('states') == ['acquiring', 'acquired']
+                    and holder.get('diagnosticGuardDropped') is False
+                    and holder.get('distributedReleaseProven') is False
+                    and holder.get('heldAtDisconnectProven') is False
+                    and isinstance(caller_request_id, str) and str(uuid.UUID(caller_request_id)) == caller_request_id
+                    and uuid.UUID(caller_request_id).int
+                    and isinstance(caller_lock_id, str) and str(uuid.UUID(caller_lock_id)) == caller_lock_id
+                    and uuid.UUID(caller_lock_id).int and len(caller_events) == 2
+                    and [event.get('state') for event in caller_events] == ['acquiring', 'acquired'],
+                    'I05 caller lacks the exact admitted GET owner at its intentional disconnect')
+            caller_uri = f'/{bucket}/{entry["key"]}?versionId={entry["versionId"]}'
+            for event in caller_events:
+                require(event.get('target') == TARGET and event.get('request_id') == caller_request_id
+                        and event.get('lock_attempt_id') == caller_lock_id
+                        and event.get('event') == 'object_namespace_lock' and event.get('component') == 'ecstore'
+                        and event.get('subsystem') == 'object_lock' and event.get('op') == 'get_object'
+                        and event.get('mode') == 'read' and event.get('bucket') == bucket
+                        and event.get('object') == entry['key']
+                        and event.get('requested_version_id') == entry['versionId']
+                        and event.get('owner') == holder.get('owner')
+                        and event.get('namespace') == holder.get('namespace')
+                        and len([span for span in event.get('spans', [])
+                                 if span.get('name') == 'http-request'
+                                 and span.get('request_id') == caller_request_id
+                                 and span.get('method') == 'GET' and span.get('uri') == caller_uri
+                                 and span.get('user_agent') == caller_transport_request.get('callerMarker')]) == 1,
+                        'I05 admitted caller lock owner is not bound to its exact historical GET')
+            caller_lock_rows = [event for event in rows['vm000']
+                                if event.get('target') == TARGET and event.get('request_id') == caller_request_id]
+            require([event.get('state') for event in caller_lock_rows] == ['acquiring', 'acquired', 'guard_dropped']
+                    and all(event.get('lock_attempt_id') == caller_lock_id
+                            and event.get('op') == 'get_object' and event.get('mode') == 'read'
+                            and event.get('bucket') == bucket and event.get('object') == entry['key']
+                            and event.get('requested_version_id') == entry['versionId']
+                            and event.get('owner') == holder.get('owner')
+                            and event.get('namespace') == holder.get('namespace')
+                            for event in caller_lock_rows),
+                    'I05 caller journal lost or changed its original GET lock lifecycle')
+            dropped = [event for event in rows['vm000']
+                       if event.get('request_id') == caller_request_id
+                       and event.get('event') == 'get_object_stream_body']
+            require(len(dropped) == 1 and dropped[0].get('state') == 'dropped_incomplete'
+                    and dropped[0].get('bucket') == bucket and dropped[0].get('object') == entry['key'],
+                    'I05 caller disconnect lacks its exact incomplete response-body event')
+            mutations = []
+            for event in rows['vm000']:
+                spans = [event.get('span'), *(event.get('spans') or [])]
+                for span in spans:
+                    if isinstance(span, dict) and span.get('method') in {'PUT', 'POST', 'PATCH', 'DELETE'}:
+                        mutations.append((event.get('request_id'), span.get('method'), span.get('uri')))
+            require(mutations and all(request_id == response['ResponseMetadata']['RequestId']
+                    and method == 'PUT' and uri == f'/{bucket}/{entry["key"]}'
+                    for request_id, method, uri in mutations),
+                    'I05 caller window contains another or unknown S3 mutation')
+            backpressure = one('I05-timeout-caller-backpressure-socket')
+            expected_process = caller_socket.get('process')
+            samples = backpressure.get('samples') or []
+            require(backpressure.get('node') == 'vm000' and backpressure.get('readOnly') is True
+                    and backpressure.get('process') == expected_process
+                    and backpressure.get('clockDomain') == caller_socket.get('clockDomain')
+                    and backpressure.get('networkNamespace') == caller_socket.get('networkNamespace')
+                    and backpressure.get('clientAddress') == sent.get('localAddress')
+                    and backpressure.get('serverAddress') == sent.get('peerAddress')
+                    and len(samples) == 2
+                    and all(sample.get('vanishedDescriptors') == 0
+                            and len(sample.get('ownedMatches') or []) == 1
+                            and sample['ownedMatches'][0].get('state') == '01'
+                            and type(sample['ownedMatches'][0].get('txQueueBytes')) is int
+                            and sample['ownedMatches'][0]['txQueueBytes'] > 0
+                            for sample in samples)
+                    and len({sample['ownedMatches'][0].get('inode') for sample in samples}) == 1,
+                    'I05 contender is not bound to the original backpressured caller socket')
+            timeout_proof_record = read(timeout / 'timeout.json')
+            require(timeout_proof_record.get('requestId') == response['ResponseMetadata']['RequestId']
+                    and timeout_proof_record.get('lockAttemptId') == proof['lockAttemptId']
+                    and timeout_proof_record.get('owner') == proof['owner']
+                    and timeout_proof_record.get('namespace') == proof['namespace']
+                    and timeout_proof_record.get('events') == proof['events']
+                    and timeout_proof_record.get('typedTimeoutBeyondBudgetObserved') is True
+                    and timeout_proof_record.get('writeLockAcquired') is False
+                    and timeout_proof_record.get('backpressureSocket') == backpressure
+                    and timeout_proof_record.get('readResponseBackpressureObservedAfterTimeout') is True
+                    and timeout_proof_record.get('canonicalCasePassClaimed') is False,
+                    'I05 contender timeout proof differs from the exact archived lock and socket evidence')
+            baseline = baselines.get('vm000')
+            drain_sockets = many('I05-caller-drain-socket')
+            drain_resources = many('I05-caller-drain-resources')
+            drain_windows = windows[5:]
+            require(baseline is not None and len(drain_sockets) == len(drain_resources) >= 1
+                    and len(drain_windows) in {len(drain_sockets), len(drain_sockets) - 1},
+                    'I05 drain archive lacks a complete service and socket sample pair')
+            def same_socket_process(value):
+                process = value.get('process') or {}
+                expected = baseline['identity']
+                require(all(process.get(name) == expected.get(name) for name in (
+                    'pid', 'startTicks', 'bootId', 'unit', 'executable', 'binarySha256', 'mountNamespace',
+                    'commandSha256', 'environmentFileSha256', 'settings')),
+                    'I05 drain socket sample crossed its original service process')
+            for socket_state, resource in zip(drain_sockets, drain_resources, strict=True):
+                same_socket_process(socket_state)
+                require(socket_state.get('node') == resource.get('node') == 'vm000'
+                        and socket_state.get('clockDomain') == caller_socket.get('clockDomain')
+                        and socket_state.get('networkNamespace') == caller_socket.get('networkNamespace')
+                        and socket_state.get('clientAddress') == sent.get('localAddress')
+                        and socket_state.get('serverAddress') == sent.get('peerAddress')
+                        and socket_state.get('readOnly') is True
+                        and socket_state.get('continuousAbsenceProven') is False
+                        and len(socket_state.get('samples') or []) == 2
+                        and all(sample.get('vanishedDescriptors') == 0 and not sample.get('ownedMatches')
+                                for sample in socket_state['samples'])
+                        and type(resource.get('fileDescriptors')) is int and resource['fileDescriptors'] >= 0
+                        and resource.get('readOnly') is True
+                        and resource.get('identity', {}).get('settings') == baseline['identity'].get('settings'),
+                        'I05 drain observation contains a changed process, socket or resource sample')
+                same_process(resource.get('identity'), baseline['identity'])
+            write_rows = [event for event in rows['vm000'] if event.get('mode') == 'write']
+            require(write_rows == proof['events']
+                    and [event.get('state') for event in write_rows] == ['acquiring', 'failed'],
+                    'I05 drain journal contains a successful or unbound namespace write')
     for path in timeout.rglob('*.json'):
         read(path)
         journal[path.relative_to(folder).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
