@@ -878,6 +878,7 @@ def run_topology(args, topology, nodes, fixture):
         if args.case_id == "heal.delete-marker-semantics":
             branches = [entry["name"] for entry in instances]
             fleet.record("marker-parameter-matrix", {"instances": instances, "sourceBranches": list(MARKER_BRANCHES)})
+        restart_after_failure = False
         for branch in branches:
             registrations = []
             metadata_faults = {}
@@ -888,6 +889,9 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
                         key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-before-" + branch))
                 if args.case_id == "heal.multiple-shard-loss":
+                    if restart_after_failure:
+                        fleet.start()
+                        restart_after_failure = False
                     wait_all_members_online(probe, fleet, processes, "before-fault-" + branch)
                 fleet.stop()
                 if args.case_id in {"heal.disk-replacement-formatted", "heal.replacement-auto-rebuild", "heal.target-graceful-restart", "heal.target-process-crash"}:
@@ -1107,6 +1111,7 @@ def run_topology(args, topology, nodes, fixture):
                     raise
                 if isinstance(exc, KeyboardInterrupt) or active or stale_marker_started:
                     raise
+                restart_after_failure = args.case_id == "heal.multiple-shard-loss"
         result["verdict"] = "PASS" if len(result["branches"]) == len(branches) and all(
             item["verdict"] == "PASS" for item in result["branches"].values()) else "FAIL"
         if args.case_id == "heal.versioning-suspended-null" and result["verdict"] == "PASS":

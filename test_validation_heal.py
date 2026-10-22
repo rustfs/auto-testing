@@ -3135,7 +3135,10 @@ class HealMultiLossMemberReadinessTest(unittest.TestCase):
     def test_runner_checks_members_before_seed_fault_and_the_single_task(self):
         from scripts.validation_heal import versions
         snapshot, _ = self.scene(4)
-        for rejected in ("before-seed", "before-fault-instance", "before-task-instance", None):
+        scenarios = [(rejected, ["instance"]) for rejected in
+                     ("before-seed", "before-fault-instance", "before-task-instance", None)]
+        scenarios.append(("before-task-instance", ["instance", "successor"]))
+        for rejected, names in scenarios:
             with self.subTest(rejected=rejected), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 candidate = root / "candidate.json"
@@ -3147,12 +3150,19 @@ class HealMultiLossMemberReadinessTest(unittest.TestCase):
                     binary_sha="d" * 64, rc_bin=rc)
                 fleet, probe = Mock(), Mock()
                 events = []
+                fleet.drive_gates = set()
+                fleet.faults = []
+                service = {"running": False}
+                fleet.deploy.side_effect = lambda *args: service.update(running=True)
+                fleet.stop.side_effect = lambda: service.update(running=False)
+                fleet.start.side_effect = lambda: service.update(running=True)
                 fleet.record.side_effect = lambda label, value: value
                 fleet.snapshot.return_value = snapshot
                 fleet.cleanup.return_value = True
                 plan = {"scope": {}, "recursive": True, "expected": [], "proofs": [], "faults": [],
                         "requiredRepairs": set(), "metadataRepairs": set()}
                 def ready(probe, fleet, actual, label):
+                    self.assertTrue(service["running"], "member observation requires the recovered service")
                     events.append(label)
                     if label == rejected:
                         raise ValueError("NOT_OBSERVED: startup members remain offline")
@@ -3172,15 +3182,21 @@ class HealMultiLossMemberReadinessTest(unittest.TestCase):
                      patch.object(versions, "Recorder"), \
                      patch.object(versions, "seed", side_effect=seeded), \
                      patch.object(versions, "verify_seed", return_value={}), \
-                     patch.object(versions, "multi_loss_instances", return_value=[{"name": "instance"}]), \
+                     patch.object(versions, "multi_loss_instances", return_value=[{"name": name} for name in names]), \
                      patch.object(versions, "multi_loss_plan", side_effect=fault_plan), \
                      patch.object(versions, "wait_all_members_online", side_effect=ready), \
                      patch.object(versions, "physical_content", return_value={}), \
                      patch.object(versions, "run_task", side_effect=task) as repair:
                     result = versions.run_topology(args, "H1", ["vm000"], "DV")
                 wanted = ["before-seed", "seed", "before-fault-instance", "fault-plan", "before-task-instance", "task"]
-                self.assertEqual(events, wanted if rejected is None else wanted[:wanted.index(rejected) + 1])
-                self.assertEqual(repair.call_count, int(rejected is None))
+                if len(names) == 2:
+                    wanted = wanted[:-1] + ["before-fault-successor", "fault-plan", "before-task-successor", "task"]
+                elif rejected is not None:
+                    wanted = wanted[:wanted.index(rejected) + 1]
+                self.assertEqual(events, wanted)
+                self.assertEqual(repair.call_count, int(rejected is None or len(names) == 2))
+                if len(names) == 2:
+                    self.assertEqual(result["branches"]["instance"]["verdict"], "FAIL")
                 self.assertEqual(result["verdict"], "FAIL")
                 self.assertEqual(result["cleanup"], "PASS")
 
