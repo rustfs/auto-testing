@@ -2468,3 +2468,13 @@ catalog 158, matrix 84/302/534 and whitespace checks passed. The macOS focused
 suite encountered the previously recorded receive-buffer prerequisite in one
 physical-change negative test; that test passed independently and in the full
 Linux suite. The prerequisite and failure oracle were not relaxed.
+
+I05 descriptor diagnosis `39754893467/1` retains FAIL/cleanup FAIL under exact
+helper `dd7e54e6672cab76b5a6245ab3b4fbd051ddd39d`; H2 was not started. Complete
+FD snapshots attribute the 22-to-23 increase to an external TCP connection
+from `168.63.129.16` while the intentional GET socket disappears and its read
+lock drops. The concrete platform probe configuration remains unverified.
+The preservation planner now validates this helper's complete census and
+original bounded refusal, caller, journal and physical evidence. The real
+101-file fixture and corrupt-evidence regressions exercise preservation
+without S3 access, restoration, verdict change or canonical acceptance.

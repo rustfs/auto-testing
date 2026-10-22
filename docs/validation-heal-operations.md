@@ -835,3 +835,25 @@ seven-millisecond HTTP completion and a later `get_object_stream_body`
 `dropped_incomplete` event. This is a source-supported hypothesis for a
 controlled streaming/IO reproduction, not a confirmed cause or a canonical
 acceptance result.
+
+I05 descriptor run `39754893467/1` pins helper
+`dd7e54e6672cab76b5a6245ab3b4fbd051ddd39d` and the unchanged package from
+`39364893106/1`. H1 retains its original FAIL/cleanup FAIL at the unchanged
+30-second drain budget; H2 did not start. The baseline owns 22 descriptors.
+Every drain resource snapshot owns 23, with all baseline fingerprints intact
+and exactly one additional TCP descriptor from remote `168.63.129.16` to local
+port 9000. The caller's exact GET socket is absent, and its read-lock journal
+contains `guard_dropped`. These snapshots establish external connection
+interference; they do not prove the platform probe configuration, continuous
+socket absence, no leak, or complete canonical acceptance.
+
+Preservation recognizes only this additional exact helper and its original
+known 503 refusal, closed read-only GET, complete journal lifecycle, stopped
+physical scene and bounded request/ACK set. The original 101-file artifact is
+retained in `testdata/validation/i05-descriptor-drain-39754893467.zip`.
+Descriptor counts, unique FD identities, socket-link fingerprints, owned TCP
+joins, snapshot flags, process birth and network namespace must agree.
+Missing census, unknown/successful mutation, extra request and physical drift
+refuse preservation. Drain journal windows follow the numbered first-drain
+label rather than a fixed count of preceding caller windows. This change
+permits preservation only; it performs no network change and grants no PASS.

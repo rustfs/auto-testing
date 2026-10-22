@@ -20,6 +20,7 @@ import test_validation_heal_race_retention as race_tests
 
 FIXTURE = Path(__file__).parent / 'testdata/validation/i05-pre-contender-39711742431.zip'
 DRAIN_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-drain-budget-39746002648.zip'
+DESCRIPTOR_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-descriptor-drain-39754893467.zip'
 
 
 class TimeoutRetentionTests(unittest.TestCase):
@@ -32,11 +33,11 @@ class TimeoutRetentionTests(unittest.TestCase):
         folder = artifact / 'run' / controller.CASE / 'evidence' / controller.CASE / 'H1'
         return root, candidate, folder
 
-    def drain_archive(self, directory):
+    def drain_archive(self, directory, run=39746002648):
         root = Path(directory) / 'drain-artifact'
-        with zipfile.ZipFile(DRAIN_FIXTURE) as archive:
+        with zipfile.ZipFile(DRAIN_FIXTURE if run == 39746002648 else DESCRIPTOR_FIXTURE) as archive:
             archive.extractall(root)
-        artifact = root / 'rustfs-validation-39746002648-1'
+        artifact = root / f'rustfs-validation-{run}-1'
         candidate = json.loads((artifact / 'candidate.json').read_text())
         folder = artifact / 'run' / controller.CASE / 'evidence' / controller.CASE / 'H1'
         return root, candidate, folder
@@ -419,6 +420,74 @@ class TimeoutRetentionTests(unittest.TestCase):
             self.assertEqual(plan['ackFilesSha256'], '21e9471c9e9133186b88fb664f8a4deff4c93044761a9c399915a0b1db9d6f32')
             self.assertEqual(plan['businessSceneSha256'], {'vm000':
                 'c438f5bf295f56ddd168e9e840b41281863c3da06c0973eb9abead95edd63e89'})
+
+    def test_descriptor_failure_preserves_exact_scene_without_leak_or_pass_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, folder = self.drain_archive(directory, 39754893467)
+            plan, = recovery.recovery_plan(root, 39754893467, candidate)
+            self.assertEqual(plan['harnessCommit'], controller.DESCRIPTOR_HELPER)
+            self.assertEqual(plan['kind'], 'unresolved-i05-timeout')
+            self.assertEqual(plan['ackFilesSha256'],
+                'f114c1f2f4d8ddbbc5c98549e1e32f8da61241b4ccf3123bf89f9f3aed88879d')
+            self.assertEqual(plan['businessSceneSha256'], {'vm000':
+                'f921b69ea51622f89e9ad4a78de8c890caf0b7ffefa0b401457d6f9796fc7d31'})
+            result = json.loads((folder.parents[2] / 'cases' / f'{controller.CASE}.json').read_text())
+            self.assertEqual((result['verdict'], result['cleanup_status']), ('FAIL', 'FAIL'))
+
+    def test_drain_window_boundary_follows_labels_after_variable_caller_wait(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, folder = self.drain_archive(directory, 39754893467)
+            empty = folder / '00023-I05-caller-window.json'
+            value = json.loads(empty.read_text())
+            self.assertEqual(value['journal'], '')
+            self.assertEqual(value['beforeCursor'], value['afterCursor'])
+            empty.unlink()
+            for path in sorted(folder.glob('*.json')):
+                index = int(path.name[:5])
+                if index > 23:
+                    path.rename(path.with_name(f'{index - 1:05d}' + path.name[5:]))
+            plan, = recovery.recovery_plan(root, 39754893467, candidate)
+            self.assertEqual(plan['runId'], 'gh-39754893467-1-h1')
+
+    def test_descriptor_failure_refuses_corrupt_census_and_unbounded_effects(self):
+        variants = ('missing-census', 'count', 'inode', 'duplicate-fd', 'foreign-tcp', 'tcp-join',
+                    'namespace', 'process', 'leak-claim', 'raw-path', 'vanished', 'socket-match',
+                    'success', 'unknown', 'extra-action', 'physical-drift')
+        for variant in variants:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, candidate, folder = self.drain_archive(directory, 39754893467)
+                path = next(folder.glob('*-I05-caller-drain-resources.json'))
+                value = json.loads(path.read_text())
+                census = value['descriptorCensus']
+                if variant == 'missing-census': value.pop('descriptorCensus')
+                elif variant == 'count': census['fileDescriptors'] += 1
+                elif variant == 'inode': next(row for row in census['descriptors'] if row['kind'] == 'socket')['inode'] += 1
+                elif variant == 'duplicate-fd': census['descriptors'][-1]['descriptor'] = 0
+                elif variant == 'foreign-tcp': census['ownedTcpConnections'][0]['inode'] = 999999999
+                elif variant == 'tcp-join': census['ownedTcpConnections'][0]['descriptors'] = [0]
+                elif variant == 'namespace': value['networkNamespace'] = 'net:[1]'
+                elif variant == 'process': value['identity']['startTicks'] += 1
+                elif variant == 'leak-claim': census['noLeakProven'] = True
+                elif variant == 'raw-path': census['descriptors'][0]['target'] = '/private/path'
+                elif variant == 'vanished': census['vanishedDescriptors'] = 1
+                elif variant == 'socket-match':
+                    path = next(folder.glob('*-I05-caller-drain-socket.json'))
+                    value = json.loads(path.read_text())
+                    value['samples'][0]['ownedTcpConnections'][0]['descriptors'] = [0]
+                elif variant in ('success', 'unknown'):
+                    path = folder / 'timeout/contender/000001-ack.json'
+                    value = json.loads(path.read_text())
+                    if variant == 'success': value['observation']['response']['ResponseMetadata']['HTTPStatusCode'] = 200
+                    else: value['observation']['resultUnknown'] = True
+                elif variant == 'extra-action': (folder / 'timeout/contender/000002-request.json').write_text('{}')
+                else:
+                    path = next(folder.glob('*-original-failure-scene.json'))
+                    value = json.loads(path.read_text())
+                    value['vm000']['formats'][0]['sha256'] = '0' * 64
+                path.write_text(json.dumps(value))
+                with patch.object(recovery, 'Fleet') as fleet, self.assertRaises((ValueError, KeyError)):
+                    recovery.recovery_plan(root, 39754893467, candidate)
+                fleet.assert_not_called()
 
     def test_drain_budget_failure_refuses_unknown_mutation_or_incomplete_sampling(self):
         for variant in ('success', 'unknown', 'extra-action', 'missing-sample', 'physical-drift'):
