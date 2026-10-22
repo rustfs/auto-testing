@@ -3,7 +3,8 @@
 from datetime import datetime, timezone
 import json
 import time
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
+from uuid import UUID
 
 try:
     from .heal_probe import Probe, require
@@ -90,12 +91,47 @@ def cycle_pairs(events):
     return pairs
 
 
+def discovery_cycle(events, node, discovery):
+    """Bind remote disk discovery to its RPC cycle, retaining the task owner."""
+    stamp = event_time(discovery)
+    spans = discovery.get("spans", [])
+    if stamp is None or not isinstance(spans, list) or any(not isinstance(span, dict) for span in spans): return None
+    remote = [span for span in spans if span.get("name") == "http-request"]
+    if not remote:
+        matches = [(node, pair) for pair in cycle_pairs(events[node])
+                   if pair["started"] <= stamp <= pair["completed"]]
+        request = None
+    else:
+        if len(remote) != 1: return None
+        span = remote[0]
+        request_id = discovery.get("request_id")
+        if not isinstance(request_id, str) or not request_id or span.get("request_id") != request_id or span.get("method") != "POST": return None
+        if not isinstance(span.get("uri"), str): return None
+        if not any(s.get("name") == "nsscanner_disk" and s.get("scan_mode") == "Deep" for s in spans): return None
+        try:
+            url = urlsplit(span["uri"])
+            query = parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+            if url.scheme or url.netloc or url.fragment or url.path != "/rustfs/rpc/ns_scanner": return None
+            cycle, = query["ns_scanner_cycle"]
+            if not cycle.isascii() or not cycle.isdecimal() or int(cycle) <= 0: return None
+            rpc_id, = query["ns_scanner_request_id"]
+            if UUID(rpc_id).int == 0: return None
+        except (KeyError, TypeError, ValueError):
+            return None
+        matches = [(leader, pair) for leader, rows in events.items() for pair in cycle_pairs(rows)
+                   if pair["cycle"] == int(cycle) and pair["started"] <= stamp <= pair["completed"]]
+        request = {"requestId": request_id, "scannerRequestId": rpc_id, "uri": span["uri"]}
+    if len(matches) != 1: return None
+    leader, pair = matches[0]
+    return {"node": leader, **{name: value.isoformat() if isinstance(value, datetime) else value
+                              for name, value in pair.items()}, "remoteRequest": request}
+
+
 def source_tasks(events, bucket, entry):
     """Bind discovery -> channel -> accepted Scanner source -> exact object task."""
     require(entry["versionId"] == "null" and not entry["deleteMarker"], "scanner cold fixture must be unversioned data")
     found = []
     for node, rows in events.items():
-        pairs = cycle_pairs(rows)
         discoveries = [event for event in rows if event.get("target") == "rustfs::scanner::folder"
             and event.get("event") == "scanner_heal_admission" and event.get("state") == "request_started"
             and event.get("bucket") == bucket and event.get("object") == entry["key"]
@@ -123,12 +159,11 @@ def source_tasks(events, bucket, entry):
                 admission = next((event for event in accepted if event_time(event) is not None
                     and receipt_time <= event_time(event) <= stamp), None)
                 done = next((event for event in completed if event_time(event) is not None and stamp <= event_time(event)), None)
-                cycle = next((pair for pair in pairs if pair["started"] <= event_time(discovery)
-                    <= pair["completed"] and event_time(discovery) <= stamp), None)
+                cycle = discovery_cycle(events, node, discovery)
                 if admission is not None and done is not None and cycle is not None:
                     found.append({"node": node, "taskId": token, "discovery": discovery, "received": receipt,
                         "admission": admission, "started": start, "completed": done,
-                        "cycle": {name: value.isoformat() if isinstance(value, datetime) else value for name, value in cycle.items()}})
+                        "cycle": cycle})
                     break
     return found
 
@@ -140,7 +175,7 @@ def observe_task(probe, fleet, window, bucket, entry, branch, *, healthy=False):
         events = window.capture()
         tasks = source_tasks(events, bucket, entry)
         if tasks:
-            if branch != "scanner-cycle-boundary" or healthy or any(len(cycle_pairs(events[task["node"]])) >= 2 for task in tasks):
+            if branch != "scanner-cycle-boundary" or healthy or any(len(cycle_pairs(events[task["cycle"]["node"]])) >= 2 for task in tasks):
                 break
         require(time.monotonic() < deadline, "ATTRIBUTION_NOT_OBSERVED: scanner did not discover, admit and complete the exact target in its cycle")
         time.sleep(1)
@@ -148,6 +183,8 @@ def observe_task(probe, fleet, window, bucket, entry, branch, *, healthy=False):
     # tasks in order and select the first exact repaired receipt for this run.
     observations = []
     for task in tasks:
+        cycles = len(cycle_pairs(events[task["cycle"]["node"]]))
+        if branch == "scanner-cycle-boundary" and not healthy and cycles < 2: continue
         endpoint = "node" + str(fleet.nodes.index(task["node"]) + 1)
         observer = Probe(probe.binding, endpoint)
         path = "/rustfs/admin/v3/heal/" + quote(bucket, safe="") + "/" + quote(entry["key"], safe="/")
@@ -161,6 +198,6 @@ def observe_task(probe, fleet, window, bucket, entry, branch, *, healthy=False):
             fleet.record("scanner-source-binding", {"source": "scanner", "branch": branch, "healthyPreflight": healthy,
                 "budgetSeconds": BUDGET_SECONDS, "task": task, "targetReadsBeforePhysicalProof": 0,
                 "adminMutations": 0, "observedTasks": observations,
-                "postFaultCycles": len(cycle_pairs(events[task["node"]]))})
+                "postFaultCycles": cycles})
             return status
     raise ValueError("scanner tasks did not provide the required exact healthy/repaired responsibility; inspect source evidence")

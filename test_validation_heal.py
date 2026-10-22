@@ -1364,6 +1364,68 @@ class HealScannerSourceTest(unittest.TestCase):
         rows[4]["timestamp"] = "2026-10-10T12:00:03Z"
         self.assertFalse(scanner_sources({"host": rows}, self.bucket, self.entry()))
 
+    def remote_events(self):
+        rows = self.events()
+        uri = ("/rustfs/rpc/ns_scanner?ns_scanner_cycle=7&ns_scanner_request_id="
+               "410f652d-2861-4780-913a-539ccab29c47")
+        rows[1].update(request_id="remote-request", spans=[
+            {"name": "http-request", "method": "POST", "request_id": "remote-request", "uri": uri},
+            {"name": "nsscanner_disk", "scan_mode": "Deep"}])
+        return {"worker": rows[1:-1], "leader": [rows[0], rows[-1]]}
+
+    def test_remote_discovery_keeps_owner_and_binds_exact_rpc_cycle(self):
+        events = self.remote_events()
+        tasks = scanner_sources(events, self.bucket, self.entry())
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["node"], "worker")
+        self.assertEqual(tasks[0]["cycle"]["node"], "leader")
+        self.assertEqual(tasks[0]["cycle"]["cycle"], 7)
+        self.assertEqual(tasks[0]["cycle"]["remoteRequest"]["requestId"], "remote-request")
+        for uri in ("/rustfs/rpc/other?ns_scanner_cycle=7",
+                    "https://other/rustfs/rpc/ns_scanner?ns_scanner_cycle=7",
+                    events["worker"][0]["spans"][0]["uri"].replace("cycle=7", "cycle=8"),
+                    events["worker"][0]["spans"][0]["uri"] + "&ns_scanner_cycle=7",
+                    events["worker"][0]["spans"][0]["uri"].replace("410f652d-2861-4780-913a-539ccab29c47", "invalid")):
+            changed = copy.deepcopy(events)
+            changed["worker"][0]["spans"][0]["uri"] = uri
+            with self.subTest(uri=uri):
+                self.assertFalse(scanner_sources(changed, self.bucket, self.entry()))
+        for field, value in (("request_id", "another"), ("method", "GET")):
+            changed = copy.deepcopy(events)
+            changed["worker"][0]["spans"][0][field] = value
+            self.assertFalse(scanner_sources(changed, self.bucket, self.entry()))
+        changed = copy.deepcopy(events)
+        changed["worker"][0]["spans"][1]["scan_mode"] = "Normal"
+        self.assertFalse(scanner_sources(changed, self.bucket, self.entry()))
+        changed = copy.deepcopy(events)
+        changed["other-leader"] = copy.deepcopy(events["leader"])
+        self.assertFalse(scanner_sources(changed, self.bucket, self.entry()))
+        changed = copy.deepcopy(events)
+        changed["leader"][-1]["state"] = "failed"
+        self.assertFalse(scanner_sources(changed, self.bucket, self.entry()))
+        for spans in (None, "invalid", [None], [{"name": "http-request", "uri": None}]):
+            changed = copy.deepcopy(events)
+            changed["worker"][0]["spans"] = spans
+            with self.subTest(spans=spans):
+                self.assertFalse(scanner_sources(changed, self.bucket, self.entry()))
+
+    def test_remote_boundary_queries_worker_and_counts_leader_cycles(self):
+        events = self.remote_events()
+        events["leader"] += [
+            {**events["leader"][0], "cycle": 8, "timestamp": "2026-10-10T12:00:08Z"},
+            {**events["leader"][1], "timestamp": "2026-10-10T12:00:09Z"}]
+        records = []
+        fleet = types.SimpleNamespace(runtime_profile="scanner", nodes=["worker", "leader"],
+            record=lambda label, value: records.append((label, value)) or value)
+        window = types.SimpleNamespace(capture=lambda: events)
+        status = {"summary": "finished", "outcome": {"objects": [{"disposition": {"state": "repaired"}}]}}
+        observer = types.SimpleNamespace(admin=lambda *args: {"httpStatus": 200, "response": status})
+        with patch("scripts.validation_heal.scanner_repair.Probe", return_value=observer) as probe:
+            observe_scanner(types.SimpleNamespace(binding={}), fleet, window, self.bucket, self.entry(), "scanner-cycle-boundary")
+        probe.assert_called_once_with({}, "node1")
+        self.assertEqual(records[-1][1]["postFaultCycles"], 2)
+        self.assertEqual(records[-1][1]["task"]["cycle"]["node"], "leader")
+
     def test_cycle_pair_requires_ordered_positive_start_and_complete_boundary(self):
         rows = self.events()
         self.assertEqual(cycle_pairs(rows)[0]["cycle"], 7)
