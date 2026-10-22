@@ -9,17 +9,17 @@ live run proves each source assertion on the required topology.
 
 ## Current acceptance and remaining work
 
-Count reconciliation (2026-10-22): the four additions after the 104-case
-baseline are C02, C03, C05 and I04. Their original raw-evidence auditors were
+Count reconciliation (2026-10-23): the five additions after the 104-case
+baseline are C02, C03, C05, I04 and B05. Their original raw-evidence auditors were
 rerun against the retained official archives; all results match the recorded
 audits. Candidate/helper identities, complete H1/H2 branch coverage, cleanup,
 acceptance review chains and unchanged earlier failures were reconciled to
-`canonical-migration-ledger-20261020-i04.json`. Each acceptance retains its own
+`canonical-migration-ledger-20261023-b05.json`. Each acceptance retains its own
 immutable candidate; this is migration coverage across those candidates, not
 a fresh replay of all cases on the current I05 package. Partial I05, native
 and recovery diagnostics add no canonical acceptance.
 
-All 158 canonical IDs are retained. Independent complete live acceptance is **108/158**: the prior 104-case baseline plus the four reconciled cases below. The baseline includes B07 `heal.below-read-quorum` ([run 38727279347/1](https://github.com/rustfs/rustfs/actions/runs/38727279347)), A10 `heal.admin-option-contract` ([run 39197088183/1](https://github.com/rustfs/rustfs/actions/runs/39197088183)) and B06 `heal.read-quorum-boundary` ([run 39223475622/1](https://github.com/rustfs/rustfs/actions/runs/39223475622)). Complete source matrices, immutable candidate/package/tools and cleanup were independently audited; earlier failures remain retained.
+All 158 canonical IDs are retained. Independent complete live acceptance is **109/158**: the prior 104-case baseline plus the five reconciled cases below. The baseline includes B07 `heal.below-read-quorum` ([run 38727279347/1](https://github.com/rustfs/rustfs/actions/runs/38727279347)), A10 `heal.admin-option-contract` ([run 39197088183/1](https://github.com/rustfs/rustfs/actions/runs/39197088183)) and B06 `heal.read-quorum-boundary` ([run 39223475622/1](https://github.com/rustfs/rustfs/actions/runs/39223475622)). Complete source matrices, immutable candidate/package/tools and cleanup were independently audited; earlier failures remain retained.
 
 | Reconciled case | Complete live run | Required coverage | Original result SHA-256 |
 | --- | --- | --- | --- |
@@ -27,16 +27,21 @@ All 158 canonical IDs are retained. Independent complete live acceptance is **10
 | C03 `heal.parity-shard-bitrot` | [39286997859/1](https://github.com/rustfs/rustfs/actions/runs/39286997859) | Six H1/H2 branch instances, 2,904 archive files | `da2df2e15aa973b6a04a0cb40491413db17426b63d6367f11682ef579b84235a` |
 | C05 `heal.missing-or-corrupt-xlmeta` | [39322217398/1](https://github.com/rustfs/rustfs/actions/runs/39322217398) | Ten H1/H2 DB/DV instances, 3,132 archive files | `489b8179ee90a7412b223e669db8fd4f6520b9e69051cbf927b6f33299de423b` |
 | I04 `heal.queue-pressure-and-admission` | [39354651483/1](https://github.com/rustfs/rustfs/actions/runs/39354651483) | Four branches per topology, six exact durable tasks, 5,565 archive files | `4dcde2f34bb7df52f03f5a3ec1e87663145a7134d3ef1a513fda2da52d1709a2` |
+| B05 `heal.multiple-shard-loss` | [39843970314/1](https://github.com/rustfs/rustfs/actions/runs/39843970314) | All 38 DB/DV and H1/H2 instances, 9,059 archive files, ten node cleanups and four package purges | `2624f43fc8581eb1b533a477b1a869f9c72208861d7a268ea35ae8f36153fd7e` |
 
 | Acceptance state | Cases | Remaining requirement |
 | --- | ---: | --- |
-| Independently accepted complete live PASS | 108 | Preserve original provenance and complete results. |
-| Retained live failures with existing executors | 26 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
+| Independently accepted complete live PASS | 109 | Preserve original provenance and complete results. |
+| Retained live failures with existing executors | 25 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
 | Required native barriers | 7 | A09 and G01–G06 need exact candidate-bound server lock/version/commit barriers. |
 | Orchestration or evidence blocked | 4 | C11, F07, I05 and J02 need their remaining native or full live evidence closure. |
 | Environment gated, disabled by default | 13 | Control flows, oracles and unmet reasons are implemented; dedicated resource adapters and real execution remain conditional on the required resources. |
 
-The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 37 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
+The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 36 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
+
+B05 acceptance uses candidate `7ed6c9320db491c84b54e8232152d7b1282c1b3f`, helper `76dbf7029e82c1e3878c9160090804d4afc38078`, package `39827676705/1` and tools `39841369555/1`. The complete official ZIP digest is `4eb3405af1f47583cd7c2d8e5b9ce9fa6910b76665df529d7dfbe4f1399a20d8`. Independent recomputation covers seed ACKs, full versions/markers, the actual 2+2 and 12+4 role/loss matrices, every endpoint's full online membership before each required boundary, sequential faults, one unique START/token per instance, two identical terminal outcome queries, strict integer scope, exact repaired/healthy responsibility, all physical shard and bitrot proofs, complete S3/HEAD/Range evidence before finalization, ten private-node cleanups and four package purges. No backup restoration was used. Original failure `38200772548` remains unchanged; its vm001 offline root cause is not established by the later pass.
+
+E04 live [39842352595/1](https://github.com/rustfs/rustfs/actions/runs/39842352595) retains FAIL/cleanup PASS. All 1,402 official files, three H1 branches and five node cleanups were independently verified. H2's eight complete journal windows no longer exhaust pagination, but its healthy Scanner task completed on vm002 while the exact node3 token query was forwarded to vm000 and returned notFound. No H2 fault branch ran. RustFS commit `553be4b4c62ae0c590e82f91817bc018bdfdc660` lets authenticated original local automatic-task tokens return the source/path-bound in-memory snapshot; Admin/Internal/unknown/alias identities retain coordinator routing. The fixed candidate `9d90884c304dcfbf97057c263c6f2ee110230ce7` adds only that reviewed patch to `7ed6c932`, with unchanged Cargo.lock. A new immutable package, matching tools and complete six-branch live acceptance remain required; unit tests do not promote E04.
 
 I05 progress (2026-10-22): four-node startup scene `39764496504/1` was
 independently verified and isolated by
@@ -95,7 +100,7 @@ peer inventory, ACK-bound stopped physical invariance and four/sixteen streaming
 shard receipts. FD counts returned to or below each peer's baseline. The original
 result remains `BLOCKED/cleanup PASS`; exact disconnect-edge ownership,
 distributed release, global no-leak and full source DL/DV coverage are unproven.
-Acceptance stays **108/158**.
+That I05 diagnostic added no acceptance; the current total is **109/158** after the separate complete B05 audit.
 
 Fresh D03 [39801936817/1](https://github.com/rustfs/rustfs/actions/runs/39801936817)
 retains FAIL/cleanup PASS. Independent H1 re-evaluation verified all four
