@@ -65,6 +65,7 @@ class TimeoutRunnerTests(unittest.TestCase):
                 self.nodes = nodes; self.evidence = evidence; self.run_id = run_id
                 self.runtime_profile = kwargs.get('runtime_profile')
                 self.secret_values = set(); self.reserved = []; self.sequence = 0
+                self.stopped = False
                 owner.fleets.append(self)
             def record(self, label, value):
                 self.sequence += 1
@@ -75,13 +76,19 @@ class TimeoutRunnerTests(unittest.TestCase):
                 if owner.change == 'reserve-error': raise ValueError('partial reservation')
             def snapshot(self, label, **kwargs):
                 owner.events.append(label)
-                return {node: {'files': [], 'formats': []} for node in self.nodes}
+                if kwargs.get('quiescent'):
+                    owner.assertTrue(self.stopped)
+                changed = ((owner.change == 'stopped-drift' and label == 'I05-successor-stopped-before-integrity')
+                           or (owner.change == 'integrity-drift' and label == 'I05-successor-stopped-after-integrity'))
+                return {node: {'files': ['changed'] if changed else [], 'formats': []} for node in self.nodes}
             def remote(self, node, action):
                 owner.events.append(action + '-' + node)
                 if action == 'process-metrics':
+                    owner.assertFalse(self.stopped)
                     return {'identity': identity(), 'fileDescriptors': 11 if owner.change == 'fd-leak' else 10}
                 return {'journal': 'original log'}
-            def stop(self): owner.events.append('stop')
+            def stop(self):
+                owner.events.append('stop'); self.stopped = True
             def cleanup(self): owner.events.append('cleanup'); return owner.change != 'cleanup-fail'
         def diagnostic(probe, fleet, bucket, entry, output):
             owner.events.append('diagnostic')
@@ -204,17 +211,11 @@ class TimeoutRunnerTests(unittest.TestCase):
 
     def test_queued_successor_driver_binds_runtime_new_ack_and_every_peer(self):
         self.args.diagnostic_branch = 'queued-successor'
-        def successor(probe, fleet, bucket, entry, output):
-            self.events.append('successor')
-            probe.s3('put_object', {'Bucket': bucket, 'Key': entry['key']}, b'new-generation')
-            return {'diagnosticComplete': True, 'canonicalCasePassClaimed': False,
-                'wholeCasePassClaimed': False, 'expectedEntries': copy.deepcopy(self.entries),
-                'verifiedEndpoints': list(probe.binding['endpoints']),
-                'callerObservation': {'baselineResources': {node: {
-                    'identity': identity(), 'fileDescriptors': 10} for node in fleet.nodes}}}
         with patch.object(runner, 'preflight', return_value=(self.candidate, self.inspector)), \
                 patch.object(runner, 'verify_native_prerequisite', return_value={'native': True}) as native, \
-                patch.object(runner, 'observe_successor', side_effect=successor):
+                patch.object(runner, 'observe_successor', side_effect=self.successor), \
+                patch.object(runner, 'map_target', side_effect=self.new_target), \
+                patch.object(runner, 'verify_cohort', side_effect=self.integrity):
             summary = runner.run(self.args)
         self.assertTrue(summary['diagnosticComplete'])
         self.assertFalse(summary['canonicalCasePassClaimed'] or summary['wholeCasePassClaimed'])
@@ -228,6 +229,66 @@ class TimeoutRunnerTests(unittest.TestCase):
             peers = list(fleet.evidence.glob('*-all-peer-ACK-proof.json'))
             self.assertEqual(len(peers), len(fleet.nodes))
             self.assertTrue(all(json.loads(p.read_text())['seedAckAndFullGetAgree'] for p in peers))
+            integrity = list(fleet.evidence.glob('*-I05-successor-new-shard-integrity.json'))
+            self.assertEqual(len(integrity), 1)
+            self.assertTrue(json.loads(integrity[0].read_text())['allShardBitrotVerified'])
+        for start, end in ((0, self.events.index('cleanup') + 1),
+                           (self.events.index('cleanup') + 1, len(self.events))):
+            events = self.events[start:end]
+            self.assertLess(events.index('physical-after-all-peer-reads'), events.index('stop'))
+            self.assertLess(events.index('process-metrics-vm000'), events.index('stop'))
+            self.assertLess(events.index('stop'), events.index('I05-successor-stopped-before-integrity'))
+            self.assertLess(events.index('I05-successor-stopped-before-integrity'), events.index('verify-integrity'))
+            self.assertLess(events.index('verify-integrity'), events.index('I05-successor-stopped-after-integrity'))
+            self.assertLess(events.index('I05-successor-stopped-after-integrity'), events.index('cleanup'))
+
+    def successor(self, probe, fleet, bucket, entry, output):
+        self.events.append('successor')
+        probe.s3('put_object', {'Bucket': bucket, 'Key': entry['key']}, b'new-generation')
+        return {'diagnosticComplete': True, 'canonicalCasePassClaimed': False,
+            'wholeCasePassClaimed': False, 'expectedEntries': copy.deepcopy(self.entries),
+            'verifiedEndpoints': list(probe.binding['endpoints']),
+            'callerObservation': {'baselineResources': {node: {
+                'identity': identity(), 'fileDescriptors': 10} for node in fleet.nodes}}}
+
+    def new_target(self, snapshot, bucket, key, role, part, version):
+        self.assertEqual(set(snapshot), set(self.fleets[-1].nodes))
+        self.assertTrue(self.fleets[-1].stopped)
+        added = next(item for item in self.entries if item['versionId'] == version)
+        self.assertEqual((added['key'], role, part), (key, 'data', 1))
+        self.assertTrue(added['isLatest'])
+        self.assertFalse(added['deleteMarker'])
+        return {'versionId': version}
+
+    def integrity(self, fleet, target, label):
+        self.assertTrue(fleet.stopped)
+        self.assertEqual(label, 'I05-successor-shard')
+        self.events.append('verify-integrity')
+        if self.change == 'integrity-error':
+            raise ValueError('corrupt acknowledged successor shard')
+        return {'allShardBitrotVerified': True}
+
+    def test_successor_stopped_drift_or_checksum_failure_retains_scene_before_cleanup(self):
+        self.args.diagnostic_branch = 'queued-successor'
+        for change, message in (('stopped-drift', 'stopping the service changed'),
+                                ('integrity-error', 'corrupt acknowledged successor shard'),
+                                ('integrity-drift', 'streaming verification changed')):
+            with self.subTest(change=change):
+                self.change = change; self.events.clear()
+                self.args.evidence = self.root / change
+                with patch.object(runner, 'verify_native_prerequisite'), \
+                        patch.object(runner, 'observe_successor', side_effect=self.successor), \
+                        patch.object(runner, 'map_target', side_effect=self.new_target), \
+                        patch.object(runner, 'verify_cohort', side_effect=self.integrity), \
+                        patch.object(runner, 'seal_successor_scene', return_value={'sealed': True}) as seal:
+                    result = self.invoke()
+                self.assertFalse(result['diagnosticComplete'])
+                self.assertEqual(result['cleanup'], 'FAIL')
+                self.assertIn(message, result['failure']['message'])
+                self.assertTrue(result['namespacesRetained'])
+                self.assertNotIn('cleanup', self.events)
+                self.assertIn('original-failure-scene', self.events)
+                seal.assert_called_once()
 
     def test_successor_unknown_outcome_seals_only_after_stop_scene_logs_and_result(self):
         self.args.diagnostic_branch = 'queued-successor'

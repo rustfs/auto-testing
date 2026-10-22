@@ -1025,7 +1025,24 @@ lifecycle, and excludes them from the unique target write attempt. The
 original fifteen-event trace is a regression fixture; foreign paths,
 write-mode substitutions and reused or malformed lifecycles still refuse.
 A new helper requires a newly bound native/tools build before another live
-attempt. Independent live acceptance of this branch is still pending.
+attempt. Fresh exact-helper native/tools
+[39791663588/1](https://github.com/rustfs/rustfs/actions/runs/39791663588)
+passed independent verification of all three official archives, 22 original
+members, ten exact tests and 104 ordered milestones. The next live run
+[39798325977/1](https://github.com/rustfs/rustfs/actions/runs/39798325977)
+passed the metadata-read classifier and acknowledged one new PUT version,
+then retained FAIL/cleanup FAIL because the controller invoked stopped-only
+streaming shard verification while the service was running.
+
+[39799657074/1](https://github.com/rustfs/rustfs/actions/runs/39799657074)
+isolated that stopped H1 scene. Independent official archive verification
+byte-matched all 71 original files and all five pre/move/post tree, device
+and inode baselines. The new shard's streaming checksums now run only after
+all online peer reads and FD observations, under the unchanged stopped-only
+verifier. Stopped physical snapshots must match the ACK-bound pre-read scene
+both before and after the checksum pass. Drift or checksum failure retains
+the original scene and prevents cleanup. Fresh helper-bound tools and
+independent live acceptance are still required.
 Every successful diagnostic
 remains `BLOCKED/cleanup PASS` with `canonicalCasePassClaimed=false`. Exact
 disconnect-edge ownership, complete native timeout/stale fences, the

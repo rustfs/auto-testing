@@ -23,6 +23,7 @@ try:
     from .lock_timeout import MIN_BACKPRESSURE_BYTES, observe_timeout
     from .lock_successor import observe_successor
     from .race_native_evidence import verify as verify_native
+    from .shards import map_target, verify_cohort
     from .timeout_retention import seal_successor_scene
 except ImportError:
     from heal_probe import Probe, compare_inventories, require, save, validate_binding
@@ -33,6 +34,7 @@ except ImportError:
     from lock_timeout import MIN_BACKPRESSURE_BYTES, observe_timeout
     from lock_successor import observe_successor
     from race_native_evidence import verify as verify_native
+    from shards import map_target, verify_cohort
     from timeout_retention import seal_successor_scene
 
 
@@ -175,6 +177,23 @@ def run_topology(args, candidate, inspector, topology):
             if all(resources[node]['fileDescriptors'] <= baseline_resources[node]['fileDescriptors'] for node in nodes):
                 break
             time.sleep(.2)
+        if branch == 'queued-successor':
+            # Stream checksums only after all live ownership/FD observations.
+            # The stopped oracle must still be the ACK-bound pre-read scene.
+            fleet.stop()
+            stopped = fleet.snapshot('I05-successor-stopped-before-integrity', quiescent=True)
+            require(physical_content(physical) == physical_content(stopped),
+                    'I05 successor stopping the service changed the verified physical scene')
+            original_versions = {item['versionId'] for item in baseline['entries']}
+            added = [item for item in diagnostic['expectedEntries'] if item['versionId'] not in original_versions]
+            require(len(added) == 1 and added[0]['key'] == target['key']
+                    and added[0]['isLatest'] is True and added[0]['deleteMarker'] is False,
+                    'I05 successor stopped verification lacks one exact new data version')
+            new_target = map_target(stopped, bucket, target['key'], 'data', 1, added[0]['versionId'])
+            fleet.record('I05-successor-new-shard-integrity', verify_cohort(fleet, new_target, 'I05-successor-shard'))
+            require(physical_content(stopped) == physical_content(
+                    fleet.snapshot('I05-successor-stopped-after-integrity', quiescent=True)),
+                    'I05 successor streaming verification changed physical content')
         result['diagnosticComplete'] = True
     except (Exception, KeyboardInterrupt) as error:
         result['failure'] = error_info(error)

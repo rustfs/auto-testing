@@ -60,8 +60,18 @@ failed at internal bucket metadata-read classification despite one
 unretried 200 PUT ACK. Its stopped H1 scene was preserved by
 [39789732916/1](https://github.com/rustfs/rustfs/actions/runs/39789732916).
 The parser fix retains exact request/owner/budget/lifecycle checks and has
-a regression over the original fifteen events; a fresh helper-bound tools
-build and live run are still required. Acceptance stays **108/158**.
+a regression over the original fifteen events. Fresh helper-bound tools
+[39791663588/1](https://github.com/rustfs/rustfs/actions/runs/39791663588)
+passed independent archive/source/native audits. Live
+[39798325977/1](https://github.com/rustfs/rustfs/actions/runs/39798325977)
+then reached the new acknowledged generation but invoked the stopped-only
+shard verifier on a running service. Its original FAIL/cleanup FAIL and
+71 files were preserved unchanged by isolation
+[39799657074/1](https://github.com/rustfs/rustfs/actions/runs/39799657074).
+The controller now finishes all online peer/FD observations before stopping
+the service and checking streaming shard integrity, with matching physical
+snapshots before and after verification. Fresh tools and live acceptance
+of that sequence remain pending. Acceptance stays **108/158**.
 
 [J02 diagnostic 38874900846/1](https://github.com/rustfs/rustfs/actions/runs/38874900846) completed all 20 H1/H2 × DB/DV branch instances on that exact candidate. Sixteen branches report PASS; the four original all-metadata-corruption probes report permanent Failed rather than Unknown and retain NOT_OBSERVED. Independent archive and provenance audits passed. Independent mixed-branch audits verified all four repaired shards against original complete bytes, exact receipts and counters, surviving below-quorum failures, original terminal preservation and post-rescue S3 inventories. All 50 node namespace finalization receipts passed audit. Real legacy writes separately produce Unknown with zero repairs and unchanged physical files, but do not replace the original source procedure. Full J02 canonical acceptance remains blocked; these partial results add no canonical acceptance.
 

@@ -16,14 +16,14 @@ try:
     from .heal_workload import Recorder, verify_seed
     from .healthy import physical_content
     from .lock_timeout import CALLER_RECEIVE_BUFFER_BYTES, MIN_BACKPRESSURE_BYTES, require_exact_inventory_entry
-    from .shards import files, map_target, verify_cohort
+    from .shards import files, map_target
 except ImportError:
     import lock_observer
     from heal_probe import CLOCK_DOMAIN, Probe, canonical, payload, require, save, validate_binding
     from heal_workload import Recorder, verify_seed
     from healthy import physical_content
     from lock_timeout import CALLER_RECEIVE_BUFFER_BYTES, MIN_BACKPRESSURE_BYTES, require_exact_inventory_entry
-    from shards import files, map_target, verify_cohort
+    from shards import files, map_target
 
 
 SUCCESSOR_BYTES = 1024 * 1024 + 197
@@ -290,7 +290,6 @@ def observe_successor(probe, fleet, bucket, entry, output):
                         after = fleet.snapshot('I05-successor-after-ACK-before-public-read')
                         after_ack = physical_content(after)
                         target = physical_append(physical, after, bucket, baseline, added)
-                        fleet.record('I05-successor-new-shard-integrity', verify_cohort(fleet, target, 'I05-successor-shard'))
                         save(output / 'successor-complete.json', {**attempt, 'added': added,
                             'queuedBeforeDisconnectObserved': True, 'originalDiagnosticDropBeforeAcquire': True,
                             'heldAtDisconnectProven': False, 'canonicalCasePassClaimed': False})

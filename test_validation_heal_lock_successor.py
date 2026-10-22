@@ -229,7 +229,7 @@ class SuccessorFlowTests(unittest.TestCase):
                 return response
         peer = type('Peer', (), {'inventory': lambda _, bucket: owner.inventory(bucket)})
         for name, value in [('SuccessorProbe', Writer), ('Probe', lambda *a, **k: peer()),
-                            ('physical_append', self.physical), ('verify_cohort', lambda *a: {'allShardBitrotVerified': True})]:
+                            ('physical_append', self.physical)]:
             p = patch.object(successor, name, value); p.start(); self.addCleanup(p.stop)
         self.probe.inventory = self.inventory
         def snapshot(label):
@@ -239,6 +239,7 @@ class SuccessorFlowTests(unittest.TestCase):
         self.fleet.snapshot = snapshot
         original_remote = self.fleet.remote
         def remote(node, action, **params):
+            self.assertNotEqual(action, 'verify-part', 'streaming checksums require a stopped service')
             value = original_remote(node, action, **params)
             if action in {'process-metrics', 'caller-socket'}:
                 if action == 'caller-socket':
