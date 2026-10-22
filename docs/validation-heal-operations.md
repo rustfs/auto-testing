@@ -870,3 +870,23 @@ The inventory now reports existing `bpftool` availability before selecting a
 service-scoped network filter; this report installs no tool or filter.
 An earlier dispatch `39757736435/1` was rejected before candidate resolution
 because the submitted helper was abbreviated; no fleet action ran there.
+
+Read-only inventory [39758842602/1](https://github.com/rustfs/rustfs/actions/runs/39758842602)
+with helper `c5d1890467599e27aeffeb5dbf1ed4b37141fd06` confirms that all four
+current fleet nodes already provide `bpftool` and cgroup v2, and none listens
+on port 9000. This observation does not certify global idleness or historical
+scene cleanup. Existing failed F07 units remain outside this operation.
+
+The I05 `lock-timeout` runtime now starts its private transient systemd unit
+with `IPAddressDeny=168.63.129.16/32` and no allow override. Startup and every
+resource sample require exact effective properties, the owned MainPID's
+membership in that unit's cgroup, both actual `sd_fw_ingress`/`sd_fw_egress`
+attachments, and root-owned `cgroup_skb` program identities/tags from bpftool.
+Missing support, ignored settings, foreign programs, aliased cgroups and
+process changes fail closed. This policy isolates the observed external
+source from this test service in both directions. Other units and the host
+firewall are untouched; the policy has the private service cgroup's lifetime.
+It does not identify the platform's probe configuration. Resource evidence
+retains the effective properties and kernel program IDs/tags as snapshots.
+The total FD threshold, caller/request identity and 30-second budget remain
+unchanged; complete I05 canonical acceptance is still required separately.

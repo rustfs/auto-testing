@@ -9,24 +9,34 @@ live run proves each source assertion on the required topology.
 
 ## Current acceptance and remaining work
 
-Count reconciliation (2026-10-22): the checked-in per-case audit below supports
-the 104-case baseline. Later PR summaries state 108, but the four additional
-case identities and complete acceptance records have not yet been reconciled
-to this baseline. The table therefore describes the documented baseline; this
-update adds or revokes no canonical acceptance. Partial I05, native and recovery
-diagnostics cannot supply the missing four records.
+Count reconciliation (2026-10-22): the four additions after the 104-case
+baseline are C02, C03, C05 and I04. Their original raw-evidence auditors were
+rerun against the retained official archives; all results match the recorded
+audits. Candidate/helper identities, complete H1/H2 branch coverage, cleanup,
+acceptance review chains and unchanged earlier failures were reconciled to
+`canonical-migration-ledger-20261020-i04.json`. Each acceptance retains its own
+immutable candidate; this is migration coverage across those candidates, not
+a fresh replay of all cases on the current I05 package. Partial I05, native
+and recovery diagnostics add no canonical acceptance.
 
-All 158 canonical IDs are retained. Independent complete live acceptance is **104/158**: the prior 101-case census plus B07 `heal.below-read-quorum` ([run 38727279347/1](https://github.com/rustfs/rustfs/actions/runs/38727279347)), A10 `heal.admin-option-contract` ([run 39197088183/1](https://github.com/rustfs/rustfs/actions/runs/39197088183)) and B06 `heal.read-quorum-boundary` ([run 39223475622/1](https://github.com/rustfs/rustfs/actions/runs/39223475622)). Their complete source matrices, immutable candidate/package/tools and cleanup were independently audited; earlier failures remain retained.
+All 158 canonical IDs are retained. Independent complete live acceptance is **108/158**: the prior 104-case baseline plus the four reconciled cases below. The baseline includes B07 `heal.below-read-quorum` ([run 38727279347/1](https://github.com/rustfs/rustfs/actions/runs/38727279347)), A10 `heal.admin-option-contract` ([run 39197088183/1](https://github.com/rustfs/rustfs/actions/runs/39197088183)) and B06 `heal.read-quorum-boundary` ([run 39223475622/1](https://github.com/rustfs/rustfs/actions/runs/39223475622)). Complete source matrices, immutable candidate/package/tools and cleanup were independently audited; earlier failures remain retained.
+
+| Reconciled case | Complete live run | Required coverage | Original result SHA-256 |
+| --- | --- | --- | --- |
+| C02 `heal.data-shard-bitrot` | [39281951263/1](https://github.com/rustfs/rustfs/actions/runs/39281951263) | Eight H1/H2 branch instances, 3,334 archive files | `009c96a4bbd1b8c711009c0223519f6f12d8762890d597db749f9e415ca23f1a` |
+| C03 `heal.parity-shard-bitrot` | [39286997859/1](https://github.com/rustfs/rustfs/actions/runs/39286997859) | Six H1/H2 branch instances, 2,904 archive files | `da2df2e15aa973b6a04a0cb40491413db17426b63d6367f11682ef579b84235a` |
+| C05 `heal.missing-or-corrupt-xlmeta` | [39322217398/1](https://github.com/rustfs/rustfs/actions/runs/39322217398) | Ten H1/H2 DB/DV instances, 3,132 archive files | `489b8179ee90a7412b223e669db8fd4f6520b9e69051cbf927b6f33299de423b` |
+| I04 `heal.queue-pressure-and-admission` | [39354651483/1](https://github.com/rustfs/rustfs/actions/runs/39354651483) | Four branches per topology, six exact durable tasks, 5,565 archive files | `4dcde2f34bb7df52f03f5a3ec1e87663145a7134d3ef1a513fda2da52d1709a2` |
 
 | Acceptance state | Cases | Remaining requirement |
 | --- | ---: | --- |
-| Independently accepted complete live PASS | 104 | Preserve original provenance and complete results. |
-| Retained live failures with existing executors | 30 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
+| Independently accepted complete live PASS | 108 | Preserve original provenance and complete results. |
+| Retained live failures with existing executors | 26 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
 | Required native barriers | 7 | A09 and G01–G06 need exact candidate-bound server lock/version/commit barriers. |
 | Orchestration or evidence blocked | 4 | C11, F07, I05 and J02 need their remaining native or full live evidence closure. |
 | Environment gated, disabled by default | 13 | Control flows, oracles and unmet reasons are implemented; dedicated resource adapters and real execution remain conditional on the required resources. |
 
-The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 41 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
+The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 37 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
 
 [J02 diagnostic 38874900846/1](https://github.com/rustfs/rustfs/actions/runs/38874900846) completed all 20 H1/H2 × DB/DV branch instances on that exact candidate. Sixteen branches report PASS; the four original all-metadata-corruption probes report permanent Failed rather than Unknown and retain NOT_OBSERVED. Independent archive and provenance audits passed. Independent mixed-branch audits verified all four repaired shards against original complete bytes, exact receipts and counters, surviving below-quorum failures, original terminal preservation and post-rescue S3 inventories. All 50 node namespace finalization receipts passed audit. Real legacy writes separately produce Unknown with zero repairs and unchanged physical files, but do not replace the original source procedure. Full J02 canonical acceptance remains blocked; these partial results add no canonical acceptance.
 

@@ -561,6 +561,7 @@ def start(request):
             outcome_legacy_phase({"runId": owner["runId"], "action": "outcome-legacy-phase"})
     if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf", "outcome-legacy", "frozen-race-legacy", "lock-timeout"}:
         runtime_configuration(state, owner)
+    filter_properties = i05_filter_properties(owner)
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
             "--property=KillMode=control-group", "--property=TimeoutStopSec=30",
             "--property=LogRateLimitIntervalSec=1s", "--property=LogRateLimitBurst=1000000",
@@ -571,11 +572,80 @@ def start(request):
             *(["--property=RemainAfterExit=yes"] if owner.get("runtimeProfile") in {"root-restart", "journal-bounded", "durable-mrf", "mrf-crash", "replacement", "replacement-target", "schema-refusal", "incarnation-checkpoint", "incarnation-mrf"} else []),
             "--property=WorkingDirectory=" + str(state),
             "--property=EnvironmentFile=" + str(state / "service.env"),
+            *filter_properties,
             *gate_module().start_properties(gate_module().checked_gate(state, roots)),
             *quorum_gate_module().properties(state, roots),
             *(volume_module().properties(state, roots, owner) if owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"} else []),
             *replacement_module().start_properties(state, roots), str(state / "rustfs"), *owner["volumes"])
-    return {"unit": owner["unit"], "started": True, "journalPolicy": journal_policy(owner)}
+    result = {"unit": owner["unit"], "started": True, "journalPolicy": journal_policy(owner)}
+    if owner.get("runtimeProfile") == "lock-timeout":
+        result["platformNetworkPolicy"] = i05_filter_policy(owner)
+    return result
+
+
+def i05_filter_properties(owner):
+    """Exclude the observed platform source only from the private I05 unit."""
+    if owner.get("runtimeProfile") != "lock-timeout":
+        return []
+    require(shutil.which('bpftool') and Path('/sys/fs/cgroup/cgroup.controllers').is_file(),
+            'I05 requires bpftool and cgroup v2 to verify its service network filter')
+    require(owner.get('unit') == unit(owner['runId']), 'I05 filter requires its exact owned service')
+    return ['--property=IPAddressDeny=168.63.129.16/32', '--property=IPAddressAllow=']
+
+
+def i05_filter_policy(owner, expected_pid=None):
+    """Check effective systemd policy and actual kernel attachments, failing closed.
+
+    Unit properties alone do not establish cgroup BPF support. No host firewall,
+    platform agent or persistent network setting is changed. Stopping the unit
+    removes its service-scoped filters with the service's cgroup.
+    """
+    require(owner.get('runtimeProfile') == 'lock-timeout'
+            and owner.get('unit') == unit(owner['runId']), 'I05 filter requires its exact owned service')
+    names = ('IPAddressDeny', 'IPAddressAllow', 'ControlGroup', 'MainPID')
+    raw = command('systemctl', 'show', owner['unit'],
+                  *(part for name in names for part in ('-p', name))).stdout
+    values = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+    group = '/system.slice/' + owner['unit']
+    require(values.get('IPAddressDeny') == '168.63.129.16/32'
+            and values.get('IPAddressAllow') == '' and values.get('ControlGroup') == group
+            and re.fullmatch(r'[1-9][0-9]*', values.get('MainPID', ''))
+            and int(values['MainPID']) > 1
+            and (expected_pid is None or int(values['MainPID']) == expected_pid),
+            'I05 effective service filter or bound process differs')
+    pid = int(values['MainPID'])
+    require((Path('/proc') / str(pid) / 'cgroup').read_text().strip() == '0::' + group,
+            'I05 process is outside its filtered service cgroup')
+    cgroup = Path('/sys/fs/cgroup') / group.lstrip('/')
+    require(cgroup.is_dir() and cgroup.resolve(strict=True) == cgroup,
+            'I05 filtered service cgroup is missing or aliased')
+    rows = json.loads(command('bpftool', '-j', 'cgroup', 'show', str(cgroup)).stdout)
+    expected = {'ingress': 'sd_fw_ingress', 'egress': 'sd_fw_egress'}
+    require(isinstance(rows, list) and len(rows) == 2
+            and all(isinstance(row, dict) for row in rows)
+            and {row.get('attach_type') for row in rows} == set(expected)
+            and all(type(row.get('id')) is int and row['id'] > 0
+                    and row.get('name') == expected[row['attach_type']]
+                    and row.get('attach_flags') == 'multi' for row in rows)
+            and len({row['id'] for row in rows}) == 2,
+            'I05 kernel service BPF attachments are missing, foreign or incomplete')
+    programs = []
+    for row in sorted(rows, key=lambda item: item['attach_type']):
+        program = json.loads(command('bpftool', '-j', 'prog', 'show', 'id', str(row['id'])).stdout)
+        if isinstance(program, list):
+            require(len(program) == 1, 'I05 kernel filter program is ambiguous')
+            program = program[0]
+        require(isinstance(program, dict) and program.get('id') == row['id']
+                and program.get('type') == 'cgroup_skb' and program.get('name') == row['name']
+                and type(program.get('uid')) is int and program['uid'] == 0
+                and re.fullmatch(r'[0-9a-f]{16}', program.get('tag', '')),
+                'I05 kernel filter program identity or type differs')
+        programs.append({**row, 'type': program['type'], 'tag': program['tag'], 'uid': program['uid']})
+    return {'unit': owner['unit'], 'pid': pid, 'controlGroup': group,
+            'deniedAddress': '168.63.129.16/32', 'effectiveProperties': values,
+            'kernelPrograms': programs, 'scope': 'owned I05 service only',
+            'hostFirewallChanged': False, 'persistentNetworkSettingsChanged': False,
+            'snapshotOnly': True, 'canonicalPassClaimed': False}
 
 
 def journal_policy(owner):
@@ -700,6 +770,7 @@ def process_metrics(request):
         result["fileDescriptors"] = result["descriptorCensus"]["fileDescriptors"]
         require(os.readlink(root / "ns/net") == namespace, "resource sample crossed a network namespace change")
         result["networkNamespace"] = namespace
+        result["platformNetworkPolicy"] = i05_filter_policy(owned(request["runId"])[2], before['pid'])
     after = process(request)
     require(all(after.get(name) == before[name] for name in PROCESS_FIELDS), "resource sample crossed a service identity change")
     return result

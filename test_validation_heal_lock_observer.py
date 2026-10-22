@@ -355,6 +355,7 @@ class CallerSocketTests(unittest.TestCase):
         with tempfile.TemporaryFile() as file, socket.socket() as sock, \
                 patch.object(fleet_node, 'process', return_value=actual), \
                 patch.object(fleet_node, 'owned', return_value=(None, None, {'runtimeProfile': 'lock-timeout'})), \
+                patch.object(fleet_node, 'i05_filter_policy', return_value={'snapshotOnly': True}) as policy, \
                 patch.object(fleet_node, 'caller_socket_backend', sockets, create=True):
             proof = fleet_node.process_metrics({'runId': 'gh-12345-1-h1', 'action': 'process-metrics'})
             census = proof['descriptorCensus']
@@ -364,6 +365,8 @@ class CallerSocketTests(unittest.TestCase):
             self.assertEqual(proof['networkNamespace'], os.readlink('/proc/self/ns/net'))
             self.assertEqual(proof['fileDescriptors'], census['fileDescriptors'])
             self.assertTrue(census['snapshotOnly'])
+            policy.assert_called_once_with({'runtimeProfile': 'lock-timeout'}, actual['pid'])
+            self.assertEqual(proof['platformNetworkPolicy'], {'snapshotOnly': True})
             with patch.object(fleet_node, 'process', side_effect=[actual, {**actual, 'startTicks': 1}]):
                 with self.assertRaisesRegex(ValueError, 'identity change'):
                     fleet_node.process_metrics({'runId': 'gh-12345-1-h1', 'action': 'process-metrics'})

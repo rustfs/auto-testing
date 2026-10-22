@@ -1,4 +1,5 @@
 import copy
+import json
 from pathlib import Path
 import tempfile
 import types
@@ -141,6 +142,87 @@ class EnvironmentTests(unittest.TestCase):
         result = environment.summarize(self.fixture())
         self.assertFalse(result['runtimeObservationsComplete'])
         self.assertFalse(result['cleanStateCertified'])
+
+
+class I05PlatformFilterTests(unittest.TestCase):
+    def owner(self):
+        return {'runtimeProfile': 'lock-timeout', 'runId': 'gh-123-1-h1',
+                'unit': 'rustfs-validation-heal-gh-123-1-h1.service'}
+
+    def test_only_i05_private_unit_receives_filter_and_missing_backend_refuses(self):
+        with patch.object(fleet_node.shutil, 'which', return_value='/usr/sbin/bpftool'), \
+                patch.object(fleet_node, 'paths'), \
+                patch.object(Path, 'is_file', return_value=True):
+            properties = fleet_node.i05_filter_properties(self.owner())
+            self.assertEqual(properties, ['--property=IPAddressDeny=168.63.129.16/32',
+                                          '--property=IPAddressAllow='])
+            with self.assertRaises(ValueError):
+                fleet_node.i05_filter_properties({**self.owner(), 'unit': 'rustfs.service'})
+        with patch.object(fleet_node.shutil, 'which', return_value=None):
+            with self.assertRaises(ValueError): fleet_node.i05_filter_properties(self.owner())
+            self.assertEqual(fleet_node.i05_filter_properties({'runtimeProfile': 'manual'}), [])
+
+    def policy(self, variant=None):
+        owner = self.owner()
+        group = '/system.slice/' + owner['unit']
+        values = {'IPAddressDeny': '168.63.129.16/32', 'IPAddressAllow': '',
+                  'ControlGroup': group, 'MainPID': '42'}
+        rows = [{'id': i, 'attach_type': direction, 'name': 'sd_fw_' + direction, 'attach_flags': 'multi'}
+                for i, direction in enumerate(('ingress', 'egress'), 1)]
+        programs = {row['id']: {'id': row['id'], 'name': row['name'], 'type': 'cgroup_skb',
+                              'uid': 0, 'tag': 'a' * 16} for row in rows}
+        if variant == 'ignored-property': values['IPAddressDeny'] = ''
+        elif variant == 'allow': values['IPAddressAllow'] = 'any'
+        elif variant == 'foreign-cgroup': values['ControlGroup'] = '/system.slice/rustfs.service'
+        elif variant == 'pid': values['MainPID'] = '43'
+        elif variant == 'unsupported-kernel': rows = []
+        elif variant == 'missing-egress': rows.pop()
+        elif variant == 'foreign-program': rows[0]['name'] = 'foreign'
+        elif variant == 'duplicate-id': rows[1]['id'] = rows[0]['id']
+        elif variant == 'override': rows[0]['attach_flags'] = 'override'
+        elif variant == 'program-id': programs[1]['id'] = 999
+        elif variant == 'program-type': programs[1]['type'] = 'socket_filter'
+        elif variant == 'program-owner': programs[1]['uid'] = 1000
+        elif variant == 'program-tag': programs[1]['tag'] = ''
+        elif variant == 'query-failed': pass
+        def invoke(*args, **kwargs):
+            if args[:2] == ('systemctl', 'show'):
+                raw = '\n'.join(k + '=' + v for k, v in values.items())
+            elif args[:4] == ('bpftool', '-j', 'cgroup', 'show'):
+                if variant == 'query-failed': raise ValueError('kernel query refused')
+                raw = json.dumps(rows)
+            elif args[:5] == ('bpftool', '-j', 'prog', 'show', 'id'):
+                # Both bpftool versions' single-program JSON forms are accepted.
+                program = programs[int(args[5])]
+                raw = json.dumps([program] if int(args[5]) == 1 else program)
+            else: self.fail(f'Unexpected filter command: {args}')
+            return types.SimpleNamespace(stdout=raw)
+        membership = '0::' + (group if variant != 'process-cgroup' else '/foreign')
+        with patch.object(fleet_node, 'command', side_effect=invoke) as command, \
+                patch.object(fleet_node, 'paths'), \
+                patch.object(Path, 'read_text', return_value=membership + '\n'), \
+                patch.object(Path, 'is_dir', return_value=variant != 'missing-cgroup'), \
+                patch.object(Path, 'resolve', autospec=True, side_effect=lambda path, **kw:
+                    Path('/foreign') if variant == 'aliased-cgroup' else path):
+            result = fleet_node.i05_filter_policy(owner, 42)
+        return result, command
+
+    def test_effective_properties_require_actual_process_bound_kernel_programs(self):
+        result, calls = self.policy()
+        self.assertEqual(result['deniedAddress'], '168.63.129.16/32')
+        self.assertEqual({row['attach_type'] for row in result['kernelPrograms']}, {'ingress', 'egress'})
+        self.assertFalse(result['hostFirewallChanged'])
+        self.assertFalse(result['persistentNetworkSettingsChanged'])
+        self.assertTrue(result['snapshotOnly'])
+        self.assertEqual([call.args[0] for call in calls.call_args_list],
+                         ['systemctl', 'bpftool', 'bpftool', 'bpftool'])
+
+    def test_configured_properties_do_not_hide_missing_foreign_or_changed_kernel_filter(self):
+        for variant in ('ignored-property', 'allow', 'foreign-cgroup', 'pid', 'unsupported-kernel',
+                        'missing-egress', 'foreign-program', 'duplicate-id', 'override', 'program-id',
+                        'program-type', 'program-owner', 'program-tag', 'query-failed',
+                        'process-cgroup', 'missing-cgroup', 'aliased-cgroup'):
+            with self.subTest(variant=variant), self.assertRaises(ValueError): self.policy(variant)
 
 
 if __name__ == '__main__': unittest.main()
