@@ -2359,8 +2359,19 @@ census matched; the complete S3 inventory was captured before the contender,
 and the server returned a known 503 with no successful VersionId. A
 post-contender S3 inventory was not captured. The new recovery planner accepts
 this exact archived boundary for preservation; it does not make a canonical
-PASS claim or authorize replay.
-Canonical acceptance and its 104/158 count remain unchanged.
+PASS claim or authorize replay. Read-only environment inspection
+[39738071753/1](https://github.com/rustfs/rustfs/actions/runs/39738071753)
+completed with stable observations of all four current Heal nodes and no
+RustFS service, validation unit or port-9000 listener on the target vm000.
+Evidence-based isolation [39738426191/1](https://github.com/rustfs/rustfs/actions/runs/39738426191)
+completed `ISOLATED` for the exact vm000 scene: all 65 original artifact files
+match byte-for-byte; preflight, move and post-audit physical digests match;
+four data roots and private state remain in five root-owned mode-0700
+same-device archive parents. No S3 request, backup restoration, namespace
+deletion or original verdict rewrite occurred. The inspection also observed
+previous failed F07 units on vm001-vm003, which were outside this plan. The
+original run remains FAIL/cleanup FAIL. Canonical acceptance and its 104/158
+count remain unchanged.
 
 
 I05 lock-window diagnosis (2026-10-22): exact candidate source

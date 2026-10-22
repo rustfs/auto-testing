@@ -774,7 +774,7 @@ A separate protected prefix is checked during the fault. The original key-level 
 
 ### I05 retained-scene isolation
 
-`validation_cleanup_run_id=39711742431` selects the narrow I05 preservation
+`validation_cleanup_run_id=<failed-run-id>` selects the narrow I05 preservation
 route with the original package build and an immutable helper containing
 `timeout_retention.py`. The driver must remain on the original Functional Chain
 branch. First check the shared current auto-testing fleet for other work. The
@@ -796,8 +796,16 @@ isolation. `ISOLATED` never changes the original FAIL or supplies canonical
 acceptance. In run 39733064688, the server refused the contender after a 1001
 ms target write-lock timeout while the exact GET held its read lock for 4.148
 s; the validator failed because it combined the same PUT's bucket-incarnation
-read-lock events with the target write-lock events. The failure and physical
-scene remain preserved pending evidence-based isolation.
+read-lock events with the target write-lock events. Read-only inspection
+[39738071753/1](https://github.com/rustfs/rustfs/actions/runs/39738071753)
+observed vm000 with no RustFS service, validation unit or port 9000 listener.
+Recovery [39738426191/1](https://github.com/rustfs/rustfs/actions/runs/39738426191)
+completed `ISOLATED` for vm000: all 65 failed-artifact files match
+byte-for-byte, preflight/move/post-audit physical digests match, and four data
+roots plus private state are retained in five root-owned mode-0700 same-device
+archive parents. No backup restoration, namespace deletion, S3 request or
+original FAIL rewrite occurred. Inspection also observed old failed F07 units
+on vm001-vm003; the I05 plan did not touch those nodes.
 
 The first live run's GET already dropped its lock before observation. The
 version-field correction correlates those original events but cannot reopen
