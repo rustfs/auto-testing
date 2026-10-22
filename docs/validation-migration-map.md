@@ -2330,17 +2330,21 @@ one; that difference is not yet explained. Neither a wrong package nor a
 source mix is inferred from it. Do not replay the same warmed baseline premise
 or claim that the field correction establishes lock contention.
 
-`timeout_retention.py` recognizes two exact H1 evidence boundaries: the first
-helper's failure before a contender, and the reviewed `d100abeb` helper's
-failure after one contender PUT received a known 503. Both require the exact
-candidate/package/binary/inspector and owner, all nine successful seed
+`timeout_retention.py` recognizes three exact I05 failure boundaries: the first
+helper's H1 failure before a contender, the reviewed `d100abeb` H1 failure
+after one contender PUT received a known 503, and current helper `1b88cad` H2
+failure after H1 completed and cleaned successfully. The H1 paths require the
+exact candidate/package/binary/inspector and owner, all nine successful seed
 request/ACK pairs, deterministic bytes, public metadata/tags/versions, closed
-read-only historical GET and unchanged stopped four-drive physical scene.
-The contender boundary additionally checks its only durable request/ACK,
-request digest and clock ordering, structured `ServiceUnavailable` response,
-request-correlated bucket-incarnation read-lock lifecycle, and exact failed
-`put_object_commit` write-lock lifecycle. Unknown or successful writes, changed
-physical evidence, another case, H2 or extra actions refuse recovery.
+read-only historical GET and unchanged stopped four-drive physical scene. The
+H2 path also requires all four owners and stopped physical scenes, inspector
+uploads, preflight and deployment proof, per-node resource baselines, lock
+checkpoints, three complete lock journal windows, and service logs. Every
+contender boundary checks its only durable request/ACK, request digest and
+clock ordering, structured `ServiceUnavailable` response, request-correlated
+bucket-incarnation read-lock lifecycle, and exact failed `put_object_commit`
+write-lock lifecycle. Unknown or successful writes, changed physical evidence,
+missing peers, an unclean H1, another case or extra actions refuse recovery.
 
 Recovery reuses retained-scene isolation with same-filesystem non-overwriting
 renames, durable intent, preflight, interrupted-move retries and five private
@@ -2358,7 +2362,7 @@ with its target write lock. The before/after stopped four-drive physical
 census matched; the complete S3 inventory was captured before the contender,
 and the server returned a known 503 with no successful VersionId. A
 post-contender S3 inventory was not captured. The new recovery planner accepts
-this exact archived boundary for preservation; it does not make a canonical
+the exact archived H1 boundary for preservation; it does not make a canonical
 PASS claim or authorize replay. Read-only environment inspection
 [39738071753/1](https://github.com/rustfs/rustfs/actions/runs/39738071753)
 completed with stable observations of all four current Heal nodes and no
@@ -2393,6 +2397,20 @@ runtime profiles are unchanged. The existing remote process observer checks
 every configured setting, so it will reject a deployment that omits or changes
 this value. Focused verification ran 50 observer/timeout/runner tests: 48
 passed and two existing Linux-only tests were skipped on macOS; `git diff
---check` passed. Hosted CI and a fresh candidate-bound live diagnostic remain
-required. The previous FAIL and its isolated scene remain retained; this local
-runtime correction is not live or canonical acceptance.
+--check` passed. The previous FAIL and its isolated scene remain retained; this
+local runtime correction is not live or canonical acceptance.
+
+I05 H2 retained-scene recovery (2026-10-22): `timeout_retention.py` now accepts
+the exact `1b88cad` H2 contender failure only after H1 completed with cleanup
+PASS. The H2 plan binds all four reserved owners, inspector uploads, preflight
+mounts, service identities/settings, journal checkpoints and balanced peer
+sampling rounds, plus the four stopped physical scenes and failure logs. It
+still requires the exact nine successful seed ACKs, complete public baseline,
+closed historical GET and known contender 503/lock lifecycle. Unknown,
+successful, foreign-peer, partial or physically changed evidence refuses
+before creating a Fleet or moving any root. H2 isolation therefore keeps the
+four peers together and never changes the original FAIL. An H2 archive fixture
+and negative evidence cases were added. The matching local CI group ran 117
+tests successfully with two existing Linux-only tests skipped on macOS; the
+previous single timeout FD test also passed when rerun in isolation. No new
+live diagnostic or canonical acceptance is established by these checks.

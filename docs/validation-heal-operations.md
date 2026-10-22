@@ -779,21 +779,29 @@ route with the original package build and an immutable helper containing
 `timeout_retention.py`. The driver must remain on the original Functional Chain
 branch. First check the shared current auto-testing fleet for other work. The
 planner accepts the original helper 704bd60 failure before contender
-submission, and the reviewed helper d100abeb failure after one exact known 503
-contender refusal. Both require nine exact successful seed request/ACK pairs,
-complete version/marker/payload/public metadata baseline, a closed read-only
-historical GET, original owner/candidate/inspector and unchanged stopped
-four-drive scene. The contender boundary also verifies its request/ACK digest,
-server request ID, full bucket-incarnation read-lock lifecycle, and exact
-failed target write-lock lifecycle. Unknown or successful writes, another
-action, H2 evidence or physical drift refuse recovery.
+submission and the reviewed helper d100abeb failure after one exact known 503
+contender refusal. It also accepts helper 1b88cad when H1 completed and cleaned
+successfully before H2 reached that same exact contender failure. The H1 path
+requires nine exact successful seed request/ACK pairs, complete
+version/marker/payload/public metadata baseline, a closed read-only historical
+GET, original owner/candidate/inspector and an unchanged stopped four-drive
+scene. The contender boundary also verifies its request/ACK digest, server
+request ID, full bucket-incarnation read-lock lifecycle and exact failed target
+write-lock lifecycle. The H2 path additionally requires four reservations,
+four inspector uploads, per-node lock checkpoints and balanced four-peer
+journal rounds before disconnect, after admission, and during contender
+observation, four stopped physical scenes and four service logs.
+Unknown or successful writes, missing peers, another action, an unclean H1 or
+physical drift refuse recovery.
 
 The recovery reuses retained-scene audit/isolate/post-audit, retaining all four
 roots and state under private per-run parents without S3 calls, backup
 restoration or deletion. Verify all original archived files byte-for-byte and
 all five final private parents independently before recording active namespace
 isolation. `ISOLATED` never changes the original FAIL or supplies canonical
-acceptance. In run 39733064688, the server refused the contender after a 1001
+acceptance. H2 recovery requires the completed H1 diagnostic and its successful
+cleanup; it isolates all four H2 peers together when the H2 contender boundary
+fails. In run 39733064688, the server refused the contender after a 1001
 ms target write-lock timeout while the exact GET held its read lock for 4.148
 s; the validator failed because it combined the same PUT's bucket-incarnation
 read-lock events with the target write-lock events. Read-only inspection

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -149,6 +150,230 @@ class TimeoutRetentionTests(unittest.TestCase):
             'journal': '\n'.join(json.dumps(row, sort_keys=True, separators=(',', ':')) for row in rows)})
         return contender
 
+    def add_h2_failure_archive(self, root, candidate, h1_folder, *, window_rounds=1):
+        self.add_contender_archive(root, candidate, h1_folder)
+        evidence = h1_folder.parent
+        h2_folder = evidence / 'H2'
+        shutil.copytree(h1_folder, h2_folder)
+
+        def read(path): return json.loads(path.read_text())
+        def write(path, value): path.write_text(json.dumps(value, sort_keys=True, separators=(',', ':')))
+        old_binding = read(h2_folder / '00001-binding.json')
+        old_run, old_bucket = old_binding['runId'], old_binding['bucketPrefix']
+        run_id = old_run[:-2] + 'h2'
+        bucket = 'rv-heal-' + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+
+        def replace(value):
+            if isinstance(value, dict): return {replace(key): replace(item) for key, item in value.items()}
+            if isinstance(value, list): return [replace(item) for item in value]
+            if isinstance(value, str): return value.replace(old_run, run_id).replace(old_bucket, bucket)
+            return value
+
+        for path in h2_folder.rglob('*.json'):
+            write(path, replace(read(path)))
+        nodes = ['vm000', 'vm001', 'vm002', 'vm003']
+        binding = read(h2_folder / '00001-binding.json')
+        binding.update(runId=run_id, bucketPrefix=bucket, harnessCommit=controller.H2_CONTENDER_HELPER,
+                       endpoints={f'node{i}': f'http://rustfs-node{i}:9000' for i in range(1, 5)})
+        binding_hash = hashlib.sha256(canonical(binding).encode()).hexdigest()
+        write(h2_folder / '00001-binding.json', binding)
+
+        requests = {}
+        for sequence in range(1, 10):
+            request_path = h2_folder / f'fixture/{sequence:06d}-request.json'
+            ack_path = h2_folder / f'fixture/{sequence:06d}-ack.json'
+            request, ack = read(request_path), read(ack_path)
+            request['runId'] = ack['runId'] = run_id
+            request['params']['Bucket'] = ack['observation']['params']['Bucket'] = bucket
+            if sequence >= 3 and sequence != 6:
+                index, generation = (0, sequence - 3) if sequence <= 6 else (1, sequence - 7)
+                size = 32 * 1024**2 if index == 0 else 1024
+                body = payload(f'{bucket}/objects/{index:04d}.bin/{generation}', size)
+                item = {'size': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
+                request['payload'] = ack['observation']['payload'] = item
+                etag = hashlib.md5(body, usedforsecurity=False).hexdigest()
+                ack['observation']['response']['ETag'] = etag
+                requests[ack['observation']['response']['VersionId']] = (item, etag)
+            raw = json.dumps(request, sort_keys=True, separators=(',', ':')).encode()
+            request_path.write_bytes(raw)
+            ack['requestSha256'] = hashlib.sha256(raw).hexdigest()
+            write(ack_path, ack)
+
+        for name in ('00010-original-ACK-bound-S3.json', '00013-I05-timeout-original-S3.json'):
+            path = h2_folder / name
+            value = read(path)
+            value['bucket'] = bucket
+            for entry in value['entries']:
+                if not entry['deleteMarker']:
+                    entry['payload'], etag = requests[entry['versionId']]
+                    entry['properties']['ETag'] = etag
+            write(path, value)
+
+        scope_path = h2_folder / 'timeout/scope.json'
+        scope = read(scope_path)
+        scope.update(runId=run_id, candidateCommit=controller.CANDIDATE, bindingSha256=binding_hash)
+        scope_entry = next(entry for entry in read(h2_folder / '00010-original-ACK-bound-S3.json')['entries']
+                           if entry['key'] == scope['entry']['key']
+                           and entry['versionId'] == scope['entry']['versionId'])
+        scope['entry']['payload'] = requests[scope_entry['versionId']][0]
+        write(scope_path, scope)
+        caller_dir = h2_folder / 'timeout/caller'
+        transport = caller_dir / 'transport'
+        request_path = transport / 'request.json'
+        caller_request = read(request_path)
+        caller_request.update(runId=run_id, harnessCommit=controller.H2_CONTENDER_HELPER,
+                              candidateCommit=controller.CANDIDATE, bucket=bucket,
+                              bindingSha256=binding_hash,
+                              requestTarget=f"/{bucket}/{scope_entry['key']}?versionId={scope_entry['versionId']}")
+        caller_request['params']['Bucket'] = bucket
+        raw = json.dumps(caller_request, sort_keys=True, separators=(',', ':')).encode()
+        request_path.write_bytes(raw)
+        for name in ('request-written.json', 'disconnected.json'):
+            path = transport / name
+            value = read(path)
+            value.update(runId=run_id, harnessCommit=controller.H2_CONTENDER_HELPER,
+                         candidateCommit=controller.CANDIDATE, bucket=bucket,
+                         bindingSha256=binding_hash,
+                         requestTarget=caller_request['requestTarget'],
+                         requestSha256=hashlib.sha256(raw).hexdigest())
+            write(path, value)
+
+        contender = h2_folder / 'timeout/contender'
+        contender_request_path = contender / '000001-request.json'
+        contender_ack_path = contender / '000001-ack.json'
+        contender_request = read(contender_request_path)
+        contender_ack = read(contender_ack_path)
+        contender_body = payload(f'{run_id}/I05-timeout-contender', CONTENDER_BYTES)
+        contender_request.update(runId=run_id, payload={'size': len(contender_body),
+            'sha256': hashlib.sha256(contender_body).hexdigest()})
+        contender_request['params']['Bucket'] = bucket
+        raw = json.dumps(contender_request, sort_keys=True, separators=(',', ':')).encode()
+        contender_request_path.write_bytes(raw)
+        contender_ack.update(runId=run_id, requestSha256=hashlib.sha256(raw).hexdigest())
+        contender_ack['observation']['params']['Bucket'] = bucket
+        contender_ack['observation']['payload'] = contender_request['payload']
+        write(contender_ack_path, contender_ack)
+
+        records = {}
+        for path in sorted(h2_folder.glob('*.json')):
+            match = path.name.split('-', 1)
+            label = match[1][:-5]
+            records.setdefault(label, []).append(read(path))
+        for path in h2_folder.glob('*.json'):
+            path.unlink()
+
+        def clone(value): return json.loads(json.dumps(value))
+        def by_node(value, node):
+            result = clone(value)
+            if isinstance(result, dict): result['node'] = node
+            return result
+        old_reservation = records['reserved'][0]
+        old_owner = old_reservation['owner']
+        owners = {}
+        reservations = []
+        uploads = []
+        for node in nodes:
+            owner = clone(old_owner)
+            owner.update(runId=run_id, bucket=bucket, hostname=node,
+                         unit=f'rustfs-validation-heal-{run_id}.service')
+            owners[node] = owner
+            reservation = clone(old_reservation)
+            reservation.update(node=node, owner=owner)
+            reservations.append(reservation)
+            uploads.append(by_node(records['inspector-upload'][0], node))
+
+        baseline_resources = records['I05-caller-baseline-resources'][0]
+        resources = [by_node(baseline_resources, node) for node in nodes]
+        for value, node in zip(resources, nodes, strict=True):
+            value['identity']['binarySha256'] = binding['candidateBinarySha256']
+            value['identity']['settings'] = controller.runtime_config('lock-timeout')
+        original_scene = records['original-failure-scene'][0]['vm000']
+        scenes = {}
+        for node in nodes:
+            scenes[node] = clone(original_scene)
+            scenes[node].update(hostname=node, unit=owners[node]['unit'],
+                                binarySha256=binding['candidateBinarySha256'])
+        physical = records['I05-timeout-original-physical'][0]
+        old_physical = physical['vm000']
+        snapshots = {node: clone(old_physical) for node in nodes}
+        started = {node: {'started': True} for node in nodes}
+        deployed = records['deployed-topology'][0]
+        deployed = {node: clone(deployed['vm000']) for node in nodes}
+        preflight = records['preflight'][0]
+        preflight = {node: {**clone(preflight['vm000']), 'hostname': node} for node in nodes}
+        checkpoint = records['I05-caller-checkpoint'][0]
+        checkpoints = [by_node(checkpoint, node) for node in nodes]
+        cursor_by_node = {node: f'{node}-checkpoint' for node in nodes}
+        windows = []
+        source_windows = records['I05-caller-window']
+        for stage in range(3):
+            for round_index in range(window_rounds):
+                for node in nodes:
+                    source = source_windows[stage]
+                    window = by_node(source, node)
+                    window['unit'] = owners[node]['unit']
+                    window['beforeCursor'] = cursor_by_node[node]
+                    cursor_by_node[node] = f'{node}-window-{stage}-{round_index + 1}'
+                    window['afterCursor'] = cursor_by_node[node]
+                    if node != 'vm000' or stage != 2 or round_index != 0: window['journal'] = ''
+                    windows.append(window)
+        admission_resources = [clone(value) for value in resources]
+        for value in admission_resources:
+            value['identity']['binarySha256'] = binding['candidateBinarySha256']
+            value['identity']['settings'] = controller.runtime_config('lock-timeout')
+        quiescent_source = records['quiescent'][0].get('vm000', {'stopped': True})
+        quiescent = {node: clone(quiescent_source) for node in nodes}
+        logs = [by_node(records['original-failure-logs'][0], node) for node in nodes]
+
+        attestation = records['integrity-fleet-attestation'][0]
+        attestation['nodes'] = nodes
+        attestation['allParticipatingNodesUseCandidate'] = True
+        actual = {'topology': 'H2', 'nodes': 4, 'independentDrives': 16}
+        diagnostic_result = {'topology': 'H2', 'diagnosticComplete': False, 'cleanup': 'FAIL',
+            'wholeCasePassClaimed': False, 'canonicalCasePassClaimed': False,
+            'failure': controller.FAILURES[controller.H2_CONTENDER_HELPER], 'namespacesRetained': True}
+        labels = controller.h2_labels((window_rounds, window_rounds, window_rounds))
+        by_label = {
+            'binding': [binding], 'inspector-build': records['inspector-build'],
+            'preflight': [preflight], 'integrity-fleet-attestation': [attestation],
+            'reserved': reservations, 'inspector-upload': uploads, 'started': [started],
+            'deployed-topology': [deployed], 'actual-topology': [actual],
+            'original-ACK-bound-S3': records['original-ACK-bound-S3'],
+            'original-ACK-proof': records['original-ACK-proof'],
+            'I05-timeout-original-physical': [snapshots], 'I05-timeout-original-S3': records['I05-timeout-original-S3'],
+            'I05-timeout-baseline-physical-after-public-read': [clone(snapshots)],
+            'I05-caller-baseline-resources': resources, 'I05-caller-checkpoint': checkpoints,
+            'I05-caller-window': windows, 'I05-caller-before-disconnect-socket': records['I05-caller-before-disconnect-socket'],
+            'I05-caller-admission-resources': admission_resources, 'quiescent': [quiescent],
+            'original-failure-scene': [scenes], 'original-failure-logs': logs,
+            'diagnostic-result': [diagnostic_result],
+        }
+        indexes = {}
+        for label in labels:
+            index = indexes.get(label, 0)
+            value = by_label[label][index]
+            indexes[label] = index + 1
+            write(h2_folder / f'{sum(indexes.values()):05d}-{label}.json', value)
+
+        shutil.rmtree(h1_folder)
+        h1_folder.mkdir()
+        write(h1_folder / '00001-diagnostic-result.json', {'topology': 'H1', 'diagnosticComplete': True,
+            'cleanup': 'PASS', 'wholeCasePassClaimed': False, 'canonicalCasePassClaimed': False})
+        case_path = root / 'rustfs-validation-39711742431-1' / 'run' / controller.CASE / 'cases' / f'{controller.CASE}.json'
+        case_result = read(case_path)
+        case_result['provenance']['testing_commit'] = controller.H2_CONTENDER_HELPER
+        write(case_path, case_result)
+        summary_path = evidence / 'healthy-summary.json'
+        summary = read(summary_path)
+        summary['diagnostics'] = [
+            {'topology': 'H1', 'diagnosticComplete': True, 'cleanup': 'PASS',
+             'wholeCasePassClaimed': False, 'canonicalCasePassClaimed': False},
+            diagnostic_result]
+        summary.update(diagnosticComplete=False, diagnosticBranchesPassed=False, cleanup='FAIL', complete=False,
+                       wholeCasePassClaimed=False, canonicalCasePassClaimed=False)
+        write(summary_path, summary)
+        return h2_folder
+
     def test_original_live_failure_yields_exact_pre_contender_preservation_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             root, candidate, _ = self.archive(directory)
@@ -172,6 +397,47 @@ class TimeoutRetentionTests(unittest.TestCase):
             self.assertEqual(plan['nodes'], ['vm000'])
             self.assertEqual(plan['businessSceneSha256'], {'vm000':
                 '6c9e808ff0c6d03cb5dfd5546bd588c3d3e1bcee3c167877dec21c4399fc1e6d'})
+
+    def test_h2_failure_after_clean_h1_yields_exact_four_node_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, h1_folder = self.archive(directory)
+            self.add_h2_failure_archive(root, candidate, h1_folder, window_rounds=2)
+            plan, = recovery.recovery_plan(root, 39711742431, candidate)
+            self.assertEqual(plan['kind'], 'unresolved-i05-timeout')
+            self.assertEqual(plan['runId'], 'gh-39711742431-1-h2')
+            self.assertEqual(plan['harnessCommit'], controller.H2_CONTENDER_HELPER)
+            self.assertEqual(plan['nodes'], ['vm000', 'vm001', 'vm002', 'vm003'])
+            self.assertEqual(set(plan['owners']), set(plan['businessSceneSha256']))
+
+    def test_h2_retention_refuses_partial_peer_or_unclean_h1_evidence(self):
+        for variant in ('missing-reservation', 'missing-peer-window', 'missing-peer-log', 'h1-dirty', 'peer-contender'):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, candidate, h1_folder = self.archive(directory)
+                h2_folder = self.add_h2_failure_archive(root, candidate, h1_folder)
+                if variant == 'missing-reservation':
+                    (h2_folder / '00005-reserved.json').unlink()
+                elif variant == 'missing-peer-window':
+                    window = next(path for path in h2_folder.glob('*-I05-caller-window.json')
+                                  if json.loads(path.read_text()).get('node') == 'vm002')
+                    window.unlink()
+                elif variant == 'missing-peer-log':
+                    log = next(path for path in h2_folder.glob('*-original-failure-logs.json')
+                               if json.loads(path.read_text()).get('node') == 'vm002')
+                    log.unlink()
+                elif variant == 'h1-dirty':
+                    summary_path = h1_folder.parent / 'healthy-summary.json'
+                    summary = json.loads(summary_path.read_text())
+                    summary['diagnostics'][0]['cleanup'] = 'FAIL'
+                    summary_path.write_text(json.dumps(summary))
+                else:
+                    window = next(path for path in h2_folder.glob('*-I05-caller-window.json')
+                                  if json.loads(path.read_text()).get('node') == 'vm001')
+                    value = json.loads(window.read_text())
+                    value['journal'] = json.dumps({'request_id': '30000000-0000-4000-8000-000000000001'})
+                    window.write_text(json.dumps(value))
+                with patch.object(recovery, 'Fleet') as fleet, self.assertRaises((ValueError, KeyError)):
+                    recovery.recovery_plan(root, 39711742431, candidate)
+                fleet.assert_not_called()
 
     def test_new_helper_refuses_unknown_success_or_corrupt_lock_lifecycle(self):
         for variant in ('unknown', 'success', 'acquired', 'read-lifecycle', 'extra-action'):
