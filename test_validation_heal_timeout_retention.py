@@ -21,9 +21,55 @@ import test_validation_heal_race_retention as race_tests
 FIXTURE = Path(__file__).parent / 'testdata/validation/i05-pre-contender-39711742431.zip'
 DRAIN_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-drain-budget-39746002648.zip'
 DESCRIPTOR_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-descriptor-drain-39754893467.zip'
+FILTER_STARTUP_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-filter-startup-39761856012.zip'
 
 
 class TimeoutRetentionTests(unittest.TestCase):
+    def startup_archive(self, directory):
+        root = Path(directory) / 'artifact'
+        archive_root = root / 'rustfs-validation-39761856012-1'
+        with zipfile.ZipFile(FILTER_STARTUP_FIXTURE) as archive:
+            archive.extractall(archive_root)
+        candidate = json.loads((archive_root / 'candidate.json').read_text())
+        return root, candidate, archive_root
+
+    def test_exact_filter_startup_failure_preserves_empty_stopped_scene_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, archive = self.startup_archive(directory)
+            before = {p: p.read_bytes() for p in archive.rglob('*') if p.is_file()}
+            with patch.object(recovery, 'Fleet') as fleet:
+                plan, = recovery.recovery_plan(root, 39761856012, candidate)
+            fleet.assert_not_called()
+            self.assertEqual(plan['runId'], 'gh-39761856012-1-h1')
+            self.assertEqual(plan['kind'], 'unresolved-i05-timeout')
+            self.assertEqual(plan['harnessCommit'], controller.FILTER_STARTUP_HELPER)
+            self.assertEqual(plan['ackFilesSha256'], controller.FILTER_STARTUP_ARCHIVE_SHA256)
+            self.assertEqual(before, {p: p.read_bytes() for p in archive.rglob('*') if p.is_file()})
+
+    def test_startup_isolation_refuses_changed_or_additional_effects_before_fleet(self):
+        for variant in ('run', 'candidate', 'missing', 'changed', 'request', 'H2', 'symlink'):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, candidate, archive = self.startup_archive(directory)
+                folder = archive / 'run' / controller.CASE / 'evidence' / controller.CASE / 'H1'
+                failed_run = 39761856012
+                if variant == 'run': failed_run += 1
+                elif variant == 'candidate': candidate['package_sha256'] = '0' * 64
+                elif variant == 'missing': (folder / '00008-original-failure-scene.json').unlink()
+                elif variant == 'changed': (folder / '00010-diagnostic-result.json').write_text('{}')
+                elif variant == 'request':
+                    (folder / 'fixture').mkdir()
+                    (folder / 'fixture/000001-request.json').write_text('{}')
+                elif variant == 'H2': (folder.parent / 'H2').mkdir()
+                else:
+                    target = folder / '00008-original-failure-scene.json'
+                    copy = Path(directory) / 'scene.json'
+                    copy.write_bytes(target.read_bytes())
+                    target.unlink()
+                    target.symlink_to(copy)
+                with patch.object(recovery, 'Fleet') as fleet, self.assertRaises(ValueError):
+                    recovery.recovery_plan(root, failed_run, candidate)
+                fleet.assert_not_called()
+
     def archive(self, directory):
         root = Path(directory) / 'artifact'
         with zipfile.ZipFile(FIXTURE) as archive:

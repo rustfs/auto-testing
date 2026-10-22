@@ -890,3 +890,21 @@ It does not identify the platform's probe configuration. Resource evidence
 retains the effective properties and kernel program IDs/tags as snapshots.
 The total FD threshold, caller/request identity and 30-second budget remain
 unchanged; complete I05 canonical acceptance is still required separately.
+
+Filter startup run [39761856012/1](https://github.com/rustfs/rustfs/actions/runs/39761856012)
+used helper `a9725c88acd4977545b278eebe3653c916f907f8` and stopped at the
+kernel attachment check, before seeding or issuing the diagnostic requests.
+Its stopped H1 scene has four original format files and no object files; all
+22 original artifact files and FAIL/cleanup FAIL remain retained. The parser
+had accepted only the older bpftool `ingress`/`egress` attach type strings.
+Newer bpftool uses libbpf's `cgroup_inet_ingress`/`cgroup_inet_egress` names for
+the same kernel types. Both exact spellings now map to a checked direction,
+while evidence preserves the original attach type. Unknown, duplicate or
+missing directions and non-string flags still fail closed.
+
+The startup preservation route requires that exact run/helper and all 22
+original file hashes, original candidate/package/binary, stopped owner and
+empty object scene. It reuses the existing same-device, private-parent
+isolation backend and its live owner/physical/tree checks. No workload is
+replayed and no namespace is deleted. A successful isolation or corrected
+startup check cannot certify the I05 source case.

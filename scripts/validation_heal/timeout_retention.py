@@ -9,7 +9,7 @@ import uuid
 try:
     from .heal_probe import canonical, payload, require
     from .heal_workload import verify_seed
-    from .healthy import physical_content
+    from .healthy import physical_content, validate_topology
     from .fleet_node import runtime_config
     from .lock_observer import ADMISSION_SECONDS, CANDIDATE, DRAIN_SECONDS, TARGET, same_process
     from .lock_timeout import (CALLER_RECEIVE_BUFFER_BYTES, CONTENDER_BYTES,
@@ -18,7 +18,7 @@ try:
 except ImportError:
     from heal_probe import canonical, payload, require
     from heal_workload import verify_seed
-    from healthy import physical_content
+    from healthy import physical_content, validate_topology
     from fleet_node import runtime_config
     from lock_observer import ADMISSION_SECONDS, CANDIDATE, DRAIN_SECONDS, TARGET, same_process
     from lock_timeout import (CALLER_RECEIVE_BUFFER_BYTES, CONTENDER_BYTES,
@@ -32,6 +32,8 @@ CONTENDER_HELPER = 'd100abeb8e85c4000a493aa994031e4a5d01518e'
 H2_CONTENDER_HELPER = '1b88cad3581e755d8e904697cb2ec471e04b5f8f'
 DRAIN_BUDGET_HELPER = '0442d4dd814ebfb490dcbb3cc266fb6fbebb0365'
 DESCRIPTOR_HELPER = 'dd7e54e6672cab76b5a6245ab3b4fbd051ddd39d'
+FILTER_STARTUP_HELPER = 'a9725c88acd4977545b278eebe3653c916f907f8'
+FILTER_STARTUP_ARCHIVE_SHA256 = 'c6760d0b4e657c306771a466e0a5aa4233f8e05db4aeae018ba037d289fca4aa'
 DRAIN_HELPERS = {DRAIN_BUDGET_HELPER, DESCRIPTOR_HELPER}
 FAILURES = {
     PRE_CONTENDER_HELPER: {'type': 'ValueError',
@@ -155,6 +157,65 @@ def validate_census(value):
             ipaddress.ip_address(endpoint[0])
 
 
+def filter_startup_plan(result_path, failed_run, candidate):
+    """Preserve the exact pre-workload filter-check failure, without deleting it."""
+    require(failed_run == 39761856012, 'I05 filter startup isolation requires its reviewed failed run')
+    archive = result_path.parents[3]
+    files = {}
+    for path in archive.rglob('*'):
+        require(not path.is_symlink() and (path.is_dir() or path.is_file()),
+                'I05 filter startup archive contains a link or special file')
+        if path.is_file():
+            require(path.stat().st_size <= 2 * 1024**2 and len(files) < 22,
+                    'I05 filter startup archive exceeds its reviewed bound')
+            files[path.relative_to(archive).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    require(len(files) == 22 and digest(files) == FILTER_STARTUP_ARCHIVE_SHA256,
+            'I05 filter startup archive differs from its byte-exact original')
+    def read(path): return json.loads(path.read_text())
+    result = read(result_path)
+    provenance = result['provenance']
+    evidence = result_path.parents[1] / 'evidence' / CASE
+    folder = evidence / 'H1'
+    labels = ('binding', 'inspector-build', 'preflight', 'integrity-fleet-attestation',
+              'reserved', 'inspector-upload', 'quiescent', 'original-failure-scene',
+              'original-failure-logs', 'diagnostic-result')
+    require({path.name for path in folder.iterdir()} == {
+                f'{index:05d}-{label}.json' for index, label in enumerate(labels, 1)}
+            and not (evidence / 'H2').exists(),
+            'I05 filter startup isolation cannot include a workload or another topology')
+    records = {label: read(folder / f'{index:05d}-{label}.json')
+               for index, label in enumerate(labels, 1)}
+    binding, reservation, scene = (records[label] for label in ('binding', 'reserved', 'original-failure-scene'))
+    run_id = 'gh-39761856012-1-h1'
+    owner = reservation['owner']
+    original = scene['vm000']
+    diagnostic = records['diagnostic-result']
+    require(result.get('verdict') == result.get('cleanup_status') == 'FAIL'
+            and result.get('case_id') == CASE
+            and candidate == read(archive / 'candidate.json')
+            and provenance['source_commit'] == binding['candidateCommit'] == CANDIDATE
+            and provenance['candidate_sha256'] == binding['candidatePackageSha256'] == candidate['package_sha256']
+            and provenance['testing_commit'] == binding['harnessCommit'] == FILTER_STARTUP_HELPER
+            and provenance['binary_sha256'] == binding['candidateBinarySha256'] == owner['binarySha256']
+            and binding['runId'] == run_id and reservation['node'] == 'vm000' and reservation['reserved'] is True
+            and original.get('quiescent') is True and original.get('pid') == 0 and original.get('files') == []
+            and original.get('unit') == owner['unit'] and original.get('hostname') == owner['hostname']
+            and diagnostic.get('diagnosticComplete') is False and diagnostic.get('cleanup') == 'FAIL'
+            and 'I05 kernel service BPF attachments are missing, foreign or incomplete' in
+                diagnostic.get('failure', {}).get('message', '')
+            and diagnostic.get('namespacesRetained') is True
+            and diagnostic.get('canonicalCasePassClaimed') is False,
+            'I05 filter startup isolation lost its original candidate, owner or stopped empty scene')
+    validate_topology(scene, 'H1')
+    plan = {'kind': 'unresolved-i05-timeout', 'runId': run_id, 'nodes': ['vm000'],
+            'bucket': binding['bucketPrefix'], 'owners': {'vm000': owner},
+            'candidateCommit': CANDIDATE, 'harnessCommit': FILTER_STARTUP_HELPER,
+            'binarySha256': binding['candidateBinarySha256'], 'ackFilesSha256': digest(files),
+            'businessSceneSha256': {'vm000': digest(physical_content(scene)['vm000'])}}
+    validate(plan)
+    return [plan]
+
+
 def archived_plan(artifact, failed_run, candidate):
     """Refuse uncertain effects, later actions, mixed cases and physical drift.
 
@@ -170,6 +231,8 @@ def archived_plan(artifact, failed_run, candidate):
         return json.loads(path.read_text())
     result = read(paths[0])
     provenance = result.get('provenance') or {}
+    if provenance.get('testing_commit') == FILTER_STARTUP_HELPER:
+        return filter_startup_plan(paths[0], failed_run, candidate)
     require(result.get('case_id') == CASE and result.get('verdict') == result.get('cleanup_status') == 'FAIL'
             and provenance.get('source_commit') == candidate.get('source_sha') == CANDIDATE
             and provenance.get('candidate_sha256') == candidate.get('package_sha256')

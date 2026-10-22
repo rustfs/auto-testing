@@ -171,7 +171,13 @@ class I05PlatformFilterTests(unittest.TestCase):
                 for i, direction in enumerate(('ingress', 'egress'), 1)]
         programs = {row['id']: {'id': row['id'], 'name': row['name'], 'type': 'cgroup_skb',
                               'uid': 0, 'tag': 'a' * 16} for row in rows}
-        if variant == 'ignored-property': values['IPAddressDeny'] = ''
+        if variant == 'libbpf-names':
+            for row in rows: row['attach_type'] = 'cgroup_inet_' + row['attach_type']
+        elif variant == 'duplicate-direction': rows[1]['attach_type'] = 'cgroup_inet_ingress'
+        elif variant == 'foreign-direction': rows[0]['attach_type'] = 'cgroup_inet_sock_create'
+        elif variant == 'invalid-direction': rows[0]['attach_type'] = ['ingress']
+        elif variant == 'flags-array': rows[0]['attach_flags'] = ['multi']
+        elif variant == 'ignored-property': values['IPAddressDeny'] = ''
         elif variant == 'allow': values['IPAddressAllow'] = 'any'
         elif variant == 'foreign-cgroup': values['ControlGroup'] = '/system.slice/rustfs.service'
         elif variant == 'pid': values['MainPID'] = '43'
@@ -217,11 +223,18 @@ class I05PlatformFilterTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in calls.call_args_list],
                          ['systemctl', 'bpftool', 'bpftool', 'bpftool'])
 
+    def test_libbpf_attach_names_keep_raw_kernel_evidence_and_same_directions(self):
+        result, _ = self.policy('libbpf-names')
+        self.assertEqual({row['attach_type'] for row in result['kernelPrograms']},
+                         {'cgroup_inet_ingress', 'cgroup_inet_egress'})
+        self.assertEqual({row['direction'] for row in result['kernelPrograms']}, {'ingress', 'egress'})
+
     def test_configured_properties_do_not_hide_missing_foreign_or_changed_kernel_filter(self):
         for variant in ('ignored-property', 'allow', 'foreign-cgroup', 'pid', 'unsupported-kernel',
                         'missing-egress', 'foreign-program', 'duplicate-id', 'override', 'program-id',
                         'program-type', 'program-owner', 'program-tag', 'query-failed',
-                        'process-cgroup', 'missing-cgroup', 'aliased-cgroup'):
+                        'process-cgroup', 'missing-cgroup', 'aliased-cgroup',
+                        'duplicate-direction', 'foreign-direction', 'invalid-direction', 'flags-array'):
             with self.subTest(variant=variant), self.assertRaises(ValueError): self.policy(variant)
 
 

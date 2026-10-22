@@ -621,11 +621,15 @@ def i05_filter_policy(owner, expected_pid=None):
             'I05 filtered service cgroup is missing or aliased')
     rows = json.loads(command('bpftool', '-j', 'cgroup', 'show', str(cgroup)).stdout)
     expected = {'ingress': 'sd_fw_ingress', 'egress': 'sd_fw_egress'}
+    # Newer bpftool uses libbpf's full enum names for the same attach types.
+    directions = {'ingress': 'ingress', 'egress': 'egress',
+                  'cgroup_inet_ingress': 'ingress', 'cgroup_inet_egress': 'egress'}
     require(isinstance(rows, list) and len(rows) == 2
             and all(isinstance(row, dict) for row in rows)
-            and {row.get('attach_type') for row in rows} == set(expected)
+            and all(isinstance(row.get('attach_type'), str) for row in rows)
+            and {directions.get(row['attach_type']) for row in rows} == set(expected)
             and all(type(row.get('id')) is int and row['id'] > 0
-                    and row.get('name') == expected[row['attach_type']]
+                    and row.get('name') == expected[directions[row['attach_type']]]
                     and row.get('attach_flags') == 'multi' for row in rows)
             and len({row['id'] for row in rows}) == 2,
             'I05 kernel service BPF attachments are missing, foreign or incomplete')
@@ -640,7 +644,8 @@ def i05_filter_policy(owner, expected_pid=None):
                 and type(program.get('uid')) is int and program['uid'] == 0
                 and re.fullmatch(r'[0-9a-f]{16}', program.get('tag', '')),
                 'I05 kernel filter program identity or type differs')
-        programs.append({**row, 'type': program['type'], 'tag': program['tag'], 'uid': program['uid']})
+        programs.append({**row, 'direction': directions[row['attach_type']],
+                         'type': program['type'], 'tag': program['tag'], 'uid': program['uid']})
     return {'unit': owner['unit'], 'pid': pid, 'controlGroup': group,
             'deniedAddress': '168.63.129.16/32', 'effectiveProperties': values,
             'kernelPrograms': programs, 'scope': 'owned I05 service only',
