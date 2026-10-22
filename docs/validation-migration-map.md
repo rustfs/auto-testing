@@ -2414,3 +2414,13 @@ and negative evidence cases were added. The matching local CI group ran 117
 tests successfully with two existing Linux-only tests skipped on macOS; the
 previous single timeout FD test also passed when rerun in isolation. No new
 live diagnostic or canonical acceptance is established by these checks.
+
+Post-isolation read-only inspection [39745040693/1](https://github.com/rustfs/rustfs/actions/runs/39745040693)
+used helper `22589bc00836b5d47f382429313e967c1dfc38a9` and candidate package
+39364893106/1. It observed 16 independent eligible endpoints and available H1/H2
+mount shapes, with stable runtime observations and no port-9000 listeners.
+vm000 had no loaded validation unit; vm001-vm003 still reported the failed H2
+unit from cancelled F07 run 38715204273/1. The inspection recorded
+`mutated=false`, `cleanStateCertified=false` and
+`globalWorkflowIdleCertified=false`; it neither changed that scene nor adds
+canonical acceptance.
