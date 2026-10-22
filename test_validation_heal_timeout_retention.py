@@ -22,9 +22,71 @@ FIXTURE = Path(__file__).parent / 'testdata/validation/i05-pre-contender-3971174
 DRAIN_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-drain-budget-39746002648.zip'
 DESCRIPTOR_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-descriptor-drain-39754893467.zip'
 FILTER_STARTUP_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-filter-startup-39761856012.zip'
+H2_FILTER_STARTUP_FIXTURE = Path(__file__).parent / 'testdata/validation/i05-h2-filter-startup-39764496504.zip'
 
 
 class TimeoutRetentionTests(unittest.TestCase):
+    def h2_startup_archive(self, directory):
+        root = Path(directory) / 'artifact'
+        archive_root = root / 'rustfs-validation-39764496504-1'
+        with zipfile.ZipFile(H2_FILTER_STARTUP_FIXTURE) as archive:
+            archive.extractall(archive_root)
+        return root, json.loads((archive_root / 'candidate.json').read_text()), archive_root
+
+    def test_exact_h2_startup_failure_retains_all_peers_after_actual_h1_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, archive = self.h2_startup_archive(directory)
+            before = {p: p.read_bytes() for p in archive.rglob('*') if p.is_file()}
+            with patch.object(recovery, 'Fleet') as fleet:
+                plan, = recovery.recovery_plan(root, 39764496504, candidate)
+            fleet.assert_not_called()
+            self.assertEqual(plan['runId'], 'gh-39764496504-1-h2')
+            self.assertEqual(plan['nodes'], ['vm000', 'vm001', 'vm002', 'vm003'])
+            self.assertEqual(plan['harnessCommit'], controller.H2_FILTER_STARTUP_HELPER)
+            self.assertEqual(plan['ackFilesSha256'], controller.H2_FILTER_STARTUP_ARCHIVE_SHA256)
+            race_retention.validate(plan)
+            self.assertEqual(before, {p: p.read_bytes() for p in archive.rglob('*') if p.is_file()})
+
+    def test_h2_startup_refuses_unreviewed_run_effects_cleanup_peers_and_archive_drift(self):
+        variants = ('run', 'candidate', 'helper', 'h1-cleanup', 'h1-result', 'scene',
+                    'missing-peer', 'workload', 'extra-case', 'format', 'symlink')
+        for variant in variants:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, candidate, archive = self.h2_startup_archive(directory)
+                evidence = archive / 'run' / controller.CASE / 'evidence' / controller.CASE
+                failed_run = 39764496504
+                if variant == 'run': failed_run += 1
+                elif variant == 'candidate': candidate['package_sha256'] = '0' * 64
+                elif variant == 'helper':
+                    path = archive / 'run' / controller.CASE / 'cases' / (controller.CASE + '.json')
+                    value = json.loads(path.read_text())
+                    value['provenance']['testing_commit'] = controller.FILTER_STARTUP_HELPER
+                    path.write_text(json.dumps(value))
+                elif variant in ('h1-cleanup', 'h1-result'):
+                    name = '00040-cleanup.json' if variant == 'h1-cleanup' else '00042-diagnostic-result.json'
+                    (evidence / 'H1' / name).write_text('{}')
+                elif variant == 'missing-peer': (evidence / 'H2/00009-reserved.json').unlink()
+                elif variant == 'workload':
+                    (evidence / 'H2/fixture').mkdir()
+                    (evidence / 'H2/fixture/000001-request.json').write_text('{}')
+                elif variant == 'extra-case':
+                    (archive / 'run' / controller.CASE / 'cases/other.json').write_text('{}')
+                else:
+                    path = evidence / 'H2/00014-original-failure-scene.json'
+                    if variant == 'symlink':
+                        copy = Path(directory) / 'scene.json'
+                        copy.write_bytes(path.read_bytes())
+                        path.unlink()
+                        path.symlink_to(copy)
+                    else:
+                        value = json.loads(path.read_text())
+                        if variant == 'scene': value['vm002']['files'].append({'path': 'unknown'})
+                        else: value['vm002']['formats'][0]['sha256'] = '0' * 64
+                        path.write_text(json.dumps(value))
+                with patch.object(recovery, 'Fleet') as fleet, self.assertRaises(ValueError):
+                    recovery.recovery_plan(root, failed_run, candidate)
+                fleet.assert_not_called()
+
     def startup_archive(self, directory):
         root = Path(directory) / 'artifact'
         archive_root = root / 'rustfs-validation-39761856012-1'

@@ -378,6 +378,33 @@ def environment_service_state():
             'retainedSceneRecoveryCertified': False}
 
 
+def bpf_tool_inventory():
+    """Read the wrapper and installed tools without installing or attaching BPF."""
+    selected = shutil.which('bpftool')
+    candidates = sorted(Path('/usr/lib/linux-tools').glob('*/bpftool'))
+    require(len(candidates) <= 64, 'BPF tool inventory exceeds its bounded installed paths')
+    tools = []
+    for path in ([Path(selected)] if selected else []) + candidates:
+        require(path.is_absolute(), 'BPF tool inventory requires absolute installed paths')
+        resolved = path.resolve(strict=True)
+        require(resolved.is_file() and resolved.stat().st_uid == 0
+                and not resolved.stat().st_mode & 0o022, 'BPF tool executable is not root-owned and protected')
+        version = command(str(path), '--version', check=False)
+        query = command(str(path), '-j', 'cgroup', 'show', '/sys/fs/cgroup', check=False)
+        try:
+            rows = json.loads(query.stdout) if query.returncode == 0 else None
+        except ValueError:
+            rows = None
+        tools.append({'path': str(path), 'resolvedPath': str(resolved), 'sha256': digest(resolved),
+            'selectedByPath': str(path) == selected,
+            'version': {'returncode': version.returncode, 'stdout': version.stdout[:4096], 'stderr': version.stderr[:4096]},
+            'rootCgroupQuery': {'returncode': query.returncode, 'jsonListObserved': isinstance(rows, list),
+                                'stderr': query.stderr[:4096]},
+            'serviceAttachmentsVerified': False})
+    return {'kernelRelease': os.uname().release, 'selectedPath': selected, 'tools': tools,
+            'inspectionOnly': True, 'mutated': False, 'canonicalPassClaimed': False}
+
+
 def environment_capabilities(request):
     """Read existing mounts and kernel interfaces without reserving a run."""
     paths(request['runId'])
@@ -414,6 +441,7 @@ def environment_capabilities(request):
         'kernel': {'pidfd': hasattr(os, 'pidfd_open'), 'cgroupV2': Path('/sys/fs/cgroup/cgroup.controllers').is_file(),
                    'fuseDevice': Path('/dev/fuse').exists() and stat.S_ISCHR(Path('/dev/fuse').stat().st_mode)},
         'commands': {name: shutil.which(name) is not None for name in ('docker', 'fusermount3', 'nft', 'az', 'bpftool')},
+        'bpfToolInventory': bpf_tool_inventory(),
         'installedBinarySha256': digest(binary) if binary.is_file() and not binary.is_symlink() else None,
         'platformRestartAuthorityVerified': False, 'compatibleReleasePairVerified': False,
         'canonicalPassClaimed': False}

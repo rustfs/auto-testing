@@ -34,6 +34,8 @@ DRAIN_BUDGET_HELPER = '0442d4dd814ebfb490dcbb3cc266fb6fbebb0365'
 DESCRIPTOR_HELPER = 'dd7e54e6672cab76b5a6245ab3b4fbd051ddd39d'
 FILTER_STARTUP_HELPER = 'a9725c88acd4977545b278eebe3653c916f907f8'
 FILTER_STARTUP_ARCHIVE_SHA256 = 'c6760d0b4e657c306771a466e0a5aa4233f8e05db4aeae018ba037d289fca4aa'
+H2_FILTER_STARTUP_HELPER = '31b787c51de23587da1f9a2ac0f910400ddf66b3'
+H2_FILTER_STARTUP_ARCHIVE_SHA256 = '8a5399be0a35295703b079ed10cb55685ee4e347e9f9e276b29140afe6764e49'
 DRAIN_HELPERS = {DRAIN_BUDGET_HELPER, DESCRIPTOR_HELPER}
 FAILURES = {
     PRE_CONTENDER_HELPER: {'type': 'ValueError',
@@ -216,6 +218,105 @@ def filter_startup_plan(result_path, failed_run, candidate):
     return [plan]
 
 
+def h2_filter_startup_plan(result_path, failed_run, candidate):
+    """Preserve only the reviewed four-peer startup failure after clean H1."""
+    require(failed_run == 39764496504, 'I05 H2 startup isolation requires its reviewed failed run')
+    archive = result_path.parents[3]
+    files = {}
+    for path in archive.rglob('*'):
+        require(not path.is_symlink() and (path.is_dir() or path.is_file()),
+                'I05 H2 startup archive contains a link or special file')
+        if path.is_file():
+            require(path.stat().st_size <= 2 * 1024**2 and len(files) < 102,
+                    'I05 H2 startup archive exceeds its reviewed bound')
+            files[path.relative_to(archive).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    require(len(files) == 102 and digest(files) == H2_FILTER_STARTUP_ARCHIVE_SHA256,
+            'I05 H2 startup archive differs from its byte-exact original')
+    def read(path): return json.loads(path.read_text())
+    result = read(result_path)
+    provenance = result['provenance']
+    evidence = result_path.parents[1] / 'evidence' / CASE
+    summary = read(evidence / 'healthy-summary.json')
+    h1 = {'topology': 'H1', 'diagnosticComplete': True, 'cleanup': 'PASS',
+          'wholeCasePassClaimed': False, 'canonicalCasePassClaimed': False}
+    require(summary.get('caseId') == CASE and summary.get('cleanup') == 'FAIL'
+            and summary.get('requestedTopologies') == ['H1', 'H2']
+            and summary.get('complete') is False and summary.get('diagnosticComplete') is False
+            and summary.get('canonicalCasePassClaimed') is False
+            and len(summary.get('diagnostics', [])) == 2 and summary['diagnostics'][0] == h1
+            and read(evidence / 'H1/00042-diagnostic-result.json') == h1
+            and read(evidence / 'H1/00041-recovery.json') == {'cleanup': 'PASS', 'errors': []}
+            and read(evidence / 'H1/00040-cleanup.json') == {
+                'node': 'vm000', 'cleanup': 'PASS', 'unitStopped': True, 'rootsRemoved': True,
+                'hostname': 'rustfs000000'},
+            'I05 H2 startup isolation requires completed H1 diagnostics and actual root cleanup')
+    folder = evidence / 'H2'
+    labels = ('binding', 'inspector-build', 'preflight', 'integrity-fleet-attestation',
+              *('reserved', 'inspector-upload') * 4, 'quiescent', 'original-failure-scene',
+              *('original-failure-logs' for _ in range(4)), 'diagnostic-result')
+    require({path.name for path in folder.iterdir()} == {
+                f'{index:05d}-{label}.json' for index, label in enumerate(labels, 1)},
+            'I05 H2 startup isolation cannot include workload or unreviewed actions')
+    records = [(label, read(folder / f'{index:05d}-{label}.json'))
+               for index, label in enumerate(labels, 1)]
+    def many(label): return [value for name, value in records if name == label]
+    def one(label):
+        values = many(label)
+        require(len(values) == 1, 'I05 H2 startup lacks one exact ' + label)
+        return values[0]
+    binding, scene, diagnostic = (one(label) for label in ('binding', 'original-failure-scene', 'diagnostic-result'))
+    run_id = 'gh-39764496504-1-h2'
+    nodes = ['vm000', 'vm001', 'vm002', 'vm003']
+    owners = {row['node']: row['owner'] for row in many('reserved')}
+    require(result.get('case_id') == CASE and result.get('verdict') == result.get('cleanup_status') == 'FAIL'
+            and candidate == read(archive / 'candidate.json')
+            and provenance['source_commit'] == binding['candidateCommit'] == candidate['source_sha'] == CANDIDATE
+            and provenance['candidate_sha256'] == binding['candidatePackageSha256'] == candidate['package_sha256']
+            and provenance['testing_commit'] == binding['harnessCommit'] == H2_FILTER_STARTUP_HELPER
+            and provenance['binary_sha256'] == binding['candidateBinarySha256']
+            and binding['runId'] == run_id
+            and binding['bucketPrefix'] == 'rv-heal-' + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+            and binding['endpoints'] == {f'node{i}': f'http://rustfs-node{i}:9000' for i in range(1, 5)}
+            and summary['diagnostics'][1] == diagnostic
+            and diagnostic.get('topology') == 'H2' and diagnostic.get('diagnosticComplete') is False
+            and diagnostic.get('cleanup') == 'FAIL' and diagnostic.get('namespacesRetained') is True
+            and diagnostic.get('wholeCasePassClaimed') is False and diagnostic.get('canonicalCasePassClaimed') is False
+            and diagnostic.get('failure', {}).get('type') == 'ValueError'
+            and 'bpftool not found for kernel 6.17.0-1022' in diagnostic.get('failure', {}).get('message', '')
+            and set(owners) == set(scene) == set(one('quiescent')) == set(nodes)
+            and all(row.get('reserved') is True for row in many('reserved'))
+            and one('integrity-fleet-attestation').get('nodes') == nodes
+            and one('integrity-fleet-attestation').get('allParticipatingNodesUseCandidate') is True
+            and one('inspector-build').get('built') is True
+            and one('inspector-build').get('candidateCommit') == CANDIDATE,
+            'I05 H2 startup isolation lost the original failure, candidate or all four peers')
+    uploads = {row['node']: row for row in many('inspector-upload')}
+    logs = {row['node']: row for row in many('original-failure-logs')}
+    require(set(uploads) == set(logs) == set(one('preflight')) == set(nodes),
+            'I05 H2 startup omits an original upload, preflight or service log')
+    for node in nodes:
+        owner, original = owners[node], scene[node]
+        require(original.get('quiescent') is True and original.get('pid') == 0 and original.get('files') == []
+                and original.get('unit') == logs[node].get('unit') == owner['unit']
+                and original.get('hostname') == one('preflight')[node].get('hostname') == owner['hostname']
+                and one('preflight')[node].get('mounts') == owner['mounts']
+                and original.get('binarySha256') == owner['binarySha256'] == binding['candidateBinarySha256']
+                and uploads[node].get('installed') is True
+                and uploads[node].get('inspectorSha256') == owner.get('inspectorSha256')
+                    == one('inspector-build').get('binarySha256')
+                and one('quiescent')[node].get('quiescent') is True
+                and one('quiescent')[node].get('service', {}).get('MainPID') == '0',
+                'I05 H2 startup scene is not the stopped, empty original on ' + node)
+    validate_topology(scene, 'H2')
+    plan = {'kind': 'unresolved-i05-timeout', 'runId': run_id, 'nodes': nodes,
+            'bucket': binding['bucketPrefix'], 'owners': owners, 'candidateCommit': CANDIDATE,
+            'harnessCommit': H2_FILTER_STARTUP_HELPER, 'binarySha256': binding['candidateBinarySha256'],
+            'ackFilesSha256': digest(files), 'businessSceneSha256': {
+                node: digest(value) for node, value in physical_content(scene).items()}}
+    validate(plan)
+    return [plan]
+
+
 def archived_plan(artifact, failed_run, candidate):
     """Refuse uncertain effects, later actions, mixed cases and physical drift.
 
@@ -233,6 +334,8 @@ def archived_plan(artifact, failed_run, candidate):
     provenance = result.get('provenance') or {}
     if provenance.get('testing_commit') == FILTER_STARTUP_HELPER:
         return filter_startup_plan(paths[0], failed_run, candidate)
+    if provenance.get('testing_commit') == H2_FILTER_STARTUP_HELPER:
+        return h2_filter_startup_plan(paths[0], failed_run, candidate)
     require(result.get('case_id') == CASE and result.get('verdict') == result.get('cleanup_status') == 'FAIL'
             and provenance.get('source_commit') == candidate.get('source_sha') == CANDIDATE
             and provenance.get('candidate_sha256') == candidate.get('package_sha256')

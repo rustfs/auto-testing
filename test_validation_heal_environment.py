@@ -145,6 +145,32 @@ class EnvironmentTests(unittest.TestCase):
 
 
 class I05PlatformFilterTests(unittest.TestCase):
+    def test_tool_inventory_keeps_broken_kernel_wrapper_separate_from_working_binary(self):
+        wrapper = Path('/usr/sbin/bpftool')
+        binary = Path('/usr/lib/linux-tools/6.17.0-1020-azure/bpftool')
+        calls = []
+        def invoke(*args, **kwargs):
+            calls.append(args)
+            failed = args[0] == str(wrapper)
+            return types.SimpleNamespace(returncode=1 if failed else 0,
+                stdout='' if failed else ('bpftool v7.6.0' if args[1] == '--version' else '[]'),
+                stderr='bpftool not found for kernel 6.17.0-1022' if failed else '')
+        with patch.object(fleet_node.shutil, 'which', return_value=str(wrapper)), \
+                patch.object(Path, 'glob', return_value=[binary]), \
+                patch.object(Path, 'resolve', autospec=True, side_effect=lambda path, **kw: path), \
+                patch.object(Path, 'is_file', return_value=True), \
+                patch.object(Path, 'stat', return_value=types.SimpleNamespace(st_uid=0, st_mode=0o755)), \
+                patch.object(fleet_node, 'digest', return_value='a' * 64), \
+                patch.object(fleet_node, 'command', side_effect=invoke):
+            result = fleet_node.bpf_tool_inventory()
+        self.assertEqual(result['selectedPath'], str(wrapper))
+        self.assertEqual([row['version']['returncode'] for row in result['tools']], [1, 0])
+        self.assertEqual([row['rootCgroupQuery']['jsonListObserved'] for row in result['tools']], [False, True])
+        self.assertTrue(all(row['serviceAttachmentsVerified'] is False for row in result['tools']))
+        self.assertFalse(result['mutated'])
+        self.assertEqual(calls, [(str(path), *args) for path in (wrapper, binary) for args in (
+            ('--version',), ('-j', 'cgroup', 'show', '/sys/fs/cgroup'))])
+
     def owner(self):
         return {'runtimeProfile': 'lock-timeout', 'runId': 'gh-123-1-h1',
                 'unit': 'rustfs-validation-heal-gh-123-1-h1.service'}

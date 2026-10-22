@@ -776,6 +776,27 @@ A separate protected prefix is checked during the fault. The original key-level 
 
 ### I05 retained-scene isolation
 
+The reviewed H2 startup failure `39764496504/1` has a separate preservation
+plan pinned to helper `31b787c51de23587da1f9a2ac0f910400ddf66b3` and the
+SHA-256 inventory of all 102 official artifact files. H1 completed its timeout
+diagnostic and actual root cleanup; H2 reserved all four peers, then failed
+before fixture seeding because vm002's bpftool wrapper could not find its
+kernel-specific executable. All four stopped original scenes contain no
+business files and retain the same complete sixteen-disk format mapping.
+The planner requires those exact original owners, candidate, inspector,
+cleanup receipts and failure boundary before allowing the existing
+audit/isolate/post-audit protocol. It issues no workload request and changes
+neither the original FAIL nor canonical acceptance. Isolation remains pending
+until its independent post-audit completes.
+
+`environment.inspect` now also records the selected bpftool path, installed
+`/usr/lib/linux-tools/*/bpftool` executables, resolved root-owned executable
+digests, kernel release, version exit status and a read-only root-cgroup JSON
+query. A working installed executable is distinct from a broken PATH wrapper.
+This inventory does not install tools, attach programs, change PATH or certify
+the I05 service filter; the actual owned-service attachment checks remain
+mandatory before another diagnostic.
+
 `validation_cleanup_run_id=<failed-run-id>` selects the narrow I05 preservation
 route with the original package build and an immutable helper containing
 `timeout_retention.py`. The driver must remain on the original Functional Chain
