@@ -120,6 +120,14 @@ A10 run `39197088183/1` uses immutable helper `b16e6072679d6a60a044b9d4520b30b4a
 
 The sections below retain earlier implementation and run history. Historical failed or partial results are not promoted by this summary.
 
+## Supplemental J02 evidence audit
+
+The 2026-10-23 supplemental independent audit closes twelve positive branch instances from original J02 run 38874900846: grace Deferred/new-token cleanup, read-only terminal failure/new-token repair and dry-run across H1/H2 and DB/DV. Every original archive member was byte-checked again, all fixture requests/ACK digests and version/marker manifests were rebuilt, and the exact executed helper was pinned.
+
+Grace uses both original ACK versions, natural 120-second expiry under unchanged candidate processes, the exact typed future retry time, two unchanged original-token terminal queries and every H2 peer, a distinct compensating token, physical post-DELETE authority before GET/rescue and complete peer inventories with old-version refusal. Read-only verifies actual private-namespace EROFS, the protected-control incarnation, unchanged failed and released scenes, a distinct repair token, original full shard/bitrot evidence before GET/rescue and all peer inventories. Dry-run retains every original typed disposition, the actual R-1 fault geometry and unchanged fault bytes. All twelve node cleanup groups bind their original reservations.
+
+Together with the earlier four mixed-branch audits, sixteen branch instances now have independent acceptance; the four original opaque-metadata Unknown probes still prevent whole-case acceptance. The supplemental report SHA-256 is `4424b3e681931527d244a4ca0211dde534a8145cd95ea0b460f388262ccb8c10`. Historical results and the 109/158 canonical count remain unchanged.
+
 ## Original reuse assessment
 
 | Source module | Cases | Existing auto-testing code to inspect | Current gap |
