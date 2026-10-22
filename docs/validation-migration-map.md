@@ -51,8 +51,8 @@ Independent audit of 211 artifact files verified exact 1001 ms write-lock
 timeouts, closed caller sockets, unchanged physical content, full diagnostic
 seed ACK/peer inventories and final FD counts at or below baseline. The
 original canonical result remains `BLOCKED/cleanup PASS`; source DL/DV,
-exact disconnect/native fences, stale-generation and queued-successor
-coverage remain outstanding. Acceptance therefore stays **108/158**.
+exact disconnect/native fences, stale-generation coverage and independent
+queued-successor live acceptance remain outstanding. Acceptance therefore stays **108/158**.
 
 [J02 diagnostic 38874900846/1](https://github.com/rustfs/rustfs/actions/runs/38874900846) completed all 20 H1/H2 × DB/DV branch instances on that exact candidate. Sixteen branches report PASS; the four original all-metadata-corruption probes report permanent Failed rather than Unknown and retain NOT_OBSERVED. Independent archive and provenance audits passed. Independent mixed-branch audits verified all four repaired shards against original complete bytes, exact receipts and counters, surviving below-quorum failures, original terminal preservation and post-rescue S3 inventories. All 50 node namespace finalization receipts passed audit. Real legacy writes separately produce Unknown with zero repairs and unchanged physical files, but do not replace the original source procedure. Full J02 canonical acceptance remains blocked; these partial results add no canonical acceptance.
 
@@ -252,7 +252,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-Four Heal cases remain outside canonical dispatch: C11, F07, I05 and J02. All four have explicit diagnostic routes that preserve their blocking canonical verdicts; I05 currently executes only the timeout diagnostic subset and still needs exact server barriers and its other source branches. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
+Four Heal cases remain outside canonical dispatch: C11, F07, I05 and J02. All four have explicit diagnostic routes that preserve their blocking canonical verdicts; I05 has a live-audited timeout diagnostic and an implemented queued-successor diagnostic with exact-source native prerequisites and stopped-scene isolation. The successor branch still needs independent live acceptance; exact server barriers and other source branches remain required. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
 

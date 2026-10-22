@@ -103,7 +103,7 @@ def same_process(observed, expected):
 def validate_scope(probe, fleet, bucket, entry):
     """Refuse another service, source or target before any remote observation."""
     validate_binding(probe.binding)
-    require(fleet.runtime_profile == 'lock-timeout' and fleet.run_id == probe.binding['runId']
+    require(fleet.runtime_profile in {'lock-timeout', 'lock-successor'} and fleet.run_id == probe.binding['runId']
             and probe.binding['candidateCommit'] == CANDIDATE,
             'caller observation requires its reviewed candidate and isolated runtime')
     endpoints = {f'node{index}': f'http://rustfs-node{index}:9000' for index in range(1, len(fleet.nodes) + 1)}
@@ -130,7 +130,7 @@ def validate_scope(probe, fleet, bucket, entry):
 
 
 def observe_disconnect(probe, fleet, bucket, entry, output, *, while_admitted=None,
-                       receive_buffer_bytes=None, before_verification=None):
+                       receive_buffer_bytes=None, before_verification=None, after_disconnect=None):
     """Use an already deployed exclusive I05 service; do not alter the fleet."""
     validate_scope(probe, fleet, bucket, entry)
     output = Path(output)
@@ -146,7 +146,7 @@ def observe_disconnect(probe, fleet, bucket, entry, output, *, while_admitted=No
             value = fleet.record(label, {'node': node, **fleet.remote(node, 'process-metrics')})
             identity = value['identity']
             require(identity.get('binarySha256') == probe.binding['candidateBinarySha256']
-                    and all(identity.get('settings', {}).get(k) == v for k, v in runtime_config('lock-timeout').items()),
+                    and all(identity.get('settings', {}).get(k) == v for k, v in runtime_config(fleet.runtime_profile).items()),
                     'I05 resource sample has another candidate or process configuration')
             if node in expected:
                 same_process(identity, expected[node])
@@ -218,6 +218,7 @@ def observe_disconnect(probe, fleet, bucket, entry, output, *, while_admitted=No
             transport_options['receive_buffer_bytes'] = receive_buffer_bytes
         sent = disconnect_get(probe, bucket, entry['key'], entry['versionId'], output / 'transport',
                               **transport_options)
+        disconnected_work = after_disconnect(sent, admitted, window) if after_disconnect is not None else None
         deadline = time.monotonic() + DRAIN_SECONDS
         while True:
             observed = capture(sent)
@@ -251,6 +252,7 @@ def observe_disconnect(probe, fleet, bucket, entry, output, *, while_admitted=No
         result = {'observationComplete': True, 'baselineResources': baseline,
             'admission': admitted, 'finalAttempt': observed,
             'admittedWork': admitted_work,
+            'disconnectedWork': disconnected_work,
             'verificationPrecondition': verification_precondition,
             'finalSocket': connection, 'finalResources': resources, 'afterVerificationResources': verified_resources,
             'exactHistoricalContentPreserved': True,

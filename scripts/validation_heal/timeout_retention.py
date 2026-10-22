@@ -317,6 +317,120 @@ def h2_filter_startup_plan(result_path, failed_run, candidate):
     return [plan]
 
 
+def successor_files(folder):
+    """Fingerprint the complete stopped diagnostic, including unknown receipts."""
+    require(folder.is_dir() and not folder.is_symlink(), 'I05 successor evidence root differs')
+    files, total = {}, 0
+    for path in sorted(folder.rglob('*')):
+        require(not path.is_symlink() and (path.is_dir() or path.is_file()),
+                'I05 successor evidence contains a link or special file')
+        if not path.is_file() or path == folder / 'successor-retention.json':
+            continue
+        size = path.stat().st_size
+        total += size
+        require(size <= 32 * 1024**2 and total <= 256 * 1024**2 and len(files) < 4096,
+                'I05 successor evidence exceeds its preservation budget')
+        files[path.relative_to(folder).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    require(files, 'I05 successor has no original evidence')
+    return files
+
+
+def successor_plan(folder, binding, scene):
+    """Preservation needs exact stopped bytes, never a successful PUT outcome."""
+    topology = 'H1' if binding['runId'].endswith('-h1') else 'H2'
+    nodes = ['vm000'] if topology == 'H1' else ['vm000', 'vm001', 'vm002', 'vm003']
+    reservations = [json.loads(path.read_text()) for path in folder.glob('*-reserved.json')]
+    owners = {row.get('node'): row.get('owner') for row in reservations}
+    require(len(reservations) == len(nodes) and set(owners) == set(scene) == set(nodes)
+            and all(row.get('reserved') is True for row in reservations)
+            and binding.get('candidateCommit') == CANDIDATE
+            and binding.get('endpoints') == {f'node{i}': f'http://rustfs-node{i}:9000'
+                                            for i in range(1, len(nodes) + 1)}
+            and binding.get('bucketPrefix') == 'rv-heal-' + hashlib.sha256(binding['runId'].encode()).hexdigest()[:16],
+            'I05 successor preservation requires the complete original fleet binding')
+    for node, owner in owners.items():
+        original = scene[node]
+        require(owner.get('runtimeProfile') == 'lock-successor'
+                and original.get('quiescent') is True and type(original.get('pid')) is int and original['pid'] == 0
+                and original.get('hostname') == owner.get('hostname')
+                and original.get('unit') == owner.get('unit')
+                and original.get('binarySha256') == owner.get('binarySha256') == binding['candidateBinarySha256']
+                and len(original.get('formats', [])) == 4
+                and {part.get('disk') for part in original['formats']} == set(range(4)),
+                'I05 successor requires the stopped original owner and all four disks')
+    plan = {'kind': 'unresolved-i05-successor', 'runId': binding['runId'], 'nodes': nodes,
+            'bucket': binding['bucketPrefix'], 'owners': owners, 'candidateCommit': CANDIDATE,
+            'harnessCommit': binding['harnessCommit'], 'binarySha256': binding['candidateBinarySha256'],
+            'ackFilesSha256': digest(successor_files(folder)),
+            'businessSceneSha256': {node: digest(value) for node, value in physical_content(scene).items()}}
+    validate(plan)
+    return plan
+
+
+def seal_successor_scene(folder, binding, scene):
+    files = successor_files(folder)
+    plan = successor_plan(folder, binding, scene)
+    require(digest(files) == plan['ackFilesSha256'], 'I05 successor evidence changed while sealing')
+    return {'schemaVersion': 1, 'plan': plan, 'originalFilesSha256': files,
+            'candidatePackageSha256': binding['candidatePackageSha256'],
+            'canonicalCasePassClaimed': False, 'unknownMutationMayBePresent': True,
+            'namespaceDeletionPermitted': False, 'backupRestorationPermitted': False}
+
+
+def successor_archived_plan(result_path, failed_run, candidate):
+    result = json.loads(result_path.read_text())
+    provenance = result.get('provenance') or {}
+    evidence = result_path.parents[1] / 'evidence' / CASE
+    summary = json.loads((evidence / 'healthy-summary.json').read_text())
+    rows = summary.get('diagnostics', [])
+    require(result.get('case_id') == CASE and result.get('verdict') == result.get('cleanup_status') == 'FAIL'
+            and summary.get('caseId') == CASE and summary.get('diagnosticBranch') == 'queued-successor'
+            and summary.get('cleanup') == 'FAIL' and summary.get('complete') is False
+            and summary.get('diagnosticComplete') is False
+            and summary.get('canonicalCasePassClaimed') is False and summary.get('wholeCasePassClaimed') is False
+            and isinstance(rows, list) and 1 <= len(rows) <= 2
+            and [row.get('topology') for row in rows] in (['H1'], ['H2'], ['H1', 'H2'])
+            and [row['topology'] for row in rows] == summary.get('requestedTopologies', [])[:len(rows)]
+            and all(row.get('diagnosticComplete') is True and row.get('cleanup') == 'PASS' for row in rows[:-1])
+            and rows[-1].get('diagnosticComplete') is False and rows[-1].get('cleanup') == 'FAIL'
+            and rows[-1].get('namespacesRetained') is True
+            and 'failureCaptureError' not in rows[-1] and 'retentionCaptureError' not in rows[-1]
+            and all(row.get('branch') == 'queued-successor' and row.get('canonicalCasePassClaimed') is False
+                    and row.get('wholeCasePassClaimed') is False for row in rows),
+            'I05 successor recovery requires one retained diagnostic failure after clean predecessors')
+    require({p.name for p in evidence.iterdir() if p.is_dir()} == {row['topology'] for row in rows},
+            'I05 successor recovery cannot omit another topology')
+    for row in rows:
+        found = list((evidence / row['topology']).glob('*-diagnostic-result.json'))
+        require(len(found) == 1 and json.loads(found[0].read_text()) == row,
+                'I05 successor summary differs from its original diagnostic result')
+    folder = evidence / rows[-1]['topology']
+    def one(label):
+        paths = list(folder.glob('*-' + label + '.json'))
+        require(len(paths) == 1, 'I05 successor lacks one original ' + label)
+        return json.loads(paths[0].read_text())
+    manifest_path = folder / 'successor-retention.json'
+    require(manifest_path.is_file() and not manifest_path.is_symlink()
+            and manifest_path.stat().st_size <= 2 * 1024**2, 'I05 successor retention seal is missing or unsafe')
+    seal = json.loads(manifest_path.read_text())
+    require(seal.get('schemaVersion') == 1 and seal.get('canonicalCasePassClaimed') is False
+            and seal.get('unknownMutationMayBePresent') is True
+            and seal.get('namespaceDeletionPermitted') is False and seal.get('backupRestorationPermitted') is False
+            and seal.get('originalFilesSha256') == successor_files(folder),
+            'I05 successor original evidence differs from its retention seal')
+    binding, scene = one('binding'), one('original-failure-scene')
+    require(re.fullmatch(rf'gh-{failed_run}-[1-9][0-9]*-h[12]', binding.get('runId', ''))
+            and candidate.get('source_sha') == binding.get('candidateCommit') == provenance.get('source_commit') == CANDIDATE
+            and candidate.get('package_sha256') == binding.get('candidatePackageSha256')
+                == provenance.get('candidate_sha256') == seal.get('candidatePackageSha256')
+            and binding.get('harnessCommit') == provenance.get('testing_commit')
+            and binding.get('candidateBinarySha256') == provenance.get('binary_sha256'),
+            'I05 successor archive changed run, candidate, helper or binary')
+    plan = successor_plan(folder, binding, scene)
+    require(seal.get('plan') == plan, 'I05 successor preservation plan differs from original evidence')
+    return [plan]
+
+
 def archived_plan(artifact, failed_run, candidate):
     """Refuse uncertain effects, later actions, mixed cases and physical drift.
 
@@ -332,6 +446,9 @@ def archived_plan(artifact, failed_run, candidate):
         return json.loads(path.read_text())
     result = read(paths[0])
     provenance = result.get('provenance') or {}
+    summary_path = paths[0].parents[1] / 'evidence' / CASE / 'healthy-summary.json'
+    if read(summary_path).get('diagnosticBranch') == 'queued-successor':
+        return successor_archived_plan(paths[0], failed_run, candidate)
     if provenance.get('testing_commit') == FILTER_STARTUP_HELPER:
         return filter_startup_plan(paths[0], failed_run, candidate)
     if provenance.get('testing_commit') == H2_FILTER_STARTUP_HELPER:

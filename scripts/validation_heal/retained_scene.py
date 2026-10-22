@@ -180,7 +180,7 @@ def mounted_paths():
 def inspect(request, node):
     state, roots = node["paths"](request["runId"])
     expected = request["expectedOwner"]
-    per_run = expected.get("runtimeProfile") in {"outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout"}
+    per_run = expected.get("runtimeProfile") in {"outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout", "lock-successor"}
     retained_state, retained_roots = destinations(state, roots, per_run_parent=per_run)
     if per_run:
         old_state, old_roots = destinations(state, roots)
@@ -190,7 +190,7 @@ def inspect(request, node):
     require(isinstance(expected, dict) and expected.get("runId") == request["runId"]
             and expected.get("unit") == node["unit"](request["runId"])
             and expected.get("hostname") == node["socket"].gethostname()
-            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout"}, "retained scene archived owner differs")
+            and expected.get("runtimeProfile") in {"mrf-crash", "root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout", "lock-successor"}, "retained scene archived owner differs")
     current = node["mounts"]()
     require(len(current) == len(expected.get("mounts", [])) == 4
             and all(all(actual[key] == old[key] for key in ("target", "source", "fstype", "uuid", "maj:min"))
@@ -234,7 +234,7 @@ def inspect(request, node):
     intent = retained_state.parent / (request["runId"] + ".intent.json")
     node["checked"](intent, state.parent)
     network = expected["runtimeProfile"] == "lock-quorum"
-    if expected["runtimeProfile"] in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout"}:
+    if expected["runtimeProfile"] in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout", "lock-successor"}:
         original_sha = request.get("expectedOriginalSceneSha256", "")
         require(re.fullmatch(r"[0-9a-f]{64}", original_sha) is not None,
                 "restored fixture requires its original physical scene digest")
@@ -270,7 +270,7 @@ def inspect(request, node):
 
 def run(request, node):
     fields = {"runId", "action", "expectedOwner"}
-    if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout"}:
+    if request.get("expectedOwner", {}).get("runtimeProfile") in {"root-restart", "outcome-grace", "outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout", "lock-successor"}:
         fields.add("expectedOriginalSceneSha256")
     if request.get("expectedOwner", {}).get("runtimeProfile") == "lock-quorum" or (
             request.get('expectedOwner', {}).get('runtimeProfile') in {'manual', 'frozen-race-legacy'}
@@ -309,7 +309,7 @@ def run(request, node):
             "originalSceneRestored": False, "canonicalPassClaimed": False, "backupRestorationUsed": False,
             "credentialContentsRead": False, "inspectionOnly": request["action"] == "retained-scene-audit",
             "mutated": mutated, "activeNamespaceIsolated": "active" not in locations}
-    if request["expectedOwner"].get("runtimeProfile") in {"outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout"}:
+    if request["expectedOwner"].get("runtimeProfile") in {"outcome-legacy", "lock-quorum", "manual", "frozen-race-legacy", "lock-timeout", "lock-successor"}:
         result["privateArchiveParents"] = []
         for target in (*retained_roots, retained_state):
             info = target.parent.lstat() if target.parent.exists() else None

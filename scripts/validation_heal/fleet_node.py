@@ -35,6 +35,9 @@ I05_BPFTOOL_SHA256 = 'aabc337b58169d62c42b3c8f1fccf605e5fc1e445a23feb0156638e9d9
 
 
 def runtime_config(profile):
+    if profile == "lock-successor":
+        return {**runtime_config("lock-timeout"),
+                "RUSTFS_PUT_COMMIT_NAMESPACE_LOCK_ACQUIRE_TIMEOUT_MS": "60000"}
     if profile == "lock-timeout":
         logging_filter = "info,rustfs_ecstore::object_lock_diag=trace"
         return {**BACKGROUND_CONFIG, "RUSTFS_OBJECT_LOCK_DIAG_ENABLE": "true",
@@ -472,7 +475,7 @@ def preflight(request):
             "insufficient free space for the explicit Heal resource profile")
     result = {"hostname": socket.gethostname(), "mounts": observed, "statePath": str(state),
               "dataRoots": [str(root / "data") for root in roots], "resourceLimits": limits, "mutated": False}
-    if request.get('runtimeProfile') == 'lock-timeout':
+    if request.get('runtimeProfile') in {'lock-timeout', 'lock-successor'}:
         result['bpfTool'] = i05_bpf_tool()
     return result
 
@@ -593,7 +596,7 @@ def start(request):
                 "J02 phase commit is incomplete; service cannot start")
         if owner.get("outcomePhase") == "legacy":
             outcome_legacy_phase({"runId": owner["runId"], "action": "outcome-legacy-phase"})
-    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf", "outcome-legacy", "frozen-race-legacy", "lock-timeout"}:
+    if owner.get("runtimeProfile") in {"incarnation-checkpoint", "incarnation-mrf", "outcome-legacy", "frozen-race-legacy", "lock-timeout", "lock-successor"}:
         runtime_configuration(state, owner)
     filter_properties = i05_filter_properties(owner)
     command("systemd-run", "--unit=" + owner["unit"], "--property=Type=exec",
@@ -612,7 +615,7 @@ def start(request):
             *(volume_module().properties(state, roots, owner) if owner.get("runtimeProfile") in {"bounded-capacity", "journal-bounded"} else []),
             *replacement_module().start_properties(state, roots), str(state / "rustfs"), *owner["volumes"])
     result = {"unit": owner["unit"], "started": True, "journalPolicy": journal_policy(owner)}
-    if owner.get("runtimeProfile") == "lock-timeout":
+    if owner.get("runtimeProfile") in {"lock-timeout", "lock-successor"}:
         result["platformNetworkPolicy"] = i05_filter_policy(owner)
     return result
 
@@ -636,7 +639,7 @@ def i05_bpf_tool():
 
 def i05_filter_properties(owner):
     """Exclude the observed platform source only from the private I05 unit."""
-    if owner.get("runtimeProfile") != "lock-timeout":
+    if owner.get("runtimeProfile") not in {"lock-timeout", "lock-successor"}:
         return []
     require(Path('/sys/fs/cgroup/cgroup.controllers').is_file(),
             'I05 requires cgroup v2 to verify its service network filter')
@@ -652,7 +655,7 @@ def i05_filter_policy(owner, expected_pid=None):
     platform agent or persistent network setting is changed. Stopping the unit
     removes its service-scoped filters with the service's cgroup.
     """
-    require(owner.get('runtimeProfile') == 'lock-timeout'
+    require(owner.get('runtimeProfile') in {'lock-timeout', 'lock-successor'}
             and owner.get('unit') == unit(owner['runId']), 'I05 filter requires its exact owned service')
     tool = i05_bpf_tool()
     names = ('IPAddressDeny', 'IPAddressAllow', 'ControlGroup', 'MainPID')
@@ -823,7 +826,7 @@ def process_metrics(request):
               "threads": int(fields[17]), "fileDescriptors": sum(1 for _ in (root / "fd").iterdir()),
               "io": {name: io[name] for name in sorted(required_io)}, "readOnly": True,
               "ioScope": "owned process counters; cached logical IO and storage IO reported separately"}
-    if owned(request["runId"])[2].get("runtimeProfile") == "lock-timeout":
+    if owned(request["runId"])[2].get("runtimeProfile") in {"lock-timeout", "lock-successor"}:
         namespace = os.readlink(root / "ns/net")
         result["descriptorCensus"] = caller_socket_backend.descriptor_census(root)
         result["fileDescriptors"] = result["descriptorCensus"]["fileDescriptors"]

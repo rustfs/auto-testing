@@ -63,6 +63,7 @@ class TimeoutRunnerTests(unittest.TestCase):
         class Fleet:
             def __init__(self, nodes, evidence, run_id, *args, **kwargs):
                 self.nodes = nodes; self.evidence = evidence; self.run_id = run_id
+                self.runtime_profile = kwargs.get('runtime_profile')
                 self.secret_values = set(); self.reserved = []; self.sequence = 0
                 owner.fleets.append(self)
             def record(self, label, value):
@@ -178,6 +179,87 @@ class TimeoutRunnerTests(unittest.TestCase):
             self.candidate_file.write_text(json.dumps({**self.candidate, 'source_sha': 'e' * 40}))
             with self.assertRaisesRegex(ValueError, 'exact reviewed'): runner.preflight(self.args)
         self.assertFalse(self.fleets or self.events)
+
+    def test_queued_successor_preflight_requires_exact_candidate_native_group(self):
+        self.args.diagnostic_branch = 'queued-successor'
+        self.args.native_directory = self.root / 'native'
+        proof = {'requiredRegressionLabels': list(runner.NATIVE_I05_LABELS),
+                 'requiredNativeSubsetPassed': True, 'wholeCasePassClaimed': False,
+                 'fleetExecutionClaimed': False, 'canonicalCasePassClaimed': False}
+        with patch.object(runner.subprocess, 'run', side_effect=[SimpleNamespace(stdout='c' * 40 + '\n'),
+                SimpleNamespace(stdout='')]), patch.object(runner, 'verify_inspector', return_value=self.inspector), \
+                patch.object(runner, 'verify_native', return_value=proof) as verify:
+            self.assertEqual(runner.preflight(self.args), (self.candidate, self.inspector))
+            verify.assert_called_once_with(self.args.native_directory, self.candidate,
+                                           self.args.testing_commit, runner.CASE_ID)
+        self.assertFalse(self.fleets or self.events)
+
+    def test_queued_successor_without_native_artifact_refuses_before_fleet_or_evidence(self):
+        self.args.diagnostic_branch = 'queued-successor'
+        with patch.object(runner, 'preflight', return_value=(self.candidate, self.inspector)):
+            with self.assertRaisesRegex(ValueError, 'immutable exact-source native evidence'):
+                runner.run(self.args)
+        self.assertFalse(self.fleets or self.events)
+        self.assertFalse(self.args.evidence.exists())
+
+    def test_queued_successor_driver_binds_runtime_new_ack_and_every_peer(self):
+        self.args.diagnostic_branch = 'queued-successor'
+        def successor(probe, fleet, bucket, entry, output):
+            self.events.append('successor')
+            probe.s3('put_object', {'Bucket': bucket, 'Key': entry['key']}, b'new-generation')
+            return {'diagnosticComplete': True, 'canonicalCasePassClaimed': False,
+                'wholeCasePassClaimed': False, 'expectedEntries': copy.deepcopy(self.entries),
+                'verifiedEndpoints': list(probe.binding['endpoints']),
+                'callerObservation': {'baselineResources': {node: {
+                    'identity': identity(), 'fileDescriptors': 10} for node in fleet.nodes}}}
+        with patch.object(runner, 'preflight', return_value=(self.candidate, self.inspector)), \
+                patch.object(runner, 'verify_native_prerequisite', return_value={'native': True}) as native, \
+                patch.object(runner, 'observe_successor', side_effect=successor):
+            summary = runner.run(self.args)
+        self.assertTrue(summary['diagnosticComplete'])
+        self.assertFalse(summary['canonicalCasePassClaimed'] or summary['wholeCasePassClaimed'])
+        self.assertEqual(native.call_count, 3)
+        self.assertEqual([f.runtime_profile for f in self.fleets], ['lock-successor'] * 2)
+        self.assertEqual(self.events.count('successor'), 2)
+        self.assertNotIn('diagnostic', self.events)
+        proof = json.loads((self.args.evidence / 'native-prerequisite.json').read_text())
+        self.assertEqual(proof, {'native': True})
+        for fleet in self.fleets:
+            peers = list(fleet.evidence.glob('*-all-peer-ACK-proof.json'))
+            self.assertEqual(len(peers), len(fleet.nodes))
+            self.assertTrue(all(json.loads(p.read_text())['seedAckAndFullGetAgree'] for p in peers))
+
+    def test_successor_unknown_outcome_seals_only_after_stop_scene_logs_and_result(self):
+        self.args.diagnostic_branch = 'queued-successor'
+        def seal(folder, binding, scene):
+            self.assertIn('stop', self.events)
+            self.assertIn('original-failure-scene', self.events)
+            self.assertIn('logs-vm000', self.events)
+            result = list(folder.glob('*-diagnostic-result.json'))
+            self.assertEqual(len(result), 1)
+            self.assertTrue(json.loads(result[0].read_text())['namespacesRetained'])
+            return {'sealed': True}
+        with patch.object(runner, 'verify_native_prerequisite'), \
+                patch.object(runner, 'observe_successor', side_effect=ValueError('unknown PUT result')), \
+                patch.object(runner, 'seal_successor_scene', side_effect=seal) as sealed:
+            result = self.invoke()
+        self.assertFalse(result['diagnosticComplete'])
+        self.assertEqual(result['cleanup'], 'FAIL')
+        self.assertNotIn('cleanup', self.events)
+        sealed.assert_called_once()
+        self.assertEqual(json.loads((self.args.evidence / 'H1/successor-retention.json').read_text()),
+                         {'sealed': True})
+
+    def test_successor_failed_stop_never_seals_incomplete_scene(self):
+        self.args.diagnostic_branch = 'queued-successor'
+        with patch.object(runner, 'verify_native_prerequisite'), \
+                patch.object(runner, 'observe_successor', side_effect=ValueError('unknown PUT result')), \
+                patch.object(runner.Fleet, 'stop', side_effect=ValueError('stop failed')), \
+                patch.object(runner, 'seal_successor_scene') as sealed:
+            result = self.invoke()
+        self.assertIn('failureCaptureError', result)
+        sealed.assert_not_called()
+        self.assertNotIn('cleanup', self.events)
 
     def test_uncommitted_or_untracked_controller_refuses_before_inspector_and_fleet(self):
         with patch.object(runner.subprocess, 'run', side_effect=[SimpleNamespace(stdout='c' * 40 + '\n'),

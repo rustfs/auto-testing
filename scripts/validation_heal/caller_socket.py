@@ -110,7 +110,8 @@ def run(request, node):
     client, server = address(request['clientAddress']), address(request['serverAddress'])
     require(server[1] == 9000, 'caller socket requires the bound service port')
     _, _, owner = node['owned'](request['runId'])
-    require(owner.get('runtimeProfile') == 'lock-timeout', 'caller socket requires the isolated I05 runtime')
+    require(owner.get('runtimeProfile') in {'lock-timeout', 'lock-successor'},
+            'caller socket requires the isolated I05 runtime')
     expected = request['expectedProcess']
     require(isinstance(expected, dict) and all(name in expected for name in node['PROCESS_FIELDS']),
             'caller socket requires the original process birth')

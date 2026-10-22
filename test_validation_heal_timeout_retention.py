@@ -835,6 +835,104 @@ class TimeoutRetentionTests(unittest.TestCase):
             plan['kind'] = 'unresolved-g01-race'
             with self.assertRaises(ValueError): race_retention.validate(plan)
 
+    def successor_archive(self, directory):
+        root, candidate, folder = self.archive(directory)
+        for path in folder.glob('*-reserved.json'):
+            value = json.loads(path.read_text())
+            value['owner']['runtimeProfile'] = 'lock-successor'
+            path.write_text(json.dumps(value))
+        result_path = next(folder.glob('*-diagnostic-result.json'))
+        result = json.loads(result_path.read_text())
+        result['branch'] = 'queued-successor'
+        result_path.write_text(json.dumps(result))
+        summary_path = folder.parent / 'healthy-summary.json'
+        summary = json.loads(summary_path.read_text())
+        summary.update(diagnosticBranch='queued-successor', diagnostics=[result],
+                       wholeCasePassClaimed=False)
+        summary_path.write_text(json.dumps(summary))
+        receipt = folder / 'queued-successor/successor'
+        receipt.mkdir(parents=True)
+        (receipt / '000001-request.json').write_text('{"operation":"put_object"}')
+        (receipt / '000001-ack.json').write_text('{"resultUnknown":true,"acknowledged":false}')
+        binding = json.loads(next(folder.glob('*-binding.json')).read_text())
+        scene = json.loads(next(folder.glob('*-original-failure-scene.json')).read_text())
+        seal = controller.seal_successor_scene(folder, binding, scene)
+        (folder / 'successor-retention.json').write_text(json.dumps(seal))
+        return root, candidate, folder
+
+    def test_successor_unknown_receipt_selects_only_stopped_scene_isolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, folder = self.successor_archive(directory)
+            original = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+            with patch.object(recovery, 'Fleet') as fleet:
+                plan, = recovery.recovery_plan(root, 39711742431, candidate)
+            fleet.assert_not_called()
+            self.assertEqual(plan['kind'], 'unresolved-i05-successor')
+            self.assertEqual(plan['owners']['vm000']['runtimeProfile'], 'lock-successor')
+            race_retention.validate(plan)
+            self.assertEqual(original, {p: p.read_bytes() for p in root.rglob('*') if p.is_file()})
+            candidate_path = Path(directory) / 'candidate.json'
+            candidate_path.write_text(json.dumps(candidate))
+            evidence = Path(directory) / 'recovery'
+            fake = SimpleNamespace(nodes=plan['nodes'], run_id=plan['runId'], record=lambda label, value: value)
+            proof = {'runId': plan['runId'], 'cleanup': 'ISOLATED', 'canonicalPassClaimed': False}
+            with patch('sys.argv', ['recover', '--failed-run-id', '39711742431', '--artifact', str(root),
+                    '--candidate', str(candidate_path), '--evidence', str(evidence)]), \
+                    patch.object(recovery, 'Fleet', return_value=fake), \
+                    patch.object(recovery, 'isolate_race_scene', return_value=proof) as isolate:
+                recovery.main()
+            isolate.assert_called_once_with(fake, plan)
+
+    def test_successor_seal_refuses_changed_or_missing_original_evidence_and_foreign_profile(self):
+        for variant in ('receipt', 'missing', 'extra', 'symlink', 'scene', 'candidate', 'kind', 'profile', 'dirty-predecessor'):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, candidate, folder = self.successor_archive(directory)
+                receipt = folder / 'queued-successor/successor/000001-ack.json'
+                if variant == 'receipt': receipt.write_text('{}')
+                elif variant == 'missing': receipt.unlink()
+                elif variant == 'extra': (folder / 'unrecorded-write.json').write_text('{}')
+                elif variant == 'symlink':
+                    target = Path(directory) / 'receipt.json'; target.write_bytes(receipt.read_bytes())
+                    receipt.unlink(); receipt.symlink_to(target)
+                elif variant == 'candidate': candidate['package_sha256'] = '0' * 64
+                elif variant == 'dirty-predecessor':
+                    path = folder.parent / 'healthy-summary.json'
+                    summary = json.loads(path.read_text()); summary['diagnostics'] *= 2
+                    path.write_text(json.dumps(summary))
+                else:
+                    path = folder / 'successor-retention.json'
+                    seal = json.loads(path.read_text())
+                    if variant == 'scene': seal['plan']['businessSceneSha256']['vm000'] = '0' * 64
+                    elif variant == 'kind': seal['plan']['kind'] = 'unresolved-i05-timeout'
+                    else: seal['plan']['owners']['vm000']['runtimeProfile'] = 'manual'
+                    path.write_text(json.dumps(seal))
+                with patch.object(recovery, 'Fleet') as fleet, self.assertRaises(ValueError):
+                    recovery.recovery_plan(root, 39711742431, candidate)
+                fleet.assert_not_called()
+
+    def test_successor_isolation_preserves_all_five_original_trees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper, state, roots, node, request, _ = self.scene(directory)
+            request['expectedOwner']['runtimeProfile'] = 'lock-successor'
+            for folder in (*roots, state):
+                (folder / 'owner.json').write_text(json.dumps(request['expectedOwner']))
+            original = {p: (p.stat().st_ino, p.read_bytes()) for folder in (*roots, state)
+                        for p in folder.rglob('*') if p.is_file()}
+            with helper.root_stats():
+                before = retained.run(request, node)
+                change = {**request, 'action': 'retained-scene-isolate', 'expectedBaseline': before['baseline']}
+                with patch.object(retained, 'rename_new', side_effect=helper.local_rename):
+                    proof = retained.run(change, node)
+                    self.assertFalse(retained.run(change, node)['mutated'])
+            self.assertEqual(proof['locations'], ['retained'] * 5)
+            self.assertFalse(proof['originalSceneRestored'] or proof['backupRestorationUsed'] or proof['canonicalPassClaimed'])
+            target_state, target_roots = retained.destinations(state, roots, per_run_parent=True)
+            for path, expected in original.items():
+                source = next(folder for folder in (*roots, state) if path.is_relative_to(folder))
+                target = target_state if source == state else target_roots[roots.index(source)]
+                moved = target / path.relative_to(source)
+                self.assertEqual((moved.stat().st_ino, moved.read_bytes()), expected)
+
 
 if __name__ == '__main__':
     unittest.main()

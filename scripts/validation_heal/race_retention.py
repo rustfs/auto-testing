@@ -30,7 +30,7 @@ def validate(plan):
     fields = {'kind', 'runId', 'nodes', 'bucket', 'owners', 'businessSceneSha256',
               'candidateCommit', 'harnessCommit', 'binarySha256', 'ackFilesSha256'}
     require(set(plan) == fields | ({'mpuKeys', 'mpuSceneSha256'} if multipart else set())
-            and plan['kind'] in ({kind for kind, _ in CASES.values()} | {'unresolved-i05-timeout'})
+            and plan['kind'] in ({kind for kind, _ in CASES.values()} | {'unresolved-i05-timeout', 'unresolved-i05-successor'})
             and re.fullmatch(r'gh-[1-9][0-9]*-[1-9][0-9]*-h[12]', plan['runId'])
             and len(plan['nodes']) == len(set(plan['nodes'])) == (1 if plan['runId'].endswith('-h1') else 4)
             and all(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', node) for node in plan['nodes'])
@@ -43,7 +43,9 @@ def validate(plan):
         owner = plan['owners'][node]
         require(owner.get('runId') == plan['runId'] and owner.get('bucket') == plan['bucket']
                 and (owner.get('runtimeProfile') == 'lock-timeout' and plan['kind'] == 'unresolved-i05-timeout' or
-                     owner.get('runtimeProfile') == 'manual' and plan['kind'] != 'unresolved-i05-timeout' or
+                     owner.get('runtimeProfile') == 'lock-successor' and plan['kind'] == 'unresolved-i05-successor' or
+                     owner.get('runtimeProfile') == 'manual'
+                     and plan['kind'] not in {'unresolved-i05-timeout', 'unresolved-i05-successor'} or
                      owner.get('runtimeProfile') == 'frozen-race-legacy'
                      and plan['kind'] in {'unresolved-g04-race', 'unresolved-g05-race'})
                 and owner.get('binarySha256') == plan['binarySha256']

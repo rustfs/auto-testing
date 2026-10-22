@@ -7,6 +7,7 @@ ASSUME_YES=1
 candidate="" testing_commit="" artifacts="" case_id=""
 driver=healthy.py
 environment_gate=0
+i05_args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --validation-case) case_id="$2"; shift 2 ;;
@@ -94,6 +95,17 @@ tool_args=()
 if [ -n "${VALIDATION_HEAL_TOOL_DIRECTORY:-}" ]; then
   tool_args=(--tool-directory "${VALIDATION_HEAL_TOOL_DIRECTORY}")
 fi
+if [ "${case_id}" = heal.lock-timeout-and-caller-abort ]; then
+  diagnostic_branch="${I05_DIAGNOSTIC_BRANCH:-timeout}"
+  case "${diagnostic_branch}" in
+    timeout|queued-successor) ;;
+    *) die "unsupported I05 diagnostic branch: ${diagnostic_branch}" ;;
+  esac
+  i05_args+=(--diagnostic-branch "${diagnostic_branch}")
+  if [ -n "${VALIDATION_HEAL_NATIVE_DIRECTORY:-}" ]; then
+    i05_args+=(--native-directory "${VALIDATION_HEAL_NATIVE_DIRECTORY}")
+  fi
+fi
 [ "${driver}" = healthy.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "physical Heal cases require candidate-bound bitrot tools"
 evidence="${artifacts}/evidence/${case_id}"
 mkdir -p "${artifacts}/cases" "${evidence}"
@@ -105,7 +117,7 @@ fi
 if [ "${driver}" = lock_timeout_runner.py ]; then
   python3 -B "${ROOT}/scripts/validation_heal/${driver}" preflight \
     --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
-    "${tool_args[@]}" --rc-bin "$(command -v rc)" > "${evidence}/timeout-preflight.json"
+    "${tool_args[@]}" "${i05_args[@]}" --rc-bin "$(command -v rc)" > "${evidence}/timeout-preflight.json"
 fi
 python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
   --result-file "${artifacts}/cases/${case_id}.json" --verdict RUNNING --cleanup-status PENDING
@@ -184,7 +196,7 @@ if [ "${bootstrap_rc}" -eq 0 ]; then
   done
   python3 -B "${ROOT}/scripts/validation_heal/${driver}" --candidate "${candidate}" \
     --case-id "${case_id}" \
-    "${tool_args[@]}" \
+    "${tool_args[@]}" "${i05_args[@]}" \
     --testing-commit "${testing_commit}" --binary-sha "${binary_sha}" --rc-bin "$(command -v rc)" \
     --evidence "${evidence}" > "${evidence}/test.log" 2>&1 || case_rc=$?
   cat "${evidence}/test.log"
@@ -231,7 +243,7 @@ if [ "${case_id}" = heal.lock-timeout-and-caller-abort ]; then
   if [ "${cleanup_status}" = PASS ] && [ "${case_rc}" -eq 0 ] && \
      jq -e '.diagnosticComplete == true and .complete == false and .canonicalCasePassClaimed == false' \
        "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
-    verdict=BLOCKED; reason="I05 timeout diagnostic completed; exact native fences, stale-generation/queued-successor controllers and complete source H1/H2 DL/DV acceptance remain required"
+    verdict=BLOCKED; reason="I05 ${diagnostic_branch:-timeout} diagnostic completed; exact disconnect ownership, remaining native fences, stale-generation controller and complete source H1/H2 DL/DV acceptance remain required"
   elif [ "${case_rc}" -eq 0 ]; then
     verdict=INFRA_ERROR; reason="I05 diagnostic summary or cleanup is incomplete; canonical PASS is prohibited"
   fi

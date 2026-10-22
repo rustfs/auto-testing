@@ -656,7 +656,7 @@ def main():
         if plan.get("buckets"):
             fleet.snapshot_buckets = plan["buckets"]
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
-        if plan.get("kind") in {"unresolved-g01-race", "unresolved-g02-race", "unresolved-a09-race", "unresolved-g04-race", "unresolved-g05-race", "unresolved-g06-race", "unresolved-i05-timeout"}:
+        if plan.get("kind") in {"unresolved-g01-race", "unresolved-g02-race", "unresolved-a09-race", "unresolved-g04-race", "unresolved-g05-race", "unresolved-g06-race", "unresolved-i05-timeout", "unresolved-i05-successor"}:
             complete.append({"failedRunId": args.failed_run_id, **isolate_race_scene(fleet, plan)})
             continue
         if plan.get("kind") == "unresolved-network-load":

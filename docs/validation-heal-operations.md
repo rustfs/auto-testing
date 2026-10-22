@@ -974,3 +974,41 @@ empty object scene. It reuses the existing same-device, private-parent
 isolation backend and its live owner/physical/tree checks. No workload is
 replayed and no namespace is deleted. A successful isolation or corrected
 startup check cannot certify the I05 source case.
+
+### I05 queued-successor diagnostic
+
+Select `I05_DIAGNOSTIC_BRANCH=queued-successor` for the explicit I05 route.
+`run_case.sh` passes this branch to both preflight and the runtime controller.
+The Functional Chain input `i05_diagnostic_branch=queued-successor` downloads
+the pinned native artifact and verifies its original hosted run, candidate,
+helper, binary, exact regression logs and required I05 labels before fleet
+mutation. `VALIDATION_HEAL_NATIVE_DIRECTORY` supplies that bundle locally.
+Native success remains a prerequisite and never certifies the live case.
+
+`lock_successor.py` uses a separate `lock-successor` runtime: the GET lock
+budget remains one second, while the successor PUT commit acquisition budget
+is sixty seconds. It starts exactly one marked PUT while the original
+historical GET is admitted, observes the PUT acquiring the same namespace,
+then closes only the original caller socket. It requires the original GET
+guard-drop event before successor acquisition, an unretried server-request-ID
+bound PUT ACK, exact ETag/version/payload, preserved historical generations,
+a distinct new physical generation, all-peer S3 agreement and bounded FD
+drain. Observation windows remain ten seconds for queue admission and thirty
+seconds for completion. The fixture is a diagnostic subset of the source DV
+workload; it does not complete the source DL/DV matrix.
+
+Failure stops the run-owned service and retains its original requests, ACKs,
+logs and physical scene. `successor-retention.json` binds all diagnostic files
+and stopped per-node physical digests to the original owner. Recovery accepts
+only an unchanged sealed archive and the same stopped live scene, then uses
+the existing same-device private-parent isolation backend. An unknown PUT
+outcome is preserved without retry, deletion or old-generation restoration.
+Incomplete capture, missing reservations, changed evidence or scene drift
+refuse automated isolation.
+
+Local controller, admission and isolation tests pass; independent live
+acceptance of this branch is still pending. Every successful diagnostic
+remains `BLOCKED/cleanup PASS` with `canonicalCasePassClaimed=false`. Exact
+disconnect-edge ownership, complete native timeout/stale fences, the
+stale-generation controller and full H1/H2 source DL/DV ACK/physical/lock/FD
+closure remain required. Migration acceptance stays 108/158.
