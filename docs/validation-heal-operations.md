@@ -857,3 +857,16 @@ Missing census, unknown/successful mutation, extra request and physical drift
 refuse preservation. Drain journal windows follow the numbered first-drain
 label rather than a fixed count of preceding caller windows. This change
 permits preservation only; it performs no network change and grants no PASS.
+
+Isolation run [39757904633/1](https://github.com/rustfs/rustfs/actions/runs/39757904633)
+completed with helper `f43151595648d83b184ab95fd3e908e7611d0dae`.
+An independent artifact audit confirms all 101 failed-run files are byte exact,
+preflight/move/post-audit baselines are identical, and all five archive parents
+are root/root 0700 on their original devices. Original business-scene digest
+`f921b69ea51622f89e9ad4a78de8c890caf0b7ffefa0b401457d6f9796fc7d31`
+is unchanged. Only the owned active paths were isolated; no namespace was
+deleted, no backup was restored and the original FAIL/cleanup FAIL remains.
+The inventory now reports existing `bpftool` availability before selecting a
+service-scoped network filter; this report installs no tool or filter.
+An earlier dispatch `39757736435/1` was rejected before candidate resolution
+because the submitted helper was abbreviated; no fleet action ran there.

@@ -413,7 +413,7 @@ def environment_capabilities(request):
         'runtime': environment_service_state(),
         'kernel': {'pidfd': hasattr(os, 'pidfd_open'), 'cgroupV2': Path('/sys/fs/cgroup/cgroup.controllers').is_file(),
                    'fuseDevice': Path('/dev/fuse').exists() and stat.S_ISCHR(Path('/dev/fuse').stat().st_mode)},
-        'commands': {name: shutil.which(name) is not None for name in ('docker', 'fusermount3', 'nft', 'az')},
+        'commands': {name: shutil.which(name) is not None for name in ('docker', 'fusermount3', 'nft', 'az', 'bpftool')},
         'installedBinarySha256': digest(binary) if binary.is_file() and not binary.is_symlink() else None,
         'platformRestartAuthorityVerified': False, 'compatibleReleasePairVerified': False,
         'canonicalPassClaimed': False}
