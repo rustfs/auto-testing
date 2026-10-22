@@ -52,7 +52,16 @@ timeouts, closed caller sockets, unchanged physical content, full diagnostic
 seed ACK/peer inventories and final FD counts at or below baseline. The
 original canonical result remains `BLOCKED/cleanup PASS`; source DL/DV,
 exact disconnect/native fences, stale-generation coverage and independent
-queued-successor live acceptance remain outstanding. Acceptance therefore stays **108/158**.
+queued-successor live acceptance remain outstanding. Exact-helper native/tools
+[39783997956/1](https://github.com/rustfs/rustfs/actions/runs/39783997956)
+passed independent audit. The initial successor live
+[39788321908/1](https://github.com/rustfs/rustfs/actions/runs/39788321908)
+failed at internal bucket metadata-read classification despite one
+unretried 200 PUT ACK. Its stopped H1 scene was preserved by
+[39789732916/1](https://github.com/rustfs/rustfs/actions/runs/39789732916).
+The parser fix retains exact request/owner/budget/lifecycle checks and has
+a regression over the original fifteen events; a fresh helper-bound tools
+build and live run are still required. Acceptance stays **108/158**.
 
 [J02 diagnostic 38874900846/1](https://github.com/rustfs/rustfs/actions/runs/38874900846) completed all 20 H1/H2 × DB/DV branch instances on that exact candidate. Sixteen branches report PASS; the four original all-metadata-corruption probes report permanent Failed rather than Unknown and retain NOT_OBSERVED. Independent archive and provenance audits passed. Independent mixed-branch audits verified all four repaired shards against original complete bytes, exact receipts and counters, surviving below-quorum failures, original terminal preservation and post-rescue S3 inventories. All 50 node namespace finalization receipts passed audit. Real legacy writes separately produce Unknown with zero repairs and unchanged physical files, but do not replace the original source procedure. Full J02 canonical acceptance remains blocked; these partial results add no canonical acceptance.
 

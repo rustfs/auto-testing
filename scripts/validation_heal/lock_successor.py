@@ -54,7 +54,7 @@ def successor_attempt(rows, marker, holder, bucket, key):
     require(marker.startswith('auto-testing-i05-successor/')
             and str(uuid.UUID(marker.split('/')[-1])) == marker.split('/')[-1],
             'I05 successor marker differs')
-    selected, request_ids = [], set()
+    selected, request_ids, metadata_attempts = [], set(), {}
     for row in rows:
         if row.get('target') != lock_observer.TARGET:
             continue
@@ -73,29 +73,39 @@ def successor_attempt(rows, marker, holder, bucket, key):
                 and span.get('uri') == '/' + quote(bucket, safe='') + '/' + quote(key, safe='/~'),
                 'I05 successor server request, method or exact URI differs')
         request_ids.add(request_id)
-        # The same S3 call may first read its bucket incarnation. Those events
-        # are retained, but cannot establish target-object write admission.
-        incarnation = (row.get('mode') == 'read' and row.get('op') == 'get_object'
-                       and row.get('bucket') == '.rustfs.sys'
-                       and row.get('object') == f'buckets/{bucket}/.bucket-incarnation')
-        if incarnation:
-            continue
+        # Bucket fencing reads both persisted metadata objects within this PUT.
+        # They share its HTTP identity, but cannot establish write admission.
+        metadata_read = (row.get('mode') == 'read' and row.get('op') == 'get_object'
+                         and row.get('bucket') == '.rustfs.sys'
+                         and row.get('object') in {f'buckets/{bucket}/.bucket-incarnation',
+                                                  f'buckets/{bucket}/.metadata.bin'})
         require(row.get('event') == 'object_namespace_lock' and row.get('component') == 'ecstore'
-                and row.get('subsystem') == 'object_lock' and row.get('op') == 'put_object_commit'
-                and row.get('bucket') == bucket and row.get('object') == key and row.get('mode') == 'write'
+                and row.get('subsystem') == 'object_lock'
+                and (metadata_read or row.get('op') == 'put_object_commit'
+                     and row.get('bucket') == bucket and row.get('object') == key and row.get('mode') == 'write')
                 and row.get('requested_version_id') is None and row.get('owner') == holder['owner']
                 and row.get('namespace') == holder['namespace'] and type(row.get('timeout_ms')) is int
-                and row['timeout_ms'] == PUT_TIMEOUT_MS and isinstance(row.get('lock_attempt_id'), str)
+                and row['timeout_ms'] == (1000 if metadata_read else PUT_TIMEOUT_MS)
+                and isinstance(row.get('lock_attempt_id'), str)
                 and str(uuid.UUID(row['lock_attempt_id'])) == row['lock_attempt_id']
                 and uuid.UUID(row['lock_attempt_id']).int
                 and row['lock_attempt_id'] != holder['lock_attempt_id']
                 and type(row.get('acquire_ms')) is int and row['acquire_ms'] >= 0,
-                'I05 successor write attempt escaped its exact namespace or budget')
+                'I05 successor lock attempt escaped its exact namespace or budget')
         require(row.get('state') in {'acquiring', 'acquired', 'guard_dropped'}
                 and row.get('level') == 'TRACE'
                 and type(row.get('hold_ms')) is int and row['hold_ms'] >= 0,
                 'I05 successor failed, cancelled or lost its diagnostic lifecycle')
-        selected.append(row)
+        if metadata_read:
+            metadata_attempts.setdefault(row['lock_attempt_id'], []).append(row)
+        else:
+            selected.append(row)
+    for attempt_id, events in metadata_attempts.items():
+        require(len({row['object'] for row in events}) == 1
+                and not any(row['lock_attempt_id'] == attempt_id for row in selected)
+                and [row['state'] for row in events] in (['acquiring'], ['acquiring', 'acquired'],
+                                                       ['acquiring', 'acquired', 'guard_dropped']),
+                'I05 successor metadata read reused an attempt or lost its lifecycle')
     require(len(request_ids) <= 1, 'I05 successor marker was retried or reused')
     if not selected:
         return None

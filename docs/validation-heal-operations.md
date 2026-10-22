@@ -1006,8 +1006,27 @@ outcome is preserved without retry, deletion or old-generation restoration.
 Incomplete capture, missing reservations, changed evidence or scene drift
 refuse automated isolation.
 
-Local controller, admission and isolation tests pass; independent live
-acceptance of this branch is still pending. Every successful diagnostic
+The exact-helper native/tools build
+[39783997956/1](https://github.com/rustfs/rustfs/actions/runs/39783997956)
+passed independent archive, source, executable and ten-regression audits.
+The first successor live run
+[39788321908/1](https://github.com/rustfs/rustfs/actions/runs/39788321908)
+retains FAIL/cleanup FAIL: the same PUT read its bucket's internal
+`.metadata.bin` after target write-lock acquisition; the controller
+incorrectly classified that read as a target write. The request returned
+one unretried 200 ACK, which does not complete the failed diagnostic.
+
+[39789732916/1](https://github.com/rustfs/rustfs/actions/runs/39789732916)
+isolated the unchanged stopped H1 scene without deleting it or restoring
+old generations. The parser recognizes only that bucket's exact
+`.metadata.bin` and `.bucket-incarnation` read paths, checks their original
+HTTP identity, namespace, one-second budget and ordered per-attempt
+lifecycle, and excludes them from the unique target write attempt. The
+original fifteen-event trace is a regression fixture; foreign paths,
+write-mode substitutions and reused or malformed lifecycles still refuse.
+A new helper requires a newly bound native/tools build before another live
+attempt. Independent live acceptance of this branch is still pending.
+Every successful diagnostic
 remains `BLOCKED/cleanup PASS` with `canonicalCasePassClaimed=false`. Exact
 disconnect-edge ownership, complete native timeout/stale fences, the
 stale-generation controller and full H1/H2 source DL/DV ACK/physical/lock/FD

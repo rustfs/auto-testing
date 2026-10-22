@@ -75,6 +75,45 @@ class SuccessorEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'retried or reused'):
             successor.successor_attempt(rows, MARKER, HOLDER, fixture.BUCKET, 'target.bin')
 
+    def test_original_live_metadata_reads_keep_one_exact_target_write_attempt(self):
+        path = Path(__file__).with_name('testdata') / 'i05-successor-metadata-39788321908.ndjson'
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        marker = 'auto-testing-i05-successor/73a9d02c-6579-44ce-8152-011f367dc891'
+        holder = {'request_id': 'c10cb980-5924-4e9f-bbba-14d180d56436',
+                  'lock_attempt_id': 'd3e2e124-e6cc-46c4-897a-cbbc7b2dba66',
+                  'owner': ':::9000', 'namespace': 'pool-0'}
+        bucket = 'rv-heal-5dd2430e083c6140'
+        for length in range(1, len(rows) + 1):
+            proof = successor.successor_attempt(rows[:length], marker, holder, bucket, 'objects/0000.bin')
+            writes = [row for row in rows[:length] if row['mode'] == 'write']
+            if not writes:
+                self.assertIsNone(proof)
+            else:
+                self.assertEqual(proof['events'], writes)
+                self.assertEqual(proof['lockAttemptId'], 'b31b1a30-9431-425e-9a92-909b47ac6bfc')
+                self.assertFalse(proof['canonicalCasePassClaimed'])
+        metadata = next(i for i, row in enumerate(rows) if row['object'].endswith('/.metadata.bin'))
+        mutations = [lambda r: r.update(object='buckets/foreign/.metadata.bin'),
+            lambda r: r.update(object=f'buckets/{bucket}/unreviewed'),
+            lambda r: r.update(mode='write'), lambda r: r.update(op='put_object_commit'),
+            lambda r: r.update(owner='foreign'), lambda r: r.update(namespace='foreign'),
+            lambda r: r.update(timeout_ms=successor.PUT_TIMEOUT_MS),
+            lambda r: r.update(requested_version_id=VERSION),
+            lambda r: r.update(component='foreign'), lambda r: r.update(event='foreign'),
+            lambda r: r.update(state='failed'), lambda r: r.update(hold_ms=True),
+            lambda r: r.update(lock_attempt_id=holder['lock_attempt_id']),
+            lambda r: r.update(lock_attempt_id='b31b1a30-9431-425e-9a92-909b47ac6bfc')]
+        for mutate in mutations:
+            changed = copy.deepcopy(rows); mutate(changed[metadata])
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                successor.successor_attempt(changed, marker, holder, bucket, 'objects/0000.bin')
+        for changed in [rows[:metadata] + rows[metadata + 1:],
+                        rows[:metadata] + [rows[metadata]] + rows[metadata:],
+                        rows[:metadata + 1] + [dict(rows[metadata + 1], object=f'buckets/{bucket}/.bucket-incarnation')]
+                        + rows[metadata + 2:]]:
+            with self.subTest(rows=changed), self.assertRaises(ValueError):
+                successor.successor_attempt(changed, marker, holder, bucket, 'objects/0000.bin')
+
     def test_real_recorder_ack_binding_rejects_unknown_retry_wrong_content_and_time(self):
         with tempfile.TemporaryDirectory() as folder:
             probe = type('Probe', (), {'binding': {
