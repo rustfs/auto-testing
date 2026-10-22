@@ -795,3 +795,15 @@ that ended window. The exact candidate source and runtime log differ on the
 optional version field; the cause remains unresolved. Any subsequent I05
 controller must establish a real streaming/IO ownership window with evidence;
 repeating the same warmed full-read premise does not provide that proof.
+
+Source review narrows the next experiment without changing the oracle. The
+candidate defaults the object-data cache off, and an explicit `versionId`
+excludes the direct-memory GET path. The 32 MiB fixture is non-inline, while
+codec streaming rollout is off by default, so this run used the legacy duplex
+reader. `ObjectLockDiagGuard` carries the real namespace guard; the
+`SetDiskLockGuardedReader` empty-read path can release that wrapper before the
+HTTP response completes. The live journal shows `guard_dropped` before the
+seven-millisecond HTTP completion and a later `get_object_stream_body`
+`dropped_incomplete` event. This is a source-supported hypothesis for a
+controlled streaming/IO reproduction, not a confirmed cause or a canonical
+acceptance result.
