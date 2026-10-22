@@ -719,7 +719,7 @@ The component always reports `resultUnknown=true`, `acknowledged=false` and `ser
 
 `lock_observer.py` observes an existing run-owned H1/H2 service using the explicit `lock-timeout` runtime profile and reviewed source `757b751482bb970bc321e92059690a7698554358`. The profile enables only the existing object-lock diagnostic target at TRACE, sets the actual object-lock acquisition budget to one second, disables early PUT rename ACKs, and preserves the standard disabled scanner/automatic-Heal/MRF settings. It does not modify the service binary. Run `python3 -B scripts/validation_heal/lock_observer.py --binding <binding.json> --nodes vm000 [vm001 vm002 vm003] --bucket <owned-bucket> --entry <acknowledged-historical-entry.json> --output <new-evidence-directory>`. The entry contains the original `key`, `versionId`, `deleteMarker=false`, and complete ACK-bound `payload.size`/`payload.sha256`. This component neither deploys nor cleans a namespace; the enclosing case owns those steps and recovery.
 
-After persisting and sending the original single GET, the observer waits up to ten seconds for its actual server-generated request ID and `get_object` lock attempt. A unique User-Agent marker connects the exact version URI and method in the `http-request` ancestor span to that lock's owner/namespace/attempt. The marker is correlation data, not an identity asserted by the client. GET's lock diagnostic omits `requested_version_id`; its HTTP span must carry the exact historical version URI instead. Free-text messages, nested native-test capture rows, client-supplied request IDs, repeated lifecycle events and foreign endpoint/owner/version records cannot prove admission. Cursor-bounded raw journald pages remain in evidence, and source message loss prevents completion.
+After persisting and sending the original single GET, the observer waits up to ten seconds for its actual server-generated request ID and `get_object` lock attempt. A unique User-Agent marker connects the exact version URI and method in the `http-request` ancestor span to that lock's owner/namespace/attempt. The marker is correlation data, not an identity asserted by the client. Its HTTP span must carry one exact historical version selector; an optional `requested_version_id` diagnostic field must agree with that selector. Free-text messages, nested native-test capture rows, client-supplied request IDs, repeated lifecycle events and foreign endpoint/owner/version records cannot prove admission. Cursor-bounded raw journald pages remain in evidence, and source message loss prevents completion.
 
 Before disconnect, two `/proc` samples must connect the exact client/server TCP tuple to an actual established socket descriptor of the original candidate process. A network-namespace table entry alone is insufficient: its inode must also appear in that process's FD links. The read-only adapter accepts no arbitrary PID, path, command or service port. Process birth, binary, environment and mount namespace must match, and its network namespace cannot change during sampling. A second journal capture must still show acquired without a diagnostic drop. An unavailable/already-ended window records incomplete evidence and closes the original caller socket without retry.
 
@@ -770,3 +770,28 @@ this manual route does not certify its native barriers or complete source case.
 The `unknown-negative` diagnostic includes the source procedure before the supplemental legacy-object diagnostic. A separate acknowledged object first receives an independently healthy Deep receipt. With the owned services stopped, the existing descriptor-relative fault backend flips byte zero of every original `xl.meta` copy: four copies in H1 and sixteen in H2. Each mutation has its own original backup, receipt and complete physical delta; the candidate-bound decoder must refuse every exact damaged copy. No other metadata, part or format may change.
 
 A separate protected prefix is checked during the fault. The original key-level task must retain complete truthful counters and an unresolved disposition, with no invented healthy, repaired, absent, version or incarnation claim. Unknown must be counted within skipped and carry the legacy warning. If the candidate reports another truthful unresolved disposition, record `NOT_OBSERVED`; the legacy diagnostic cannot promote it to PASS. Archive the original terminal result and unchanged complete fault scene before restoring original metadata bytes. Verify the full original physical and SDK inventories and the unchanged original token after restoration. Fixture rescue is never product repair. J02 remains outside canonical dispatch until the separate version-specific grace Deferred/new-token procedure and complete live evidence are available.
+
+
+### I05 pre-contender retained-scene isolation
+
+`validation_cleanup_run_id=39711742431` selects the narrow I05 preservation
+route with the original package build 39364893106/1 and an immutable helper
+containing `timeout_retention.py`. The driver must remain on the original
+Functional Chain branch. First check the shared current auto-testing fleet
+for other work. The planner accepts only original helper 704bd60's failed H1
+boundary before contender submission: nine exact successful seed request/ACK
+pairs, complete version/marker/payload/public metadata baseline, the single
+closed historical GET, original owner/candidate/inspector and unchanged stopped
+four-drive scene. Unknown writes, additional actions or H2 evidence refuse it.
+It reuses retained-scene audit/isolate/post-audit, retaining all four roots and
+state under private per-run parents without S3 calls, backup restoration or
+deletion. Verify all original archived files byte-for-byte and all five final
+private parents independently before recording active namespace isolation.
+`ISOLATED` never changes the original FAIL or supplies canonical acceptance.
+
+The first live run's GET already dropped its lock before observation. The
+version-field correction correlates those original events but cannot reopen
+that ended window. The exact candidate source and runtime log differ on the
+optional version field; the cause remains unresolved. Any subsequent I05
+controller must establish a real streaming/IO ownership window with evidence;
+repeating the same warmed full-read premise does not provide that proof.

@@ -2309,3 +2309,35 @@ The inspection performs no mutation and certifies neither historical-scene
 recovery nor global workflow idleness. Fresh ownership/cleanup and immutable
 artifact checks still precede any new fleet diagnostic. H4's twenty-four
 endpoints and H6 platform restart authority remain unavailable.
+
+
+I05 first manual live diagnostic [39711742431/1](https://github.com/rustfs/rustfs/actions/runs/39711742431)
+used helper `704bd606071676dded130dca91d3d5278455bcaa`, candidate
+`757b751482bb970bc321e92059690a7698554358`, package build 39364893106/1 and
+inspector build 39566504743/1. H1 retained FAIL/cleanup FAIL after all nine seed
+requests received successful bound ACKs and the original full S3 baseline
+passed. The single historical GET was written and its client socket closed;
+no contender PUT was invoked and H2 did not start. Official artifact
+12397696964 has digest `e9ab49593f0423f0649066aa71325d59fadc0e7e6d0328071e2f06f45790325f`.
+
+The observer incorrectly required an absent diagnostic version field. It now
+accepts an absent field or the exact unique HTTP version selector and rejects
+any other version. The three original production events are regression
+fixtures: they correlate to the exact GET but already show `guard_dropped`
+within approximately 0.36 ms, so they cannot prove a held timeout window. The
+reviewed source passes no version to this diagnostic while this log carries
+one; that difference is not yet explained. Neither a wrong package nor a
+source mix is inferred from it. Do not replay the same warmed baseline premise
+or claim that the field correction establishes lock contention.
+
+`timeout_retention.py` admits only this old helper's H1 pre-contender failure
+boundary, exact candidate/package/binary/inspector and owner, all nine successful
+seed request/ACK pairs, deterministic bytes, public metadata/tags/versions,
+closed read-only historical GET and unchanged stopped four-drive physical
+scene. Another case, H2, contender, uncertain write or physical drift refuses
+recovery. Existing retained-scene isolation preserves four data roots plus the
+private state by same-filesystem non-overwriting renames with durable intent,
+all-peer preflight, interrupted-move retries and five private archive parents.
+It sends no S3 request and never restores backups, deletes the namespace or
+rewrites the original FAIL. Live isolation is pending until separately recorded
+and audited. Canonical acceptance and its count are unchanged.

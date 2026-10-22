@@ -33,6 +33,7 @@ def event(state, sent=SENT):
     return {'target': observer.TARGET, 'level': 'TRACE', 'event': 'object_namespace_lock',
         'component': 'ecstore', 'subsystem': 'object_lock', 'state': state, 'op': 'get_object',
         'bucket': BUCKET, 'object': 'target.bin', 'namespace': 'namespace-one', 'owner': 'owner-one',
+        'requested_version_id': VERSION,
         'lock_attempt_id': ATTEMPT, 'request_id': REQUEST, 'mode': 'read', 'timeout_ms': 1000,
         'acquire_ms': 1, 'hold_ms': 1, 'span': {'name': 'http-request', 'user_agent': sent['callerMarker'],
             'request_id': REQUEST, 'method': 'GET', 'uri': sent['requestTarget']}}
@@ -72,11 +73,41 @@ class LockEventTests(unittest.TestCase):
         self.assertTrue(proof['diagnosticGuardDropped'])
         self.assertFalse(proof['distributedReleaseProven'] or proof['heldAtDisconnectProven'])
 
+    def test_optional_diagnostic_version_must_agree_with_exact_http_selector(self):
+        rows = [event('acquiring'), event('acquired')]
+        for row in rows: row.pop('requested_version_id')
+        self.assertTrue(observer.caller_attempt(rows, SENT, BUCKET, 'target.bin')['observedAcquiredWithoutDrop'])
+        for version in ('', ATTEMPT):
+            with self.subTest(version=version):
+                rows = [event('acquiring'), event('acquired')]
+                rows[0]['requested_version_id'] = version
+                with self.assertRaisesRegex(ValueError, 'exact GET identity'):
+                    observer.caller_attempt(rows, SENT, BUCKET, 'target.bin')
+
+    def test_repeated_or_missing_http_version_selector_refuses_before_events(self):
+        for target in ('/bucket/key', SENT['requestTarget'] + '&versionId=' + VERSION):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, 'one exact historical'):
+                observer.caller_attempt([], {**SENT, 'requestTarget': target}, BUCKET, 'target.bin')
+
+    def test_original_live_historical_get_is_correlated_but_ended_window_stays_closed(self):
+        path = Path(__file__).with_name('testdata') / 'i05-historical-get-39711742431.ndjson'
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        span = rows[0]['span']
+        sent = {'callerMarker': span['user_agent'], 'requestTarget': span['uri']}
+        proof = observer.caller_attempt(rows, sent, rows[0]['bucket'], rows[0]['object'])
+        self.assertTrue(proof['diagnosticGuardDropped'])
+        self.assertFalse(proof['observedAcquiredWithoutDrop'] or proof['heldAtDisconnectProven'])
+        self.assertEqual(proof['request_id'], span['request_id'])
+        # The complete earlier lifecycle cannot be trimmed to claim a live holder.
+        rows[1]['requested_version_id'] = ATTEMPT
+        with self.assertRaisesRegex(ValueError, 'exact GET identity'):
+            observer.caller_attempt(rows, sent, rows[0]['bucket'], rows[0]['object'])
+
     def test_rejects_forged_request_id_foreign_key_version_owner_or_incomplete_events(self):
         mutations = [lambda e: e.update(request_id=ATTEMPT), lambda e: e.update(object='foreign.bin'),
             lambda e: e.update(owner='another-owner'), lambda e: e.update(timeout_ms=5000),
             lambda e: e.update(acquire_ms=True), lambda e: e.update(hold_ms=-1),
-            lambda e: e.update(requested_version_id=VERSION),
+            lambda e: e.update(requested_version_id=ATTEMPT),
             lambda e: e['span'].update(uri='/other-version'), lambda e: e['span'].update(method='PUT'),
             lambda e: e.update(lock_attempt_id=REQUEST)]
         for mutate in mutations:

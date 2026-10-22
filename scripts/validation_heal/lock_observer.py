@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import time
 import uuid
+from urllib.parse import parse_qs, urlsplit
 
 try:
     from .caller_abort import disconnect_get
@@ -34,11 +35,17 @@ def caller_attempt(rows, sent, bucket, key):
 
     External S3 request IDs are server-owned. The client User-Agent is only a
     unique correlation marker; a client request-id header cannot stand in for
-    server admission. GET's lock diagnostic has no requested_version_id; the
-    exact version must instead match the HTTP span URI.
+    server admission. The exact historical version is bound by the HTTP URI;
+    an optional diagnostic version must agree with that same selector.
     """
     require(re.fullmatch(r'auto-testing-i05/[0-9a-f-]{36}', sent.get('callerMarker', '')),
             'missing caller correlation marker')
+    query = parse_qs(urlsplit(sent.get('requestTarget', '')).query, keep_blank_values=True)
+    require(set(query) == {'versionId'} and len(query['versionId']) == 1,
+            'caller requires one exact historical version selector')
+    version = query['versionId'][0]
+    require(str(uuid.UUID(version)) == version and uuid.UUID(version).int,
+            'caller historical version selector is invalid')
     selected = []
     for row in rows:
         if row.get('target') != TARGET:
@@ -58,7 +65,7 @@ def caller_attempt(rows, sent, bucket, key):
         require(row.get('event') == 'object_namespace_lock' and row.get('component') == 'ecstore'
                 and row.get('subsystem') == 'object_lock' and row.get('op') == 'get_object'
                 and row.get('mode') == 'read' and row.get('bucket') == bucket and row.get('object') == key
-                and row.get('requested_version_id') is None and row.get('timeout_ms') == 1000,
+                and row.get('requested_version_id') in (None, version) and row.get('timeout_ms') == 1000,
                 'caller lock diagnostic escaped its exact GET identity or runtime budget')
         require(all(isinstance(row.get(name), str) and 0 < len(row[name]) <= 2048
                     for name in ('owner', 'namespace', 'lock_attempt_id'))

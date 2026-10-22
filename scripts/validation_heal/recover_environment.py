@@ -16,6 +16,7 @@ try:
     from .outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan, acknowledged_legacy_plan
     from .network_retention import archived_plan as network_retention_plan, isolate as isolate_network_scene
     from .race_retention import archived_plan as race_retention_plan, isolate as isolate_race_scene
+    from .timeout_retention import archived_plan as timeout_retention_plan
 except ImportError:
     from healthy import Fleet, physical_content
     from heal_probe import require, save
@@ -23,6 +24,7 @@ except ImportError:
     from outcome_recovery import acknowledged_grace_plan, isolate_acknowledged_grace, interrupted_opaque_plan, acknowledged_legacy_plan
     from network_retention import archived_plan as network_retention_plan, isolate as isolate_network_scene
     from race_retention import archived_plan as race_retention_plan, isolate as isolate_race_scene
+    from timeout_retention import archived_plan as timeout_retention_plan
 
 
 def quota_recovery_plan(artifact, failed_run, candidate):
@@ -149,6 +151,8 @@ def network_recovery_plan(artifact, failed_run, candidate):
 
 def recovery_plan(artifact, failed_run, candidate):
     require(type(failed_run) is int and failed_run > 0, "exact failed workflow run required")
+    if list(artifact.glob("*/run/heal.lock-timeout-and-caller-abort/cases/*.json")):
+        return timeout_retention_plan(artifact, failed_run, candidate)
     if (list(artifact.glob("*/run/heal.race-unversioned-overwrite/cases/*.json"))
             or list(artifact.glob("*/run/heal.race-versioned-put/cases/*.json"))
             or list(artifact.glob("*/run/heal.race-markers-and-batch-delete/cases/*.json"))
@@ -652,7 +656,7 @@ def main():
         if plan.get("buckets"):
             fleet.snapshot_buckets = plan["buckets"]
         fleet.record("archived-recovery-plan", {key: value for key, value in plan.items() if key != "before"})
-        if plan.get("kind") in {"unresolved-g01-race", "unresolved-g02-race", "unresolved-a09-race", "unresolved-g04-race", "unresolved-g05-race", "unresolved-g06-race"}:
+        if plan.get("kind") in {"unresolved-g01-race", "unresolved-g02-race", "unresolved-a09-race", "unresolved-g04-race", "unresolved-g05-race", "unresolved-g06-race", "unresolved-i05-timeout"}:
             complete.append({"failedRunId": args.failed_run_id, **isolate_race_scene(fleet, plan)})
             continue
         if plan.get("kind") == "unresolved-network-load":
