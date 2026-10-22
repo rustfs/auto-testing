@@ -15,6 +15,7 @@ import re
 import secrets
 import signal
 import sys
+import time
 from urllib.parse import quote
 
 try:
@@ -33,7 +34,7 @@ try:
     from .markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
                           marker_plan, prepare_stale, verify_markers, reveal_current)
     from .stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
-    from .disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch
+    from .disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch, info_disks
     from .replacement import BRANCHES as REPLACEMENT_BRANCHES, AUTOMATIC_BRANCHES as AUTO_REPLACEMENT_BRANCHES, GRACEFUL_BRANCHES, CRASH_BRANCHES, run_branch as replacement_branch
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
                          validate_repaired_physical, verify_cohort, verify_ranges)
@@ -53,7 +54,7 @@ except ImportError:
     from markers import (BRANCHES as MARKER_BRANCHES, INSTANCES as MARKER_INSTANCES, seed_markers,
                          marker_plan, prepare_stale, verify_markers, reveal_current)
     from stale_rejoin import BRANCHES as STALE_BRANCHES, run_branch as stale_branch
-    from disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch
+    from disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch, info_disks
     from replacement import BRANCHES as REPLACEMENT_BRANCHES, AUTOMATIC_BRANCHES as AUTO_REPLACEMENT_BRANCHES, GRACEFUL_BRANCHES, CRASH_BRANCHES, run_branch as replacement_branch
     from shards import (SIZES, files, map_target, run_task, validate_fault,
                         validate_repaired_physical, verify_cohort, verify_ranges)
@@ -338,6 +339,50 @@ def metadata_target(snapshot, part_target):
     relative = f"{part_target['bucket']}/{part_target['key']}/xl.meta"
     entry = files(snapshot)[part_target["node"], part_target["disk"], relative]
     return {**part_target, "relativePath": relative, "sha256": entry["sha256"], "size": entry["size"]}
+
+
+def validate_all_members_online(observed, snapshot):
+    topology = validate_topology(snapshot, "H1" if len(snapshot) == 1 else "H2")
+    indexed = info_disks(observed, topology["independentDrives"])
+    require(len({disk["endpoint"] for disk in indexed.values()}) == len(indexed),
+            "multi-loss Admin members reuse a physical endpoint")
+    members = []
+    for slot, expected_uuid in enumerate(topology["diskUUIDs"]):
+        disk = indexed[0, 0, slot]
+        require(disk.get("uuid") in {None, "", expected_uuid},
+                "multi-loss Admin slot differs from the frozen format UUID")
+        members.append({"slot": [0, 0, slot], "uuid": disk.get("uuid"), "endpoint": disk["endpoint"],
+                        "state": disk.get("state"), "runtimeState": disk.get("runtimeState")})
+    online = all(member["uuid"] == topology["diskUUIDs"][member["slot"][2]]
+                 and member["state"] == "ok" and member["runtimeState"] in {None, "online"}
+                 for member in members)
+    return {"allFormattedMembersOnline": online, "members": members}
+
+
+def wait_all_members_online(probe, fleet, snapshot, label):
+    # Read readiness only proves quorum. Poll complete member views before the
+    # single admitted repair; no task or fixture operation is retried here.
+    deadline = time.monotonic() + 90
+    while True:
+        views = {}
+        for endpoint in probe.binding["endpoints"]:
+            require(time.monotonic() < deadline,
+                    "NOT_OBSERVED: multi-loss full-member startup exceeded 90 seconds")
+            reader = Probe(probe.binding, endpoint)
+            observed = fleet.record("multi-loss-members-" + label + "-" + endpoint,
+                reader.admin("/rustfs/admin/v3/info", [], b"", method="GET"))
+            views[endpoint] = validate_all_members_online(observed, snapshot)
+        proof = fleet.record("multi-loss-members-proof-" + label,
+            {"views": views, "allEndpointViewsOnline": all(
+                view["allFormattedMembersOnline"] for view in views.values()),
+             "observationOnly": True, "healTaskRetried": False})
+        if proof["allEndpointViewsOnline"]:
+            require(time.monotonic() < deadline,
+                    "NOT_OBSERVED: multi-loss full-member startup exceeded 90 seconds")
+            return proof
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, "NOT_OBSERVED: multi-loss full-member startup exceeded 90 seconds")
+        time.sleep(min(2, remaining))
 
 
 def multi_loss_instances(snapshot, bucket, expected, fixture):
@@ -762,6 +807,8 @@ def run_topology(args, topology, nodes, fixture):
         fleet.deploy(args.binary_sha, bucket, access, secret)
         processes = fleet.snapshot("deployed-topology")
         fleet.record("topology-proof", validate_topology(processes, topology))
+        if args.case_id == "heal.multiple-shard-loss":
+            wait_all_members_online(probe, fleet, processes, "before-seed")
         scanner = args.case_id == "heal.scanner-cold-object-repair"
         if scanner:
             fleet.record("scanner-registered-budget", {"perBranchSeconds": 240, "sourceBranches": list(SCANNER_BRANCHES),
@@ -840,6 +887,8 @@ def run_topology(args, topology, nodes, fixture):
                 if lock_context is not None:
                     fleet.record("lock-before-fault", prove_locked(probe, fleet, bucket, lock_context,
                         key=LOCK_KEYS[LOCK_BRANCHES.index(branch)], label="lock-before-" + branch))
+                if args.case_id == "heal.multiple-shard-loss":
+                    wait_all_members_online(probe, fleet, processes, "before-fault-" + branch)
                 fleet.stop()
                 if args.case_id in {"heal.disk-replacement-formatted", "heal.replacement-auto-rebuild", "heal.target-graceful-restart", "heal.target-process-crash"}:
                     stale_marker_started = True
@@ -904,6 +953,8 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.record("drive-gate-armed", fleet.remote(gate_node, "drive-gate",
                         disk=plan["proofs"][0]["disk"], mode=plan["driveGate"]))
                 fleet.start()
+                if args.case_id == "heal.multiple-shard-loss":
+                    wait_all_members_online(probe, fleet, before, "before-task-" + branch)
                 if gate_node is not None:
                     fleet.record("service-write-denial", fleet.remote(gate_node, "drive-gate-probe"))
                 witness = fleet.snapshot("physical-before-trigger-" + branch, metadata_faults=metadata_faults)

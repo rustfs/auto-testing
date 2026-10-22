@@ -334,6 +334,15 @@ Source assertions:
 
 Topologies: H1,H2. Branches: loss-1-data, loss-1-parity, loss-2-through-m-data-parity.
 
+Before seeding, before each fault and after each faulted restart, the executor
+observes signed read-only Admin info from every H1/H2 endpoint for at most
+90 seconds. All 4/16 slots must match the frozen format UUIDs and report online;
+read readiness alone does not prove this prerequisite. Every observation is
+retained. Incomplete or foreign identities fail immediately; persistent offline
+members expire as `NOT_OBSERVED` without retrying the Heal task. The original
+`38200772548` unknown-version receipts remain a retained failure. This startup
+check alone does not establish its underlying cause or a new live PASS.
+
 1. 从候选/实际元数据确定 M=N-R，枚举 1..M 的合法缺片数及 data/parity 组合，写入本批展开参数表；不得只运行 loss=1。
 2. 每实例用相同版本的新对象，将指定成员上的 part 分别 FAULT missing；多份元数据也要证明指向同 version/data_dir。
 3. 在满足修复提交条件时 START deep/WAIT；先检查全部目标片与角色基线相同，再 VERIFY。

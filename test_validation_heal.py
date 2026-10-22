@@ -24,6 +24,7 @@ from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, vali
     map_inline_target, verify_proof)
 from scripts.validation_heal.versions import seed_semantics, verify_semantics
 from scripts.validation_heal.versions import multi_loss_instances, multi_loss_plan, SPECIAL_KEYS, verify_pagination, boundary_plan
+from scripts.validation_heal.versions import validate_all_members_online, wait_all_members_online
 from scripts.validation_heal.heal_probe import Probe, validate_s3_request
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract, size_contract
 from scripts.validation_heal.boundaries import verify_size_contract, boundary_sizes, verify_boundary_ranges
@@ -3035,6 +3036,153 @@ class HealStaleRejoinTest(unittest.TestCase):
         for nonce in (-1, True, "1"):
             with self.subTest(nonce=nonce), self.assertRaises(ValueError):
                 verify_seed([{**entry, "payloadNonce": nonce}], inventory)
+
+
+class HealMultiLossMemberReadinessTest(unittest.TestCase):
+    def scene(self, total):
+        snapshot, expected = HealReadQuorumBoundaryTest().scene(total=total, data=2 if total == 4 else 12)
+        target = map_target(snapshot, HealReadQuorumBoundaryTest.bucket, expected[0]["key"], "data", 1)
+        observed = HealDiskLossTest().admin_info(target)
+        drives = observed["response"]["info"]["servers"][0]["drives"]
+        observed["response"]["info"]["servers"] = [{"drives": drives[index:index + 4]}
+                                                    for index in range(0, total, 4)]
+        return snapshot, observed
+
+    def test_complete_formatted_members_are_required_even_with_read_quorum(self):
+        for total in (4, 16):
+            snapshot, online = self.scene(total)
+            self.assertTrue(validate_all_members_online(online, snapshot)["allFormattedMembersOnline"])
+            changed = copy.deepcopy(online)
+            drives = changed["response"]["info"]["servers"][0]["drives"]
+            for disk in drives[:1 if total == 4 else 4]:
+                disk.update(state="disk not found", runtimeState="offline", uuid="")
+            self.assertFalse(validate_all_members_online(changed, snapshot)["allFormattedMembersOnline"])
+        for field, value in (("runtimeState", "offline"), ("runtimeState", "unknown"),
+                             ("state", "initializing"), ("uuid", None)):
+            snapshot, changed = self.scene(16)
+            changed["response"]["info"]["servers"][0]["drives"][0][field] = value
+            with self.subTest(field=field, value=value):
+                self.assertFalse(validate_all_members_online(changed, snapshot)["allFormattedMembersOnline"])
+
+    def test_malformed_or_foreign_member_evidence_fails_without_polling(self):
+        for kind in ("http", "omitted", "duplicate-slot", "foreign-uuid", "duplicate-uuid",
+                     "duplicate-endpoint", "wrong-pool", "bool-slot"):
+            snapshot, changed = self.scene(16)
+            servers = changed["response"]["info"]["servers"]
+            drives = servers[0]["drives"]
+            if kind == "http": changed["httpStatus"] = 503
+            elif kind == "omitted": servers.pop()
+            elif kind == "duplicate-slot": drives[1]["disk_index"] = drives[0]["disk_index"]
+            elif kind == "foreign-uuid": drives[0]["uuid"] = "foreign"
+            elif kind == "duplicate-uuid": drives[1]["uuid"] = drives[0]["uuid"]
+            elif kind == "duplicate-endpoint": drives[1]["endpoint"] = drives[0]["endpoint"]
+            elif kind == "wrong-pool": drives[0]["pool_index"] = 1
+            else: drives[0]["disk_index"] = False
+            probe, fleet, reader = Mock(), Mock(), Mock()
+            probe.binding = {"endpoints": {"node1": "http://rustfs-node1:9000"}}
+            fleet.record.side_effect = lambda label, value: value
+            reader.admin.return_value = changed
+            with self.subTest(kind=kind), patch("scripts.validation_heal.versions.Probe", return_value=reader), \
+                 patch("scripts.validation_heal.versions.time.sleep") as sleep, self.assertRaises(ValueError):
+                wait_all_members_online(probe, fleet, snapshot, "before-task")
+            reader.admin.assert_called_once_with("/rustfs/admin/v3/info", [], b"", method="GET")
+            sleep.assert_not_called()
+
+    def test_polling_records_each_endpoint_and_never_admits_a_heal(self):
+        snapshot, online = self.scene(16)
+        offline = copy.deepcopy(online)
+        for disk in offline["response"]["info"]["servers"][1]["drives"]:
+            disk.update(state="offline", runtimeState="offline")
+        probe, fleet = Mock(), Mock()
+        probe.binding = {"endpoints": {f"node{index}": f"http://rustfs-node{index}:9000" for index in range(1, 5)}}
+        fleet.record.side_effect = lambda label, value: value
+        readers = {endpoint: Mock() for endpoint in probe.binding["endpoints"]}
+        for endpoint, reader in readers.items():
+            reader.admin.side_effect = [offline if endpoint == "node2" else online, online]
+        with patch("scripts.validation_heal.versions.Probe", side_effect=lambda binding, endpoint: readers[endpoint]), \
+             patch("scripts.validation_heal.versions.time.sleep") as sleep, \
+             patch("scripts.validation_heal.versions.run_task") as task:
+            result = wait_all_members_online(probe, fleet, snapshot, "before-task")
+        self.assertTrue(result["allEndpointViewsOnline"])
+        self.assertEqual(set(result["views"]), set(readers))
+        for reader in readers.values():
+            self.assertEqual(reader.admin.call_count, 2)
+            self.assertTrue(all(call.args == ("/rustfs/admin/v3/info", [], b"")
+                                and call.kwargs == {"method": "GET"} for call in reader.admin.call_args_list))
+        self.assertEqual(sum("proof" in call.args[0] for call in fleet.record.call_args_list), 2)
+        sleep.assert_called_once()
+        task.assert_not_called()
+        fleet.remote.assert_not_called()
+
+    def test_persistent_offline_and_late_online_observations_expire(self):
+        for late_online in (False, True):
+            snapshot, observed = self.scene(4)
+            if not late_online:
+                observed["response"]["info"]["servers"][0]["drives"][0].update(state="offline")
+            probe, fleet, reader = Mock(), Mock(), Mock()
+            probe.binding = {"endpoints": {"node1": "http://rustfs-node1:9000"}}
+            fleet.record.side_effect = lambda label, value: value
+            reader.admin.return_value = observed
+            with self.subTest(late_online=late_online), \
+                 patch("scripts.validation_heal.versions.Probe", return_value=reader), \
+                 patch("scripts.validation_heal.versions.time.monotonic", side_effect=[0, 0, 91]), \
+                 patch("scripts.validation_heal.versions.time.sleep") as sleep, \
+                 self.assertRaisesRegex(ValueError, "NOT_OBSERVED.*90 seconds"):
+                wait_all_members_online(probe, fleet, snapshot, "before-task")
+            reader.admin.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_runner_checks_members_before_seed_fault_and_the_single_task(self):
+        from scripts.validation_heal import versions
+        snapshot, _ = self.scene(4)
+        for rejected in ("before-seed", "before-fault-instance", "before-task-instance", None):
+            with self.subTest(rejected=rejected), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                candidate = root / "candidate.json"
+                candidate.write_text(json.dumps({"source_sha": "a" * 40, "package_sha256": "b" * 64}))
+                rc = root / "rc"
+                rc.write_bytes(b"rc")
+                args = types.SimpleNamespace(evidence=root / "evidence", candidate=candidate,
+                    case_id="heal.multiple-shard-loss", tool_directory=root, testing_commit="c" * 40,
+                    binary_sha="d" * 64, rc_bin=rc)
+                fleet, probe = Mock(), Mock()
+                events = []
+                fleet.record.side_effect = lambda label, value: value
+                fleet.snapshot.return_value = snapshot
+                fleet.cleanup.return_value = True
+                plan = {"scope": {}, "recursive": True, "expected": [], "proofs": [], "faults": [],
+                        "requiredRepairs": set(), "metadataRepairs": set()}
+                def ready(probe, fleet, actual, label):
+                    events.append(label)
+                    if label == rejected:
+                        raise ValueError("NOT_OBSERVED: startup members remain offline")
+                def seeded(*args):
+                    events.append("seed")
+                    return []
+                def fault_plan(*args):
+                    events.append("fault-plan")
+                    return plan
+                def task(*args, **kwargs):
+                    events.append("task")
+                    raise ValueError("stop after the single admitted task")
+                with patch.dict("os.environ", {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}), \
+                     patch.object(versions, "Fleet", return_value=fleet), \
+                     patch.object(versions, "Probe", return_value=probe), \
+                     patch.object(versions, "verify_inspector", return_value={}), \
+                     patch.object(versions, "Recorder"), \
+                     patch.object(versions, "seed", side_effect=seeded), \
+                     patch.object(versions, "verify_seed", return_value={}), \
+                     patch.object(versions, "multi_loss_instances", return_value=[{"name": "instance"}]), \
+                     patch.object(versions, "multi_loss_plan", side_effect=fault_plan), \
+                     patch.object(versions, "wait_all_members_online", side_effect=ready), \
+                     patch.object(versions, "physical_content", return_value={}), \
+                     patch.object(versions, "run_task", side_effect=task) as repair:
+                    result = versions.run_topology(args, "H1", ["vm000"], "DV")
+                wanted = ["before-seed", "seed", "before-fault-instance", "fault-plan", "before-task-instance", "task"]
+                self.assertEqual(events, wanted if rejected is None else wanted[:wanted.index(rejected) + 1])
+                self.assertEqual(repair.call_count, int(rejected is None))
+                self.assertEqual(result["verdict"], "FAIL")
+                self.assertEqual(result["cleanup"], "PASS")
 
 
 class HealDiskLossTest(unittest.TestCase):
