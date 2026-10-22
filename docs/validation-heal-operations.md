@@ -733,6 +733,38 @@ The contender body, exact PUT request, endpoint, structured 503/`ServiceUnavaila
 
 This establishes a live timeout diagnostic subset only: it does not certify ownership at the precise disconnect edge, stale read-repair fencing, queued successor behavior, H1/H2 DL/DV source branches, or canonical acceptance. The native abort/timeout/stale fences and independent live audit remain required.
 
+`lock_timeout_runner.py` provides the enclosing diagnostic deployment through
+the existing Functional Chain workflow. After auditing prior cleanup and
+ownership, explicitly select `validation_case=heal.lock-timeout-and-caller-abort`,
+the exact `auto_testing_sha`, candidate build run/attempt and successful
+inspector build run/attempt. The existing shared-fleet concurrency group and
+auto-testing bootstrap install the immutable package. Local source, helper,
+workflow identity, vm000–vm003 binding and inspector checks run before
+bootstrap; Fleet verifies the installed binary digest before starting each
+owned service. H1 runs on vm000, followed by H2 on vm000–vm003 only after
+complete H1 diagnostic and namespace cleanup. A fresh artifact tree is required;
+the runner accepts the enclosing script's setup/test logs but refuses any old
+topology or summary before deployment.
+
+Each topology uses the existing Fleet, Recorder and DV seeder: two keys have
+three original versions each and one current marker; the selected historical
+version is 32 MiB to maintain bounded TCP backpressure. This small fixture is a
+diagnostic subset, not the complete source DL/DV matrix. After timeout and
+caller-drain checks, every endpoint must preserve the entire original ACK
+manifest, payloads, metadata and tags. Physical comparison brackets those
+reads, and every original process's FD count must return to its baseline before
+cleanup. Failed/unknown seeding, contention, observation or peer verification
+stops the owned services, saves the original physical/log scene and retains
+the namespace and original receipts. A failed diagnostic or cleanup prevents
+the next topology. SIGTERM follows the same failure capture and retention
+path. The summary records diagnostic completion while keeping whole-case and
+canonical claims false. The manual entry returns canonical `BLOCKED` after a
+successful diagnostic with clean finalization, preserves diagnostic failures,
+and reports `INFRA_ERROR` for an incomplete summary or failed finalization
+after a zero exit. The workflow gate therefore remains non-green even when
+the diagnostic succeeds. I05 remains excluded from the automatic matrix;
+this manual route does not certify its native barriers or complete source case.
+
 ### J02 original opaque metadata probe
 
 The `unknown-negative` diagnostic includes the source procedure before the supplemental legacy-object diagnostic. A separate acknowledged object first receives an independently healthy Deep receipt. With the owned services stopped, the existing descriptor-relative fault backend flips byte zero of every original `xl.meta` copy: four copies in H1 and sixteen in H2. Each mutation has its own original backup, receipt and complete physical delta; the candidate-bound decoder must refuse every exact damaged copy. No other metadata, part or format may change.

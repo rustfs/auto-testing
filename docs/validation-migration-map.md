@@ -9,6 +9,13 @@ live run proves each source assertion on the required topology.
 
 ## Current acceptance and remaining work
 
+Count reconciliation (2026-10-22): the checked-in per-case audit below supports
+the 104-case baseline. Later PR summaries state 108, but the four additional
+case identities and complete acceptance records have not yet been reconciled
+to this baseline. The table therefore describes the documented baseline; this
+update adds or revokes no canonical acceptance. Partial I05, native and recovery
+diagnostics cannot supply the missing four records.
+
 All 158 canonical IDs are retained. Independent complete live acceptance is **104/158**: the prior 101-case census plus B07 `heal.below-read-quorum` ([run 38727279347/1](https://github.com/rustfs/rustfs/actions/runs/38727279347)), A10 `heal.admin-option-contract` ([run 39197088183/1](https://github.com/rustfs/rustfs/actions/runs/39197088183)) and B06 `heal.read-quorum-boundary` ([run 39223475622/1](https://github.com/rustfs/rustfs/actions/runs/39223475622)). Their complete source matrices, immutable candidate/package/tools and cleanup were independently audited; earlier failures remain retained.
 
 | Acceptance state | Cases | Remaining requirement |
@@ -219,7 +226,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-Four Heal cases remain outside canonical dispatch: C11, F07, I05 and J02. C11/F07/J02 have explicit diagnostic routes that preserve their blocking canonical verdicts; I05 still needs exact server barriers. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
+Four Heal cases remain outside canonical dispatch: C11, F07, I05 and J02. All four have explicit diagnostic routes that preserve their blocking canonical verdicts; I05 currently executes only the timeout diagnostic subset and still needs exact server barriers and its other source branches. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
 
@@ -2267,3 +2274,38 @@ focused checks and the 832-test Heal suite pass (nine platform skips). The
 original FAIL remains unchanged; later pressure behavior and complete fresh
 candidate-bound H1/H2 execution remain unproven. Canonical acceptance stays
 104/158, and I03 still uses its separate frozen helper.
+
+
+I05 manual timeout deployment (2026-10-22): `lock_timeout_runner.py` now joins
+the existing four-argument dispatcher and Functional Chain manual case input.
+It validates the exact 757b candidate, immutable helper, inspector and current
+vm000-vm003 binding before package bootstrap, then runs independent H1 and H2
+timeout diagnostics with original versioned ACKs, full peer content/metadata/tag
+verification, physical comparisons and original-process FD closure. Dirty
+H1, unknown writes or failed finalization stop the sequence and retain the
+original stopped namespace/log scene. SIGTERM follows that retention path.
+The wrapper's pre-existing log directory is accepted; prior topology or summary
+files are refused before any new deployment. A clean diagnostic returns
+canonical BLOCKED, never PASS; the automatic matrix remains unchanged.
+
+Final focused verification ran 106 tests (104 passed, two Linux-only skips);
+31 existing shell/outcome/nolock compatibility tests also passed. All 14 new
+runner tests passed, including the actual CLI, real SIGTERM, retained receipts,
+credential redaction and executed shell verdict block. The first focused run
+had an earlier receive-buffer prerequisite failure in the empty-send-queue
+negative test; the single test and complete focused rerun passed. A separate
+300-connection macOS probe observed one kernel buffer increase after connect,
+so this local transport limitation remains explicit; the bounded guard is not
+relaxed and actual Linux component coverage remains in hosted CI. Catalog
+158 and matrix 84/302/534 checks, shell syntax, actionlint and whitespace pass.
+These checks do not establish live or canonical I05 acceptance.
+
+Read-only environment run [39710469108/1](https://github.com/rustfs/rustfs/actions/runs/39710469108)
+completed against candidate package 39364893106/1 and helper fa79b52. It
+observed sixteen independent eligible endpoints, H1/H2 mounts and no port-9000
+listeners. vm001-vm003 retain failed units from cancelled F07 38715204273/1;
+its separately recorded successful recovery is [38726570148/1](https://github.com/rustfs/rustfs/actions/runs/38726570148).
+The inspection performs no mutation and certifies neither historical-scene
+recovery nor global workflow idleness. Fresh ownership/cleanup and immutable
+artifact checks still precede any new fleet diagnostic. H4's twenty-four
+endpoints and H6 platform restart authority remain unavailable.

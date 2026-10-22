@@ -23,6 +23,7 @@ case "${case_id}" in
   heal.bucket-incarnation-recreation) driver=incarnation.py ;;
   heal.outcome-counters-and-error-truth) driver=outcome.py ;;
   heal.checkpoint-and-mrf-corruption) driver=persistence.py ;;
+  heal.lock-timeout-and-caller-abort) driver=lock_timeout_runner.py ;;
   heal.node-outage-rejoin) driver=node_outage.py ;;
   heal.status-partial-disabled-unknown) driver=status.py ;;
   heal.incremental-cursor-and-truncation) driver=cursor.py ;;
@@ -100,6 +101,11 @@ if [ "${driver}" = race.py ] || [ "${driver}" = nolock.py ]; then
   python3 -B "${ROOT}/scripts/validation_heal/${driver}" preflight \
     --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
     > "${evidence}/native-preflight.json"
+fi
+if [ "${driver}" = lock_timeout_runner.py ]; then
+  python3 -B "${ROOT}/scripts/validation_heal/${driver}" preflight \
+    --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
+    "${tool_args[@]}" --rc-bin "$(command -v rc)" > "${evidence}/timeout-preflight.json"
 fi
 python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
   --result-file "${artifacts}/cases/${case_id}.json" --verdict RUNNING --cleanup-status PENDING
@@ -217,6 +223,17 @@ if [ "${case_id}" = heal.outcome-counters-and-error-truth ] && [ "${cleanup_stat
   if [ "${case_rc}" -eq 0 ] || jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
       "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
     verdict=BLOCKED; reason="J02 manual diagnostics require independent acceptance of all original source procedures; canonical admission remains disabled"
+  fi
+fi
+if [ "${case_id}" = heal.lock-timeout-and-caller-abort ]; then
+  # This route is an explicit diagnostic invocation, never canonical admission.
+  # Even an all-green timeout subset leaves the source's other branches open.
+  if [ "${cleanup_status}" = PASS ] && [ "${case_rc}" -eq 0 ] && \
+     jq -e '.diagnosticComplete == true and .complete == false and .canonicalCasePassClaimed == false' \
+       "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+    verdict=BLOCKED; reason="I05 timeout diagnostic completed; exact native fences, stale-generation/queued-successor controllers and complete source H1/H2 DL/DV acceptance remain required"
+  elif [ "${case_rc}" -eq 0 ]; then
+    verdict=INFRA_ERROR; reason="I05 diagnostic summary or cleanup is incomplete; canonical PASS is prohibited"
   fi
 fi
 args=("${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool
