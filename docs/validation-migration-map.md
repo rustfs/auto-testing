@@ -2339,5 +2339,32 @@ recovery. Existing retained-scene isolation preserves four data roots plus the
 private state by same-filesystem non-overwriting renames with durable intent,
 all-peer preflight, interrupted-move retries and five private archive parents.
 It sends no S3 request and never restores backups, deletes the namespace or
-rewrites the original FAIL. Live isolation is pending until separately recorded
-and audited. Canonical acceptance and its count are unchanged.
+rewrites the original FAIL. Recovery [39715499193/1](https://github.com/rustfs/rustfs/actions/runs/39715499193)
+completed `ISOLATED`: all 58 original artifact files match byte-for-byte,
+pre/move/post physical baselines match, and four data roots plus private state
+were moved into five root-owned mode-0700 same-device archive parents.
+Canonical acceptance and its count are unchanged.
+
+
+I05 lock-window diagnosis (2026-10-22): exact candidate source
+`757b751482bb970bc321e92059690a7698554358` defaults
+`RUSTFS_OBJECT_LOCK_OPTIMIZATION_ENABLE` to `true`. Its `get_object` path
+acquires the ECStore read guard, marks downstream options `no_lock`, then
+returns the reader without attaching that guard when optimization is enabled.
+The original isolated-service attestation does not set this variable, so the
+candidate default applies. The archived GET's exact `acquired` and
+`guard_dropped` events share request `1ba2503b-78ea-40cd-b2ff-003f54662c9c` and
+lock attempt `3a86c2cc-ada5-4e8a-9e0d-dbe3bb7c1489`; they are 0.367104 ms apart.
+This explains the missing backpressured lock window without attributing it to
+the caller socket or optional version field.
+
+The `lock-timeout` runtime profile now explicitly sets
+`RUSTFS_OBJECT_LOCK_OPTIMIZATION_ENABLE=false`, causing the streaming GET to
+retain its read guard until EOF or reader drop. The candidate binary and other
+runtime profiles are unchanged. The existing remote process observer checks
+every configured setting, so it will reject a deployment that omits or changes
+this value. Focused verification ran 50 observer/timeout/runner tests: 48
+passed and two existing Linux-only tests were skipped on macOS; `git diff
+--check` passed. Hosted CI and a fresh candidate-bound live diagnostic remain
+required. The previous FAIL and its isolated scene remain retained; this local
+runtime correction is not live or canonical acceptance.

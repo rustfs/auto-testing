@@ -36,6 +36,8 @@ def runtime_config(profile):
     if profile == "lock-timeout":
         logging_filter = "info,rustfs_ecstore::object_lock_diag=trace"
         return {**BACKGROUND_CONFIG, "RUSTFS_OBJECT_LOCK_DIAG_ENABLE": "true",
+                # I05 needs streaming GETs to retain their lock through backpressure.
+                "RUSTFS_OBJECT_LOCK_OPTIMIZATION_ENABLE": "false",
                 "RUSTFS_OBJECT_LOCK_ACQUIRE_TIMEOUT": "1",
                 "RUSTFS_PUT_RENAME_EARLY_ACK_ENABLE": "false",
                 "RUSTFS_OBS_LOGGER_LEVEL": logging_filter, "RUST_LOG": logging_filter}

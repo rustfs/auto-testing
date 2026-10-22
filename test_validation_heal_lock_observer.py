@@ -295,7 +295,9 @@ class CallerSocketTests(unittest.TestCase):
             scope = {'__name__': '__i05_socket_test__'}
             exec(compile(source, 'i05-socket-node', 'exec'), scope)
             self.assertTrue(callable(scope['caller_socket_backend'].run))
-            self.assertEqual(scope['runtime_config']('lock-timeout')['RUSTFS_OBJECT_LOCK_ACQUIRE_TIMEOUT'], '1')
+            settings = scope['runtime_config']('lock-timeout')
+            self.assertEqual(settings['RUSTFS_OBJECT_LOCK_ACQUIRE_TIMEOUT'], '1')
+            self.assertEqual(settings['RUSTFS_OBJECT_LOCK_OPTIMIZATION_ENABLE'], 'false')
             return SimpleNamespace(returncode=0, stdout='{}', stderr='')
         with tempfile.TemporaryDirectory() as tmp, \
                 patch('scripts.validation_heal.healthy.subprocess.run', side_effect=execute):
