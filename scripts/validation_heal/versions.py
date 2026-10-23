@@ -995,7 +995,8 @@ def run_topology(args, topology, nodes, fixture):
                         rejection = validate_coordination_rejection(status, path=status.get("path"))
                         logs = {node: fleet.record("coordination-rejection-logs", {"node": node,
                             **fleet.remote(node, "logs")}) for node in fleet.nodes}
-                        rejection["logProof"] = validate_coordination_rejection_logs(logs)
+                        rejection["logProof"] = validate_coordination_rejection_logs(
+                            {"request": status["requestWindow"], "peers": logs})
                         rejection["physicalUnchanged"] = True
                         gated_proof = rejection
                     else:

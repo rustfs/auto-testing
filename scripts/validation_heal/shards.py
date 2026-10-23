@@ -105,15 +105,76 @@ def validate_coordination_rejection(observation, *, path=None):
 
 def validate_coordination_rejection_logs(observations):
     require(isinstance(observations, dict) and observations, "coordinator failure logs are missing")
+    request = observations.get("request")
+    peers = observations.get("peers")
+    require(isinstance(request, dict) and isinstance(peers, dict),
+            "coordinator rejection lacks its request window and peer logs")
+    require(request.get("method") == "POST" and request.get("httpStatus") == 500
+            and isinstance(request.get("path"), str) and request["path"].startswith("/rustfs/admin/v3/heal/")
+            and request.get("response") == COORDINATION_REJECTION_BODY,
+            "coordinator rejection request identity differs from the reviewed Heal request")
+    require(isinstance(request.get("requestId"), str) and request["requestId"]
+            and isinstance(request.get("unitFragment"), str) and request["unitFragment"],
+            "coordinator rejection request lacks its HTTP identity or run unit")
+    try:
+        started = datetime.fromisoformat(request["startedAt"])
+        finished = datetime.fromisoformat(request["finishedAt"])
+    except (KeyError, TypeError, ValueError):
+        require(False, "coordinator rejection request has no valid client time window")
+    require(started.tzinfo is not None and finished.tzinfo is not None and started <= finished,
+            "coordinator rejection request has an invalid client time window")
+    expected_node = request.get("serviceNode")
+    require(isinstance(expected_node, str) and expected_node in peers,
+            "coordinator rejection logs omit the request-serving node")
+
+    service = peers[expected_node]
+    require(isinstance(service, dict) and service.get("node") == expected_node
+            and isinstance(service.get("unit"), str)
+            and request["unitFragment"] in service["unit"],
+            "coordinator rejection log unit does not belong to the active test run")
+    journal = service.get("journal")
+    require(isinstance(journal, str), "request-serving node has no service journal")
     matches = []
-    for node, observation in observations.items():
-        journal = observation.get("journal") if isinstance(observation, dict) else None
-        if (isinstance(journal, str) and "local_coordinator_failed" in journal
-                and "heal control start admission failed" in journal):
-            matches.append(node)
-    require(matches, "coordinator rejection is not attributed to the exact admission failure in service logs")
-    return {"coordinatorFailureLogged": True, "nodesWithFailure": sorted(matches),
-            "reason": "local_coordinator_failed", "admissionFailure": "heal control start admission failed"}
+    for line in journal.splitlines():
+        offset = line.find("{")
+        if offset < 0:
+            continue
+        try:
+            event = json.loads(line[offset:])
+            raw_timestamp = event.get("timestamp")
+            if not isinstance(raw_timestamp, str):
+                continue
+            timestamp = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+        if timestamp.tzinfo is None:
+            continue
+        timestamp = timestamp.astimezone(timezone.utc)
+        # Client and service clocks can differ slightly; the bounded margin is
+        # still narrow enough to distinguish this short POST from nearby Heal work.
+        if not started - timedelta(seconds=1) <= timestamp <= finished + timedelta(seconds=1):
+            continue
+        if (event.get("level") != "WARN" or event.get("message") != "cluster heal coordination failed"
+                or event.get("event") != "admin_request_failed" or event.get("component") != "admin_api"
+                or event.get("subsystem") != "heal_admin" or event.get("operation") != "heal_control"
+                or event.get("result") != "failed" or event.get("target") != "rustfs::admin::handlers::heal"):
+            continue
+        reason, error = event.get("reason"), event.get("error")
+        if reason == "local_coordinator_failed" and isinstance(error, str) \
+                and 'message: "heal control start admission failed"' in error:
+            matches.append((timestamp, reason, "heal control start admission failed"))
+        elif reason == "cluster_capability_unavailable" and isinstance(error, str) \
+                and "remote rpc client unavailable: can not get heal control client" in error \
+                and "transport error" in error:
+            matches.append((timestamp, reason, "heal control capability preflight failed"))
+    require(matches, "coordinator rejection is not attributed to this request's exact pre-admission failure in service logs")
+    require(len(matches) == 1, "coordinator rejection has ambiguous matching service failures in its request window")
+    timestamp, reason, failure = matches[0]
+    return {"coordinatorFailureLogged": True, "serviceNode": expected_node,
+            "serviceUnit": service["unit"], "requestPath": request["path"],
+            "requestId": request["requestId"], "eventTimestamp": timestamp.isoformat(),
+            "reason": reason, "preAdmissionFailure": failure,
+            "correlation": "request-serving node + active run unit + bounded client request window + exact structured RustFS event"}
 
 
 def files(snapshot):
@@ -401,7 +462,17 @@ def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_
     started = fleet.record("trigger", probe.admin(path, [], json.dumps(
         {**BASE_OPTIONS, "scanMode": mode, **(option_overrides or {})}).encode()))
     if allow_coordination_rejection and started.get("httpStatus") != 200:
-        return validate_coordination_rejection(started, path=path)
+        rejection = validate_coordination_rejection(started, path=path)
+        endpoint = started.get("endpoint")
+        match = re.fullmatch(r"node([1-9][0-9]*)", endpoint) if isinstance(endpoint, str) else None
+        require(match is not None and int(match.group(1)) <= len(fleet.nodes),
+                "rejected Heal request endpoint is not bound to a test service node")
+        request_id = (started.get("responseHeaders") or {}).get("x-request-id")
+        request_window = {name: started.get(name) for name in
+                          ("method", "httpStatus", "path", "startedAt", "finishedAt", "response")}
+        request_window.update(requestId=request_id, endpoint=endpoint,
+                              serviceNode=fleet.nodes[int(match.group(1)) - 1], unitFragment=fleet.run_id)
+        return {**rejection, "requestWindow": request_window}
     require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict), "repair admission failed")
     token = started["response"].get("clientToken")
     require(isinstance(token, str) and token, "repair admission omitted token")

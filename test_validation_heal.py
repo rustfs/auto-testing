@@ -292,7 +292,10 @@ class HealShardOracleTest(unittest.TestCase):
     def test_exact_coordinator_rejection_is_branch_scoped_and_never_admits_a_task(self):
         body = ('<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code>'
                 '<Message>cluster heal coordination unavailable</Message></Error>')
-        observed = {"httpStatus": 500, "response": body}
+        observed = {"method": "POST", "httpStatus": 500, "response": body,
+            "startedAt": "2026-10-23T06:03:32.490+00:00",
+            "finishedAt": "2026-10-23T06:03:32.520+00:00", "endpoint": "node1",
+            "responseHeaders": {"x-request-id": "request-123"}}
         calls, records, active, admissions = [], [], [], []
 
         def admin(path, query, request_body):
@@ -300,7 +303,8 @@ class HealShardOracleTest(unittest.TestCase):
             return {**observed, "path": path}
 
         result = run_task(types.SimpleNamespace(admin=admin),
-            types.SimpleNamespace(record=lambda label, value: records.append((label, value)) or value),
+            types.SimpleNamespace(record=lambda label, value: records.append((label, value)) or value,
+                                  nodes=["vm000"], run_id="gh-39909050467-1-h1"),
             {"bucket": "fixture", "key": "objects/0008.bin"}, 2, active,
             admissions=admissions, allow_coordination_rejection=True)
         self.assertEqual(result["admissionState"], "coordination-rejected")
@@ -309,6 +313,8 @@ class HealShardOracleTest(unittest.TestCase):
         self.assertIsNone(result["clientToken"])
         self.assertFalse(result["responsibilityReported"])
         self.assertEqual(len(calls), 1)
+        self.assertEqual(result["requestWindow"]["requestId"], "request-123")
+        self.assertEqual(result["requestWindow"]["serviceNode"], "vm000")
         self.assertEqual(active, [])
         self.assertEqual(admissions, [])
         with self.assertRaisesRegex(ValueError, "repair admission failed"):
@@ -329,11 +335,49 @@ class HealShardOracleTest(unittest.TestCase):
             with self.subTest(changed=changed):
                 with self.assertRaisesRegex(ValueError, "reviewed coordinator failure"):
                     validate_coordination_rejection(changed)
-        logs = {"node1": {"journal": ('{"reason":"local_coordinator_failed",'
-            '"error":"heal control start admission failed"}')}}
-        self.assertTrue(validate_coordination_rejection_logs(logs)["coordinatorFailureLogged"])
-        with self.assertRaisesRegex(ValueError, "not attributed"):
-            validate_coordination_rejection_logs({"node1": {"journal": "unrelated failure"}})
+        request = {"method": "POST", "httpStatus": 500,
+            "path": "/rustfs/admin/v3/heal/fixture/objects/0008.bin",
+            "startedAt": "2026-10-23T06:03:32.490+00:00",
+            "finishedAt": "2026-10-23T06:03:32.520+00:00", "response": exact["response"],
+            "requestId": "request-123", "endpoint": "node1", "serviceNode": "vm000",
+            "unitFragment": "gh-39909050467-1-h1"}
+        base_event = {"timestamp": "2026-10-23T06:03:32.511021252Z", "level": "WARN",
+            "message": "cluster heal coordination failed", "event": "admin_request_failed",
+            "component": "admin_api", "subsystem": "heal_admin", "operation": "heal_control",
+            "result": "failed", "reason": "local_coordinator_failed",
+            "error": 'code: \'Internal error\', message: "heal control start admission failed"',
+            "target": "rustfs::admin::handlers::heal"}
+        def logs_for(event, *, node="vm000", unit="rustfs-validation-heal-gh-39909050467-1-h1.service"):
+            return {"request": request, "peers": {node: {"node": node, "unit": unit,
+                "journal": "Oct 23 06:03:32 rustfs000000 rustfs[874327]: " + json.dumps(event)}}}
+        proof = validate_coordination_rejection_logs(logs_for(base_event))
+        self.assertTrue(proof["coordinatorFailureLogged"])
+        self.assertEqual(proof["preAdmissionFailure"], "heal control start admission failed")
+
+        capability = {**base_event, "reason": "cluster_capability_unavailable",
+            "error": "remote rpc client unavailable: can not get heal control client, err: transport error"}
+        request["startedAt"] = "2026-10-23T06:30:38.471+00:00"
+        request["finishedAt"] = "2026-10-23T06:30:38.493+00:00"
+        request["unitFragment"] = "gh-39911462644-1-h2"
+        capability["timestamp"] = "2026-10-23T06:30:38.4969218Z"
+        self.assertEqual(validate_coordination_rejection_logs(logs_for(capability,
+            unit="rustfs-validation-heal-gh-39911462644-1-h2.service"))["reason"],
+            "cluster_capability_unavailable")
+
+        unrelated = {**capability, "reason": "coordinator_request_failed"}
+        with self.assertRaisesRegex(ValueError, "exact pre-admission failure"):
+            validate_coordination_rejection_logs(logs_for(unrelated,
+                unit="rustfs-validation-heal-gh-39911462644-1-h2.service"))
+        with self.assertRaisesRegex(ValueError, "request-serving node"):
+            validate_coordination_rejection_logs(logs_for(capability, node="vm001",
+                unit="rustfs-validation-heal-gh-39911462644-1-h2.service"))
+        with self.assertRaisesRegex(ValueError, "active test run"):
+            validate_coordination_rejection_logs(logs_for(capability,
+                unit="rustfs-validation-heal-gh-39909050467-1-h1.service"))
+        late = {**capability, "timestamp": "2026-10-23T06:30:41.000Z"}
+        with self.assertRaisesRegex(ValueError, "exact pre-admission failure"):
+            validate_coordination_rejection_logs(logs_for(late,
+                unit="rustfs-validation-heal-gh-39911462644-1-h2.service"))
 
     def test_condition_denial_is_not_a_transport_failure_or_success_payload(self):
         baseline = {"properties": {"ETag": '"etag"'}, "payload": {"size": 3, "sha256": "correct"}}

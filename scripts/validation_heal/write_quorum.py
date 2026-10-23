@@ -293,7 +293,8 @@ def run_branch(args, topology, nodes, branch):
         logs = {node: fleet.record("negative-quorum-peer-logs", {"node": node, **fleet.remote(node, "logs")})
                 for node in nodes}
         if coordination_rejected:
-            result["coordinationRejectionLogs"] = validate_coordination_rejection_logs(logs)
+            result["coordinationRejectionLogs"] = validate_coordination_rejection_logs(
+                {"request": status["requestWindow"], "peers": logs})
         for node in tuple(fleet.quorum_gates):
             fleet.record("release-write-quorum-gate", fleet.remote(node, "quorum-gate", mode="clear"))
             fleet.quorum_gates.remove(node)
