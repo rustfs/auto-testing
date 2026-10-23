@@ -182,6 +182,20 @@ def responsibility(status, bucket, key, expected, *, deleted=None):
             "bucketIncarnationId": incarnation, "counters": counters}
 
 
+def return_original_member(fleet, node, prefix):
+    """Release the owned permission gate without triggering startup recovery."""
+    processes = {peer: fleet.remote(peer, "process") for peer in fleet.nodes}
+    release = fleet.record(prefix + "-original-member-rejoin", fleet.remote(node, "drive-gate-release-live"))
+    require(release.get("sameOriginalProcess") is True and release.get("serviceRestarted") is False,
+            "member rejoin restarted or replaced the original process")
+    fleet.drive_gates.remove(node)
+    rejoined = {peer: fleet.remote(peer, "process") for peer in fleet.nodes}
+    require(all(all(processes[peer].get(name) == rejoined[peer].get(name) for name in PROCESS_FIELDS) for peer in fleet.nodes),
+            "live rejoin changed an original peer process/unit/candidate/environment")
+    fleet.record(prefix + "-live-rejoin-process-proof", {"before": processes, "after": rejoined,
+        "allOriginalProcessesPreserved": True})
+
+
 def run_branch(recorder, fleet, bucket, branch, expected, active, admissions, contract):
     # Lazy imports keep the shared version executor's dependency graph acyclic.
     try:
@@ -219,15 +233,7 @@ def run_branch(recorder, fleet, bucket, branch, expected, active, admissions, co
     require(physical_content(authority) == physical_content(fleet.snapshot("stale-online-authorities-stable")),
             "NOT_OBSERVED: offline ACK authority is not physically stable before live rejoin")
     witness = fleet.record("stale-generation-authority-proof", authority_witness(before, authority, bucket, key, manifest, target))
-    processes = {peer: fleet.remote(peer, "process") for peer in fleet.nodes}
-    release = fleet.record("stale-original-member-rejoin", fleet.remote(node, "drive-gate-release-live"))
-    require(release.get("sameOriginalProcess") is True and release.get("serviceRestarted") is False,
-            "stale member rejoin restarted or replaced the original process")
-    fleet.drive_gates.remove(node)
-    rejoined = {peer: fleet.remote(peer, "process") for peer in fleet.nodes}
-    require(all(all(processes[peer].get(name) == rejoined[peer].get(name) for name in PROCESS_FIELDS) for peer in fleet.nodes),
-            "stale live rejoin changed an original peer process/unit/candidate/environment")
-    fleet.record("stale-live-rejoin-process-proof", {"before": processes, "after": rejoined, "allOriginalProcessesPreserved": True})
+    return_original_member(fleet, node, "stale")
     require(physical_content(authority) == physical_content(fleet.snapshot("stale-before-manual")),
             "ATTRIBUTION_NOT_OBSERVED: stale namespace changed before its manual token")
     status = run_task(recorder.probe, fleet, {"bucket": bucket, "key": key}, 2, active,

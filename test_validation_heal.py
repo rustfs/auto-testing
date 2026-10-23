@@ -3397,6 +3397,80 @@ class HealMultiLossMemberReadinessTest(unittest.TestCase):
 
 
 class HealDiskLossTest(unittest.TestCase):
+    def test_original_member_return_preserves_every_peer_process_identity(self):
+        identities = {node: {name: node + ":" + name for name in fleet_node.PROCESS_FIELDS}
+                      for node in ("node1", "node2")}
+        for changed in (None, *fleet_node.PROCESS_FIELDS, "restart", "unbound"):
+            released = False
+            def remote(node, action):
+                nonlocal released
+                if action == "drive-gate-release-live":
+                    released = True
+                    return {"sameOriginalProcess": changed != "unbound", "serviceRestarted": changed == "restart"}
+                self.assertEqual(action, "process")
+                value = copy.deepcopy(identities[node])
+                if released and node == "node1" and changed in fleet_node.PROCESS_FIELDS:
+                    value[changed] = "changed"
+                return value
+            fleet = types.SimpleNamespace(nodes=list(identities), drive_gates={"node2"}, remote=remote,
+                record=Mock(side_effect=lambda label, value: value))
+            with self.subTest(changed=changed):
+                if changed is None:
+                    stale_rejoin.return_original_member(fleet, "node2", "disk-loss")
+                    self.assertEqual(fleet.drive_gates, set())
+                    self.assertEqual(fleet.record.call_args.args[0], "disk-loss-live-rejoin-process-proof")
+                else:
+                    with self.assertRaises(ValueError):
+                        stale_rejoin.return_original_member(fleet, "node2", "disk-loss")
+                    self.assertNotIn("disk-loss-live-rejoin-process-proof", [call.args[0] for call in fleet.record.call_args_list])
+
+    def test_offline_ack_rejoin_cannot_restart_or_admit_manual_work_after_early_repair(self):
+        original, authority, repaired, bucket, target, new, _ = self.scene()
+        online = self.admin_info(target)
+        offline = copy.deepcopy(online)
+        offline["response"]["info"]["servers"][0]["drives"][target["setSlot"]].update(state="drive access denied")
+        for failure in (None, "unstable", "early-repair"):
+            events = []
+            def snapshot(label, **options):
+                if label.startswith("disk-loss-original-"): return original
+                self.assertFalse(options.get("quiescent", False), "offline ACKs must remain in their original running fleet")
+                if failure == "unstable" and label == "disk-loss-online-authorities-stable": return repaired
+                if failure == "early-repair" and label == "disk-loss-before-manual": return repaired
+                return authority
+            def remote(node, action, **options):
+                if action == "drive-gate": return {"dataPath": "/owned-root"}
+                if action == "drive-gate-probe":
+                    return {"dataPath": "/owned-root", "readProbe": {"errno": 13}, "errno": 13, "dacBypassRemoved": True}
+                if action == "drive-gate-release-live":
+                    events.append("live-return")
+                    return {"sameOriginalProcess": True, "serviceRestarted": False}
+                self.assertEqual(action, "process")
+                return {name: node + ":" + name for name in fleet_node.PROCESS_FIELDS}
+            def ack(*args):
+                events.append("ack")
+                return new, new
+            fleet = types.SimpleNamespace(nodes=["node1"], drive_gates=set(), remote=remote,
+                record=lambda label, value: value, snapshot=snapshot,
+                start=lambda: events.append("start"), stop=lambda: events.append("stop"))
+            recorder = types.SimpleNamespace(probe=types.SimpleNamespace(
+                admin=Mock(side_effect=[online, offline, offline]), inventory=lambda *args, **kw: {}))
+            with self.subTest(failure=failure), patch.object(disk_loss, "map_target", return_value=target), \
+                 patch.object(disk_loss, "offline_ack", side_effect=ack), \
+                 patch.object(disk_loss, "verify_seed", return_value={}), \
+                 patch.object(disk_loss, "run_task", side_effect=RuntimeError("manual boundary reached")) as run:
+                if failure is None:
+                    with self.assertRaisesRegex(RuntimeError, "manual boundary reached"):
+                        disk_loss.run_branch(recorder, fleet, bucket, "offline-ack-repair", [], [], [],
+                                             HealReadQuorumBoundaryTest.contract)
+                    self.assertEqual(run.call_count, 1)
+                else:
+                    with self.assertRaisesRegex(ValueError, "NOT_OBSERVED"):
+                        disk_loss.run_branch(recorder, fleet, bucket, "offline-ack-repair", [], [], [],
+                                             HealReadQuorumBoundaryTest.contract)
+                    run.assert_not_called()
+                self.assertNotIn("stop", events[events.index("ack"):])
+                self.assertNotIn("start", events[events.index("ack"):])
+
     def scene(self, total=4, data=2):
         original, old = HealReadQuorumBoundaryTest().scene(total=total, data=data)
         bucket, old_key, new_key = HealReadQuorumBoundaryTest.bucket, old[0]["key"], "disk-loss/offline-ack-repair/new-00.bin"

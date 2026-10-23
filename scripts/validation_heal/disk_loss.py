@@ -9,13 +9,13 @@ try:
     from .heal_workload import verify_seed
     from .healthy import physical_content
     from .shards import files, map_target, run_task
-    from .stale_rejoin import logical_metadata, identities
+    from .stale_rejoin import logical_metadata, identities, return_original_member
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require
     from heal_workload import verify_seed
     from healthy import physical_content
     from shards import files, map_target, run_task
-    from stale_rejoin import logical_metadata, identities
+    from stale_rejoin import logical_metadata, identities, return_original_member
 
 
 BRANCHES = ("original-drive-return", "offline-ack-repair")
@@ -220,12 +220,14 @@ def run_branch(recorder, fleet, bucket, branch, expected, active, admissions, co
     baseline_s3 = fleet.record("disk-loss-degraded-full-inventory", recorder.probe.inventory(bucket, unversioned_current_tags=True))
     fleet.record("disk-loss-degraded-full-proof", {"expected": manifest, **verify_seed(manifest, baseline_s3)})
     last = witness_offline("after-acks")
-    fleet.stop()
-    authority = fleet.snapshot("disk-loss-online-authorities", quiescent=True)
+    # A restart with the original disk still inaccessible leaves its unclean
+    # marker intact. Returning it through startup can repair ACKs before the
+    # manual token; reuse the original-process rejoin used by stale versions.
+    authority = fleet.snapshot("disk-loss-online-authorities")
+    require(physical_content(authority) == physical_content(fleet.snapshot("disk-loss-online-authorities-stable")),
+            "NOT_OBSERVED: offline ACK authority is not physically stable before live rejoin")
     witness = fleet.record("disk-loss-ack-authority", authority_witness(before, authority, bucket, target, new))
-    fleet.record("disk-loss-original-member-return", fleet.remote(node, "drive-gate", mode="clear"))
-    fleet.drive_gates.remove(node)
-    fleet.start()
+    return_original_member(fleet, node, "disk-loss")
     require(physical_content(authority) == physical_content(fleet.snapshot("disk-loss-before-manual")),
             "ATTRIBUTION_NOT_OBSERVED: original member gained ACK shards before the manual token")
     receipts = []
