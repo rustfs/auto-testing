@@ -15,13 +15,13 @@ try:
     from .heal_probe import canonical, payload, require
     from .healthy import BASE_OPTIONS, physical_content
     from .cursor import SIZE, TASK_SECONDS, run_topology as dx_topology, main as dx_main, wanted_pairs
-    from .stop import start, status, idle_fleet, validate_unknown_token
+    from .stop import start, status, idle_fleet, validate_retired_stop
     from .versions import public_version_id
 except ImportError:
     from heal_probe import canonical, payload, require
     from healthy import BASE_OPTIONS, physical_content
     from cursor import SIZE, TASK_SECONDS, run_topology as dx_topology, main as dx_main, wanted_pairs
-    from stop import start, status, idle_fleet, validate_unknown_token
+    from stop import start, status, idle_fleet, validate_retired_stop
     from versions import public_version_id
 
 
@@ -287,7 +287,7 @@ def observe_branch(branch, probe, fleet, binding, bucket, expected, targets, act
         monotonic(before, first_old, cancelled=True)
         new_before = wait_window(probe, fleet, path, new)
         retired = fleet.record("force-old-stop", probe.admin(path, [("clientToken", old), ("forceStop", "true")], b""))
-        proof["oldStopIsolation"] = validate_unknown_token(retired, old)
+        proof["oldStopIsolation"] = validate_retired_stop(retired, old)
         new_after = status(probe, fleet, path, new, "force-new-after-old-stop")
         require(new_after.get("summary") != "stopped", "old token stopped the replacement task")
         require(active_window(new_after), "NOT_OBSERVED: old stop was not bracketed by the same running replacement")

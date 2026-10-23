@@ -2483,6 +2483,12 @@ class HealCancelledRestartOracleTest(unittest.TestCase):
 class HealOverlapOracleTest(unittest.TestCase):
     bucket = "rv-heal-overlap-unit"
 
+    def retired_stop(self, path, query, body):
+        return {"httpStatus": 200, "query": query, "method": "POST", "auth": "signed",
+            "requestBody": body.decode(), "path": path,
+            "response": {"summary": "stopped", "detail": "", "startTime": "2026-10-23T02:00:00Z",
+                         "settings": {**BASE_OPTIONS, "scanMode": 1, "pool": None, "set": None}}}
+
     def expected(self):
         return [{"key": f"objects/a/child/{index:04d}.bin", "versionId": "null", "deleteMarker": False,
                  "payload": {"size": CURSOR_SIZE}} for index in range(overlap.SCOPE_OBJECTS)]
@@ -2683,14 +2689,14 @@ class HealOverlapOracleTest(unittest.TestCase):
                 return value
             fleet = types.SimpleNamespace(nodes=["node"], record=record,
                 snapshot=lambda *args: {"node": {"pid": 1, "unit": "unit"}})
-            probe = types.SimpleNamespace(admin=lambda *args: {})
+            probe = types.SimpleNamespace(admin=self.retired_stop)
             samples = [self.state(processed=90), self.state()]
             with self.subTest(branch=branch), patch.object(overlap, "start", side_effect=admit), \
                  patch.object(overlap, "wait_window", side_effect=(before, new_before)), \
                  patch.object(overlap, "status", side_effect=observed), patch.object(overlap, "completed_scope", side_effect=complete), \
-                 patch.object(overlap, "idle_fleet", return_value={}), patch.object(overlap, "validate_unknown_token", return_value={}), \
+                 patch.object(overlap, "idle_fleet", return_value={}), \
                  patch.object(overlap, "physical_content", return_value={}), patch.object(overlap.time, "sleep"):
-                overlap.observe_branch(branch, probe, fleet, {}, self.bucket, primary + other, targets, active, original={})
+                result = overlap.observe_branch(branch, probe, fleet, {}, self.bucket, primary + other, targets, active, original={})
             self.assertEqual(active, [])
             self.assertEqual(calls[-1][1], "new")
             if branch == "disjoint":
@@ -2699,8 +2705,46 @@ class HealOverlapOracleTest(unittest.TestCase):
                 self.assertEqual(calls[0][2], [before, after])
                 self.assertEqual(calls[-1][2], [new_before] + peer_samples)
             else:
+                self.assertEqual(result[branch]["oldStopIsolation"]["exactRetiredTaskId"], "old")
                 self.assertEqual(calls[-1][2][:2], [new_before, new_after])
                 self.assertEqual(len(calls[-1][2]), 4)
+
+    def test_force_start_rejects_unknown_or_malformed_retired_stop_before_completion(self):
+        primary = self.expected()
+        targets = [primary[index] for index in overlap.MISSING]
+        for kind in ("unknown", "token", "duplicate-token", "method", "body", "transport",
+                     "settings", "summary", "timestamp", "extra-field"):
+            active = []
+            def admit(probe, fleet, path, identities, **options):
+                token = "new" if identities else "old"
+                identities.append((path, token))
+                return token
+            def response(path, query, body):
+                observed = self.retired_stop(path, query, body)
+                if kind == "unknown":
+                    observed.update(httpStatus=500, response={"Code": "InternalError",
+                        "Message": "Heal task not found: old"})
+                if kind == "token": observed["query"] = [("clientToken", "new"), ("forceStop", "true")]
+                if kind == "duplicate-token": observed["query"] += [("clientToken", "new")]
+                if kind == "method": observed["method"] = "GET"
+                if kind == "body": observed["requestBody"] = "{}"
+                if kind == "transport": observed["transportError"] = "timeout"
+                if kind == "settings": observed["response"]["settings"]["recursive"] = True
+                if kind == "summary": observed["response"]["summary"] = "finished"
+                if kind == "timestamp": observed["response"]["startTime"] = "2026-10-23T02:00:00"
+                if kind == "extra-field": observed["response"]["clientToken"] = "old"
+                return observed
+            fleet = types.SimpleNamespace(record=lambda label, value: value)
+            probe = types.SimpleNamespace(admin=response)
+            with self.subTest(kind=kind), patch.object(overlap, "start", side_effect=admit), \
+                 patch.object(overlap, "wait_window", side_effect=(self.state(processed=23), self.state(processed=70))), \
+                 patch.object(overlap, "status", return_value=self.state(cancelled=True)) as status_call, \
+                 patch.object(overlap, "completed_scope") as completion, \
+                 self.assertRaises(ValueError):
+                overlap.observe_branch("force-start", probe, fleet, {}, self.bucket, primary, targets, active, original={})
+            completion.assert_not_called()
+            self.assertEqual(status_call.call_count, 1)
+            self.assertEqual([token for _, token in active], ["old", "new"])
 
     def test_finished_window_and_same_token_counter_rollback_cannot_pass(self):
         self.assertFalse(overlap.active_window(self.state()))
