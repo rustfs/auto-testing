@@ -86,6 +86,34 @@ BRANCHES = {
 }
 SIZES = [0, 1, 4095, 4096, 4097, 1024**2 - 1, 1024**2, 1024**2 + 1, 5 * 1024**2 + 123]
 MULTIPART_SIZES = (5 * 1024**2 + 17, 5 * 1024**2 + 93, 1024**2 + 47)
+COORDINATION_REJECTION_BODY = (
+    '<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code>'
+    '<Message>cluster heal coordination unavailable</Message></Error>')
+
+
+def validate_coordination_rejection(observation, *, path=None):
+    require(observation.get("httpStatus") == 500
+            and observation.get("response") == COORDINATION_REJECTION_BODY,
+            "Heal admission refusal differs from the reviewed coordinator failure")
+    require(path is None or observation.get("path") == path,
+            "Heal admission refusal belongs to another request path")
+    return {"admissionState": "coordination-rejected", "path": observation.get("path"),
+            "httpStatus": 500, "response": COORDINATION_REJECTION_BODY,
+            "errorCode": "InternalError", "errorMessage": "cluster heal coordination unavailable",
+            "clientToken": None, "taskAdmitted": False, "responsibilityReported": False}
+
+
+def validate_coordination_rejection_logs(observations):
+    require(isinstance(observations, dict) and observations, "coordinator failure logs are missing")
+    matches = []
+    for node, observation in observations.items():
+        journal = observation.get("journal") if isinstance(observation, dict) else None
+        if (isinstance(journal, str) and "local_coordinator_failed" in journal
+                and "heal control start admission failed" in journal):
+            matches.append(node)
+    require(matches, "coordinator rejection is not attributed to the exact admission failure in service logs")
+    return {"coordinatorFailureLogged": True, "nodesWithFailure": sorted(matches),
+            "reason": "local_coordinator_failed", "admissionFailure": "heal control start admission failed"}
 
 
 def files(snapshot):
@@ -365,12 +393,15 @@ def validate_absent_request(status, bucket, key, options):
             "completeResponsibility": True, "repairPassClaimed": False}
 
 
-def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_overrides=None, admissions=None):
+def run_task(probe, fleet, target, mode, active, *, status_endpoints=(), option_overrides=None, admissions=None,
+             allow_coordination_rejection=False):
     path = "/rustfs/admin/v3/heal/" + quote(target["bucket"], safe="")
     if target["key"]:
         path += "/" + quote(target["key"], safe="/")
     started = fleet.record("trigger", probe.admin(path, [], json.dumps(
         {**BASE_OPTIONS, "scanMode": mode, **(option_overrides or {})}).encode()))
+    if allow_coordination_rejection and started.get("httpStatus") != 200:
+        return validate_coordination_rejection(started, path=path)
     require(started.get("httpStatus") == 200 and isinstance(started.get("response"), dict), "repair admission failed")
     token = started["response"].get("clientToken")
     require(isinstance(token, str) and token, "repair admission omitted token")

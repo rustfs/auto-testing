@@ -15,7 +15,9 @@ from scripts.validation_heal.matrix import STAGES, TOPOLOGIES, audit_evidence, c
 from scripts.validation_heal.healthy import validate_healthy, validate_topology, validate_rejection, Fleet, BASE_OPTIONS
 from scripts.validation_heal.fleet_node import paths, stopped, inspect_metadata
 from scripts.validation_heal.inspector import verify as verify_inspector
-from scripts.validation_heal.shards import BRANCHES, files, map_target, validate_fault, validate_repaired_physical, validate_repaired_status, peer_status_equal, validate_dry_run_status
+from scripts.validation_heal.shards import (BRANCHES, files, map_target, validate_fault, validate_repaired_physical,
+    validate_repaired_status, peer_status_equal, validate_dry_run_status, validate_coordination_rejection,
+    validate_coordination_rejection_logs)
 from scripts.validation_heal.heal_fault import mutation
 from scripts.validation_heal.shards import validate_conditional_response
 from scripts.validation_heal.shards import run_task, verify_ranges
@@ -286,6 +288,52 @@ class HealShardOracleTest(unittest.TestCase):
             self.assertTrue(json.loads(calls[0][2])["recursive"])
             self.assertEqual(active, [])
             self.assertEqual(admissions, [{"path": expected_path, "clientToken": "original-token"}])
+
+    def test_exact_coordinator_rejection_is_branch_scoped_and_never_admits_a_task(self):
+        body = ('<?xml version="1.0" encoding="UTF-8"?><Error><Code>InternalError</Code>'
+                '<Message>cluster heal coordination unavailable</Message></Error>')
+        observed = {"httpStatus": 500, "response": body}
+        calls, records, active, admissions = [], [], [], []
+
+        def admin(path, query, request_body):
+            calls.append((path, query, request_body))
+            return {**observed, "path": path}
+
+        result = run_task(types.SimpleNamespace(admin=admin),
+            types.SimpleNamespace(record=lambda label, value: records.append((label, value)) or value),
+            {"bucket": "fixture", "key": "objects/0008.bin"}, 2, active,
+            admissions=admissions, allow_coordination_rejection=True)
+        self.assertEqual(result["admissionState"], "coordination-rejected")
+        self.assertEqual(result["httpStatus"], 500)
+        self.assertFalse(result["taskAdmitted"])
+        self.assertIsNone(result["clientToken"])
+        self.assertFalse(result["responsibilityReported"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(active, [])
+        self.assertEqual(admissions, [])
+        with self.assertRaisesRegex(ValueError, "repair admission failed"):
+            run_task(types.SimpleNamespace(admin=admin),
+                types.SimpleNamespace(record=lambda _label, value: value),
+                {"bucket": "fixture", "key": "objects/0008.bin"}, 2, [],
+                allow_coordination_rejection=False)
+
+    def test_coordinator_rejection_requires_exact_status_and_xml(self):
+        exact = {"httpStatus": 500, "response": ('<?xml version="1.0" encoding="UTF-8"?><Error>'
+            '<Code>InternalError</Code><Message>cluster heal coordination unavailable</Message></Error>')}
+        self.assertEqual(validate_coordination_rejection(exact)["errorCode"], "InternalError")
+        for changed in (
+            {**exact, "httpStatus": 503},
+            {**exact, "response": exact["response"].replace("unavailable", "temporarily unavailable")},
+            {**exact, "response": exact["response"] + " "},
+        ):
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(ValueError, "reviewed coordinator failure"):
+                    validate_coordination_rejection(changed)
+        logs = {"node1": {"journal": ('{"reason":"local_coordinator_failed",'
+            '"error":"heal control start admission failed"}')}}
+        self.assertTrue(validate_coordination_rejection_logs(logs)["coordinatorFailureLogged"])
+        with self.assertRaisesRegex(ValueError, "not attributed"):
+            validate_coordination_rejection_logs({"node1": {"journal": "unrelated failure"}})
 
     def test_condition_denial_is_not_a_transport_failure_or_success_payload(self):
         baseline = {"properties": {"ETag": '"etag"'}, "payload": {"size": 3, "sha256": "correct"}}

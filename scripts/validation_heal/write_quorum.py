@@ -21,7 +21,9 @@ try:
     from .healthy import Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
     from .matrix import select
-    from .shards import SIZES, files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
+    from .shards import (SIZES, files, map_target, run_task, validate_fault,
+        validate_coordination_rejection, validate_coordination_rejection_logs,
+        validate_repaired_physical, verify_cohort)
     from .versions import validate_version_receipts, verify_quorum_contract, verify_version_s3
     from .drive_gate import validate_unwritable
     from .quorum_boundary import LOCK_REFERENCE, lock_reference
@@ -32,7 +34,9 @@ except ImportError:
     from healthy import Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
     from matrix import select
-    from shards import SIZES, files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
+    from shards import (SIZES, files, map_target, run_task, validate_fault,
+        validate_coordination_rejection, validate_coordination_rejection_logs,
+        validate_repaired_physical, verify_cohort)
     from versions import validate_version_receipts, verify_quorum_contract, verify_version_s3
     from drive_gate import validate_unwritable
     from quorum_boundary import LOCK_REFERENCE, lock_reference
@@ -209,7 +213,7 @@ def run_branch(args, topology, nodes, branch):
     fleet.record("storage-boundary-source-contract", reference["storage"])
     contract = verify_quorum_contract(fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate)), candidate)
     fleet.record("binding", binding)
-    probe, active = Probe(binding), []
+    probe, active, admissions = Probe(binding), [], []
     result = {"topology": topology, "branch": branch, "verdict": "RUNNING", "cleanup": "PENDING"}
     put_observed, put_key, put_payload, original = None, None, None, None
     try:
@@ -272,8 +276,12 @@ def run_branch(args, topology, nodes, branch):
         put_observed = fleet.record("single-negative-PUT-no-retry", probe.s3("put_object", {"Bucket": bucket, "Key": put_key,
             "Metadata": {"heal-fixture": "DL"}, "Tagging": "suite=heal&fixture=DL"}, put_body))
         result["put"] = negative_put(put_observed)
-        status = run_task(probe, fleet, {"bucket": bucket, "key": selected["key"]}, 2, active)
-        result["negativeResponsibility"] = validate_unwritable(status, bucket, selected)
+        status = run_task(probe, fleet, {"bucket": bucket, "key": selected["key"]}, 2, active,
+                          admissions=admissions, allow_coordination_rejection=(topology == "H2"))
+        coordination_rejected = status.get("admissionState") == "coordination-rejected"
+        result["negativeResponsibility"] = validate_coordination_rejection(status) if coordination_rejected \
+            else validate_unwritable(status, bucket, selected)
+        result["negativeResponsibility"]["physicalMutationClaimed"] = False
         fleet.record("quorums-after-operations", witness("service-quorum-after"))
         for node in plan["offlineNodes"]:
             fleet.record("lock-peer-still-refused", endpoint_refused(binding, nodes.index(node)))
@@ -282,8 +290,10 @@ def run_branch(args, topology, nodes, branch):
         fleet.stop()
         scene = fleet.snapshot("physical-negative-before-recovery", quiescent=True)
         require(physical_content(faulted) == physical_content(scene), "negative write/Heal mutated target or intact controls")
-        for node in nodes:
-            fleet.record("negative-quorum-peer-logs", {"node": node, **fleet.remote(node, "logs")})
+        logs = {node: fleet.record("negative-quorum-peer-logs", {"node": node, **fleet.remote(node, "logs")})
+                for node in nodes}
+        if coordination_rejected:
+            result["coordinationRejectionLogs"] = validate_coordination_rejection_logs(logs)
         for node in tuple(fleet.quorum_gates):
             fleet.record("release-write-quorum-gate", fleet.remote(node, "quorum-gate", mode="clear"))
             fleet.quorum_gates.remove(node)
@@ -291,7 +301,13 @@ def run_branch(args, topology, nodes, branch):
         require(physical_content(faulted) == physical_content(fleet.snapshot("physical-source-return-before-repair")),
                 "source return repaired the target before the independent manual recovery task")
         recovered = run_task(probe, fleet, {"bucket": bucket, "key": selected["key"]}, 2, active,
-                             status_endpoints=tuple(binding["endpoints"])[1:])
+                             status_endpoints=tuple(binding["endpoints"])[1:], admissions=admissions)
+        if coordination_rejected:
+            require(len(admissions) == 1 and admissions[0]["clientToken"],
+                    "recovered quorum repair lacks its first admitted task identity")
+        else:
+            require(len(admissions) == 2 and admissions[-1]["clientToken"] != admissions[-2]["clientToken"],
+                    "recovered quorum repair reused the negative-window task identity")
         result["recoveryResponsibility"] = validate_version_receipts(recovered, bucket, [selected], 2,
             required_repairs={(selected["key"], "null")})
         idle_fleet(fleet, binding)

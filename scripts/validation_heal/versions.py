@@ -37,6 +37,7 @@ try:
     from .disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch, info_disks
     from .replacement import BRANCHES as REPLACEMENT_BRANCHES, AUTOMATIC_BRANCHES as AUTO_REPLACEMENT_BRANCHES, GRACEFUL_BRANCHES, CRASH_BRANCHES, run_branch as replacement_branch
     from .shards import (SIZES, files, map_target, run_task, validate_fault,
+        validate_coordination_rejection, validate_coordination_rejection_logs,
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
     from heal_probe import Probe, compare_inventories, payload, require, save
@@ -57,6 +58,7 @@ except ImportError:
     from disk_loss import BRANCHES as DISK_LOSS_BRANCHES, run_branch as disk_loss_branch, info_disks
     from replacement import BRANCHES as REPLACEMENT_BRANCHES, AUTOMATIC_BRANCHES as AUTO_REPLACEMENT_BRANCHES, GRACEFUL_BRANCHES, CRASH_BRANCHES, run_branch as replacement_branch
     from shards import (SIZES, files, map_target, run_task, validate_fault,
+        validate_coordination_rejection, validate_coordination_rejection_logs,
                         validate_repaired_physical, verify_cohort, verify_ranges)
 
 
@@ -974,19 +976,30 @@ def run_topology(args, topology, nodes, fixture):
                     validate_unrecoverable_get(denied, contract)
                     require(physical_content(prior) == physical_content(fleet.snapshot("physical-after-negative-get")),
                             "negative read widened damage or silently healed below-quorum fragments")
+                admissions_before_attempt = len(admissions)
                 if args.case_id == "heal.read-repair-attribution":
                     status = tracked_read_task(probe, fleet, bucket, branch, plan["expected"][0])
                 elif scanner:
                     status = scanner_task(probe, fleet, scanner_window, bucket, plan["expected"][0], branch)
                 else:
                     status = run_task(probe, fleet, plan["scope"], 2, active,
-                                      option_overrides={"recursive": plan["recursive"]}, admissions=admissions)
+                                      option_overrides={"recursive": plan["recursive"]}, admissions=admissions,
+                                      allow_coordination_rejection=(args.case_id == "heal.disk-readonly-and-permission"
+                                                                    and branch == "permission-denied"))
                 fleet.stop()
                 repaired = fleet.snapshot("physical-after-" + branch, quiescent=True, metadata_faults=metadata_faults)
                 if gate_node is not None:
                     require(physical_content(prior) == physical_content(repaired),
                             "unwritable window changed object files or wrote outside the target")
-                    gated_proof = validate_unwritable(status, bucket, plan["expected"][0])
+                    if status.get("admissionState") == "coordination-rejected":
+                        rejection = validate_coordination_rejection(status, path=status.get("path"))
+                        logs = {node: fleet.record("coordination-rejection-logs", {"node": node,
+                            **fleet.remote(node, "logs")}) for node in fleet.nodes}
+                        rejection["logProof"] = validate_coordination_rejection_logs(logs)
+                        rejection["physicalUnchanged"] = True
+                        gated_proof = rejection
+                    else:
+                        gated_proof = validate_unwritable(status, bucket, plan["expected"][0])
                     fleet.record("unwritable-responsibility", gated_proof)
                     fleet.record("drive-gate-released", fleet.remote(gate_node, "drive-gate", mode="clear"))
                     fleet.drive_gates.remove(gate_node)
@@ -994,8 +1007,14 @@ def run_topology(args, topology, nodes, fixture):
                     fleet.start()
                     restored_status = run_task(probe, fleet, plan["scope"], 2, active,
                         option_overrides={"recursive": False}, admissions=admissions)
-                    require(len(admissions) >= 2 and admissions[-1]["clientToken"] != admissions[-2]["clientToken"],
-                            "restored writable repair reused the failed task identity")
+                    if status.get("admissionState") == "coordination-rejected":
+                        require(len(admissions) == admissions_before_attempt + 1
+                                and admissions[-1]["clientToken"] not in {item["clientToken"]
+                                    for item in admissions[:admissions_before_attempt]},
+                                "restored writable repair lacks a fresh unique task identity")
+                    else:
+                        require(len(admissions) >= 2 and admissions[-1]["clientToken"] != admissions[-2]["clientToken"],
+                                "restored writable repair reused the failed task identity")
                     status = restored_status
                     fleet.stop()
                     repaired = fleet.snapshot("physical-writable-repair", quiescent=True)
