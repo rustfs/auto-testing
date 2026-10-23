@@ -114,6 +114,18 @@ registered 90-second format observations never found the replacement
 `format.json`; candidate journals repeatedly report
 `Replacement target is not ready: target mount admission failed`.
 
+I re-downloaded the official artifact and checked its runner storage preflight,
+H1 deployment preflight, replacement receipt, post-start format observations,
+and candidate journal. The runner had about 258 GB free at preflight, and the
+four parent mounts were four distinct NVMe devices; this rules out the old
+disk-space concern for this run. The deployment record lists the actual
+endpoint roots under each `/data/rustfsN` mount, but does not establish a mount
+lease for those run-private endpoint paths. The service journal confirms that
+`renew_disk` attached the empty endpoint and queued the replacement request,
+which then failed admission. Thus the missing capability is endpoint mount
+binding and safe mount switching, rather than capacity or missing replacement
+bytes.
+
 The runner gives RustFS endpoints under
 `/data/rustfsN/heal-validation/<run>/data`. The parent `/data/rustfsN`
 mounts are independent devices, but the candidate's replacement admission
@@ -131,14 +143,19 @@ procedure and strict UUID/set-slot and physical-byte oracles remain unchanged;
 do not lengthen the wait, copy from quarantine, or infer a product verdict from
 this environment mismatch.
 
-Before another canonical attempt, the auto-testing adapter must demonstrate a
-candidate-supported way to initialize the blank replacement before the
-manual token, and expose every local endpoint through mount leases that pass
-the candidate's exact mount and sibling-device checks. Record mount IDs and
-device identities before and after replacement, keep the old archive unreadable
-to the service, then rerun the full H1/H2 DB/DV matrix. If the current fleet
-cannot supply those mounts, retain this failure and record the precise resource
-blocker instead of emulating mount admission.
+Before another canonical attempt, add a read-only preflight that checks every
+local endpoint's exact mount lease, mount ID, filesystem identity, and physical
+device separation from `/` and its local siblings. The replacement adapter
+must then demonstrate a candidate-supported way to switch the target endpoint
+to a blank mount, let the candidate obtain a new lease and initialize it before
+the manual token, while keeping the old archive unreadable to the service. A
+bind mount may be used only if the adapter proves this full lease switch and
+all candidate device-identity checks; a bind mount by itself is not evidence.
+Run the admission preflight first and stop before seeding if it fails. Once it
+passes, record mount identities before and after replacement and rerun the
+full H1/H2 DB/DV matrix. If the current fleet cannot supply the mount-switch
+adapter, retain this failure and report B03 as environment-blocked instead of
+emulating mount admission.
 
 B05 acceptance uses candidate `7ed6c9320db491c84b54e8232152d7b1282c1b3f`, helper `76dbf7029e82c1e3878c9160090804d4afc38078`, package `39827676705/1` and tools `39841369555/1`. The complete official ZIP digest is `4eb3405af1f47583cd7c2d8e5b9ce9fa6910b76665df529d7dfbe4f1399a20d8`. Independent recomputation covers seed ACKs, full versions/markers, the actual 2+2 and 12+4 role/loss matrices, every endpoint's full online membership before each required boundary, sequential faults, one unique START/token per instance, two identical terminal outcome queries, strict integer scope, exact repaired/healthy responsibility, all physical shard and bitrot proofs, complete S3/HEAD/Range evidence before finalization, ten private-node cleanups and four package purges. No backup restoration was used. Original failure `38200772548` remains unchanged; its vm001 offline root cause is not established by the later pass.
 

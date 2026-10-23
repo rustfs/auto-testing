@@ -2,7 +2,7 @@
 
 此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 302 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
 
-公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 60 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
+公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 67 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
 
 ## 1. 使用入口与交付物
 
@@ -54,7 +54,7 @@ python scripts/validation_heal/heal_probe.py --binding lab.json --out reports/bi
 
 ### 独立实验服务的部署
 
-H1 使用当前 Heal 节点经核验的四个独立 mount，**另建** `/data/rustfsN/heal-validation/<runId>/data` 和同级 `quarantine`，root-owned 0700；每个 `<runId>` 根写入包含 `runId` 的 root-owned `owner.json`。先检查每个根不存在；已存在的根不能覆盖。复用 `rustfs_heal_test.sh` 的 candidate deb 下载、SHA 校验和安装流程，把已安装且摘要已核验的 `/usr/bin/rustfs` 放在本批 state 下；执行用例不需要 RustFS 源码 checkout。凭据文件为 0600。以下专用 unit 仍运行在当前 Heal 节点，使用已分配的 9000 测试端口：
+H1 使用当前 Heal 节点经核验的四个独立 mount，**另建** `/data/rustfsN/heal-validation/<runId>/data` 和同级 `quarantine`，root-owned 0700；每个 `<runId>` 根写入包含 `runId` 的 root-owned `owner.json`。普通对象故障可以使用这些独立父盘下的 run 私有目录。B03 还要求替换 target 和同组兄弟 endpoint 都能取得 candidate 认可的精确 mount lease；替换过程中必须证明旧 mount 与 quarantine 对服务不可读、新空设备挂到原 endpoint 后 candidate 取得新的 mount lease，并前后记录 mount ID、物理设备 ID 和 filesystem identity。独立文件系统或隔离 mount namespace 中的 bind mount 都可能作为实现方式，但仅创建 bind mount 不足以满足要求：adapter 还必须安全切换被替换 endpoint，且通过 candidate 对 root 和 sibling 物理设备身份的检查。当前 runner 只把 run 私有子目录作为 endpoint，尚无此 mount-switch adapter，因此它现有的四个独立父盘不能证明 B03 满足资源条件。缺少已验证 adapter 时应保留 FAIL/BLOCKED 证据，不延长等待时间或复制 quarantine 数据。先检查每个根不存在；已存在的根不能覆盖。复用 `rustfs_heal_test.sh` 的 candidate deb 下载、SHA 校验和安装流程，把已安装且摘要已核验的 `/usr/bin/rustfs` 放在本批 state 下；执行用例不需要 RustFS 源码 checkout。凭据文件为 0600。以下专用 unit 仍运行在当前 Heal 节点，使用已分配的 9000 测试端口：
 
 ```bash
 # 在目标节点；所有变量来自已审核的 lab binding，不接受任意在线输入。
