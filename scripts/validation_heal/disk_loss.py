@@ -77,7 +77,7 @@ def member_state(observed, target, total, baseline=None):
                 "another Admin member is unavailable; single-drive admission is unproven")
     # The pinned candidate counts these explicit disk errors as offline. An
     # unknown/initializing server or aggregate count never witnesses this disk.
-    require(selected.get("state") in {"disk not found", "disk access denied", "file access denied",
+    require(selected.get("state") in {"disk not found", "drive access denied", "disk access denied", "file access denied",
                 "volume access denied", "offline"} or selected.get("runtimeState") == "offline",
             "NOT_OBSERVED: exact gated member is not explicitly offline in Admin info")
     return {**baseline, "reportedUUID": selected.get("uuid"), "state": selected.get("state"),

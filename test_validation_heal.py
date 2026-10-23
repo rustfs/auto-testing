@@ -3431,20 +3431,47 @@ class HealDiskLossTest(unittest.TestCase):
         baseline = disk_loss.member_state(online, target, 4)
         offline = copy.deepcopy(online)
         selected = offline["response"]["info"]["servers"][0]["drives"][target["setSlot"]]
-        selected.update(state="disk access denied", runtimeState="offline")
+        selected.update(state="drive access denied", runtimeState="online")
         self.assertTrue(disk_loss.member_state(offline, target, 4, baseline)["exactOriginalMemberOffline"])
-        for kind in ("wrong-slot", "unknown", "new-uuid", "new-endpoint", "peer-offline", "omitted", "duplicate"):
+        for kind in ("wrong-slot", "online", "unknown", "initializing", "unknown-error", "new-uuid",
+                     "new-endpoint", "peer-offline", "peer-uuid", "omitted", "duplicate"):
             changed = copy.deepcopy(offline)
             drives = changed["response"]["info"]["servers"][0]["drives"]
             if kind == "wrong-slot": drives[target["setSlot"]]["disk_index"] = 0
+            elif kind == "online": drives[target["setSlot"]].update(state="ok", runtimeState="online")
             elif kind == "unknown": drives[target["setSlot"]].update(state="unknown", runtimeState="unknown")
+            elif kind == "initializing": drives[target["setSlot"]].update(state="initializing", runtimeState=None)
+            elif kind == "unknown-error": drives[target["setSlot"]].update(state="unexpected access error", runtimeState="online")
             elif kind == "new-uuid": drives[target["setSlot"]]["uuid"] = "another-disk"
             elif kind == "new-endpoint": drives[target["setSlot"]]["endpoint"] = "http://another-node:9000/data"
             elif kind == "peer-offline": drives[0].update(state="offline", runtimeState="offline")
+            elif kind == "peer-uuid": drives[0]["uuid"] = "another-disk"
             elif kind == "omitted": drives.pop()
             else: drives.append(copy.deepcopy(drives[0]))
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 disk_loss.member_state(changed, target, 4, baseline)
+
+    def test_explicit_drive_access_denial_is_offline_despite_cached_runtime_state(self):
+        _, _, _, _, target, _, _ = self.scene()
+        online = self.admin_info(target)
+        baseline = disk_loss.member_state(online, target, 4)
+        for runtime in ("online", None):
+            for uuid in (target["diskUUID"], ""):
+                observed = copy.deepcopy(online)
+                selected = observed["response"]["info"]["servers"][0]["drives"][target["setSlot"]]
+                selected.update(state="drive access denied", uuid=uuid)
+                if runtime is None:
+                    selected.pop("runtimeState")
+                else:
+                    selected["runtimeState"] = runtime
+                with self.subTest(runtime=runtime, uuid=uuid):
+                    proof = disk_loss.member_state(observed, target, 4, baseline)
+                    self.assertTrue(proof["exactOriginalMemberOffline"])
+                    self.assertEqual(proof["state"], "drive access denied")
+                    self.assertEqual(proof["reportedUUID"], uuid)
+                    self.assertEqual(proof["runtimeState"], runtime)
+                    with self.assertRaisesRegex(ValueError, "not positively online"):
+                        disk_loss.member_state(observed, target, 4)
 
     def test_degraded_unique_puts_keep_each_ack_and_branches_match_source(self):
         self.assertEqual(list(disk_loss.BRANCHES), select("B01")[0]["variants"])

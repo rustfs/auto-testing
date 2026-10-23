@@ -40,6 +40,22 @@ All 158 canonical IDs are retained. Independent complete live acceptance is **11
 
 The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 35 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
 
+A05 scoped live [39875125045/1](https://github.com/rustfs/rustfs/actions/runs/39875125045)
+was interrupted by the self-hosted runner's exhausted filesystem. The official
+check annotation reports `No space left on device` while writing the runner's
+worker log. The selected-case step remained in progress in the completed job;
+cleanup and artifact upload stayed pending, and the official artifact listing
+contains no files. Neither product failure nor clean finalization can be
+concluded from that interruption. Its fixed candidate `c95bb396`, package
+`39867606969/1` and matching tools `39874908888/1` retain their independent
+byte/provenance audits. The J01 chain stopped before dispatch when A05 evidence
+collection refused the empty artifact listing. Its released-client fix and
+the B01 explicit disk-error correction have local coverage; both still need
+complete fresh live acceptance. Preserve the interrupted runner's original
+temporary evidence and all current fleet namespaces before another job or
+recovery action. Resume fleet execution only after runner space, original
+evidence and owned cleanup/isolation have been independently reconciled.
+
 B05 acceptance uses candidate `7ed6c9320db491c84b54e8232152d7b1282c1b3f`, helper `76dbf7029e82c1e3878c9160090804d4afc38078`, package `39827676705/1` and tools `39841369555/1`. The complete official ZIP digest is `4eb3405af1f47583cd7c2d8e5b9ce9fa6910b76665df529d7dfbe4f1399a20d8`. Independent recomputation covers seed ACKs, full versions/markers, the actual 2+2 and 12+4 role/loss matrices, every endpoint's full online membership before each required boundary, sequential faults, one unique START/token per instance, two identical terminal outcome queries, strict integer scope, exact repaired/healthy responsibility, all physical shard and bitrot proofs, complete S3/HEAD/Range evidence before finalization, ten private-node cleanups and four package purges. No backup restoration was used. Original failure `38200772548` remains unchanged; its vm001 offline root cause is not established by the later pass.
 
 E04 live [39842352595/1](https://github.com/rustfs/rustfs/actions/runs/39842352595) retains FAIL/cleanup PASS. All 1,402 official files, three H1 branches and five node cleanups were independently verified. H2's healthy Scanner task completed on vm002 while the exact node3 token query was forwarded to vm000 and returned notFound. RustFS commit `553be4b4c62ae0c590e82f91817bc018bdfdc660` lets authenticated original local automatic-task tokens return the source/path-bound in-memory snapshot; Admin/Internal/unknown/alias identities retain coordinator routing. Fixed candidate `9d90884c304dcfbf97057c263c6f2ee110230ce7` adds only that reviewed patch to `7ed6c932`, with unchanged Cargo.lock. Package [39851206784/1](https://github.com/rustfs/rustfs/actions/runs/39851206784) and matching tools [39860218641/1](https://github.com/rustfs/rustfs/actions/runs/39860218641) passed independent complete provenance and byte audits.
@@ -885,12 +901,18 @@ streaming checks and full all-peer S3 manifests. Missing/unchanged UUID or early
 automatic repair cannot satisfy this manual case. Partial rename/mkdir intent
 remains recoverable; archive drift retains the namespace. Live proof is pending.
 
-B01 run `38081858808` retained FAIL and cleanup PASS. Both H1/H2 had real
-same-service read/write EACCES, but the exact Admin disk never became explicitly
-offline within the registered 90-second observation window. Degraded ACKs were
-therefore not started. The missing double witness remains NOT_OBSERVED in the
-failure evidence; ready, cached online state and an inaccessible directory do
-not substitute for the required Admin offline proof.
+B01 run `38081858808` retains its original FAIL and cleanup PASS. Both H1/H2
+had real same-service read/write EACCES. Independent replay of all 46 H1 and
+45 H2 original Admin responses finds the exact original slot, endpoint and UUID with
+`state="drive access denied"` and cached `runtimeState="online"`. The candidate's
+`DiskAccessDenied` error renders that exact state, and its Admin disk-count
+logic counts it as offline. The executor omitted this spelling from its
+explicit error set, so it rejected the recorded witness and never started
+degraded ACKs. The state mapping now recognizes that exact error while still
+requiring the original identity and every other member's healthy UUID. Unknown,
+initializing, unrecognized error and online-only observations remain refused.
+Replaying this offline check does not supply the unexecuted ACK or repair
+branches; complete fresh H1/H2 live evidence is still required.
 
 
 B06 corrected run `38082447868` retained FAIL and cleanup PASS. Both exact-R
