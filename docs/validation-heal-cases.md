@@ -273,6 +273,8 @@ Topologies: H1,H2. Branches: read-only, permission-denied.
 3. 目标不可写期间必须保留失败/待修责任，不能 reported repaired；PHYSICAL 确認没有写到父目录/系统盘。
 4. 解除只读或恢复原 ACL，重新修复并 VERIFY；保留故障期间错误和恢复后物理补片证据。
 
+permission-denied 分支释放 ACL gate 后，保持同一候选进程运行，并用进程 birth、候选摘要及释放后的物理快照证明状态。释放后、提交新的唯一 Admin token 前，目标分片必须仍保持故障态；若自动恢复先改变分片，该分支记为 `NOT_OBSERVED`，不能将恢复归因给新的手工任务。新的修复 token 终态后再停止服务并验证原始分片摘要。read-only 分支按其 unit mount gate 的生命周期清理 gate，再执行独立修复任务。
+
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FAULT](validation-heal-operations.md#FAULT) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:

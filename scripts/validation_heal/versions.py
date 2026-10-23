@@ -493,6 +493,36 @@ def verify_proof(fleet, target, label):
     return {"allInlineShardsBitrotVerified": True, "originalInlineSha256Restored": True, "shards": proofs}
 
 
+def release_permission_gate_live(fleet, node, before_release, metadata_faults):
+    """Restore a B02 permission gate without restarting its candidate process."""
+    released = fleet.record("drive-gate-released-live",
+                            fleet.remote(node, "drive-gate-release-live"))
+    require(released.get("sameOriginalProcess") is True and released.get("serviceRestarted") is False
+            and isinstance(released.get("processBefore"), dict)
+            and released.get("processBefore") == released.get("processAfter")
+            and released["processAfter"].get("pid", 0) > 1,
+            "B02 permission gate release did not preserve the original candidate process")
+    fleet.drive_gates.remove(node)
+
+    expected_process = released["processAfter"]
+    process_before_snapshot = fleet.record("process-after-live-gate-release-before-snapshot",
+                                            fleet.remote(node, "process"))
+    require(process_before_snapshot == expected_process,
+            "B02 candidate process changed after live permission gate release")
+    after_release = fleet.snapshot("physical-after-live-gate-release", metadata_faults=metadata_faults)
+    require(after_release[node].get("pid") == expected_process["pid"]
+            and after_release[node].get("binarySha256") == expected_process["binarySha256"],
+            "B02 live physical snapshot is not bound to the released candidate process")
+    process_after_snapshot = fleet.record("process-after-live-gate-release-after-snapshot",
+                                          fleet.remote(node, "process"))
+    require(process_after_snapshot == expected_process,
+            "B02 candidate process changed while taking the post-release physical snapshot")
+    require(physical_content(before_release) == physical_content(after_release),
+            "ATTRIBUTION_NOT_OBSERVED: target changed after same-process gate release before the fresh manual token")
+    return {"release": released, "physicalUnchangedUntilFreshToken": True,
+            "processBoundSnapshot": True, "processIdentity": expected_process}
+
+
 def boundary_plan(instance, snapshot, bucket, expected):
     selected = [entry for entry in expected if entry["key"] == instance["key"]]
     require(len(selected) == 1 and selected[0]["payload"]["size"] == instance["size"], "boundary lost its ACK size")
@@ -986,8 +1016,17 @@ def run_topology(args, topology, nodes, fixture):
                                       option_overrides={"recursive": plan["recursive"]}, admissions=admissions,
                                       allow_coordination_rejection=(args.case_id == "heal.disk-readonly-and-permission"
                                                                     and branch == "permission-denied"))
-                fleet.stop()
-                repaired = fleet.snapshot("physical-after-" + branch, quiescent=True, metadata_faults=metadata_faults)
+                permission_live_rejoin = (gate_node is not None
+                    and args.case_id == "heal.disk-readonly-and-permission" and branch == "permission-denied")
+                if permission_live_rejoin:
+                    # Keep the candidate alive: the old stop/clear/start sequence
+                    # allowed a restarted process to restore the part before the
+                    # fresh writable Admin token could be attributed.
+                    repaired = fleet.snapshot("physical-after-" + branch, metadata_faults=metadata_faults)
+                else:
+                    fleet.stop()
+                    repaired = fleet.snapshot("physical-after-" + branch, quiescent=True,
+                                              metadata_faults=metadata_faults)
                 if gate_node is not None:
                     require(physical_content(prior) == physical_content(repaired),
                             "unwritable window changed object files or wrote outside the target")
@@ -1002,10 +1041,15 @@ def run_topology(args, topology, nodes, fixture):
                     else:
                         gated_proof = validate_unwritable(status, bucket, plan["expected"][0])
                     fleet.record("unwritable-responsibility", gated_proof)
-                    fleet.record("drive-gate-released", fleet.remote(gate_node, "drive-gate", mode="clear"))
-                    fleet.drive_gates.remove(gate_node)
+                    if permission_live_rejoin:
+                        release_proof = release_permission_gate_live(fleet, gate_node, repaired, metadata_faults)
+                        fleet.record("same-process-writable-repair-boundary", release_proof)
+                    else:
+                        fleet.record("drive-gate-released", fleet.remote(gate_node, "drive-gate", mode="clear"))
+                        fleet.drive_gates.remove(gate_node)
                     gate_node = None
-                    fleet.start()
+                    if not permission_live_rejoin:
+                        fleet.start()
                     restored_status = run_task(probe, fleet, plan["scope"], 2, active,
                         option_overrides={"recursive": False}, admissions=admissions)
                     if status.get("admissionState") == "coordination-rejected":

@@ -26,7 +26,7 @@ from scripts.validation_heal.versions import (BRANCHES as VERSION_BRANCHES, vali
     map_inline_target, verify_proof)
 from scripts.validation_heal.versions import seed_semantics, verify_semantics
 from scripts.validation_heal.versions import multi_loss_instances, multi_loss_plan, SPECIAL_KEYS, verify_pagination, boundary_plan
-from scripts.validation_heal.versions import validate_all_members_online, wait_all_members_online
+from scripts.validation_heal.versions import validate_all_members_online, wait_all_members_online, release_permission_gate_live
 from scripts.validation_heal.heal_probe import Probe, validate_s3_request
 from scripts.validation_heal.prepare_heal_meta_inspector import quorum_contract, size_contract
 from scripts.validation_heal.boundaries import verify_size_contract, boundary_sizes, verify_boundary_ranges
@@ -1168,6 +1168,37 @@ class HealNodeOutageTest(unittest.TestCase):
 
 
 class HealDriveGateTest(unittest.TestCase):
+    def test_permission_gate_release_keeps_same_process_before_fresh_repair_token(self):
+        process = {name: "candidate-" + name for name in ("pid", "startTicks", "bootId", "unit",
+            "executable", "binarySha256", "mountNamespace", "commandSha256", "environmentFileSha256", "settings")}
+        process["pid"] = 4242
+        before = {"node1": {"files": [{"path": "bucket/objects/0000.bin/part.1", "sha256": "before"}],
+                             "formats": [{"value": {"id": "format"}}]}}
+        after = copy.deepcopy(before)
+        after["node1"].update(pid=4242, binarySha256=process["binarySha256"])
+        events = []
+
+        def remote(node, action):
+            events.append(action)
+            if action == "drive-gate-release-live":
+                return {"sameOriginalProcess": True, "serviceRestarted": False,
+                        "processBefore": process, "processAfter": process,
+                        "originalPermissionsRestored": True}
+            if action == "process":
+                return process
+            raise AssertionError(action)
+
+        fleet = types.SimpleNamespace(drive_gates={"node1"}, remote=remote,
+            record=lambda label, value: events.append(label) or value,
+            snapshot=lambda label, **kwargs: after)
+        proof = release_permission_gate_live(fleet, "node1", before, {})
+        self.assertEqual(events, ["drive-gate-release-live", "drive-gate-released-live", "process",
+                                  "process-after-live-gate-release-before-snapshot", "process",
+                                  "process-after-live-gate-release-after-snapshot"])
+        self.assertEqual(fleet.drive_gates, set())
+        self.assertTrue(proof["physicalUnchangedUntilFreshToken"])
+        self.assertTrue(proof["processBoundSnapshot"])
+
     def test_live_permission_activation_follows_actual_start_and_initial_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
             fleet = Fleet(["node1"], Path(directory), "gh-12345-1-h1")
