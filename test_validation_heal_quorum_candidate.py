@@ -16,6 +16,7 @@ ORIGINAL = '072b57b37559fbe626aeda8abf61617fdcbdd926'
 FIXED = '1c7fc818dd858247c45b39542abd8291b1e6e31b'
 DIAGNOSTIC = '85c706cac09d53d0649487b8f1865f18beb53225'
 RPC_FIXED = '62ff96774fa4139d45f14d70b70519aae8070ac0'
+IDENTITY_FIXED = '1a3f038c90704f9ad9693eddcf7d861c9530f13c'
 
 
 class RecordedSourceContract(Exception):
@@ -29,7 +30,7 @@ class QuorumCandidateTests(unittest.TestCase):
         records = {}
         def record(label, value):
             records[label] = value
-            if label in {'quorum-source-contract', 'network-source-contract'}:
+            if label in {'quorum-source-contract', 'network-source-contract', 'storage-boundary-source-contract'}:
                 raise RecordedSourceContract(records)
             return value
         fleet = types.SimpleNamespace(record=record)
@@ -51,6 +52,8 @@ class QuorumCandidateTests(unittest.TestCase):
             # exists on this fleet and no Probe is constructed by these tests.
             if module is quorum_boundary:
                 module.run_topology(args, 'H1', ['vm000'])
+            elif module is write_quorum:
+                module.run_branch(args, 'H1', ['vm000'], write_quorum.BRANCHES[0])
             else:
                 module.run_branch(args, ['vm000', 'vm001', 'vm002', 'vm003'], network.BRANCHES[0])
         return records
@@ -70,12 +73,23 @@ class QuorumCandidateTests(unittest.TestCase):
                     self.assertEqual(captured['binding']['candidateCommit'], source)
 
     def test_unknown_and_malformed_sources_never_reach_inspector_or_deploy(self):
-        for module in (quorum_boundary, network):
+        for module in (quorum_boundary, network, write_quorum):
             for source in ('0' * 40, FIXED[:7], FIXED.upper(), RPC_FIXED[:7], RPC_FIXED.upper(),
                            RPC_FIXED[:-1] + '1', None, [], True):
                 with self.subTest(executor=module.CASE_ID, source=source):
                     with self.assertRaises(ValueError):
                         self.execute_until_contract(module, source, allow_inspector=False)
+
+    def test_write_quorum_binds_both_source_reviews_before_inspector_or_deploy(self):
+        for source in (ORIGINAL, IDENTITY_FIXED):
+            with self.subTest(source=source), self.assertRaises(RecordedSourceContract) as completed:
+                self.execute_until_contract(write_quorum, source)
+            captured = completed.exception.records
+            self.assertEqual(captured['lock-policy-source-contract']['candidateCommit'], source)
+            self.assertEqual(captured['storage-boundary-source-contract']['candidateCommit'], source)
+        for source in (FIXED, DIAGNOSTIC, RPC_FIXED):
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, 'storage boundary'):
+                self.execute_until_contract(write_quorum, source, allow_inspector=False)
 
     def test_network_storage_review_is_separate_from_lock_review(self):
         source = 'f' * 40
@@ -96,6 +110,12 @@ class QuorumCandidateTests(unittest.TestCase):
         self.assertTrue(network.source_reference(FIXED)['storage']['sourceFiles'])
         self.assertEqual(quorum_boundary.LOCK_REFERENCE, original)
         self.assertEqual(write_quorum.LOCK_REFERENCE['candidateCommit'], ORIGINAL)
+        self.assertEqual(write_quorum.STORAGE_REFERENCE['candidateCommit'], ORIGINAL)
+        selected = write_quorum.source_reference(IDENTITY_FIXED)
+        selected['lock']['sourceFiles'].clear()
+        selected['storage']['sourceFiles'].clear()
+        self.assertTrue(write_quorum.source_reference(IDENTITY_FIXED)['lock']['sourceFiles'])
+        self.assertTrue(write_quorum.source_reference(IDENTITY_FIXED)['storage']['sourceFiles'])
         self.assertEqual(write_quorum.STORAGE_REFERENCE['candidateCommit'], ORIGINAL)
 
 

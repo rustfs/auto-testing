@@ -78,6 +78,17 @@ LOCK_REFERENCES['62ff96774fa4139d45f14d70b70519aae8070ac0'] = {
     **LOCK_REFERENCES['85c706cac09d53d0649487b8f1865f18beb53225'],
     'candidateCommit': '62ff96774fa4139d45f14d70b70519aae8070ac0'}
 
+LOCK_REFERENCES['1a3f038c90704f9ad9693eddcf7d861c9530f13c'] = {
+    **LOCK_REFERENCES['62ff96774fa4139d45f14d70b70519aae8070ac0'],
+    'candidateCommit': '1a3f038c90704f9ad9693eddcf7d861c9530f13c',
+    'manualHealLockPolicy': 'ordinary manual heal retains the exclusive namespace owner through storage completion; read-repair has a separate shared data phase and exclusive commit fence',
+    'sourceFiles': {
+        **LOCK_REFERENCES['62ff96774fa4139d45f14d70b70519aae8070ac0']['sourceFiles'],
+        'crates/ecstore/src/set_disk/ops/locking.rs': 'b75bb680ab648a1cac84a14318e7b0c5022897be43b624281f6fa277235a4e62',
+        'crates/ecstore/src/set_disk/ops/heal.rs': '0b706ac476e02202d5ad217a166eb523abfd3cfd123902a9fb7edf27bd2bf376',
+        'crates/ecstore/src/cluster/rpc/client.rs': '515b1ec94c2d88e8cf77646652dc9b84405f1c5e5eb4cc103b79be21746edc47'},
+}
+
 
 def lock_reference(candidate_commit):
     require(isinstance(candidate_commit, str) and candidate_commit in LOCK_REFERENCES,

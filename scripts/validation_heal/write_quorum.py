@@ -2,6 +2,7 @@
 """B08: independently witnessed write and distributed-lock quorum loss."""
 
 import argparse
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -23,7 +24,7 @@ try:
     from .shards import SIZES, files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
     from .versions import validate_version_receipts, verify_quorum_contract, verify_version_s3
     from .drive_gate import validate_unwritable
-    from .quorum_boundary import LOCK_REFERENCE
+    from .quorum_boundary import LOCK_REFERENCE, lock_reference
     from .stop import idle_fleet
 except ImportError:
     from heal_probe import Probe, payload, require, save
@@ -34,7 +35,7 @@ except ImportError:
     from shards import SIZES, files, map_target, run_task, validate_fault, validate_repaired_physical, verify_cohort
     from versions import validate_version_receipts, verify_quorum_contract, verify_version_s3
     from drive_gate import validate_unwritable
-    from quorum_boundary import LOCK_REFERENCE
+    from quorum_boundary import LOCK_REFERENCE, lock_reference
     from stop import idle_fleet
 
 
@@ -48,6 +49,18 @@ STORAGE_REFERENCE = {"candidateCommit": LOCK_REFERENCE["candidateCommit"],
         "e7c29544e2798c246e78d978f60f103bd6446eccd560c5c9b490316bca64bf9c"},
     "H2LockFixture": "explicit EC:8 only for the fresh run-owned sixteen-drive lock-loss branch",
     "WriteFixture": "all N readable authorities; independent read-only gates remove W even when R equals W"}
+
+STORAGE_REFERENCES = {
+    STORAGE_REFERENCE['candidateCommit']: STORAGE_REFERENCE,
+    '1a3f038c90704f9ad9693eddcf7d861c9530f13c': {
+        **STORAGE_REFERENCE, 'candidateCommit': '1a3f038c90704f9ad9693eddcf7d861c9530f13c'},
+}
+
+
+def source_reference(candidate_commit):
+    locks = lock_reference(candidate_commit)
+    require(candidate_commit in STORAGE_REFERENCES, "B08 storage boundary is not reviewed for this candidate")
+    return {"lock": locks, "storage": copy.deepcopy(STORAGE_REFERENCES[candidate_commit])}
 
 
 def plan_for(snapshot, target, branch, contract):
@@ -181,7 +194,7 @@ def run_branch(args, topology, nodes, branch):
     lock_fixture = topology == "H2" and branch == "lock-quorum-absent"
     fleet = Fleet(nodes, directory, run_id, args.tool_directory, runtime_profile="lock-quorum" if lock_fixture else "manual")
     candidate = json.loads(args.candidate.read_text())
-    require(candidate["source_sha"] == LOCK_REFERENCE["candidateCommit"], "B08 lock client policy is unreviewed")
+    reference = source_reference(candidate["source_sha"])
     bucket = "rv-heal-" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     access, secret = secrets.token_hex(16), secrets.token_hex(24)
     os.environ.update(HEAL_ACCESS_KEY=access, HEAL_SECRET_KEY=secret)
@@ -192,8 +205,8 @@ def run_branch(args, topology, nodes, branch):
         "candidatePackageSha256": candidate["package_sha256"], "candidateBinarySha256": args.binary_sha,
         "rcBinarySha256": hashlib.sha256(args.rc_bin.read_bytes()).hexdigest(), "maxInventoryObjects": 256,
         "maxInventoryBytes": 512 * 1024**2}
-    fleet.record("lock-policy-source-contract", LOCK_REFERENCE)
-    fleet.record("storage-boundary-source-contract", STORAGE_REFERENCE)
+    fleet.record("lock-policy-source-contract", reference["lock"])
+    fleet.record("storage-boundary-source-contract", reference["storage"])
     contract = verify_quorum_contract(fleet.record("inspector-build", verify_inspector(args.tool_directory, candidate)), candidate)
     fleet.record("binding", binding)
     probe, active = Probe(binding), []
