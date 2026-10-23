@@ -334,6 +334,136 @@ def mounts():
     return observed
 
 
+def _unescape_mountinfo(value):
+    return (value.replace("\\040", " ").replace("\\011", "\t")
+            .replace("\\012", "\n").replace("\\134", "\\"))
+
+
+def _mountinfo_entries():
+    entries = []
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        fields = line.split()
+        if len(fields) < 10 or "-" not in fields:
+            continue
+        separator = fields.index("-")
+        if separator + 2 >= len(fields):
+            continue
+        entries.append({
+            "mountId": fields[0], "device": fields[2], "root": _unescape_mountinfo(fields[3]),
+            "target": _unescape_mountinfo(fields[4]), "options": fields[5],
+            "fstype": fields[separator + 1], "source": _unescape_mountinfo(fields[separator + 2]),
+        })
+    return entries
+
+
+def _physical_device_ids(path):
+    """Resolve leaf block identities in the same failure-domain shape as RustFS."""
+    info = path.stat()
+    device = f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}"
+    sysfs = Path("/sys/dev/block") / device
+    if not sysfs.exists():
+        return [device]
+
+    def leaves(node):
+        slaves = node / "slaves"
+        entries = sorted(slaves.iterdir()) if slaves.is_dir() else []
+        if entries:
+            result = []
+            for entry in entries:
+                result.extend(leaves(entry.resolve(strict=True)))
+            return result
+        if (node / "partition").exists() and node.parent.name:
+            return [node.parent.name]
+        return [node.name]
+
+    return sorted(set(leaves(sysfs.resolve(strict=True))))
+
+
+def _replacement_mount_identity(path):
+    """Inspect one endpoint without creating, remounting or switching anything."""
+    require(path.is_absolute() and not any(part == ".." for part in path.parts),
+            "replacement endpoint path is invalid")
+    mount_root = next((mount for mount in MOUNTS if path.is_relative_to(mount)), None)
+    if mount_root is not None:
+        for entry in (path, *path.parents):
+            require(not entry.is_symlink(), "symlink in replacement endpoint path")
+            if entry == mount_root:
+                break
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    require(probe.exists() and not probe.is_symlink(), "replacement endpoint has no safe existing ancestor")
+    canonical_probe = probe.resolve(strict=True)
+    canonical = path.resolve(strict=False)
+    info = canonical_probe.lstat()
+    require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode),
+            "replacement endpoint or nearest existing ancestor must be a canonical directory")
+    entries = _mountinfo_entries()
+    exact = [item for item in entries if item["target"] == str(canonical)] if path.exists() else []
+    mount = exact[-1] if len(exact) == 1 else None
+    mount_id = mount["mountId"] if mount else None
+    ancestors = [item for item in entries if canonical_probe == Path(item["target"])
+                 or Path(item["target"]) in canonical_probe.parents]
+    nearest_mount = max(ancestors, key=lambda item: len(Path(item["target"]).parts), default=None)
+    physical = _physical_device_ids(canonical_probe)
+    return {
+        "endpoint": str(path),
+        "canonicalPath": str(canonical),
+        "endpointExists": path.exists(),
+        "mounted": mount is not None and mount_id is not None,
+        "mount": mount,
+        "mountId": mount_id,
+        "filesystemIdentity": None if mount_id is None else f"{mount_id}:{info.st_dev}:{info.st_ino}",
+        "device": f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}",
+        "physicalDeviceIds": physical,
+        "nearestExistingAncestor": str(canonical_probe),
+        "ancestorMount": nearest_mount,
+        "writable": os.access(canonical_probe, os.W_OK),
+    }
+
+
+def replacement_admission_preflight(request):
+    """Read-only B03 admission proof; fail closed before service start or seed."""
+    require(set(request) == {"runId", "action"}, "replacement admission accepts no paths or mutation options")
+    _, roots = paths(request["runId"])
+    endpoints = [_replacement_mount_identity(root / "data") for root in roots]
+    root_identity = _replacement_mount_identity(Path("/"))
+    root_devices = set(root_identity["physicalDeviceIds"])
+    endpoint_devices = [set(item["physicalDeviceIds"]) for item in endpoints]
+    sibling_overlap = [sorted(left & right) for index, left in enumerate(endpoint_devices)
+                       for right in endpoint_devices[index + 1:] if left & right]
+    root_overlap = [sorted(devices & root_devices) for devices in endpoint_devices if devices & root_devices]
+    exact_mounts = all(item["mounted"] for item in endpoints)
+    distinct_filesystems = len({item["filesystemIdentity"] for item in endpoints}) == len(endpoints)
+    adapter = {
+        "registered": False,
+        "reason": "auto-testing reserves ordinary run directories; no reviewed endpoint mount-switch adapter is installed",
+    }
+    result = {
+        "runId": request["runId"],
+        "readOnly": True,
+        "mutated": False,
+        "canonicalPassClaimed": False,
+        "endpoints": endpoints,
+        "root": root_identity,
+        "mountSwitchAdapter": adapter,
+        "checks": {
+            "exactEndpointMounts": exact_mounts,
+            "mountIdsPresent": all(item["mountId"] is not None for item in endpoints),
+            "filesystemIdentitiesDistinct": distinct_filesystems,
+            "endpointPhysicalDevicesDistinct": not sibling_overlap,
+            "endpointDevicesSeparateFromRoot": not root_overlap,
+            "mountSwitchAdapterReviewed": False,
+        },
+        "admitted": bool(exact_mounts and distinct_filesystems and not sibling_overlap
+                         and not root_overlap and adapter["registered"] is True),
+        "reason": None,
+    }
+    if not result["admitted"]:
+        result["reason"] = "B03 requires exact endpoint mount leases and a reviewed mount-switch adapter; run endpoints are ordinary directories"
+    return result
+
+
 def environment_service_state():
     """Observe fixed service/port names; never stop or certify a clean scene."""
     fields = {'LoadState', 'ActiveState', 'SubState', 'MainPID'}
@@ -1984,6 +2114,7 @@ def main(request):
     actions["version-race-backups"] = lambda value: globals()["mpu_race_backups_backend"].run(value, globals())
     actions["process-clock"] = process_clock
     actions["environment-capabilities"] = environment_capabilities
+    actions["replacement-admission-preflight"] = replacement_admission_preflight
     for action in ("retained-scene-audit", "retained-scene-isolate"):
         actions[action] = retained_scene_operation
     for action in ("owner-markers-audit", "owner-markers-recover"):

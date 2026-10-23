@@ -225,6 +225,11 @@ if [ "${case_rc}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
 elif [ "${case_rc}" -eq 0 ]; then
   verdict=INFRA_ERROR; reason="Heal environment finalization failed"
 fi
+if [ "${case_id}" = heal.disk-replacement-formatted ] && [ "${cleanup_status}" = PASS ] && \
+   jq -e '.replacementAdmissionBlocked == true and .complete == false and .canonicalPassClaimed != true' \
+     "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+  verdict=BLOCKED; reason="B03 exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; preflight stopped before deployment and fixture seed"
+fi
 if [ "${case_id}" = heal.bucket-incarnation-recreation ] && [ "${cleanup_status}" = PASS ] && \
    jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
      "${evidence}/healthy-summary.json" >/dev/null 2>&1; then

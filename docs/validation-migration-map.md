@@ -151,11 +151,17 @@ to a blank mount, let the candidate obtain a new lease and initialize it before
 the manual token, while keeping the old archive unreadable to the service. A
 bind mount may be used only if the adapter proves this full lease switch and
 all candidate device-identity checks; a bind mount by itself is not evidence.
-Run the admission preflight first and stop before seeding if it fails. Once it
-passes, record mount identities before and after replacement and rerun the
-full H1/H2 DB/DV matrix. If the current fleet cannot supply the mount-switch
-adapter, retain this failure and report B03 as environment-blocked instead of
-emulating mount admission.
+The executor now runs a read-only `replacement-admission-preflight` before
+the normal parent-mount preflight, package-backed reservation, service start,
+or fixture seed. It records each endpoint's exact mountpoint, mount ID,
+filesystem identity, nearest existing ancestor, physical-device IDs and
+root/sibling overlap; it also records whether a reviewed mount-switch adapter
+is registered. The current runner reports ordinary run directories and no
+adapter, so B03 is stopped as `BLOCKED` with cleanup evidence before any
+90-second format wait. Once an adapter is installed and independently
+reviewed, the gate must pass before recording mount identities before and
+after replacement and rerunning the full H1/H2 DB/DV matrix. The source oracle
+and prior FAIL evidence remain unchanged.
 
 B05 acceptance uses candidate `7ed6c9320db491c84b54e8232152d7b1282c1b3f`, helper `76dbf7029e82c1e3878c9160090804d4afc38078`, package `39827676705/1` and tools `39841369555/1`. The complete official ZIP digest is `4eb3405af1f47583cd7c2d8e5b9ce9fa6910b76665df529d7dfbe4f1399a20d8`. Independent recomputation covers seed ACKs, full versions/markers, the actual 2+2 and 12+4 role/loss matrices, every endpoint's full online membership before each required boundary, sequential faults, one unique START/token per instance, two identical terminal outcome queries, strict integer scope, exact repaired/healthy responsibility, all physical shard and bitrot proofs, complete S3/HEAD/Range evidence before finalization, ten private-node cleanups and four package purges. No backup restoration was used. Original failure `38200772548` remains unchanged; its vm001 offline root cause is not established by the later pass.
 

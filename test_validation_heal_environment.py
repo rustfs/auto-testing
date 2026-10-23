@@ -62,15 +62,51 @@ class EnvironmentTests(unittest.TestCase):
             self.assertFalse(result['resourceShapes']['H1']['mountsAvailable'])
 
     def test_current_remote_adapter_includes_a_compilable_readonly_inventory_action(self):
+        actions = []
         def invoke(argv, **params):
             source = params['input']
             compile(source, 'remote-inventory', 'exec')
+            actions.append(source)
             self.assertIn('environment_capabilities', source)
-            self.assertIn('environment-capabilities', source)
             return types.SimpleNamespace(returncode=0, stdout='{"inspectionOnly":true,"mutated":false}', stderr='')
         with tempfile.TemporaryDirectory() as name, patch('scripts.validation_heal.healthy.subprocess.run', side_effect=invoke):
             fleet = Fleet(['n0'], Path(name), 'gh-1234-1-h2')
             self.assertFalse(fleet.remote('n0', 'environment-capabilities')['mutated'])
+            self.assertFalse(fleet.remote('n0', 'replacement-admission-preflight')['mutated'])
+        self.assertIn('replacement_admission_preflight', actions[-1])
+
+    def test_b03_admission_requires_exact_endpoint_mounts_and_reviewed_switch_adapter(self):
+        roots = [Path(f'/data/rustfs{index}/heal-validation/gh-1234-1-h1') for index in range(1, 5)]
+        ordinary = lambda path: {
+            'endpoint': str(path), 'canonicalPath': str(path), 'endpointExists': False,
+            'mounted': False, 'mount': None, 'mountId': None, 'filesystemIdentity': None,
+            'device': '8:1', 'physicalDeviceIds': ['nvme0n1'],
+            'nearestExistingAncestor': str(path.parent.parent), 'ancestorMount': None, 'writable': True,
+        }
+        root = {**ordinary(Path('/')), 'endpointExists': True, 'mounted': True, 'mountId': '1',
+                'filesystemIdentity': '1:0:1', 'physicalDeviceIds': ['nvme-root']}
+        with patch.object(fleet_node, 'paths', return_value=(Path('/state'), roots)), \
+             patch.object(fleet_node, '_replacement_mount_identity', side_effect=lambda path: root if path == Path('/') else ordinary(path)):
+            result = fleet_node.replacement_admission_preflight({'runId': 'gh-1234-1-h1', 'action': 'replacement-admission-preflight'})
+        self.assertFalse(result['admitted'])
+        self.assertFalse(result['mutated'])
+        self.assertFalse(result['checks']['exactEndpointMounts'])
+        self.assertFalse(result['checks']['mountSwitchAdapterReviewed'])
+        self.assertIn('ordinary directories', result['reason'])
+
+    def test_b03_admission_stops_before_parent_mount_preflight_or_start(self):
+        with tempfile.TemporaryDirectory() as name:
+            fleet = Fleet(['n0'], Path(name), 'gh-1234-1-h1', runtime_profile='replacement',
+                          require_replacement_admission=True)
+            actions = []
+            fleet.record = lambda label, value: value
+            fleet.remote = lambda node, action, **params: actions.append(action) or {
+                'readOnly': True, 'mutated': False, 'canonicalPassClaimed': False, 'admitted': False,
+            }
+            with self.assertRaisesRegex(ValueError, 'admission preflight failed'):
+                fleet.deploy('a' * 64, 'rv-heal-' + 'a' * 16, 'access', 'secret')
+            self.assertEqual(actions, ['replacement-admission-preflight'])
+            self.assertEqual(fleet.reserved, [])
 
     def runtime_command(self, *, units='', listeners='', state=None):
         state = state or 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\n'

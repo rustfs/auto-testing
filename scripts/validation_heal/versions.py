@@ -22,7 +22,7 @@ try:
     from .heal_probe import Probe, compare_inventories, payload, require, save
     from .fleet_node import PROCESS_FIELDS
     from .heal_workload import Recorder, seed, verify_seed
-    from .healthy import Fleet, physical_content, validate_topology
+    from .healthy import Fleet, ReplacementAdmissionBlocked, physical_content, validate_topology
     from .inspector import verify as verify_inspector
     from .matrix import select
     from .heal_fault import bounded_fault_id
@@ -44,7 +44,7 @@ except ImportError:
     from heal_probe import Probe, compare_inventories, payload, require, save
     from fleet_node import PROCESS_FIELDS
     from heal_workload import Recorder, seed, verify_seed
-    from healthy import Fleet, physical_content, validate_topology
+    from healthy import Fleet, ReplacementAdmissionBlocked, physical_content, validate_topology
     from inspector import verify as verify_inspector
     from matrix import select
     from heal_fault import bounded_fault_id
@@ -803,7 +803,8 @@ def run_topology(args, topology, nodes, fixture):
                   runtime_profile="scanner" if args.case_id == "heal.scanner-cold-object-repair" else
                   "read-repair" if args.case_id == "heal.read-repair-attribution" else
                   "replacement" if args.case_id == "heal.replacement-auto-rebuild" or target_restart else
-                  "stale-rejoin" if args.case_id == "heal.stale-version-rejoin" else "manual")
+                  "stale-rejoin" if args.case_id == "heal.stale-version-rejoin" else "manual",
+                  require_replacement_admission=args.case_id == "heal.disk-replacement-formatted")
     if target_restart:
         fleet.node_runtime_profiles = {node: "replacement-target" for node in nodes[1:]}
     candidate = json.loads(args.candidate.read_text())
@@ -1187,6 +1188,10 @@ def run_topology(args, topology, nodes, fixture):
             item["verdict"] == "PASS" for item in result["branches"].values()) else "FAIL"
         if args.case_id == "heal.versioning-suspended-null" and result["verdict"] == "PASS":
             result["reenable"] = reenable_and_verify(recorder, fleet, bucket, baseline)
+    except ReplacementAdmissionBlocked as exc:
+        result.update(verdict="BLOCKED", failure={"type": type(exc).__name__, "message": str(exc)},
+                      replacementAdmissionBlocked=True, admissionEvidence=exc.evidence,
+                      deploymentSkipped=True, fixtureSeedSkipped=True)
     except (Exception, KeyboardInterrupt) as exc:
         result.update(verdict="FAIL", failure={"type": type(exc).__name__, "message": str(exc)})
     finally:
@@ -1238,15 +1243,27 @@ def main():
         for topology, selected in topologies:
             for fixture in fixtures:
                 results.append(run_topology(args, topology, selected, fixture))
+                if results[-1].get("replacementAdmissionBlocked") is True:
+                    break
                 if results[-1]["cleanup"] != "PASS":
                     break
+            if results and results[-1].get("replacementAdmissionBlocked") is True:
+                break
             if results[-1]["cleanup"] != "PASS":
                 break
     finally:
         complete = len(results) == len(topologies) * len(fixtures) and all(
             item["verdict"] == "PASS" and item["cleanup"] == "PASS" for item in results)
+        replacement_admission_blocked = (args.case_id == "heal.disk-replacement-formatted" and bool(results)
+            and all(item.get("replacementAdmissionBlocked") is True and item.get("cleanup") == "PASS"
+                    for item in results))
         save(args.evidence / "healthy-summary.json", {"caseId": args.case_id, "results": results,
-            "cleanup": "PASS" if results and all(item["cleanup"] == "PASS" for item in results) else "FAIL", "complete": complete})
+            "cleanup": "PASS" if results and all(item["cleanup"] == "PASS" for item in results) else "FAIL",
+            "complete": complete, "replacementAdmissionBlocked": replacement_admission_blocked,
+            "canonicalPassClaimed": False})
+    if replacement_admission_blocked:
+        print("heal.disk-replacement-formatted: BLOCKED before deployment or fixture seed by mount admission preflight")
+        return
     require(complete, "version case requires every H1/H2 source branch; inspect topology-result evidence")
 
 

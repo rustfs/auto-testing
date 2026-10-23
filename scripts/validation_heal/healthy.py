@@ -36,6 +36,14 @@ BASE_OPTIONS = {"recursive": False, "remove": False, "recreate": False, "scanMod
                 "dryRun": False, "updateParity": False, "nolock": False, "readRepair": False, "pool": 0, "set": 0}
 
 
+class ReplacementAdmissionBlocked(ValueError):
+    """B03 cannot start until the actual endpoint mounts pass candidate admission."""
+
+    def __init__(self, evidence):
+        self.evidence = evidence
+        super().__init__("B03 replacement mount admission preflight failed; deployment and fixture seed were skipped")
+
+
 def validate_rejection(observed, expected_code):
     require(observed.get("httpStatus") == 400, "invalid Heal request was not rejected with HTTP 400")
     body = observed.get("response")
@@ -136,12 +144,14 @@ def validate_healthy(status, bucket, key, disposition):
 
 
 class Fleet:
-    def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard"):
+    def __init__(self, nodes, evidence, run_id, tool_directory=None, *, runtime_profile="manual", resource_profile="standard",
+                 require_replacement_admission=False):
         require(runtime_profile in {"lock-timeout", "lock-successor", "frozen-race-legacy", "outcome-legacy", "outcome-grace", "queue-pressure", "orphan-preserve", "orphan-before", "orphan-after", "manual", "authority-split", "multi-pool", "bounded-capacity", "journal-bounded", "lock-quorum", "offline-replay", "durable-mrf", "mrf-crash", "flapping", "read-repair", "scanner", "disabled", "overlap", "root-restart", "stale-rejoin", "replacement", "schema-refusal", "scope-isolation", "incarnation-checkpoint", "incarnation-mrf"}, "unsupported Heal runtime profile")
         require(resource_profile in {"standard", "cursor", "full-restart"}, "unsupported Heal resource profile")
         self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
         self.tool_directory = tool_directory
         self.runtime_profile = runtime_profile
+        self.require_replacement_admission = bool(require_replacement_admission)
         self.node_runtime_profiles = {}
         self.resource_profile = resource_profile
         self.sequence = 0
@@ -294,6 +304,13 @@ class Fleet:
 
     def deploy(self, binary_sha, bucket, access, secret, *, before_start=None):
         self.secret_values.update({access, secret})
+        if self.require_replacement_admission:
+            admission = {node: self.remote(node, "replacement-admission-preflight") for node in self.nodes}
+            self.record("replacement-admission-preflight", admission)
+            if not all(value.get("readOnly") is True and value.get("mutated") is False
+                       and value.get("canonicalPassClaimed") is False and value.get("admitted") is True
+                       for value in admission.values()):
+                raise ReplacementAdmissionBlocked(admission)
         checked = {node: self.remote(node, "preflight", resourceProfile=self.resource_profile,
                    **({'runtimeProfile': self.runtime_profile}
                       if self.runtime_profile in {'lock-timeout', 'lock-successor'} else {}))
