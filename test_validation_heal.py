@@ -1172,6 +1172,8 @@ class HealDriveGateTest(unittest.TestCase):
         process = {name: "candidate-" + name for name in ("pid", "startTicks", "bootId", "unit",
             "executable", "binarySha256", "mountNamespace", "commandSha256", "environmentFileSha256", "settings")}
         process["pid"] = 4242
+        process_before = {**process, "state": "S"}
+        process_after = {**process, "state": "R"}
         before = {"node1": {"files": [{"path": "bucket/objects/0000.bin/part.1", "sha256": "before"}],
                              "formats": [{"value": {"id": "format"}}]}}
         after = copy.deepcopy(before)
@@ -1182,10 +1184,10 @@ class HealDriveGateTest(unittest.TestCase):
             events.append(action)
             if action == "drive-gate-release-live":
                 return {"sameOriginalProcess": True, "serviceRestarted": False,
-                        "processBefore": process, "processAfter": process,
+                        "processBefore": process_before, "processAfter": process_after,
                         "originalPermissionsRestored": True}
             if action == "process":
-                return process
+                return {**process, "state": "D"}
             raise AssertionError(action)
 
         fleet = types.SimpleNamespace(drive_gates={"node1"}, remote=remote,

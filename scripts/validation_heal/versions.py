@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 try:
     from .heal_probe import Probe, compare_inventories, payload, require, save
+    from .fleet_node import PROCESS_FIELDS
     from .heal_workload import Recorder, seed, verify_seed
     from .healthy import Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
@@ -41,6 +42,7 @@ try:
                          validate_repaired_physical, verify_cohort, verify_ranges)
 except ImportError:
     from heal_probe import Probe, compare_inventories, payload, require, save
+    from fleet_node import PROCESS_FIELDS
     from heal_workload import Recorder, seed, verify_seed
     from healthy import Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
@@ -499,7 +501,10 @@ def release_permission_gate_live(fleet, node, before_release, metadata_faults):
                             fleet.remote(node, "drive-gate-release-live"))
     require(released.get("sameOriginalProcess") is True and released.get("serviceRestarted") is False
             and isinstance(released.get("processBefore"), dict)
-            and released.get("processBefore") == released.get("processAfter")
+            and isinstance(released.get("processAfter"), dict)
+            and all(name in released["processBefore"] and name in released["processAfter"]
+                    and released["processBefore"][name] == released["processAfter"][name]
+                    for name in PROCESS_FIELDS)
             and released["processAfter"].get("pid", 0) > 1,
             "B02 permission gate release did not preserve the original candidate process")
     fleet.drive_gates.remove(node)
@@ -507,7 +512,8 @@ def release_permission_gate_live(fleet, node, before_release, metadata_faults):
     expected_process = released["processAfter"]
     process_before_snapshot = fleet.record("process-after-live-gate-release-before-snapshot",
                                             fleet.remote(node, "process"))
-    require(process_before_snapshot == expected_process,
+    require(all(name in process_before_snapshot and process_before_snapshot[name] == expected_process[name]
+                for name in PROCESS_FIELDS),
             "B02 candidate process changed after live permission gate release")
     after_release = fleet.snapshot("physical-after-live-gate-release", metadata_faults=metadata_faults)
     require(after_release[node].get("pid") == expected_process["pid"]
@@ -515,7 +521,8 @@ def release_permission_gate_live(fleet, node, before_release, metadata_faults):
             "B02 live physical snapshot is not bound to the released candidate process")
     process_after_snapshot = fleet.record("process-after-live-gate-release-after-snapshot",
                                           fleet.remote(node, "process"))
-    require(process_after_snapshot == expected_process,
+    require(all(name in process_after_snapshot and process_after_snapshot[name] == expected_process[name]
+                for name in PROCESS_FIELDS),
             "B02 candidate process changed while taking the post-release physical snapshot")
     require(physical_content(before_release) == physical_content(after_release),
             "ATTRIBUTION_NOT_OBSERVED: target changed after same-process gate release before the fresh manual token")
