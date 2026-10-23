@@ -203,20 +203,28 @@ if [ "${case_id}" = heal.disk-replacement-formatted ]; then
       --reason "B03 read-only predeployment admission could not complete; package and service state were left untouched"
     exit 1
   fi
+  preflight_evidence_args=(
+    --evidence "evidence/${case_id}/predeployment-preflight.log"
+    --evidence "evidence/${case_id}/healthy-summary.json"
+  )
+  while IFS= read -r preflight_file; do
+    preflight_relative="${preflight_file#${artifacts}/}"
+    [ "${preflight_relative}" != "${preflight_file}" ] || die "B03 preflight evidence escaped the artifact root"
+    preflight_evidence_args+=(--evidence "${preflight_relative}")
+  done < <(find "${evidence}/replacement-admission" -type f -name '*.json' -print | LC_ALL=C sort)
   preflight_status="$(jq -er '.status' "${evidence}/healthy-summary.json")"
   if [ "${preflight_status}" = BLOCKED ]; then
     python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
       --result-file "${artifacts}/cases/${case_id}.json" --verdict BLOCKED --cleanup-status PASS \
       --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
-      --predeployment-blocked --evidence "evidence/${case_id}/predeployment-preflight.log" \
-      --evidence "evidence/${case_id}/healthy-summary.json" \
+      --predeployment-blocked "${preflight_evidence_args[@]}" \
       --reason "B03 exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; the read-only preflight stopped before service or package changes"
     exit 1
   elif [ "${preflight_status}" = INFRA_ERROR ]; then
     python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
       --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status PASS \
       --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
-      --evidence "evidence/${case_id}/healthy-summary.json" \
+      "${preflight_evidence_args[@]}" \
       --reason "B03 read-only admission returned incomplete node evidence; package and service state were left untouched"
     exit 1
   elif [ "${preflight_status}" != ADMITTED ]; then

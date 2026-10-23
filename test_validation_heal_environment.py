@@ -176,6 +176,16 @@ class EnvironmentTests(unittest.TestCase):
             self.assertLess(source.index('preflight_status}" = ' + status, gate), package_activation)
         self.assertIn('--predeployment-blocked', source[gate:bootstrap])
 
+    def test_b03_case_result_references_each_topology_preflight_record(self):
+        source = (Path(__file__).parent / 'scripts/validation_heal/run_case.sh').read_text()
+        gate = source.index('replacement_preflight.py')
+        bootstrap = source.index('(bootstrap)')
+        preflight = source[gate:bootstrap]
+        self.assertIn('find "${evidence}/replacement-admission" -type f -name \'*.json\'', preflight)
+        self.assertIn('preflight_relative="${preflight_file#${artifacts}/}"', preflight)
+        self.assertIn('--predeployment-blocked "${preflight_evidence_args[@]}"', preflight)
+        self.assertIn('"${preflight_evidence_args[@]}"', preflight)
+
     def runtime_command(self, *, units='', listeners='', state=None):
         state = state or 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\n'
         def invoke(*args, **params):
