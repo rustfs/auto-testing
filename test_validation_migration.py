@@ -186,6 +186,7 @@ class ResultWriterTest(unittest.TestCase):
                                                 "--reason", "candidate install failed"], check=True, capture_output=True)
             bootstrap = json.loads((results / "s3.basic-object-round-trip.json").read_text())
             self.assertEqual(bootstrap["verdict"], "INFRA_ERROR")
+            self.assertEqual(bootstrap["migration_status"], "unverified")
             self.assertIsNone(bootstrap["provenance"]["binary_sha256"])
             subprocess.run(command + identity + ["--verdict", "BLOCKED", "--cleanup-status", "PASS",
                 "--binary-sha256", "b" * 64, "--reason", "diagnostic branches require independent canonical audit",
@@ -213,6 +214,34 @@ class ResultWriterTest(unittest.TestCase):
             catalog = json.loads((ROOT / "validation-cases.json").read_text(encoding="utf-8"))
             _, errors = validate_results(catalog, results, gate_statuses=set())
             self.assertEqual([], errors)
+
+    def test_predeployment_blocked_result_does_not_claim_an_installed_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rc = root / "rc"
+            rc.write_bytes(b"test-rc")
+            candidate = root / "candidate.json"
+            candidate.write_text(json.dumps({
+                "package_url": "https://example.invalid/rustfs.deb",
+                "package_sha256": "a" * 64,
+                "source_sha": "c" * 40,
+            }), encoding="utf-8")
+            result = root / "b03.json"
+            command = [sys.executable, str(ROOT / "scripts/validation_result.py"),
+                "--case-id", "heal.disk-replacement-formatted", "--profile", "cluster-1pool",
+                "--result-file", str(result), "--verdict", "BLOCKED", "--cleanup-status", "PASS",
+                "--candidate-manifest", str(candidate), "--testing-commit", "d" * 40,
+                "--rc-bin", str(rc), "--predeployment-blocked", "--reason", "mount gate failed"]
+            subprocess.run(command, check=True, capture_output=True)
+            value = json.loads(result.read_text(encoding="utf-8"))
+            self.assertEqual(value["execution_stage"], "pre-deployment")
+            self.assertEqual(value["migration_status"], "unverified")
+            self.assertIsNone(value["provenance"]["binary_sha256"])
+            self.assertNotIn("assertions", value)
+            invalid_command = command.copy()
+            invalid_command[invalid_command.index("--verdict") + 1] = "PASS"
+            invalid = subprocess.run(invalid_command, capture_output=True)
+            self.assertNotEqual(invalid.returncode, 0)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from scripts.validation_heal import environment
 from scripts.validation_heal import fleet_node
+from scripts.validation_heal import replacement_preflight
 from scripts.validation_heal.healthy import Fleet
 
 
@@ -107,6 +108,73 @@ class EnvironmentTests(unittest.TestCase):
                 fleet.deploy('a' * 64, 'rv-heal-' + 'a' * 16, 'access', 'secret')
             self.assertEqual(actions, ['replacement-admission-preflight'])
             self.assertEqual(fleet.reserved, [])
+
+    def test_b03_predeployment_gate_is_read_only_and_checks_h1_h2_before_bootstrap(self):
+        check_names = {
+            'exactEndpointMounts', 'mountIdsPresent', 'filesystemIdentitiesDistinct',
+            'endpointPhysicalDevicesDistinct', 'endpointDevicesSeparateFromRoot',
+            'mountSwitchAdapterReviewed',
+        }
+        calls = []
+        class ReadOnlyFleet:
+            def __init__(self, nodes, evidence, run_id):
+                self.nodes, self.evidence, self.run_id = nodes, evidence, run_id
+                self.evidence.mkdir(parents=True, exist_ok=True)
+            def remote(self, node, action):
+                calls.append((self.run_id, node, action))
+                admitted = node != 'vm002'
+                return {'runId': self.run_id, 'readOnly': True, 'mutated': False,
+                    'canonicalPassClaimed': False, 'admitted': admitted,
+                    'checks': {name: admitted for name in check_names}}
+            def record(self, label, value):
+                (self.evidence / (label + '.json')).write_text(json.dumps(value))
+                return value
+        candidate = {'source_sha': 'a' * 40, 'package_sha256': 'b' * 64,
+                     'package_url': 'https://example.invalid/rustfs.deb'}
+        with tempfile.TemporaryDirectory() as folder, patch.object(replacement_preflight, 'Fleet', ReadOnlyFleet):
+            summary = replacement_preflight.run_preflight(['vm000', 'vm001', 'vm002', 'vm003'],
+                Path(folder), '12345', '2', 'c' * 40, candidate)
+            self.assertEqual(summary['status'], 'BLOCKED')
+            self.assertTrue(summary['replacementAdmissionBlocked'])
+            self.assertFalse(summary['mutationStarted'])
+            self.assertEqual(summary['cleanupDisposition'], 'NOT_REQUIRED_NO_MUTATION')
+            self.assertEqual([row['topology'] for row in summary['results']], ['H1', 'H2'])
+            self.assertEqual(len(calls), 5)
+            self.assertTrue(all(action == 'replacement-admission-preflight' for _, _, action in calls))
+            self.assertTrue((Path(folder) / 'healthy-summary.json').is_file())
+
+    def test_b03_predeployment_transport_failure_is_infrastructure_error(self):
+        class ReadOnlyFleet:
+            def __init__(self, nodes, evidence, run_id):
+                self.nodes, self.evidence = nodes, evidence
+                self.evidence.mkdir(parents=True, exist_ok=True)
+            def remote(self, node, action):
+                if node == 'vm002': raise OSError('SSH unavailable')
+                return {'readOnly': True, 'mutated': False, 'canonicalPassClaimed': False,
+                    'admitted': False, 'checks': {'exactEndpointMounts': False,
+                    'mountIdsPresent': False, 'filesystemIdentitiesDistinct': False,
+                    'endpointPhysicalDevicesDistinct': False, 'endpointDevicesSeparateFromRoot': False,
+                    'mountSwitchAdapterReviewed': False}}
+            def record(self, label, value): return value
+        candidate = {'source_sha': 'a' * 40, 'package_sha256': 'b' * 64,
+                     'package_url': 'https://example.invalid/rustfs.deb'}
+        with tempfile.TemporaryDirectory() as folder, patch.object(replacement_preflight, 'Fleet', ReadOnlyFleet):
+            summary = replacement_preflight.run_preflight(['vm000', 'vm001', 'vm002', 'vm003'],
+                Path(folder), '12345', '2', 'c' * 40, candidate)
+        self.assertEqual(summary['status'], 'INFRA_ERROR')
+        self.assertFalse(summary['replacementAdmissionBlocked'])
+        self.assertEqual(summary['infrastructureErrors'][0]['node'], 'vm002')
+
+    def test_b03_runner_preflight_precedes_bootstrap_and_package_activation(self):
+        source = (Path(__file__).parent / 'scripts/validation_heal/run_case.sh').read_text()
+        gate = source.index('replacement_preflight.py')
+        bootstrap = source.index('(bootstrap)')
+        package_activation = source.index('package_active=1', gate)
+        self.assertLess(gate, package_activation)
+        self.assertLess(package_activation, bootstrap)
+        for status in ('BLOCKED', 'INFRA_ERROR'):
+            self.assertLess(source.index('preflight_status}" = ' + status, gate), package_activation)
+        self.assertIn('--predeployment-blocked', source[gate:bootstrap])
 
     def runtime_command(self, *, units='', listeners='', state=None):
         state = state or 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\n'

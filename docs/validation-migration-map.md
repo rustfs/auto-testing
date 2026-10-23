@@ -151,14 +151,19 @@ to a blank mount, let the candidate obtain a new lease and initialize it before
 the manual token, while keeping the old archive unreadable to the service. A
 bind mount may be used only if the adapter proves this full lease switch and
 all candidate device-identity checks; a bind mount by itself is not evidence.
-The executor now runs a read-only `replacement-admission-preflight` before
-the normal parent-mount preflight, package-backed reservation, service start,
-or fixture seed. It records each endpoint's exact mountpoint, mount ID,
+The Functional Chain now runs a read-only `replacement-admission-preflight`
+before `stop_existing`, candidate package download/install, the normal
+parent-mount preflight, reservation, service start, or fixture seed. It
+inspects all H1/H2 endpoints and records each exact mountpoint, mount ID,
 filesystem identity, nearest existing ancestor, physical-device IDs and
-root/sibling overlap; it also records whether a reviewed mount-switch adapter
-is registered. The current runner reports ordinary run directories and no
-adapter, so B03 is stopped as `BLOCKED` with cleanup evidence before any
-90-second format wait. Once an adapter is installed and independently
+root/sibling overlap, along with whether a reviewed mount-switch adapter is
+registered. If admission is unavailable, the result is `BLOCKED` with
+candidate package and client provenance, `binary_sha256: null`, and an
+explicit `NOT_REQUIRED_NO_MUTATION` cleanup disposition; the existing RustFS
+package and service remain untouched. If admission passes, `Fleet.deploy()`
+repeats the read-only check immediately before reservation. The current runner
+reports ordinary run directories and no adapter, so B03 stops before bootstrap
+and any 90-second format wait. Once an adapter is installed and independently
 reviewed, the gate must pass before recording mount identities before and
 after replacement and rerunning the full H1/H2 DB/DV matrix. The source oracle
 and prior FAIL evidence remain unchanged.

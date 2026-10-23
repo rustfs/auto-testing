@@ -177,7 +177,7 @@ test "${status}:${state}" = "1:"' || failed=1
 }
 
 bootstrap_rc=0 case_rc=0 cleanup_status=PASS binary_sha=""
-package_active=1
+package_active=0
 on_exit() {
   local exit_code=$?
   trap - EXIT
@@ -189,6 +189,41 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [ "${case_id}" = heal.disk-replacement-formatted ]; then
+  preflight_rc=0
+  python3 -B "${ROOT}/scripts/validation_heal/replacement_preflight.py" \
+    --candidate "${candidate}" --testing-commit "${testing_commit}" --evidence "${evidence}" \
+    > "${evidence}/predeployment-preflight.log" 2>&1 || preflight_rc=$?
+  cat "${evidence}/predeployment-preflight.log"
+  if [ "${preflight_rc}" -ne 0 ]; then
+    python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+      --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status PASS \
+      --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
+      --evidence "evidence/${case_id}/predeployment-preflight.log" \
+      --reason "B03 read-only predeployment admission could not complete; package and service state were left untouched"
+    exit 1
+  fi
+  preflight_status="$(jq -er '.status' "${evidence}/healthy-summary.json")"
+  if [ "${preflight_status}" = BLOCKED ]; then
+    python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+      --result-file "${artifacts}/cases/${case_id}.json" --verdict BLOCKED --cleanup-status PASS \
+      --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
+      --predeployment-blocked --evidence "evidence/${case_id}/predeployment-preflight.log" \
+      --evidence "evidence/${case_id}/healthy-summary.json" \
+      --reason "B03 exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; the read-only preflight stopped before service or package changes"
+    exit 1
+  elif [ "${preflight_status}" = INFRA_ERROR ]; then
+    python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+      --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status PASS \
+      --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
+      --evidence "evidence/${case_id}/healthy-summary.json" \
+      --reason "B03 read-only admission returned incomplete node evidence; package and service state were left untouched"
+    exit 1
+  elif [ "${preflight_status}" != ADMITTED ]; then
+    die "B03 predeployment admission returned an unknown status: ${preflight_status}"
+  fi
+fi
+package_active=1
 (bootstrap) > "${evidence}/setup.log" 2>&1 || bootstrap_rc=$?
 cat "${evidence}/setup.log"
 if [ "${bootstrap_rc}" -eq 0 ]; then
