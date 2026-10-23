@@ -3513,6 +3513,34 @@ class HealDiskLossTest(unittest.TestCase):
             self.assertTrue(proof["allDegradedACKTargetPartsCreated"])
             self.assertFalse(proof["backupRestorationUsed"])
 
+    def test_repaired_protected_ack_requires_one_exact_target_integrity_sidecar(self):
+        original, authority, repaired, bucket, target, new, _ = self.scene()
+        for scene in (authority, repaired):
+            for value in scene.values():
+                for item in value["files"]:
+                    metadata = item.get("metadata", {})
+                    if metadata.get("key") == new[0]["key"]:
+                        metadata["versions"][0]["parts"][0]["integrityDescriptorPresent"] = True
+        witness = disk_loss.authority_witness(original, authority, bucket, target, new)
+        cohort = map_target(repaired, bucket, new[0]["key"], "data", 1)
+        member = next(shard for shard in cohort["cohort"] if shard["node"] == target["node"] and shard["disk"] == target["disk"])
+        sidecar = {"disk": target["disk"], "path": member["relativePath"] + ".integrity.12345678-1234-1234-1234-123456789abc",
+                   "size": 1408, "sha256": "actual-sidecar-hash"}
+        repaired[target["node"]]["files"].append(sidecar)
+        disk_loss.repaired_physical(authority, repaired, bucket, target, new, witness)
+        for kind in ("missing", "duplicate", "foreign-generation", "nil", "empty", "oversize", "different-member"):
+            changed = copy.deepcopy(repaired)
+            row = changed[target["node"]]["files"][-1]
+            if kind == "missing": changed[target["node"]]["files"].pop()
+            elif kind == "duplicate": changed[target["node"]]["files"].append({**row, "path": row["path"][:-1] + "d"})
+            elif kind == "foreign-generation": row["path"] = row["path"].replace(cohort["dataDir"], "other")
+            elif kind == "nil": row["path"] = member["relativePath"] + ".integrity.00000000-0000-0000-0000-000000000000"
+            elif kind == "empty": row["size"] = 0
+            elif kind == "oversize": row["size"] = 65537
+            else: row["disk"] = (target["disk"] + 1) % 4
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                disk_loss.repaired_physical(authority, changed, bucket, target, new, witness)
+
     def test_offline_ack_authority_rejects_target_writes_loss_of_controls_and_donor_versions(self):
         original, authority, repaired, bucket, target, new, witness = self.scene()
         for kind in ("offline-write", "control", "donor-version", "format", "outside"):

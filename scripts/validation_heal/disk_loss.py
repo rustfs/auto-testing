@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import time
+import uuid
 
 try:
     from .heal_probe import Probe, canonical, compare_inventories, payload, require
@@ -175,6 +176,16 @@ def repaired_physical(authority, after, bucket, target, new, witness):
         require(shard["diskUUID"] == target["diskUUID"] and shard["setSlot"] == target["setSlot"],
                 "repair used a replacement disk or different member slot")
         allowed.update((part, metadata)); cohorts.append(cohort)
+        protected = cohort["logical"]["parts"][0].get("integrityDescriptorPresent") is True
+        sidecars = [identity for identity in right if identity[:2] == member
+                    and identity[2].startswith(part[2] + ".integrity.")]
+        require(len(sidecars) == int(protected), "rejoined protected part has missing or ambiguous integrity sidecars")
+        for identity in sidecars:
+            generation = identity[2].removeprefix(part[2] + ".integrity.")
+            require(str(uuid.UUID(generation)) == generation and uuid.UUID(generation).int != 0
+                    and 0 < right[identity]["size"] <= 65536,
+                    "rejoined integrity sidecar has an invalid generation or size")
+            allowed.add(identity)
     require(set(right) - set(left) == allowed, "repair created unexpected or missing files outside the original member's ACKs")
     return cohorts, {"sameDiskUUIDAndSetSlot": True, "allDegradedACKTargetPartsCreated": True,
         "originalAndOnlineShardBytesUnchanged": True, "backupRestorationUsed": False,
