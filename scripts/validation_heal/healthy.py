@@ -37,11 +37,11 @@ BASE_OPTIONS = {"recursive": False, "remove": False, "recreate": False, "scanMod
 
 
 class ReplacementAdmissionBlocked(ValueError):
-    """B03 cannot start until the actual endpoint mounts pass candidate admission."""
+    """Replacement cases cannot start until endpoint mounts pass admission."""
 
     def __init__(self, evidence):
         self.evidence = evidence
-        super().__init__("B03 replacement mount admission preflight failed; deployment and fixture seed were skipped")
+        super().__init__("replacement mount admission preflight failed; deployment and fixture seed were skipped")
 
 
 def validate_rejection(observed, expected_code):

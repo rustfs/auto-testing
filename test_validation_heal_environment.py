@@ -165,6 +165,32 @@ class EnvironmentTests(unittest.TestCase):
         self.assertFalse(summary['replacementAdmissionBlocked'])
         self.assertEqual(summary['infrastructureErrors'][0]['node'], 'vm002')
 
+    def test_b04_reuses_replacement_admission_summary_without_claiming_mutation(self):
+        class ReadOnlyFleet:
+            def __init__(self, nodes, evidence, run_id):
+                self.nodes, self.evidence = nodes, evidence
+                self.evidence.mkdir(parents=True, exist_ok=True)
+            def remote(self, node, action):
+                return {'readOnly': True, 'mutated': False, 'canonicalPassClaimed': False,
+                        'admitted': False, 'checks': {
+                            'exactEndpointMounts': False, 'mountIdsPresent': False,
+                            'filesystemIdentitiesDistinct': False,
+                            'endpointPhysicalDevicesDistinct': True,
+                            'endpointDevicesSeparateFromRoot': True,
+                            'mountSwitchAdapterReviewed': False}}
+            def record(self, label, value): return value
+        candidate = {'source_sha': 'a' * 40, 'package_sha256': 'b' * 64,
+                     'package_url': 'https://example.invalid/rustfs.deb'}
+        with tempfile.TemporaryDirectory() as folder, patch.object(replacement_preflight, 'Fleet', ReadOnlyFleet):
+            summary = replacement_preflight.run_preflight(['vm000', 'vm001', 'vm002', 'vm003'],
+                Path(folder), '12345', '2', 'c' * 40, candidate,
+                'heal.disk-replacement-unformatted')
+        self.assertEqual(summary['caseId'], 'heal.disk-replacement-unformatted')
+        self.assertEqual(summary['status'], 'BLOCKED')
+        self.assertTrue(summary['replacementAdmissionBlocked'])
+        self.assertFalse(summary['mutationStarted'])
+        self.assertEqual(summary['cleanupDisposition'], 'NOT_REQUIRED_NO_MUTATION')
+
     def test_b03_runner_preflight_precedes_bootstrap_and_package_activation(self):
         source = (Path(__file__).parent / 'scripts/validation_heal/run_case.sh').read_text()
         gate = source.index('replacement_preflight.py')
@@ -185,6 +211,16 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn('preflight_relative="${preflight_file#${artifacts}/}"', preflight)
         self.assertIn('--predeployment-blocked "${preflight_evidence_args[@]}"', preflight)
         self.assertIn('"${preflight_evidence_args[@]}"', preflight)
+
+    def test_b04_runner_and_executor_use_the_same_replacement_admission_contract(self):
+        source = (Path(__file__).parent / 'scripts/validation_heal/run_case.sh').read_text()
+        gate = source.index('replacement_preflight.py')
+        bootstrap = source.index('(bootstrap)')
+        self.assertIn('heal.disk-replacement-unformatted) driver=unformatted.py; replacement_admission_gate=1', source)
+        self.assertIn('--case-id "${case_id}"', source[gate:bootstrap])
+        self.assertLess(gate, bootstrap)
+        executor = (Path(__file__).parent / 'scripts/validation_heal/unformatted.py').read_text()
+        self.assertIn('require_replacement_admission=True', executor)
 
     def runtime_command(self, *, units='', listeners='', state=None):
         state = state or 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\n'

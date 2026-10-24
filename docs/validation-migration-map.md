@@ -188,6 +188,14 @@ This is verified BLOCKED evidence only: it adds no canonical PASS and does
 not replace the retained B03 live failures. The next valid B03 attempt still
 depends on installing and reviewing the mount-switch adapter.
 
+B04 `heal.disk-replacement-unformatted` now uses the same replacement
+admission contract. Its runner checks H1/H2 exact endpoint mounts before
+stopping any service or installing the candidate, and its executor repeats
+the read-only admission immediately before reservation. If the current
+ordinary-directory layout remains in place, B04 is recorded as `BLOCKED`
+with `binary_sha256=null`, `cleanup=PASS`, and
+`NOT_REQUIRED_NO_MUTATION`; no blank or foreign-format fixture is created.
+
 B05 acceptance uses candidate `7ed6c9320db491c84b54e8232152d7b1282c1b3f`, helper `76dbf7029e82c1e3878c9160090804d4afc38078`, package `39827676705/1` and tools `39841369555/1`. The complete official ZIP digest is `4eb3405af1f47583cd7c2d8e5b9ce9fa6910b76665df529d7dfbe4f1399a20d8`. Independent recomputation covers seed ACKs, full versions/markers, the actual 2+2 and 12+4 role/loss matrices, every endpoint's full online membership before each required boundary, sequential faults, one unique START/token per instance, two identical terminal outcome queries, strict integer scope, exact repaired/healthy responsibility, all physical shard and bitrot proofs, complete S3/HEAD/Range evidence before finalization, ten private-node cleanups and four package purges. No backup restoration was used. Original failure `38200772548` remains unchanged; its vm001 offline root cause is not established by the later pass.
 
 E04 live [39842352595/1](https://github.com/rustfs/rustfs/actions/runs/39842352595) retains FAIL/cleanup PASS. All 1,402 official files, three H1 branches and five node cleanups were independently verified. H2's healthy Scanner task completed on vm002 while the exact node3 token query was forwarded to vm000 and returned notFound. RustFS commit `553be4b4c62ae0c590e82f91817bc018bdfdc660` lets authenticated original local automatic-task tokens return the source/path-bound in-memory snapshot; Admin/Internal/unknown/alias identities retain coordinator routing. Fixed candidate `9d90884c304dcfbf97057c263c6f2ee110230ce7` adds only that reviewed patch to `7ed6c932`, with unchanged Cargo.lock. Package [39851206784/1](https://github.com/rustfs/rustfs/actions/runs/39851206784) and matching tools [39860218641/1](https://github.com/rustfs/rustfs/actions/runs/39860218641) passed independent complete provenance and byte audits.

@@ -423,7 +423,7 @@ def _replacement_mount_identity(path):
 
 
 def replacement_admission_preflight(request):
-    """Read-only B03 admission proof; fail closed before service start or seed."""
+    """Read-only replacement admission proof; fail closed before service start or seed."""
     require(set(request) == {"runId", "action"}, "replacement admission accepts no paths or mutation options")
     _, roots = paths(request["runId"])
     endpoints = [_replacement_mount_identity(root / "data") for root in roots]
@@ -460,7 +460,7 @@ def replacement_admission_preflight(request):
         "reason": None,
     }
     if not result["admitted"]:
-        result["reason"] = "B03 requires exact endpoint mount leases and a reviewed mount-switch adapter; run endpoints are ordinary directories"
+        result["reason"] = "replacement cases require exact endpoint mount leases and a reviewed mount-switch adapter; run endpoints are ordinary directories"
     return result
 
 

@@ -243,6 +243,15 @@ class ResultWriterTest(unittest.TestCase):
             invalid = subprocess.run(invalid_command, capture_output=True)
             self.assertNotEqual(invalid.returncode, 0)
 
+            b04 = root / "b04.json"
+            b04_command = command.copy()
+            b04_command[b04_command.index("--case-id") + 1] = "heal.disk-replacement-unformatted"
+            b04_command[b04_command.index("--result-file") + 1] = str(b04)
+            subprocess.run(b04_command, check=True, capture_output=True)
+            b04_value = json.loads(b04.read_text(encoding="utf-8"))
+            self.assertEqual(b04_value["case_id"], "heal.disk-replacement-unformatted")
+            self.assertIsNone(b04_value["provenance"]["binary_sha256"])
+
 
 if __name__ == "__main__":
     unittest.main()

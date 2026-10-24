@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run B03's read-only endpoint admission check before package/service changes."""
+"""Run the replacement cases' read-only endpoint admission check before changes."""
 
 from __future__ import annotations
 
@@ -32,19 +32,28 @@ def checked_identity(value: object) -> bool:
             and type(value.get("admitted")) is bool)
 
 
+REPLACEMENT_CASES = {
+    "heal.disk-replacement-formatted",
+    "heal.disk-replacement-unformatted",
+}
+
+
 def run_preflight(nodes: list[str], evidence: Path, workflow_run_id: str, attempt: str,
-                  testing_commit: str, candidate: dict) -> dict:
+                  testing_commit: str, candidate: dict,
+                  case_id: str = "heal.disk-replacement-formatted") -> dict:
+    if case_id not in REPLACEMENT_CASES:
+        raise ValueError(f"unsupported replacement admission case: {case_id}")
     if not re.fullmatch(r"[1-9][0-9]*", workflow_run_id) or not re.fullmatch(r"[1-9][0-9]*", attempt):
-        raise ValueError("B03 preflight requires the immutable workflow run and attempt")
+        raise ValueError("replacement preflight requires the immutable workflow run and attempt")
     if not re.fullmatch(r"[0-9a-f]{40}", testing_commit):
-        raise ValueError("B03 preflight requires the exact auto-testing commit")
+        raise ValueError("replacement preflight requires the exact auto-testing commit")
     if (not re.fullmatch(r"[0-9a-f]{40}", str(candidate.get("source_sha", "")))
             or not re.fullmatch(r"[0-9a-f]{64}", str(candidate.get("package_sha256", "")))
             or not isinstance(candidate.get("package_url"), str) or not candidate["package_url"]):
-        raise ValueError("B03 preflight candidate package provenance is incomplete")
+        raise ValueError("replacement preflight candidate package provenance is incomplete")
     if len(nodes) != 4 or len(set(nodes)) != 4 or any(
             not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node) for node in nodes):
-        raise ValueError("B03 preflight requires the four current auto-testing Heal nodes")
+        raise ValueError("replacement preflight requires the four current auto-testing Heal nodes")
 
     results = []
     infrastructure_errors = []
@@ -83,7 +92,7 @@ def run_preflight(nodes: list[str], evidence: Path, workflow_run_id: str, attemp
     status = "INFRA_ERROR" if infrastructure_errors else "BLOCKED" if blocked else "ADMITTED"
     summary = {
         "schemaVersion": 1,
-        "caseId": "heal.disk-replacement-formatted",
+        "caseId": case_id,
         "status": status,
         "executionStage": "pre-deployment",
         "workflowRunId": int(workflow_run_id),
@@ -109,6 +118,8 @@ def run_preflight(nodes: list[str], evidence: Path, workflow_run_id: str, attemp
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--case-id", choices=sorted(REPLACEMENT_CASES),
+                        default="heal.disk-replacement-formatted")
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--testing-commit", required=True)
     parser.add_argument("--evidence", type=Path, required=True)
@@ -117,7 +128,8 @@ def main() -> int:
         nodes = os.environ.get("RUSTFS_NODES", "vm000 vm001 vm002 vm003").split()
         candidate = json.loads(args.candidate.read_text(encoding="utf-8"))
         summary = run_preflight(nodes, args.evidence, os.environ.get("GITHUB_RUN_ID", ""),
-            os.environ.get("GITHUB_RUN_ATTEMPT", "1"), args.testing_commit, candidate)
+            os.environ.get("GITHUB_RUN_ATTEMPT", "1"), args.testing_commit, candidate,
+            args.case_id)
         print(json.dumps({"status": summary["status"], "mutationStarted": False,
                           "replacementAdmissionBlocked": summary["replacementAdmissionBlocked"]}, sort_keys=True))
         return 0

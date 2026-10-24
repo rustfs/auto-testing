@@ -7,6 +7,7 @@ ASSUME_YES=1
 candidate="" testing_commit="" artifacts="" case_id=""
 driver=healthy.py
 environment_gate=0
+replacement_admission_gate=0
 i05_args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -39,7 +40,8 @@ case "${case_id}" in
   heal.admin-option-contract) driver=options.py ;;
   heal.queue-pressure-and-admission) driver=queue_pressure.py ;;
   heal.bucket-metadata-integrity) driver=bucket_metadata.py ;;
-  heal.disk-replacement-unformatted) driver=unformatted.py ;;
+  heal.disk-replacement-unformatted) driver=unformatted.py; replacement_admission_gate=1 ;;
+  heal.disk-replacement-formatted) driver=versions.py; replacement_admission_gate=1 ;;
   heal.below-write-quorum) driver=write_quorum.py ;;
   heal.foreign-format-and-unknown-schema) driver=schema.py ;;
   heal.encrypted-objects) driver=encrypted.py ;;
@@ -55,7 +57,7 @@ case "${case_id}" in
   heal.mixed-version-upgrade-rollback|heal.dedicated-host-forced-restart|heal.race-ilm-expiry-and-transition|heal.race-replication-resync|heal.with-expansion-rebalance|heal.with-rebalance-stop-resume|heal.with-decommission|heal.with-decommission-cancel-clear|heal.after-retired-pool-removal|heal.ec84-multi-set-restart|heal.slow-io-and-eio|heal.kms-and-tier-outage|heal.long-soak)
     driver=environment_gate.py; environment_gate=1 ;;
   heal.read-quorum-boundary) driver=quorum_boundary.py ;;
-  heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null|heal.below-read-quorum|heal.missing-or-corrupt-xlmeta|heal.object-metadata-and-tags|heal.multiple-shard-loss|heal.special-keys-and-pagination|heal.object-size-boundaries|heal.object-lock-retention|heal.metadata-payload-mismatch|heal.read-repair-attribution|heal.disk-readonly-and-permission|heal.scanner-cold-object-repair|heal.delete-marker-semantics|heal.stale-version-rejoin|heal.disk-loss-and-repair|heal.disk-replacement-formatted|heal.replacement-auto-rebuild|heal.target-graceful-restart|heal.target-process-crash) driver=versions.py ;;
+  heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null|heal.below-read-quorum|heal.missing-or-corrupt-xlmeta|heal.object-metadata-and-tags|heal.multiple-shard-loss|heal.special-keys-and-pagination|heal.object-size-boundaries|heal.object-lock-retention|heal.metadata-payload-mismatch|heal.read-repair-attribution|heal.disk-readonly-and-permission|heal.scanner-cold-object-repair|heal.delete-marker-semantics|heal.stale-version-rejoin|heal.disk-loss-and-repair|heal.replacement-auto-rebuild|heal.target-graceful-restart|heal.target-process-crash) driver=versions.py ;;
   heal.admin-token-cross-node-status|heal.admin-dry-run|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.range-head-and-conditions|heal.manual-normal-attribution|heal.manual-deep-attribution)
     driver=shards.py ;;
   *) die "automatic Heal executor is not migrated: ${case_id}" ;;
@@ -189,10 +191,10 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [ "${case_id}" = heal.disk-replacement-formatted ]; then
+if [ "${replacement_admission_gate}" -eq 1 ]; then
   preflight_rc=0
   python3 -B "${ROOT}/scripts/validation_heal/replacement_preflight.py" \
-    --candidate "${candidate}" --testing-commit "${testing_commit}" --evidence "${evidence}" \
+    --case-id "${case_id}" --candidate "${candidate}" --testing-commit "${testing_commit}" --evidence "${evidence}" \
     > "${evidence}/predeployment-preflight.log" 2>&1 || preflight_rc=$?
   cat "${evidence}/predeployment-preflight.log"
   if [ "${preflight_rc}" -ne 0 ]; then
@@ -200,7 +202,7 @@ if [ "${case_id}" = heal.disk-replacement-formatted ]; then
       --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status PASS \
       --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
       --evidence "evidence/${case_id}/predeployment-preflight.log" \
-      --reason "B03 read-only predeployment admission could not complete; package and service state were left untouched"
+      --reason "${case_id} read-only predeployment admission could not complete; package and service state were left untouched"
     exit 1
   fi
   preflight_evidence_args=(
@@ -218,17 +220,17 @@ if [ "${case_id}" = heal.disk-replacement-formatted ]; then
       --result-file "${artifacts}/cases/${case_id}.json" --verdict BLOCKED --cleanup-status PASS \
       --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
       --predeployment-blocked "${preflight_evidence_args[@]}" \
-      --reason "B03 exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; the read-only preflight stopped before service or package changes"
+      --reason "${case_id} exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; the read-only preflight stopped before service or package changes"
     exit 1
   elif [ "${preflight_status}" = INFRA_ERROR ]; then
     python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
       --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status PASS \
       --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
       "${preflight_evidence_args[@]}" \
-      --reason "B03 read-only admission returned incomplete node evidence; package and service state were left untouched"
+      --reason "${case_id} read-only admission returned incomplete node evidence; package and service state were left untouched"
     exit 1
   elif [ "${preflight_status}" != ADMITTED ]; then
-    die "B03 predeployment admission returned an unknown status: ${preflight_status}"
+    die "${case_id} predeployment admission returned an unknown status: ${preflight_status}"
   fi
 fi
 package_active=1
@@ -268,10 +270,10 @@ if [ "${case_rc}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
 elif [ "${case_rc}" -eq 0 ]; then
   verdict=INFRA_ERROR; reason="Heal environment finalization failed"
 fi
-if [ "${case_id}" = heal.disk-replacement-formatted ] && [ "${cleanup_status}" = PASS ] && \
+if [ "${replacement_admission_gate}" -eq 1 ] && [ "${cleanup_status}" = PASS ] && \
    jq -e '.replacementAdmissionBlocked == true and .complete == false and .canonicalPassClaimed != true' \
      "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
-  verdict=BLOCKED; reason="B03 exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; preflight stopped before deployment and fixture seed"
+  verdict=BLOCKED; reason="${case_id} exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; preflight stopped before deployment and fixture seed"
 fi
 if [ "${case_id}" = heal.bucket-incarnation-recreation ] && [ "${cleanup_status}" = PASS ] && \
    jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \

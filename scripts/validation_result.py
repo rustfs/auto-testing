@@ -50,8 +50,11 @@ def main() -> int:
                         help="record a BLOCKED result before any candidate package was installed")
     args = parser.parse_args()
     if args.predeployment_blocked and (args.verdict != "BLOCKED"
-                                      or args.case_id != "heal.disk-replacement-formatted"):
-        parser.error("--predeployment-blocked is reserved for the B03 mount admission result")
+                                      or args.case_id not in {
+                                          "heal.disk-replacement-formatted",
+                                          "heal.disk-replacement-unformatted",
+                                      }):
+        parser.error("--predeployment-blocked is reserved for replacement admission results")
     catalog = json.loads(args.catalog.read_text(encoding="utf-8"))
     case = case_from_catalog(catalog, args.case_id)
     result = {
