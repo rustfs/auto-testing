@@ -134,7 +134,7 @@ def main() -> int:
                           "replacementAdmissionBlocked": summary["replacementAdmissionBlocked"]}, sort_keys=True))
         return 0
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        print(f"B03 pre-deployment preflight failed: {exc}", file=sys.stderr)
+        print(f"replacement pre-deployment preflight failed: {exc}", file=sys.stderr)
         return 1
 
 
