@@ -23,7 +23,7 @@ import time
 try:
     from .heal_probe import Probe, compare_inventories, require, save
     from .heal_workload import Recorder, seed, verify_seed
-    from .healthy import Fleet, physical_content, validate_topology
+    from .healthy import Fleet, ReplacementAdmissionBlocked, physical_content, validate_topology
     from .inspector import verify as verify_inspector
     from .matrix import select
     from .disk_loss import info_disks, member_state
@@ -32,7 +32,7 @@ try:
 except ImportError:
     from heal_probe import Probe, compare_inventories, require, save
     from heal_workload import Recorder, seed, verify_seed
-    from healthy import Fleet, physical_content, validate_topology
+    from healthy import Fleet, ReplacementAdmissionBlocked, physical_content, validate_topology
     from inspector import verify as verify_inspector
     from matrix import select
     from disk_loss import info_disks, member_state
@@ -230,6 +230,11 @@ def run_branch(args, topology, nodes, branch, foreign):
         fleet.stop()
         require(physical_content(rebuilt) == physical_content(fleet.snapshot("after-S3-physical", quiescent=True)), "S3 verification changed the proven physical result")
         result.update(verdict="PASS", all128ACKsPreserved=True, allPeerS3ManifestEqual=True, syntheticFormatOrUUIDUsed=False)
+    except ReplacementAdmissionBlocked as exc:
+        result.update(verdict="BLOCKED", replacementAdmissionBlocked=True,
+                      admissionEvidence=exc.evidence, deploymentSkipped=True,
+                      fixtureSeedSkipped=True,
+                      failure={"type": type(exc).__name__, "message": str(exc)})
     except (Exception, KeyboardInterrupt) as exc:
         result.update(verdict="FAIL", failure={"type": type(exc).__name__, "message": str(exc)})
         if fleet.reserved:
@@ -267,14 +272,26 @@ def main():
         for topology, selected in (("H1", nodes[:1]), ("H2", nodes[:4])):
             for branch in BRANCHES:
                 results.append(run_branch(args, topology, selected, branch, donor))
+                if results[-1].get("replacementAdmissionBlocked") is True:
+                    break
                 if results[-1]["cleanup"] != "PASS": break
-            if results[-1]["cleanup"] != "PASS": break
+            if (results[-1].get("replacementAdmissionBlocked") is True
+                    or results[-1]["cleanup"] != "PASS"): break
     except (Exception, KeyboardInterrupt) as exc:
         donor_error = {"type": type(exc).__name__, "message": str(exc)}
     finally:
         complete = len(results) == 4 and all(item["verdict"] == "PASS" and item["cleanup"] == "PASS" for item in results)
+        replacement_admission_blocked = (bool(results)
+            and any(item.get("replacementAdmissionBlocked") is True for item in results)
+            and all(item.get("cleanup") == "PASS" for item in results)
+            and donor_error is None)
         save(args.evidence / "healthy-summary.json", {"caseId": CASE_ID, "results": results, "donorFailure": donor_error,
-            "cleanup": "PASS" if results and all(item["cleanup"] == "PASS" for item in results) else "FAIL", "complete": complete})
+            "cleanup": "PASS" if results and all(item["cleanup"] == "PASS" for item in results) and donor_error is None else "FAIL",
+            "complete": complete, "replacementAdmissionBlocked": replacement_admission_blocked,
+            "canonicalPassClaimed": False})
+    if replacement_admission_blocked:
+        print("heal.disk-replacement-unformatted: BLOCKED before reservation or fixture seed by mount admission preflight")
+        return
     require(complete, "B04 requires both source branches on H1/H2, released foreign donor and complete cleanup")
 
 

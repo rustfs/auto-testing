@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -109,6 +110,45 @@ class UnformattedReplacementTests(unittest.TestCase):
     def test_both_source_branches_have_an_automatic_entry(self):
         self.assertEqual(select("B04")[0]["variants"], list(unformatted.BRANCHES))
         self.assertIn(unformatted.CASE_ID, AUTOMATIC_CASES)
+
+    def test_second_admission_block_is_blocked_and_does_not_seed_fixture(self):
+        class BlockedFleet:
+            instances = []
+            def __init__(self, *args, **kwargs):
+                self.reserved = []
+                self.records = []
+                self.instances.append(self)
+            def record(self, label, value):
+                self.records.append((label, value))
+                return value
+            def deploy(self, *args, **kwargs):
+                raise unformatted.ReplacementAdmissionBlocked({
+                    "vm000": {"admitted": False, "mutated": False, "readOnly": True}})
+            def cleanup(self): return True
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            candidate = root / "candidate.json"
+            candidate.write_text(json.dumps({"source_sha": "072b57b37559fbe626aeda8abf61617fdcbdd926",
+                "package_sha256": "b" * 64, "package_url": "https://example.invalid/rustfs.deb"}))
+            evidence = root / "evidence"
+            evidence.mkdir()
+            rc = root / "rc"
+            rc.write_bytes(b"rc")
+            args = SimpleNamespace(evidence=evidence, candidate=candidate, binary_sha="c" * 64,
+                testing_commit="d" * 40, tool_directory=root, rc_bin=rc)
+            with patch.dict("os.environ", {"GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1"}), \
+                    patch.object(unformatted, "Fleet", BlockedFleet), \
+                    patch.object(unformatted, "verify_inspector", return_value={"verified": True}):
+                result = unformatted.run_branch(args, "H1", ["vm000"], "blank-unformatted", None)
+        self.assertEqual(result["verdict"], "BLOCKED")
+        self.assertTrue(result["replacementAdmissionBlocked"])
+        self.assertTrue(result["deploymentSkipped"])
+        self.assertTrue(result["fixtureSeedSkipped"])
+        self.assertEqual(result["cleanup"], "PASS")
+        self.assertEqual(result["admissionEvidence"]["vm000"]["admitted"], False)
+        self.assertEqual(len(BlockedFleet.instances), 1)
+        self.assertEqual(BlockedFleet.instances[0].reserved, [])
+        self.assertFalse((evidence / "H1-blank-unformatted" / "fixture").exists())
 
 
 if __name__ == "__main__": unittest.main()
