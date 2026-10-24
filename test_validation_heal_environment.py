@@ -219,6 +219,8 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn('heal.disk-replacement-unformatted) driver=unformatted.py; replacement_admission_gate=1', source)
         self.assertIn('--case-id "${case_id}"', source[gate:bootstrap])
         self.assertLess(gate, bootstrap)
+        self.assertIn('replacement admission did not permit deployment or fixture seed', source)
+        self.assertIn('reservation-time recheck blocked the case', source)
         executor = (Path(__file__).parent / 'scripts/validation_heal/unformatted.py').read_text()
         self.assertIn('require_replacement_admission=True', executor)
 

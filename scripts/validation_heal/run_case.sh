@@ -273,7 +273,7 @@ fi
 if [ "${replacement_admission_gate:-0}" -eq 1 ] && [ "${cleanup_status}" = PASS ] && \
    jq -e '.replacementAdmissionBlocked == true and .complete == false and .canonicalPassClaimed != true' \
      "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
-  verdict=BLOCKED; reason="${case_id} exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; preflight stopped before deployment and fixture seed"
+  verdict=BLOCKED; reason="${case_id} replacement admission did not permit deployment or fixture seed; the read-only gate or the reservation-time recheck blocked the case"
 fi
 if [ "${case_id}" = heal.bucket-incarnation-recreation ] && [ "${cleanup_status}" = PASS ] && \
    jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
