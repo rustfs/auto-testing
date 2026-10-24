@@ -314,6 +314,12 @@ Source assertions:
 
 Topologies: H1,H2. Branches: blank-unformatted, foreign-format.
 
+The Functional Chain runs the shared read-only replacement admission gate
+before package/service changes and the executor repeats it before reservation.
+If exact endpoint mounts or the reviewed mount-switch adapter are unavailable,
+the case is recorded as pre-deployment `BLOCKED` without creating either
+the blank or foreign-format fixture.
+
 1. REPLACE 建没有 format 的空逻辑盘；记录空目录证据，启动并观察候选支持的安全初始化或明确拒绝。
 2. 第二实例使用同 run 的第二个隔离小集群生成外来 format，将其按 FORMAT_BAD 手册装入替换根，保留原始副本和所有 UUID。
 3. 外来身份不能被静默覆盖或挂到错误 set；若拒绝，等待有界 deadline 并确认其他正常盘数据不变。
