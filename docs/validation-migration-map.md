@@ -195,6 +195,11 @@ the read-only admission immediately before reservation. If the current
 ordinary-directory layout remains in place, B04 is recorded as `BLOCKED`
 with `binary_sha256=null`, `cleanup=PASS`, and
 `NOT_REQUIRED_NO_MUTATION`; no blank or foreign-format fixture is created.
+If the first gate passes but the reservation-time recheck observes environment
+drift, the executor records the same `BLOCKED` verdict while retaining the
+installed candidate provenance, skips reservation and fixture seeding, and
+finishes cleanup. That post-bootstrap block is distinct from the
+pre-deployment `NOT_REQUIRED_NO_MUTATION` result and cannot claim canonical PASS.
 
 B05 acceptance uses candidate `7ed6c9320db491c84b54e8232152d7b1282c1b3f`, helper `76dbf7029e82c1e3878c9160090804d4afc38078`, package `39827676705/1` and tools `39841369555/1`. The complete official ZIP digest is `4eb3405af1f47583cd7c2d8e5b9ce9fa6910b76665df529d7dfbe4f1399a20d8`. Independent recomputation covers seed ACKs, full versions/markers, the actual 2+2 and 12+4 role/loss matrices, every endpoint's full online membership before each required boundary, sequential faults, one unique START/token per instance, two identical terminal outcome queries, strict integer scope, exact repaired/healthy responsibility, all physical shard and bitrot proofs, complete S3/HEAD/Range evidence before finalization, ten private-node cleanups and four package purges. No backup restoration was used. Original failure `38200772548` remains unchanged; its vm001 offline root cause is not established by the later pass.
 
