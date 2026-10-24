@@ -270,7 +270,7 @@ if [ "${case_rc}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
 elif [ "${case_rc}" -eq 0 ]; then
   verdict=INFRA_ERROR; reason="Heal environment finalization failed"
 fi
-if [ "${replacement_admission_gate}" -eq 1 ] && [ "${cleanup_status}" = PASS ] && \
+if [ "${replacement_admission_gate:-0}" -eq 1 ] && [ "${cleanup_status}" = PASS ] && \
    jq -e '.replacementAdmissionBlocked == true and .complete == false and .canonicalPassClaimed != true' \
      "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
   verdict=BLOCKED; reason="${case_id} exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; preflight stopped before deployment and fixture seed"
