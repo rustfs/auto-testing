@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -34,6 +35,8 @@ try:
     from .race_native_evidence import verify as verify_native
     from .race_io import set_fleet as set_race_io_cap
     from .mpu_race_backups import verify_versions as verify_version_backups
+    from .status_keepalive import KeepAliveStatusProbe
+    from .fleet_node import endpoint_resolution
 except ImportError:
     from heal_probe import Probe, canonical, compare_inventories, payload, require, save
     from heal_workload import Recorder, seed as seed_workload, verify_seed
@@ -47,6 +50,8 @@ except ImportError:
     from race_native_evidence import verify as verify_native
     from race_io import set_fleet as set_race_io_cap
     from mpu_race_backups import verify_versions as verify_version_backups
+    from status_keepalive import KeepAliveStatusProbe
+    from fleet_node import endpoint_resolution
 
 
 CASE_IDS = ("heal.race-unversioned-overwrite", "heal.race-versioned-put", "heal.race-version-delete", "heal.race-markers-and-batch-delete", "heal.race-multipart-complete-abort", "heal.race-copy-and-metadata-update")
@@ -570,6 +575,31 @@ def observe(probe, fleet, path, token, reference=REFERENCE):
     return value
 
 
+def verify_endpoint_resolution(fleet):
+    """Fail before allocation/start if an existing fleet alias cannot resolve."""
+    request = {'runId': fleet.run_id, 'action': 'endpoint-resolution'}
+    runner = endpoint_resolution(request)
+    with ThreadPoolExecutor(max_workers=len(fleet.nodes)) as pool:
+        peers = dict(zip(fleet.nodes, pool.map(lambda node: fleet.remote(node, 'endpoint-resolution'), fleet.nodes), strict=True))
+    observed = fleet.record('endpoint-resolution', {'runner': runner, 'peers': peers})
+    for entry in [observed['runner'], *observed['peers'].values()]:
+        require(entry.get('readOnly') is True and entry.get('mutated') is False
+                and entry.get('resolved') is True,
+                'Heal endpoint name resolution failed before allocation/start; inspect endpoint-resolution evidence')
+
+
+@contextmanager
+def foreground_status_session(probe, fleet, branch, path, token):
+    if branch not in G06_BRANCHES:
+        yield
+        return
+    with probe.status_session(token, path) as transport:
+        try:
+            yield
+        finally:
+            fleet.record('G06-status-transport', transport)
+
+
 def wait_running(probe, fleet, path, token, total, reference=REFERENCE):
     deadline = time.monotonic() + 30
     while True:
@@ -662,6 +692,51 @@ def read_versions(recorder, ledger, lock, done):
     return proofs
 
 
+def read_unversioned(recorder, params, done):
+    """Retain every actual G01 GET request/ACK independently of the PUT worker."""
+    proofs = []
+    deadline = time.monotonic() + 90
+    for cycle in range(512):
+        if done.is_set() or time.monotonic() >= deadline:
+            break
+        recorder.call('get_object', params, identity={'readCycle': cycle})
+        proofs.append(json.loads((recorder.output / f'{recorder.sequence:06d}-ack.json').read_text()))
+        time.sleep(.01)
+    return proofs
+
+
+def verify_unversioned_reads(readers, baseline, plan, responses):
+    """A concurrent unversioned GET may see only one complete ACK-known generation."""
+    require(baseline is not None and len(plan) == len(responses) == 3 and len(readers) <= 512,
+            'G01 reader lacks its complete bounded original/foreground ACK model')
+    params = {'Bucket': plan[0]['params']['Bucket'], 'Key': plan[0]['params']['Key']}
+    originals = [entry for entry in baseline['entries'] if entry['key'] == params['Key']]
+    require(len(originals) == 1 and originals[0]['versionId'] == 'null'
+            and originals[0]['deleteMarker'] is False and originals[0]['isLatest'] is True,
+            'G01 reader lost its exact original unversioned generation')
+    known = [{'payload': originals[0]['payload'], 'properties': {
+        key: originals[0]['properties'][key] for key in ('ETag', 'ContentLength', 'ContentType', 'Metadata')}}]
+    for step, response in zip(plan, responses, strict=True):
+        body = payload(step['nonce'], SIZE)
+        require(step['operation'] == 'put_object' and step['params']['Bucket'] == params['Bucket']
+                and step['params']['Key'] == params['Key'] and response.get('ETag')
+                and response.get('VersionId') in {None, 'null'}, 'G01 reader has a foreign or unresolved PUT generation')
+        known.append({'payload': {'size': len(body), 'sha256': hashlib.sha256(body).hexdigest()},
+            'properties': {'ETag': response['ETag'], 'ContentLength': len(body),
+                'ContentType': step['params']['ContentType'], 'Metadata': step['params']['Metadata']}})
+    for ack in readers:
+        observed = ack.get('observation') or {}; response = observed.get('response') or {}
+        require(ack.get('operationCheck') == 'PASS' and observed.get('operation') == 'get_object'
+                and observed.get('params') == params and observed.get('acknowledged') is True
+                and observed.get('resultUnknown') is False and not observed.get('clientCleanupError')
+                and response.get('ResponseMetadata', {}).get('HTTPStatusCode') == 200
+                and response.get('VersionId') in {None, 'null'}
+                and any(observed.get('payload') == entry['payload']
+                    and all(response.get(key) == value for key, value in entry['properties'].items()) for entry in known),
+                'G01 read-repair GET lost its full ACK-known body or mixed generation properties')
+    return bool(readers)
+
+
 def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, baseline=None):
     samples = []
     dispatch_times = []
@@ -674,10 +749,15 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
     version_race = bool(plan and plan[0].get('branch') in G02_BRANCHES)
     done = threading.Event(); lock = threading.Lock()
     ledger = {'bucket': plan[0]['params']['Bucket'], 'entries': []}
+    read_recorder = None
+    if read_branch:
+        require(baseline is not None, 'concurrent reader needs its original complete S3 baseline')
     if version_reads:
-        require(baseline is not None, 'G02 historical reads need their complete original S3 baseline')
         ledger['entries'] = [copy.deepcopy(row) for row in baseline['entries'] if row['key'] == TARGET_KEY]
         require(len(ledger['entries']) == 3, 'G02 historical reader lacks three original ACK-known versions')
+    if read_branch:
+        read_recorder = Recorder(probe, recorder.output.parent / (
+            'historical-read-ACKs' if version_reads else 'read-repair-ACKs'))
     def committed(responses):
         added = version_put_entries(baseline, plan, responses)
         with lock:
@@ -692,23 +772,15 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
     with ThreadPoolExecutor(max_workers=2 if read_branch else 1) as pool:
         worker = pool.submit(writing)
         if version_reads:
-            read_recorder = Recorder(probe, recorder.output.parent / 'historical-read-ACKs')
             read_future = pool.submit(read_versions, read_recorder, ledger, lock, done)
         elif read_branch:
-            def read_repair():
-                deadline = time.monotonic() + 90
-                while not worker.done() and time.monotonic() < deadline:
-                    params = {"Bucket": plan[0]["params"]["Bucket"], "Key": plan[0]["params"]["Key"]}
-                    if plan[0].get("readVersionId"): params["VersionId"] = plan[0]["readVersionId"]
-                    observed = probe.s3("get_object", params)
-                    readers.append(observed)
-                    time.sleep(.01)
-            read_future = pool.submit(read_repair)
+            params = {'Bucket': plan[0]['params']['Bucket'], 'Key': plan[0]['params']['Key']}
+            read_future = pool.submit(read_unversioned, read_recorder, params, done)
         else:
             read_future = None
         deadline = time.monotonic() + (90 if version_race else 120)
         try:
-            while (not worker.done() or version_reads and read_future is not None and not read_future.done()) and time.monotonic() < deadline:
+            while (not worker.done() or read_branch and read_future is not None and not read_future.done()) and time.monotonic() < deadline:
                 if dispatch is not None:
                     try:
                         dispatch_times.append(dispatch.get(timeout=.05))
@@ -726,16 +798,15 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
             plan[0]["runtime"] = runtime
         if read_future is not None:
             value = read_future.result(timeout=60)
-            if version_reads:
-                readers = value
+            readers = value
     acks = [json.loads(path.read_text()) for path in sorted(recorder.output.glob("*-ack.json"))]
     require(len(acks) == len(plan) and all(row.get("operationCheck") == "PASS" for row in acks),
             "G01/G03 lacks every durable foreground ACK")
     overlaps = [any(sample_overlap(ack, sample, path, token, reference) for sample in samples) for ack in acks]
-    # The frozen G06 source fixes 16 tag writes and accepts one fully nested
-    # original-token sample among them; every write still needs its own ACK.
+    # The frozen controllers require one nested sample per workload role,
+    # while every serial mutation still needs its own durable ACK.
     tag_updates = bool(plan and plan[0].get('branch') == 'update-tags')
-    overlap_complete = any(overlaps) if tag_updates else all(overlaps)
+    overlap_complete = any(overlaps)
     if dispatch is not None:
         fleet.record('G06-request-dispatch-observation', {'requestSendMonotonicNs': dispatch_times,
             'statusSamples': len(samples), 'notificationScope': 'botocore before-send.s3; inside SDK call',
@@ -751,12 +822,22 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
         fleet.record('G02-historical-read-coverage', {'requiredVersionIds': sorted(required),
             'observedVersionIds': sorted(actual), 'complete': read_complete, 'readerCallOverlapObserved': reader_overlap,
             'allReadsBoundToDurableACKs': True, 'nativeFenceProved': False, 'canonicalCasePassClaimed': False})
+    elif read_branch:
+        read_complete = verify_unversioned_reads(readers, baseline, plan, responses)
+        reader_overlap = any(sample_overlap(ack, sample, path, token, reference) for ack in readers for sample in samples)
+        fleet.record('G01-read-repair-coverage', {'readCalls': len(readers), 'maxReadCalls': 512,
+            'complete': read_complete, 'readerCallOverlapObserved': reader_overlap,
+            'allReadsBoundToDurableACKs': True, 'fullACKKnownBodiesAndPropertiesVerified': read_complete,
+            'nativeFenceProved': False, 'canonicalCasePassClaimed': False})
     fleet.record("read-repair-overlap-proof", {"branch": plan[0].get("branch") if plan else None,
         "readCalls": len(readers), "allReadsObserved": bool(readers) if read_branch else True,
         "nativeFenceProved": False})
     fleet.record("public-call-overlap-proof", {"everyMutationOverlapped": all(overlaps), "mutations": overlaps,
-        "requiredCallOverlapObserved": overlap_complete,
-        "overlapRequirement": "at-least-one-of-frozen-16-tag-updates" if tag_updates else "every-mutation",
+        "writerCallOverlapObserved": overlap_complete,
+        "readerCallOverlapObserved": reader_overlap if read_branch else None,
+        "requiredCallOverlapObserved": overlap_complete and reader_overlap,
+        "allRequiredReadContentVerified": read_complete,
+        "overlapRequirement": "at-least-one-of-frozen-16-tag-updates" if tag_updates else "at-least-one-per-required-workload-role",
         "nativeFenceProved": False, "serverCommitOverlapProved": False})
     return responses, overlap_complete and read_complete and reader_overlap
 
@@ -799,12 +880,14 @@ def run_branch(args, topology, nodes, branch):
     current_target_key, current_reference_key = target_key(branch), reference_key(branch)
     fleet.record("source-contract", {**reference, "branch": branch, "objectCount": OBJECTS, "objectSize": SIZE,
         "requiredPUTs": 3 if branch in (*G01_BRANCHES, *G02_BRANCHES) else 0, "serverCommitOverlapProved": False})
-    probe, active, recorder, writer = Probe(binding), [], None, None
+    probe = KeepAliveStatusProbe(binding) if branch in G06_BRANCHES else Probe(binding)
+    active, recorder, writer = [], None, None
     result = {"topology": topology, "branch": branch,
               "fixture": "DL" if branch in G01_BRANCHES else "DS" if branch in G06_BRANCHES else "DV",
               "verdict": "RUNNING", "cleanup": "PENDING", "canonicalCasePassClaimed": False}
     changed_target_registered, target_authority = None, False
     try:
+        verify_endpoint_resolution(fleet)
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record("topology-proof", validate_topology(fleet.snapshot("deployed-topology"), topology))
         recorder = RaceRecorder(probe, directory / "seed-ACKs",
@@ -838,6 +921,7 @@ def run_branch(args, topology, nodes, branch):
                 expectedSha256=target["sha256"], kind="missing")}))
         faulted = fleet.snapshot("complete-fault-physical", quiescent=True)
         fleet.record("fault-batch-proof", validate_missing_batch(before, faulted, targets, receipts))
+        verify_endpoint_resolution(fleet)
         fleet.start()
         set_race_io_cap(fleet, args.case_id, branch, True, nodes=sorted({target['node'] for target in targets}))
         require(physical_content(faulted) == physical_content(fleet.snapshot("attribution-before-START")),
@@ -848,22 +932,20 @@ def run_branch(args, topology, nodes, branch):
         token = start.get("response", {}).get("clientToken") if isinstance(start.get("response"), dict) else None
         require(start.get("httpStatus") == 200 and isinstance(token, str) and token, "G01/G03 admission lacks an original token")
         active.append((path, token))
-        if branch in G02_BRANCHES:
-            witness = wait_version_window(probe, fleet, path, token, reference, before, targets, bucket)
-        else:
-            wait_running(probe, fleet, path, token, len(expected), reference)
-            witness = fleet.snapshot("target-missing-before-foreground")
-        target = next(target for target in targets if target["key"] == current_target_key)
-        if (target["node"], target["disk"], target["relativePath"]) in files(witness):
-            raise WindowNotObserved("G01/G03 old target already repaired before foreground mutations")
-        writer_probe = DispatchProbe(binding) if branch in G06_BRANCHES else probe
-        writer = RaceRecorder(writer_probe, directory / "foreground-ACKs",
-                              versioned=branch in (*G02_BRANCHES, *G03_BRANCHES))
-        writer.seen.update((row["key"], row["versionId"]) for row in expected)
-        if branch in G02_BRANCHES:
+        with foreground_status_session(probe, fleet, branch, path, token):
+            if branch in G02_BRANCHES:
+                witness = wait_version_window(probe, fleet, path, token, reference, before, targets, bucket)
+            else:
+                wait_running(probe, fleet, path, token, len(expected), reference)
+                witness = fleet.snapshot("target-missing-before-foreground")
+            target = next(target for target in targets if target["key"] == current_target_key)
+            if (target["node"], target["disk"], target["relativePath"]) in files(witness):
+                raise WindowNotObserved("G01/G03 old target already repaired before foreground mutations")
+            writer_probe = DispatchProbe(binding) if branch in G06_BRANCHES else probe
+            writer = RaceRecorder(writer_probe, directory / "foreground-ACKs",
+                                  versioned=branch in (*G02_BRANCHES, *G03_BRANCHES))
+            writer.seen.update((row["key"], row["versionId"]) for row in expected)
             responses, overlapped = race(writer, plan, probe, fleet, path, token, reference, baseline=baseline)
-        else:
-            responses, overlapped = race(writer, plan, probe, fleet, path, token, reference)
         set_race_io_cap(fleet, args.case_id, branch, False, nodes=sorted({target['node'] for target in targets}))
         final = fleet.record("ACK-derived-final-manifest", final_inventory(baseline, branch, plan, responses))
         terminal = wait_terminal(probe, fleet, path, token, reference)
@@ -895,6 +977,7 @@ def run_branch(args, topology, nodes, branch):
         fleet.record("obsolete-target-fault-retired", {"fault": changed_target_registered,
             "reason": "complete last-ACK physical authority proves the original generation obsolete",
             "oldBytesRestored": False, "backupRetainedUntilCleanup": True})
+        verify_endpoint_resolution(fleet)
         fleet.start()
         for endpoint in binding["endpoints"]:
             current = fleet.record("all-peer-final-S3", {"endpoint": endpoint, **Probe(binding, endpoint).inventory(
@@ -911,7 +994,7 @@ def run_branch(args, topology, nodes, branch):
         require(physical_content(after) == physical_content(fleet.snapshot("physical-after-S3", quiescent=True)),
                 "G01/G03 final GET changed the already-proven physical result")
         result["terminal"] = terminal_proof(terminal, bucket, baseline, final)
-        if not overlapped: raise WindowNotObserved("G01/G03 did not observe every required SDK call overlap")
+        if not overlapped: raise WindowNotObserved("race did not observe a nested SDK call for every required workload role")
         result.update(verdict="PASS", physical=physical, publicCallOverlapObserved=True,
                       nativeFenceProved=False, serverCommitOverlapProved=False)
     except (Exception, KeyboardInterrupt) as exc:

@@ -262,7 +262,7 @@ class RaceIoTests(unittest.TestCase):
                 probe.inventory.return_value = {'entries':expected}
                 def cap(f,c,b,enabled,*,nodes):
                     self.assertIs(f,fleet); self.assertEqual(nodes,['vm000']); trace.append('cap-on' if enabled else 'cap-off')
-                def foreground(*args): trace.append('foreground'); return [],False
+                def foreground(*args, **kwargs): trace.append('foreground'); return [],False
                 def terminal(*args): trace.append('terminal'); raise ReachedTerminalBoundary()
                 values = {'Fleet':Mock(return_value=fleet),'Probe':Mock(return_value=probe),'verify_inspector':Mock(return_value={}),
                           'validate_topology':Mock(),'seed_fixture':Mock(return_value=expected),'verify_seed':Mock(),
@@ -270,6 +270,7 @@ class RaceIoTests(unittest.TestCase):
                           'validate_missing_batch':Mock(),'wait_running':Mock(),'race':Mock(side_effect=foreground),
                           'final_inventory':Mock(return_value={'entries':expected}),
                           'wait_terminal':Mock(side_effect=terminal),'set_race_io_cap':Mock(side_effect=cap),'OBJECTS':3}
+                if driver is race: values['verify_endpoint_resolution'] = Mock()
                 for name,value in values.items(): stack.enter_context(patch.object(driver,name,value))
                 stack.enter_context(patch.dict(race.os.environ,{'GITHUB_RUN_ID':'12345','GITHUB_RUN_ATTEMPT':'1'}))
                 args = SimpleNamespace(evidence=root/'evidence',candidate=candidate,rc_bin=rc,tool_directory=root,

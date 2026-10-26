@@ -313,6 +313,7 @@ class VersionPutSourceTests(unittest.TestCase):
                         patch.object(race, 'Probe', return_value=probe), patch.object(race, 'validate_topology'), \
                         patch.object(race, 'seed_fixture', return_value=baseline['entries']), patch.object(race, 'verify_seed'), \
                         patch.object(race, 'map_fixture', return_value=mapped), patch.object(race, 'OBJECTS', 4), \
+                        patch.object(race, 'verify_endpoint_resolution'), \
                         patch.object(race, 'verify_part_manifest') as verify, \
                         patch.dict(race.os.environ, {'GITHUB_RUN_ID': '12345', 'GITHUB_RUN_ATTEMPT': '1'}):
                     # The actual binding selects a fresh bucket; its read-only
@@ -323,8 +324,9 @@ class VersionPutSourceTests(unittest.TestCase):
                     self.assertEqual(verify.call_args.kwargs['count'], len(mapped))
 
     def test_controller_requires_both_complete_six_version_reads_and_original_token_reader_overlap(self):
-        for complete, reader_overlap in ((True, True), (True, False), (False, True)):
-            with self.subTest(complete=complete, reader_overlap=reader_overlap), tempfile.TemporaryDirectory() as directory:
+        for complete, reader_overlap, writer_overlap in ((True, True, True), (True, False, True),
+                                                         (False, True, True), (True, True, False)):
+            with self.subTest(complete=complete, reader_overlap=reader_overlap, writer_overlap=writer_overlap), tempfile.TemporaryDirectory() as directory:
                 baseline = self.baseline(); branch = race.G02_BRANCHES[1]
                 plan = race.operation_plan(self.bucket, branch, baseline['entries'])
                 for step in plan: step['branch'] = branch
@@ -351,12 +353,13 @@ class VersionPutSourceTests(unittest.TestCase):
                 probe = SimpleNamespace(binding={'runId': 'gh-12345-1-h1', 'bucketPrefix': self.bucket,
                                                   'maxInventoryBytes': 512 * 1024**2})
                 def overlap(ack, *args):
-                    return ack['observation']['operation'] == 'put_object' or reader_overlap
+                    return (writer_overlap and ack['observation']['params']['Metadata']['nonce'] == '1'
+                            if ack['observation']['operation'] == 'put_object' else reader_overlap)
                 with patch.object(race, 'observe', side_effect=observe), patch.object(race, 'read_versions', side_effect=read), \
                         patch.object(race, 'sample_overlap', side_effect=overlap):
                     responses, accepted = race.race(writer, plan, probe, fleet, '/original/path', 'original-token', baseline=baseline)
                 self.assertEqual(len(responses), 3)
-                self.assertEqual(accepted, complete and reader_overlap)
+                self.assertEqual(accepted, complete and reader_overlap and writer_overlap)
                 self.assertEqual(records['G02-historical-read-coverage']['complete'], complete)
                 self.assertEqual(records['G02-historical-read-coverage']['readerCallOverlapObserved'], reader_overlap)
 

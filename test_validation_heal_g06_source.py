@@ -16,10 +16,11 @@ from scripts.validation_heal import race
 
 
 class G06DispatchTests(unittest.TestCase):
-    def server(self, *, summary='running', hold_copy=True, first_only=False):
+    def server(self, *, summary='running', hold_copy=True, first_only=False, allow_warmup=False):
         copy_seen, sampled = threading.Event(), threading.Event()
         failures, calls = [], [0]
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
             def log_message(self, *args):
                 pass
             def reply(self, raw, kind):
@@ -34,7 +35,8 @@ class G06DispatchTests(unittest.TestCase):
                 self.reply(b'' if '?tagging' in self.path else
                     b'<CopyObjectResult><ETag>"copy-ack"</ETag><LastModified>2026-10-26T00:00:00Z</LastModified></CopyObjectResult>', 'application/xml')
             def do_POST(self):
-                if not copy_seen.wait(3): failures.append('Admin request preceded an actual COPY')
+                if not (allow_warmup and calls[0] == 0) and not copy_seen.wait(3):
+                    failures.append('Admin request preceded an actual COPY')
                 state = summary if not first_only or calls[0] == 1 else 'finished'
                 self.reply(json.dumps({'summary': state, 'settings': race.COPY_REFERENCE['effective'],
                     'outcome': {'counters': {'processed': 1}}}).encode(), 'application/json')
@@ -48,6 +50,46 @@ class G06DispatchTests(unittest.TestCase):
             'candidatePackageSha256': '3' * 64, 'candidateBinarySha256': '4' * 64, 'rcBinarySha256': '5' * 64,
             'maxInventoryObjects': 512, 'maxInventoryBytes': 512 * 1024**2}
         return binding, sampled, failures
+
+    def test_g06_reuses_the_original_status_connection_without_changing_sdk_intervals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binding, sampled, failures = self.server(allow_warmup=True)
+            admin_probe = race.KeepAliveStatusProbe(binding, credential_pair=('test-access', 'test-secret'))
+            writer = race.RaceRecorder(race.DispatchProbe(binding, credential_pair=('test-access', 'test-secret')),
+                                      Path(directory) / 'foreground-ACKs', versioned=False)
+            plan = race.operation_plan(binding['bucketPrefix'], 'copy-source', [])
+            plan[0]['branch'] = 'copy-source'
+            path, token = '/rustfs/admin/v3/heal/' + binding['bucketPrefix'], str(uuid.uuid4())
+            records = {}; fleet = SimpleNamespace(record=lambda label, value: records.setdefault(label, value))
+            with race.foreground_status_session(admin_probe, fleet, 'copy-source', path, token):
+                warm = admin_probe.admin(path, [('clientToken', token)], b'')
+                original = admin_probe.admin
+                def admin(*args):
+                    result = original(*args); sampled.set(); return result
+                admin_probe.admin = admin
+                _, accepted = race.race(writer, plan, admin_probe, fleet, path, token, race.COPY_REFERENCE)
+            self.assertTrue(accepted)
+            self.assertFalse(failures)
+            state = records['G06-status-transport']
+            self.assertIsNone(admin_probe._status)
+            self.assertEqual((state['requests'], state['connectionsOpened']), (2, 1))
+            first, second = state['observations']
+            self.assertEqual(first['transport']['connectionId'], second['transport']['connectionId'])
+            self.assertFalse(second['transport']['newConnection'])
+            ack = json.loads(next(writer.output.glob('*-ack.json')).read_text())
+            self.assertLess(warm['callFinishedMonotonicNs'], ack['observation']['callStartedMonotonicNs'])
+            self.assertTrue(race.sample_overlap(ack, records['original-token-status'], path, token, race.COPY_REFERENCE))
+
+    def test_status_session_failure_preserves_transport_diagnostics_and_closes_connection(self):
+        binding, _, _ = self.server(hold_copy=False)
+        probe = race.KeepAliveStatusProbe(binding, credential_pair=('test-access', 'test-secret'))
+        records = {}; fleet = SimpleNamespace(record=lambda label, value: records.setdefault(label, value))
+        with self.assertRaisesRegex(ValueError, 'fixture failure'):
+            with race.foreground_status_session(probe, fleet, 'replace-metadata',
+                    '/rustfs/admin/v3/heal/' + binding['bucketPrefix'], str(uuid.uuid4())):
+                raise ValueError('fixture failure')
+        self.assertIsNone(probe._status)
+        self.assertIn('G06-status-transport', records)
 
     def test_real_sdk_dispatch_schedules_original_status_and_keeps_strict_interval_oracle(self):
         for summary in ('running', 'finished'):

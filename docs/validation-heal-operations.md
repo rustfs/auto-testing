@@ -693,6 +693,33 @@ Source `757b751482bb970bc321e92059690a7698554358` adds two collector-only groups
 
 The G06 public adapter uses the existing DS workload: all 257 original keys, including Chinese, spaces, literal `%2F`, actual slashes and parent-like prefixes. The observed missing key is `中文/文件/0252.bin`; its companion is `literal%2Fslash/0254.bin`. `copy-source` copies from the observed key into the companion; `copy-destination` copies in the reverse direction. Default COPY expectations inherit the source payload, content properties, metadata and tags. Both directions verify the unchanged source, exact destination coding-index shard bytes and a distinct destination generation before GET, rejecting retained old destination directories. Registry, fixture and local transition tests do not establish public overlap or complete canonical PASS.
 
+G06 reuses `KeepAliveStatusProbe` only while observing the original token and
+foreground operation. Existing readiness polls warm the same direct connection;
+the controller still starts each foreground observation from the real SDK send
+notification. Every connection attempt, actual socket identity, response and
+phase remains in `G06-status-transport`. A transport error poisons the session
+without an implicit retry; leaving the session closes its connection. The strict
+same-clock nested interval, complete ACK ledger and finished-task refusal remain
+unchanged. No delay is injected into the SDK call.
+
+Before race allocation and each explicit service restart, the runner and every
+participating node resolve the existing `rustfs-node1` alias (H1) or all four
+aliases (H2). `endpoint-resolution` retains bounded, single-attempt `getent`
+results and refuses a failed precondition. It never edits hosts files or DNS,
+substitutes IP addresses, extends the readiness budget or certifies node identity.
+Later topology and physical checks remain required; successful preflight cannot
+guarantee that a resolver will remain available during startup.
+
+G01/G02 retain every serial PUT ACK but follow the frozen source's overlap rule:
+at least one strictly nested running status sample per required workload role.
+G01's read-repair branch additionally journals every actual GET, verifies its
+complete body and joint ETag/length/type/metadata against one original or
+ACK-known foreground generation, and requires a reader overlap. Zero reads,
+unknown results and mixed generations cannot pass. G02 requires all six
+ACK-known historical versions and a separate reader overlap in its read branch.
+Sampling continues until an in-flight reader drains after the writer. These
+conditions preserve the source workload; they do not supply live acceptance.
+
 ### G03 serial deletion authority
 
 G03's frozen `VersionLedger.history` determines the new current version after an explicit DELETE. The public S3 inventory is UUID-sorted and cannot supply that order. Each original foreground plan now carries the three seed ACK version IDs in order; the final oracle rejects missing, duplicate, foreign or differently selected identities, removes exactly the acknowledged version and promotes the last retained seed ACK. The physical oracle permits only that `isLatest` change while preserving every other retained descriptor, coding-index byte and data directory. Every original drive must contain exactly the retained version/latest population, with no extra marker or duplicate version. Focused tests use nonmonotonic UUIDs, both delete branches and corrupted physical populations. This source adaptation adds no native or live acceptance.

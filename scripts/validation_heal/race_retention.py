@@ -107,7 +107,8 @@ def archived_plan(artifact, failed_run, candidate):
     multipart = kind == 'unresolved-g05-race'
     markers = kind == 'unresolved-g04-race'
     read_journals = (['mpu-read-ACKs', *['final-read-ACKs-node' + str(i) for i in range(1, len(owners) + 1)]]
-                     if multipart else ['negative-read-ACKs-node'+str(i) for i in range(1,len(owners)+1)] if markers else [])
+                     if multipart else ['negative-read-ACKs-node'+str(i) for i in range(1,len(owners)+1)] if markers else
+                     ['read-repair-ACKs'] if case == CASE and row['branch'] == 'overwrite-vs-read-repair' else [])
     if multipart:
         require({path.name for path in folder.glob('final-read-ACKs-*')} <= set(read_journals),
                 'G05 isolation has an unbound final peer read journal')
@@ -178,7 +179,7 @@ def archived_plan(artifact, failed_run, candidate):
                             'G04 isolation SDK request changed its bounded flat key set')
             allowed = ({'list_multipart_uploads', 'list_parts', 'list_object_versions', 'get_object', 'head_object',
                         'get_object_tagging'} if multipart and name in read_journals else
-                       {'get_object'} if name == 'historical-read-ACKs' or markers and name in read_journals else
+                       {'get_object'} if name in {'historical-read-ACKs', 'read-repair-ACKs'} or markers and name in read_journals else
                        {'create_bucket','put_bucket_versioning','put_object','delete_object','delete_objects'} if markers else
                        {'create_bucket', 'put_bucket_versioning', 'put_object', 'create_multipart_upload',
                         'upload_part', 'complete_multipart_upload', 'abort_multipart_upload'} if multipart else

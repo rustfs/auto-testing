@@ -112,6 +112,7 @@ class RaceFaultAdmissionTests(unittest.TestCase):
                 fleet.remote.side_effect = remote
                 for name, value in {"Fleet": Mock(return_value=fleet), "verify_inspector": Mock(return_value={}),
                                     "validate_topology": Mock(return_value={}), "Probe": Mock(),
+                                    "KeepAliveStatusProbe": Mock(), "verify_endpoint_resolution": Mock(),
                                     "seed_fixture": Mock(return_value=expected), "verify_seed": Mock(),
                                     "operation_plan": Mock(return_value=[]), "map_fixture": Mock(return_value=mapped),
                                     "verify_part_manifest": Mock(), "OBJECTS": 3}.items():

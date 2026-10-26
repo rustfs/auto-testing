@@ -201,6 +201,28 @@ class RaceRetentionTests(unittest.TestCase):
         root = Path(directory) / 'artifact'
         return root, candidate, folder
 
+    def test_g01_read_repair_journal_is_digest_bound_and_cannot_hide_a_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, candidate, original = self.archive(directory)
+            folder = original.with_name('overwrite-vs-read-repair'); original.rename(folder)
+            summary_path = folder.parents[1] / 'healthy-summary.json'
+            summary = json.loads(summary_path.read_text()); summary['results'][0]['branch'] = folder.name
+            summary_path.write_text(json.dumps(summary))
+            binding = json.loads((folder / '00001-binding.json').read_text())
+            journal = folder / 'read-repair-ACKs'; journal.mkdir()
+            request = {'runId': binding['runId'], 'operation': 'get_object',
+                       'params': {'Bucket': binding['bucketPrefix'], 'Key': 'objects/0256.bin'}}
+            (journal / '000001-request.json').write_text(json.dumps(request))
+            ack = {'runId': binding['runId'], 'observation': {'operation': 'get_object', 'resultUnknown': True}}
+            receipt = journal / '000001-ack.json'; receipt.write_text(json.dumps(ack))
+            first = recovery.recovery_plan(root, 12345, candidate)[0]
+            ack['preservedUnknownReceipt'] = True; receipt.write_text(json.dumps(ack))
+            second = recovery.recovery_plan(root, 12345, candidate)[0]
+            self.assertNotEqual(first['ackFilesSha256'], second['ackFilesSha256'])
+            self.assertEqual(first['businessSceneSha256'], second['businessSceneSha256'])
+            request['operation'] = 'put_object'; (journal / '000001-request.json').write_text(json.dumps(request))
+            with self.assertRaises(ValueError): recovery.recovery_plan(root, 12345, candidate)
+
     def test_archived_unknown_or_explicit_refusal_can_only_select_isolation_with_exact_identity(self):
         for kind in ('valid', 'unknown', 'refusal', 'candidate', 'binary', 'host', 'live', 'mpu', 'omitted-owner', 'mixed-case', 'extra-failure'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:

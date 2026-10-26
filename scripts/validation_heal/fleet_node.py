@@ -8,6 +8,7 @@ units and mounts are derived here; no shell program or fault path is accepted.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import base64
 import json
 import os
@@ -596,6 +597,26 @@ def resource_limits(profile):
     return {"maxSnapshotFiles": {"standard": 4096, "cursor": 16384, "full-restart": 24576}[profile],
             "minimumDriveFreeBytes": (1 if profile == "standard" else 2) * 1024**3,
             "runtimeMaxSeconds": 1800 if profile == "standard" else 2700}
+
+
+def endpoint_resolution(request):
+    """Observe the existing resolver only; never install hosts entries or retry."""
+    require(set(request) == {'runId', 'action'} and request['action'] == 'endpoint-resolution'
+            and isinstance(request['runId'], str) and RUN_PATTERN.fullmatch(request['runId']),
+            'endpoint resolution accepts no host, path or mutation options')
+    hosts = ['rustfs-node1'] if request['runId'].endswith('-h1') else [f'rustfs-node{i}' for i in range(1, 5)]
+    entries = {}
+    for host in hosts:
+        try:
+            result = subprocess.run(['getent', 'ahosts', host], capture_output=True, text=True, timeout=10)
+            addresses = sorted({str(ipaddress.ip_address(line.split()[0])) for line in result.stdout.splitlines() if line.split()})
+            entries[host] = {'addresses': addresses, 'resolved': result.returncode == 0 and bool(addresses),
+                             'returnCode': result.returncode}
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            entries[host] = {'addresses': [], 'resolved': False, 'failureType': type(exc).__name__}
+    return {'hostname': socket.gethostname(), 'entries': entries, 'readOnly': True, 'mutated': False,
+            'resolved': all(row['resolved'] for row in entries.values()),
+            'hostIdentityCertified': False, 'canonicalPassClaimed': False}
 
 
 def preflight(request):
@@ -2114,6 +2135,7 @@ def main(request):
     actions["version-race-backups"] = lambda value: globals()["mpu_race_backups_backend"].run(value, globals())
     actions["process-clock"] = process_clock
     actions["environment-capabilities"] = environment_capabilities
+    actions['endpoint-resolution'] = endpoint_resolution
     actions["replacement-admission-preflight"] = replacement_admission_preflight
     for action in ("retained-scene-audit", "retained-scene-isolate"):
         actions[action] = retained_scene_operation
