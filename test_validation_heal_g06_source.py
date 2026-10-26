@@ -16,9 +16,9 @@ from scripts.validation_heal import race
 
 
 class G06DispatchTests(unittest.TestCase):
-    def server(self, *, summary='running', hold_copy=True):
+    def server(self, *, summary='running', hold_copy=True, first_only=False):
         copy_seen, sampled = threading.Event(), threading.Event()
-        failures = []
+        failures, calls = [], [0]
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
@@ -26,12 +26,17 @@ class G06DispatchTests(unittest.TestCase):
                 self.send_response(200); self.send_header('Content-Type', kind)
                 self.send_header('Content-Length', str(len(raw))); self.end_headers(); self.wfile.write(raw)
             def do_PUT(self):
+                self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                calls[0] += 1
                 copy_seen.set()
-                if hold_copy and not sampled.wait(3): failures.append('COPY response did not observe Admin completion')
-                self.reply(b'<CopyObjectResult><ETag>"copy-ack"</ETag><LastModified>2026-10-26T00:00:00Z</LastModified></CopyObjectResult>', 'application/xml')
+                if hold_copy and (not first_only or calls[0] == 1) and not sampled.wait(3):
+                    failures.append('SDK response did not observe Admin completion')
+                self.reply(b'' if '?tagging' in self.path else
+                    b'<CopyObjectResult><ETag>"copy-ack"</ETag><LastModified>2026-10-26T00:00:00Z</LastModified></CopyObjectResult>', 'application/xml')
             def do_POST(self):
                 if not copy_seen.wait(3): failures.append('Admin request preceded an actual COPY')
-                self.reply(json.dumps({'summary': summary, 'settings': race.COPY_REFERENCE['effective'],
+                state = summary if not first_only or calls[0] == 1 else 'finished'
+                self.reply(json.dumps({'summary': state, 'settings': race.COPY_REFERENCE['effective'],
                     'outcome': {'counters': {'processed': 1}}}).encode(), 'application/json')
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         worker = threading.Thread(target=server.serve_forever, daemon=True); worker.start()
@@ -86,6 +91,34 @@ class G06DispatchTests(unittest.TestCase):
         self.assertLess(sent, result['callFinishedMonotonicNs'])
         self.assertEqual(result['response']['CopyObjectResult']['ETag'], '"copy-ack"')
         self.assertFalse(failures)
+
+    def test_frozen_sixteen_tag_writes_require_all_acks_and_one_nested_running_sample(self):
+        for summary in ('running', 'finished'):
+            with self.subTest(summary=summary), tempfile.TemporaryDirectory() as directory:
+                binding, sampled, failures = self.server(summary=summary, first_only=True)
+                writer_probe = race.DispatchProbe(binding, credential_pair=('test-access', 'test-secret'))
+                admin_probe = race.Probe(binding, credential_pair=('test-access', 'test-secret'))
+                original_admin = admin_probe.admin
+                def admin(*args):
+                    value = original_admin(*args); sampled.set(); return value
+                admin_probe.admin = admin
+                writer = race.RaceRecorder(writer_probe, Path(directory) / 'foreground-ACKs', versioned=False)
+                plan = race.operation_plan(binding['bucketPrefix'], 'update-tags', [])
+                for step in plan: step['branch'] = 'update-tags'
+                records = {}; fleet = SimpleNamespace(record=lambda label, value: records.setdefault(label, value))
+                responses, accepted = race.race(writer, plan, admin_probe, fleet,
+                    '/rustfs/admin/v3/heal/' + binding['bucketPrefix'], 'original-token', race.COPY_REFERENCE)
+                self.assertEqual(len(responses), 16)
+                self.assertEqual(len(list(writer.output.glob('*-request.json'))), 16)
+                acks = [json.loads(p.read_text()) for p in writer.output.glob('*-ack.json')]
+                self.assertEqual(len(acks), 16)
+                self.assertTrue(all(row['operationCheck'] == 'PASS' for row in acks))
+                self.assertEqual(accepted, summary == 'running')
+                proof = records['public-call-overlap-proof']
+                self.assertEqual(proof['overlapRequirement'], 'at-least-one-of-frozen-16-tag-updates')
+                self.assertEqual(proof['requiredCallOverlapObserved'], summary == 'running')
+                self.assertFalse(proof['everyMutationOverlapped'])
+                self.assertFalse(failures)
 
 
 class G06SourceTests(unittest.TestCase):

@@ -732,6 +732,10 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
     require(len(acks) == len(plan) and all(row.get("operationCheck") == "PASS" for row in acks),
             "G01/G03 lacks every durable foreground ACK")
     overlaps = [any(sample_overlap(ack, sample, path, token, reference) for sample in samples) for ack in acks]
+    # The frozen G06 source fixes 16 tag writes and accepts one fully nested
+    # original-token sample among them; every write still needs its own ACK.
+    tag_updates = bool(plan and plan[0].get('branch') == 'update-tags')
+    overlap_complete = any(overlaps) if tag_updates else all(overlaps)
     if dispatch is not None:
         fleet.record('G06-request-dispatch-observation', {'requestSendMonotonicNs': dispatch_times,
             'statusSamples': len(samples), 'notificationScope': 'botocore before-send.s3; inside SDK call',
@@ -751,8 +755,10 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
         "readCalls": len(readers), "allReadsObserved": bool(readers) if read_branch else True,
         "nativeFenceProved": False})
     fleet.record("public-call-overlap-proof", {"everyMutationOverlapped": all(overlaps), "mutations": overlaps,
+        "requiredCallOverlapObserved": overlap_complete,
+        "overlapRequirement": "at-least-one-of-frozen-16-tag-updates" if tag_updates else "every-mutation",
         "nativeFenceProved": False, "serverCommitOverlapProved": False})
-    return responses, all(overlaps) and read_complete and reader_overlap
+    return responses, overlap_complete and read_complete and reader_overlap
 
 
 def run_branch(args, topology, nodes, branch):
