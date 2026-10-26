@@ -6,6 +6,8 @@ The Functional Chain `environment.inspect` entry records the current four Heal h
 
 These observations do not certify a clean environment. Independently audit retained validation scenes and the complete shared-workflow census before dispatching another case. A completed workflow's success or failure alone does not prove recovery. The regular case installer remains responsible for stopping the standard service, and its existing namespace/port reservation guards remain authoritative.
 
+When the shared runner cannot start `environment.inspect`, the separate `validation_runner_inspect_only=true` entry inspects GitHub registration and queue metadata on a hosted runner without fleet access. Inspection [40256930895/1](https://github.com/rustfs/rustfs/actions/runs/40256930895) observed `rustfs-smoke-testing` (ID 139653) offline at `2026-10-26T02:00:24Z`. This is not a diagnosis of host or disk health. API failures remain incomplete; restoring registration does not certify retained-scene cleanup or release the existing live admission gates.
+
 第一批 13 个用例保留全部 recipe、分支和 source assertions，并新增 `environment_cases.py` 的控制流程与断言，接入 validation 调度。它们默认关闭，只产生 `BLOCKED` 结果与未满足原因；默认路径不会连接或修改 fleet。真实执行沿用 auto-testing 的 S3/Admin collector、ACK ledger、候选包绑定、物理故障 oracle 和恢复模式，专用资源操作由部署环境的适配器提供。当前没有把适配器协议或未运行代码计为 canonical PASS。
 
 设置 `AUTO_TESTING_ENABLE_ENV_GATED_HEAL=1` 并通过 `VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES` 指向 JSON 能力清单后，门控会检查全部能力。缺项仍返回 `BLOCKED`。能力齐全后还要用 `VALIDATION_HEAL_ENVIRONMENT_RUNTIME` 指向 runtime JSON；只有候选/checkout/client 摘要、全部拓扑、当前 Heal SSH 节点和适配器摘要校验通过后才会运行分支。未绑定适配器仍为 `BLOCKED`；执行结果需要 source assertion 审核，当前实现不会自动生成 canonical PASS。
@@ -44,6 +46,8 @@ These observations do not certify a clean environment. Independently audit retai
 | J02 | `heal.outcome-counters-and-error-truth` | 全部夹具与 manifest 对账均已实现。候选 `7951bb629821246868ee3761b321dd07c06db45c` 修复整桶重试覆盖 repaired 记录，210 项 manager 与 5 项独立进程集成测试通过。新实机 `38874900846/1` 完成 20 个分支：16 个报告通过，4 个原始全元数据损坏探针返回永久 Failed，保留 NOT_OBSERVED；四组混合任务与全部 50 条节点清理记录已独立审计。真实 legacy Unknown 已观察，不能代替原始探针 | 原始元数据损坏分支的 Unknown 仍未观察；完整 source-procedure 验收尚未闭合。原始 Failed、NOT_OBSERVED 和完整用例门控保持不变 |
 
 I05 与 A09、G01–G06 的精确屏障证据允许使用同一不可变候选源码单独构建的 `cfg(test)` 原生测试执行文件。不得给优化服务候选加入隐藏 hook 冒充原包，也不能把缺少 release hook 本身归为外部环境阻塞。原生子集、完整服务调用和现场最终 ACK/物理检查分别验收；已验收 native 证据不能代替尚缺的 controller 或完整 live 结果。第一批 G07/G08 的 native 分支与 H04 容量锁窗口保留各自未完成条件；外部请求重试或最终对象正确均不能证明精确锁或提交窗口。
+
+2026-10-26 已独立复核 hosted-only tools [40086026324/1](https://github.com/rustfs/rustfs/actions/runs/40086026324)：候选 `757b751482bb970bc321e92059690a7698554358` 上 10 项精确原生测试和 104 条有序 milestone 全部通过，覆盖 A09、G01–G06 与 I05 的原生子集。固定 helper `002473b` 的 runtime admission 在该候选上仅开放 A09/G05/G06；G01–G04 仍须选择各自审核过的候选及匹配工具，或先完成新的 runtime 源码审核。完整 live 用例和 I05 剩余控制流程均未因此通过，canonical 计数保持 114/158。
 
 资源适配器协议使用 stdin/stdout JSON，不调用 shell。runtime 中的 `adapter` 包含绝对可执行路径、SHA-256 和操作 allowlist；`environment_cases.required_operations(case_id)` 给出所需操作。每个请求携带 run ID、原候选 commit、sequence、拓扑/分支 scope、bucket prefix、租约和参数。响应必须回显上述身份、按 `heal_probe.canonical(request)` 的 UTF-8 SHA-256 绑定原请求，并把真实观察写在 `observation`，禁止返回 verdict。资源适配器需独立实现平台 power control、故障层、pool lifecycle 或 KMS/tier 隔离；本 PR 未向当前共享环境部署适配器。
 

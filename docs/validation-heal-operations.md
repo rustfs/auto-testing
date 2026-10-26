@@ -34,6 +34,17 @@ python scripts/validation_heal/matrix.py plan --selection A01,A04,C01,C02,C04,J0
 
 live 命令使用当前 auto-testing 的 `smoke-testing` runner、`RUSTFS_NODES` 和 `RUSTFS_SSH_USER`，复用 `rustfs_heal_test.sh` 的 Heal 节点。运行前取得与 Functional Chain 一致的共享节点并发锁。H1–H6 是测试拓扑要求，不是另一组 SSH 主机；不得按源仓库历史主机名或 IP 选择机器。
 
+### Runner 无法接单时的只读诊断
+
+RustFS Functional Chain 提供 `validation_runner_inspect_only=true` 入口。它在 `ubuntu-latest` 上读取 GitHub 的 runner 注册信息与活动任务，使用独立并发组，不占用或替换测试 fleet 队列。一次请求只能选择该模式，不同时传入 candidate、tools、case 或 recovery 参数；使用包含此入口的已审核 workflow ref：
+
+```bash
+gh workflow run rustfs-functional-chain.yml --repo rustfs/rustfs \
+  --ref "$VALIDATION_DRIVER_REF" -f validation_runner_inspect_only=true
+```
+
+下载该次 `validation-runner-inspection-<runId>-<attempt>` artifact，核对 `workflowCommit`、`runId`、`runAttempt`、`observedAt`、`complete` 和 `runnerAvailability`。`offline`、`online-busy`、`online-idle`、`unregistered` 是 GitHub 注册状态的不同观察；API 拒绝、分页超过上限或其他错误保留 `complete=false` 与失败阶段，不能解释为空闲。报告不连接节点、不重启服务、不清理文件、不取消 workflow，也不证明环境已恢复或共享 workflow 全局空闲。runner 服务恢复后，仍需重新执行资源检查及原有现场/并发门控。
+
 用 `matrix.py plan` 冻结当前 SSH 节点与所有适用操作分支，再根据本次只读 preflight 填写私有 `lab.json`。计划中的 `verified:false` 不可直接改成资源验证通过。H4 需要至少 24 个已分配独立盘端点；H6 需要独占主机及平台事件/恢复绑定。缺少资源的分支保留为 BLOCKED。
 
 填写内容须包含：

@@ -17,8 +17,8 @@ record; it does not replace that retained failure or replay all 158 cases on
 one candidate.
 
 All 158 canonical IDs are retained. Independent complete live acceptance is
-**114/158**. The current ledger has 20 retained live failures, seven required
-native barriers, four orchestration/evidence blockers and 13 environment cases
+**114/158**. The current ledger has 20 retained live failures, seven pending
+native/live race acceptances, four orchestration/evidence blockers and 13 environment cases
 disabled by default. The active acceptance backlog is 31 cases. Counts are
 case-level canonical results across immutable candidates; diagnostic, native,
 isolation and partial results do not increment PASS.
@@ -40,11 +40,25 @@ isolation and partial results do not increment PASS.
 | --- | ---: | --- |
 | Independently accepted complete live PASS | 114 | Preserve original provenance and complete results. |
 | Retained live failures with existing executors | 20 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
-| Required native barriers | 7 | A09 and G01–G06 need exact candidate-bound server lock/version/commit barriers. |
+| Native and live race acceptance pending | 7 | A09 and G01–G06 require independently verified native groups, reviewed candidate-specific runtime admission and complete H1/H2 live evidence. |
 | Orchestration or evidence blocked | 4 | C11, F07, I05 and J02 need their remaining native or full live evidence closure. |
 | Environment gated, disabled by default | 13 | Control flows, oracles and unmet reasons are implemented; dedicated resource adapters and real execution remain conditional on the required resources. |
 
 The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 31 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
+
+### Native prerequisites and runtime admission (2026-10-26)
+
+Hosted-only tools [40086026324/1](https://github.com/rustfs/rustfs/actions/runs/40086026324) completed successfully on candidate `757b751482bb970bc321e92059690a7698554358`, auto-testing `002473b51f5ceeccadedf7325a1b1691e4c71dcd` and driver `b1f7fb276941d7128b5ddbbda9c3e6536931c89d`. Its immutable package is [40081956660/1](https://github.com/rustfs/rustfs/actions/runs/40081956660), SHA-256 `1a52387a8cbdef586be2616b02298f351aec4ac2d5c0f7a76d094409c89c0b3c`. Independent read-only verification checked the candidate source tree, registered source-file digests, Cargo.lock, executable digest, ten exact nonignored passing test invocations, all 104 ordered milestones and the inspector identity. The original artifacts and audit are retained in the migration evidence store. No downloaded native executable was run during this audit.
+
+The registry exposes eight native prerequisite groups: A09, G01–G06 and part of I05. This is separate from runtime admission. The pinned helper admits A09, G05 and G06 on this candidate; it intentionally rejects G01–G04 on the same source before bootstrap because their runtime candidate contracts remain pinned to other reviewed sources. G01–G03 may use their reviewed version candidate `bd0671ba781d8ebf509f4f03533228dfb44496f1`, and G04 uses marker candidate `8380466f3a27c3c3ef4115084178a0ab99a78f32`, each with its own exact package and matching helper/tools. Alternatively, a separate source review and matching tools build must precede extending runtime admission. Do not infer admission from registry membership or mix artifacts from different candidates or helpers.
+
+All ten native tests pass, but complete live acceptance remains **114/158**. A09/G01–G06 still need their complete source branches, SDK ACK ledgers, physical checks and clean finalization on H1/H2. I05's native subset does not supply its missing full timeout/stale-generation controller and live closure. This tools run neither accessed the fleet nor adds canonical PASS.
+
+### Hosted runner inspection (2026-10-26)
+
+Read-only [40256930895/1](https://github.com/rustfs/rustfs/actions/runs/40256930895) completed on a GitHub-hosted runner with driver `31c9d85645c1a8051562983f18631098b9bc34e7`. At `2026-10-26T02:00:24Z`, GitHub reported the only matching `smoke-testing` runner, `rustfs-smoke-testing` (ID 139653), as **offline**, with `busy=false`. The report retained two queued fleet jobs, including the Functional Chain summary and the health collector, plus pending workflow runs without jobs. This establishes the runner registration state at observation time; it does not diagnose the host's service, disk, network or power state.
+
+The new `validation_runner_inspect_only=true` dispatch path uses a separate workflow concurrency group, reads only GitHub API metadata and uploads an incomplete report if API access fails. It rejects simultaneous candidate, build, fleet, tools or recovery inputs; all fleet jobs were skipped in the real inspection. No queued workflow was cancelled or replaced, no test-node connection was made, and `mutated`, `cleanStateCertified`, `sharedWorkflowIdleCertified` and `canonicalCasePassClaimed` remain false. Live resumption requires a working maintenance entry to restore this runner, followed by a new resource inspection and the existing retained-scene and shared-workflow admission checks.
 
 ### B08 complete live acceptance
 
