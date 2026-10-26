@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import re
 import secrets
 import signal
@@ -154,6 +155,22 @@ def target_key(branch):
 
 def reference_key(branch):
     return G06_REFERENCE_KEY if branch in G06_BRANCHES else REFERENCE_KEY
+
+
+class DispatchProbe(Probe):
+    """Wake G06 observation from inside the SDK, immediately before sending.
+
+    No wait or delay is added to the SDK call or its response. The notification
+    schedules observation; only the unchanged recorded intervals prove overlap.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dispatched = SimpleQueue()
+
+    def s3_client(self):
+        client = super().s3_client()
+        client.meta.events.register("before-send.s3", lambda **_: self.dispatched.put(time.monotonic_ns()))
+        return client
 
 
 class RaceRecorder(Recorder):
@@ -647,6 +664,8 @@ def read_versions(recorder, ledger, lock, done):
 
 def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, baseline=None):
     samples = []
+    dispatch_times = []
+    dispatch = recorder.probe.dispatched if plan and plan[0].get('branch') in G06_BRANCHES else None
     # Only the worker mutates Recorder state. All Fleet.record writes run on
     # the controller, so evidence sequence allocation never races.
     readers = []
@@ -690,8 +709,14 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
         deadline = time.monotonic() + (90 if version_race else 120)
         try:
             while (not worker.done() or version_reads and read_future is not None and not read_future.done()) and time.monotonic() < deadline:
+                if dispatch is not None:
+                    try:
+                        dispatch_times.append(dispatch.get(timeout=.05))
+                    except Empty:
+                        continue
                 samples.append(observe(probe, fleet, path, token, reference))
-                time.sleep(.025 if version_race else .01)
+                if dispatch is None:
+                    time.sleep(.025 if version_race else .01)
         except BaseException:
             recorder.mutations.poison("status observation failed; drain in-flight mutations only")
             raise
@@ -707,6 +732,11 @@ def race(recorder, plan, probe, fleet, path, token, reference=REFERENCE, *, base
     require(len(acks) == len(plan) and all(row.get("operationCheck") == "PASS" for row in acks),
             "G01/G03 lacks every durable foreground ACK")
     overlaps = [any(sample_overlap(ack, sample, path, token, reference) for sample in samples) for ack in acks]
+    if dispatch is not None:
+        fleet.record('G06-request-dispatch-observation', {'requestSendMonotonicNs': dispatch_times,
+            'statusSamples': len(samples), 'notificationScope': 'botocore before-send.s3; inside SDK call',
+            'SDKCallDelayed': False, 'publicOverlapProved': False, 'nativeFenceProved': False,
+            'canonicalCasePassClaimed': False})
     read_complete = True
     reader_overlap = True
     if version_reads:
@@ -820,7 +850,8 @@ def run_branch(args, topology, nodes, branch):
         target = next(target for target in targets if target["key"] == current_target_key)
         if (target["node"], target["disk"], target["relativePath"]) in files(witness):
             raise WindowNotObserved("G01/G03 old target already repaired before foreground mutations")
-        writer = RaceRecorder(probe, directory / "foreground-ACKs",
+        writer_probe = DispatchProbe(binding) if branch in G06_BRANCHES else probe
+        writer = RaceRecorder(writer_probe, directory / "foreground-ACKs",
                               versioned=branch in (*G02_BRANCHES, *G03_BRANCHES))
         writer.seen.update((row["key"], row["versionId"]) for row in expected)
         if branch in G02_BRANCHES:

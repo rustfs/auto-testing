@@ -1,5 +1,11 @@
 """Frozen DS and COPY direction contracts; synthetic scenes are not live proof."""
 import copy
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+from pathlib import Path
+import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -7,6 +13,79 @@ import uuid
 
 import test_validation_heal as physical_fixtures
 from scripts.validation_heal import race
+
+
+class G06DispatchTests(unittest.TestCase):
+    def server(self, *, summary='running', hold_copy=True):
+        copy_seen, sampled = threading.Event(), threading.Event()
+        failures = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def reply(self, raw, kind):
+                self.send_response(200); self.send_header('Content-Type', kind)
+                self.send_header('Content-Length', str(len(raw))); self.end_headers(); self.wfile.write(raw)
+            def do_PUT(self):
+                copy_seen.set()
+                if hold_copy and not sampled.wait(3): failures.append('COPY response did not observe Admin completion')
+                self.reply(b'<CopyObjectResult><ETag>"copy-ack"</ETag><LastModified>2026-10-26T00:00:00Z</LastModified></CopyObjectResult>', 'application/xml')
+            def do_POST(self):
+                if not copy_seen.wait(3): failures.append('Admin request preceded an actual COPY')
+                self.reply(json.dumps({'summary': summary, 'settings': race.COPY_REFERENCE['effective'],
+                    'outcome': {'counters': {'processed': 1}}}).encode(), 'application/json')
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True); worker.start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        binding = {'schemaVersion': 1, 'runId': 'gh-12345-1-h1', 'jumpHostOnly': True,
+            'exclusiveHealService': True, 'leaseExpiresAt': (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+            'bucketPrefix': 'rv-heal-0123456789abcdef', 'endpoints': {'node1': f'http://127.0.0.1:{server.server_port}'},
+            'defaultEndpoint': 'node1', 'candidateCommit': race.COPY_CANDIDATE, 'harnessCommit': '2' * 40,
+            'candidatePackageSha256': '3' * 64, 'candidateBinarySha256': '4' * 64, 'rcBinarySha256': '5' * 64,
+            'maxInventoryObjects': 512, 'maxInventoryBytes': 512 * 1024**2}
+        return binding, sampled, failures
+
+    def test_real_sdk_dispatch_schedules_original_status_and_keeps_strict_interval_oracle(self):
+        for summary in ('running', 'finished'):
+            with self.subTest(summary=summary), tempfile.TemporaryDirectory() as directory:
+                binding, sampled, failures = self.server(summary=summary)
+                writer_probe = race.DispatchProbe(binding, credential_pair=('test-access', 'test-secret'))
+                admin_probe = race.Probe(binding, credential_pair=('test-access', 'test-secret'))
+                original_admin = admin_probe.admin
+                def admin(*args):
+                    result = original_admin(*args)
+                    sampled.set()  # Server-only fixture barrier; production notification never waits.
+                    return result
+                admin_probe.admin = admin
+                writer = race.RaceRecorder(writer_probe, Path(directory) / 'foreground-ACKs', versioned=False)
+                plan = race.operation_plan(binding['bucketPrefix'], 'copy-destination', [])
+                plan[0]['branch'] = 'copy-destination'
+                records = {}
+                fleet = SimpleNamespace(record=lambda label, value: records.setdefault(label, value))
+                responses, accepted = race.race(writer, plan, admin_probe, fleet,
+                    '/rustfs/admin/v3/heal/' + binding['bucketPrefix'], 'original-token', race.COPY_REFERENCE)
+                self.assertEqual(responses[0]['CopyObjectResult']['ETag'], '"copy-ack"')
+                self.assertEqual(accepted, summary == 'running')
+                self.assertFalse(failures)
+                ack = json.loads(next(writer.output.glob('*-ack.json')).read_text())
+                dispatch = records['G06-request-dispatch-observation']
+                sent = dispatch['requestSendMonotonicNs'][0]
+                observation = ack['observation']; status = records['original-token-status']
+                self.assertLess(observation['callStartedMonotonicNs'], sent)
+                self.assertLess(sent, status['callStartedMonotonicNs'])
+                self.assertLess(status['callFinishedMonotonicNs'], observation['callFinishedMonotonicNs'])
+                self.assertFalse(dispatch['SDKCallDelayed'] or dispatch['publicOverlapProved'] or dispatch['canonicalCasePassClaimed'])
+
+    def test_notification_never_waits_for_an_observer_or_changes_an_ack(self):
+        binding, _, failures = self.server(hold_copy=False)
+        probe = race.DispatchProbe(binding, credential_pair=('test-access', 'test-secret'))
+        plan = race.operation_plan(binding['bucketPrefix'], 'copy-source', [])
+        result = probe.s3(plan[0]['operation'], plan[0]['params'])
+        self.assertTrue(result['acknowledged'])
+        sent = probe.dispatched.get_nowait()
+        self.assertLess(result['callStartedMonotonicNs'], sent)
+        self.assertLess(sent, result['callFinishedMonotonicNs'])
+        self.assertEqual(result['response']['CopyObjectResult']['ETag'], '"copy-ack"')
+        self.assertFalse(failures)
 
 
 class G06SourceTests(unittest.TestCase):
