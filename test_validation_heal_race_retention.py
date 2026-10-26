@@ -12,7 +12,82 @@ import unittest
 from unittest.mock import patch
 
 from scripts.validation_heal import race_retention as controller, retained_scene as retained, recover_environment as recovery
+from scripts.validation_heal import interrupted_race
 import test_validation_heal_retained_scene as retained_tests
+
+
+class InterruptedCopyTests(unittest.TestCase):
+    def journal(self, directory, mutation=None):
+        folder = Path(directory) / 'foreground-ACKs'; folder.mkdir()
+        params = {'Bucket': 'rv-heal-0123456789abcdef', 'Key': 'destination',
+                  'CopySource': {'Bucket': 'rv-heal-0123456789abcdef', 'Key': 'source'}}
+        request = {'schemaVersion': 2, 'runId': 'gh-12345-1-h1', 'sequence': 1,
+                   'operation': 'copy_object', 'params': params}
+        raw = json.dumps(request).encode()
+        ack = {'schemaVersion': 2, 'runId': request['runId'], 'sequence': 1,
+               'requestFile': '000001-request.json', 'requestSha256': hashlib.sha256(raw).hexdigest(),
+               'operationCheck': 'PASS', 'observation': {'operation': 'copy_object', 'params': params,
+               'acknowledged': True, 'resultUnknown': False, 'clientCallInvoked': True,
+               'response': {'CopyObjectResult': {'ETag': '"committed"'}}}}
+        if mutation == 'unknown': ack['observation']['resultUnknown'] = True
+        elif mutation == 'refusal': ack['observation']['acknowledged'] = False
+        elif mutation == 'request-hash': ack['requestSha256'] = '0' * 64
+        elif mutation == 'foreign-run': ack['runId'] = 'gh-99999-1-h1'
+        elif mutation == 'foreign-operation': ack['observation']['operation'] = 'delete_object'
+        (folder / '000001-request.json').write_bytes(raw)
+        if mutation != 'missing-ack': (folder / '000001-ack.json').write_text(json.dumps(ack))
+        return folder, request
+
+    def test_only_exact_ack_can_be_replayed_without_a_client(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder, request = self.journal(directory)
+            reader = interrupted_race.Replay(folder, request['runId'], request['params']['Bucket'])
+            response = reader.call(request['operation'], request['params'])
+            self.assertEqual(response, {'CopyObjectResult': {'ETag': '"committed"'}})
+            self.assertEqual(len(reader.finish(1)), 2)
+            (folder / '000002-request.json').write_text('{}')
+            with self.assertRaises(ValueError): reader.finish(1)
+
+    def test_unknown_refused_changed_or_missing_ack_never_becomes_authority(self):
+        for mutation in ('unknown', 'refusal', 'request-hash', 'foreign-run', 'foreign-operation', 'missing-ack'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                folder, request = self.journal(directory, mutation)
+                reader = interrupted_race.Replay(folder, request['runId'], request['params']['Bucket'])
+                with self.assertRaises((ValueError, FileNotFoundError)):
+                    reader.call(request['operation'], request['params'])
+
+    def test_foreign_owner_refuses_before_stop_and_scene_drift_refuses_before_move(self):
+        for mutation in ('foreign-owner', 'scene-drift'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                helper, state, roots, node, request, scene = RaceRetentionTests().scene(directory)
+                owner = request['expectedOwner']
+                isolation = {'kind': 'unresolved-g06-race', 'runId': owner['runId'],
+                    'nodes': ['vm000', 'vm001', 'vm002', 'vm003'], 'bucket': owner['bucket'],
+                    'candidateCommit': '1' * 40, 'harnessCommit': '2' * 40,
+                    'binarySha256': owner['binarySha256'], 'ackFilesSha256': '3' * 64,
+                    'owners': {}, 'businessSceneSha256': {}}
+                for i, name in enumerate(isolation['nodes']):
+                    isolation['owners'][name] = {**owner, 'hostname': 'host-' + str(i)}
+                    isolation['businessSceneSha256'][name] = request['expectedOriginalSceneSha256']
+                calls = []
+                def remote(name, action, **params):
+                    calls.append(action)
+                    if action == 'namespace-state':
+                        marker = {'exists': True, 'ownerEvidence': {'uid': 0,
+                            'canonicalSha256': controller.digest(isolation['owners'][name])}}
+                        if mutation == 'foreign-owner' and name == 'vm003': marker['ownerEvidence']['canonicalSha256'] = '0' * 64
+                        return {'state': copy.deepcopy(marker), 'roots': [copy.deepcopy(marker) for _ in range(4)]}
+                    if action == 'stop': return {'unit': owner['unit'], 'quiescent': True}
+                    self.assertEqual(action, 'retained-scene-audit')
+                    raise ValueError('current business scene differs')
+                fleet = SimpleNamespace(nodes=isolation['nodes'], run_id=owner['runId'],
+                    remote=remote, record=lambda label, value: value)
+                plan = {'kind': 'interrupted-g06-after-authority', 'isolation': isolation,
+                        'originalCaseSha256': '4' * 64}
+                with self.assertRaises(ValueError): interrupted_race.isolate(fleet, plan)
+                self.assertNotIn('retained-scene-isolate', calls)
+                self.assertNotIn('recover-fault', calls)
+                if mutation == 'foreign-owner': self.assertNotIn('stop', calls)
 
 
 class RaceRetentionTests(unittest.TestCase):
