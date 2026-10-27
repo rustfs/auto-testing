@@ -17,9 +17,9 @@ record; it does not replace that retained failure or replay all 158 cases on
 one candidate.
 
 All 158 canonical IDs are retained. Independent complete live acceptance is
-**114/158**. The current ledger has 20 retained live failures, seven pending
+**115/158**. The current ledger has 20 retained live failures, six pending
 native/live race acceptances, four orchestration/evidence blockers and 13 environment cases
-disabled by default. The active acceptance backlog is 31 cases. Counts are
+disabled by default. The active acceptance backlog is 30 cases. Counts are
 case-level canonical results across immutable candidates; diagnostic, native,
 isolation and partial results do not increment PASS.
 
@@ -38,13 +38,13 @@ isolation and partial results do not increment PASS.
 
 | Acceptance state | Cases | Remaining requirement |
 | --- | ---: | --- |
-| Independently accepted complete live PASS | 114 | Preserve original provenance and complete results. |
+| Independently accepted complete live PASS | 115 | Preserve original provenance and complete results. |
 | Retained live failures with existing executors | 20 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
-| Native and live race acceptance pending | 7 | A09 and G01–G06 require independently verified native groups, reviewed candidate-specific runtime admission and complete H1/H2 live evidence. |
+| Native and live race acceptance pending | 6 | A09 and G01–G05 require independently verified native groups, reviewed candidate-specific runtime admission and complete H1/H2 live evidence. |
 | Orchestration or evidence blocked | 4 | C11, F07, I05 and J02 need their remaining native or full live evidence closure. |
 | Environment gated, disabled by default | 13 | Control flows, oracles and unmet reasons are implemented; dedicated resource adapters and real execution remain conditional on the required resources. |
 
-The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 31 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
+The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 30 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
 
 ### Native prerequisites and runtime admission (2026-10-26)
 
@@ -52,7 +52,7 @@ Hosted-only tools [40086026324/1](https://github.com/rustfs/rustfs/actions/runs/
 
 The registry exposes eight native prerequisite groups: A09, G01–G06 and part of I05. This is separate from runtime admission. The pinned helper admits A09, G05 and G06 on this candidate; it intentionally rejects G01–G04 on the same source before bootstrap because their runtime candidate contracts remain pinned to other reviewed sources. G01–G03 may use their reviewed version candidate `bd0671ba781d8ebf509f4f03533228dfb44496f1`, and G04 uses marker candidate `8380466f3a27c3c3ef4115084178a0ab99a78f32`, each with its own exact package and matching helper/tools. Alternatively, a separate source review and matching tools build must precede extending runtime admission. Do not infer admission from registry membership or mix artifacts from different candidates or helpers.
 
-All ten native tests pass, but complete live acceptance remains **114/158**. A09/G01–G06 still need their complete source branches, SDK ACK ledgers, physical checks and clean finalization on H1/H2. I05's native subset does not supply its missing full timeout/stale-generation controller and live closure. This tools run neither accessed the fleet nor adds canonical PASS.
+All ten native tests pass. G06 subsequently passed all eight H1/H2 public branches in [40427815826/1](https://github.com/rustfs/rustfs/actions/runs/40427815826); an independent audit verified its ACK, physical, peer S3, overlap and 20 cleanup receipts, adding one canonical PASS. A09 and G01–G05 still need their complete source branches and clean finalization; I05's native subset does not supply its missing full timeout/stale-generation controller and live closure.
 
 ### Hosted runner inspection (2026-10-26)
 
@@ -76,7 +76,7 @@ Isolation [40286516720/1](https://github.com/rustfs/rustfs/actions/runs/40286516
 
 The original COPY SDK calls lasted approximately 23 ms and 17 ms. Their nearest running samples began before those calls or finished after them, so the frozen strict interval oracle correctly refused overlap. G06 schedules observation from botocore's actual `before-send.s3` notification inside the SDK call, after client preparation and durable request intent. The callback only queues a timestamp; it never waits, delays a response, repeats a mutation or alters the SDK call interval. A qualifying original-token running sample must still fit strictly inside one actual acknowledged SDK call. Real local HTTP/SDK tests cover nested running acceptance, finished-task refusal and response completion without any observer. The previous polling scheduler fails the positive regression.
 
-Complete G06 replay [40299213418/1](https://github.com/rustfs/rustfs/actions/runs/40299213418), pinned to helper `1f8bcd7387f5b4b3055e3193cafac5672674371e`, retained all eight public branches and uploaded its official artifact. Five branches passed; H1 `copy-source` remained `NOT_OBSERVED`, and H2's two COPY branches failed deployment before fixture writes because all peers could not resolve `rustfs-node1`. The nearest H1 status completed 0.575 ms after the SDK call; the strict oracle correctly refused it. Independent replay with the executing helper recomputed all six seeded branches' deterministic journals, original seed properties/tags, final manifests, physical transitions, complete streaming receipts, full peer S3 inventories, terminal outcomes and public overlap. All 20 cleanup receipts match the original reserved hosts. The case remains FAIL, adds no canonical PASS and does not establish an external disk deletion.
+Complete G06 replay [40427815826/1](https://github.com/rustfs/rustfs/actions/runs/40427815826), pinned to helper `7094c16`, passed all eight H1/H2 public branches. Independent replay with the executing helper recomputed all six seeded branches' deterministic journals, original seed properties/tags, final manifests, physical transitions, complete streaming receipts, full peer S3 inventories, terminal outcomes and public overlap. All 20 cleanup receipts match the reserved hosts. G06 is now canonical PASS; the earlier failed run [40299213418/1](https://github.com/rustfs/rustfs/actions/runs/40299213418) remains retained unchanged.
 
 The next executor reuses the existing same-token status transport for G06, preserving its strict overlap oracle, and records read-only endpoint resolution before allocation and restarts. G01/G02 separately restore the frozen source's per-role overlap rule while requiring every PUT ACK and complete concurrent reader evidence. New exact-helper tools and complete H1/H2 live evidence remain required for acceptance.
 
