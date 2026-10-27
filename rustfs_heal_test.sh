@@ -1125,14 +1125,17 @@ step7_analyze_results() {
     # HEAL-STEP 8: MRF intent cleanup for deleted buckets (backlog#8590).
     # Legacy durable PartialWrite intents whose bucket has been deleted must
     # not remain active: the heal scheduler retries them indefinitely against
-    # a nonexistent bucket (rustfs/backlog#8590).
+    # a nonexistent bucket (rustfs/backlog#8590). The bucket names live in the
+    # full heal-status body, not in the summary status string; `|| true`
+    # keeps an empty grep from tripping the ERR trap under pipefail — that
+    # regression turned a PASSED heal into a step-7 FAIL (run 40303804842).
     local mrf_leak
-    mrf_leak="$(printf '%s' "${summary}" | grep -oE '"bucket":"[^"]*"' | sort -u | while read -r bq; do
+    mrf_leak="$(printf '%s' "${body}" | grep -oE '"bucket":"[^"]*"' | sort -u | while read -r bq; do
       bq_name=$(printf '%s' "${bq}" | sed 's/"bucket":"//;s/"//')
       if ! aws s3api head-bucket --bucket "${bq_name}" 2>/dev/null; then
         printf 'MRF intent references deleted bucket: %s\n' "${bq_name}"
       fi
-    done)"
+    done || true)"
     if [ -n "${mrf_leak}" ]; then
       log "HEAL-STEP 8 MRF intent leak: ${mrf_leak}"
     fi
