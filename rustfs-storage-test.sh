@@ -1,7 +1,3 @@
-  # Both keys carry a compressible extension: disk compression is decided
-  # from the request key/Content-Type, and aws s3api sends no Content-Type on
-  # put-object or copy-object, so an extension-less key is never compressed
-  # (same include filter as MinIO) and the assertion below would be vacuous.
 #!/usr/bin/env bash
 #
 # rustfs-storage-test.sh
@@ -32,6 +28,7 @@
 #     reported as UNSUPPORTED, not FAIL.
 #
 set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ==================== Configuration ====================
 
@@ -76,6 +73,7 @@ RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
 TOPO_SINGLE_SINGLE="single-single"
 TOPO_SINGLE_MULTI="single-multi"
 TOPO_MULTI_MULTI="multi-multi"
+TOPO_ILM_2X4="ilm-2x4"
 
 ENDPOINT_SINGLE_SINGLE="http://rustfs-node1:9000"
 ENDPOINT_SINGLE_MULTI="http://rustfs-node1:9000"
@@ -84,6 +82,8 @@ ENDPOINT_MULTI_MULTI="http://rustfs-node1:9000"
 VOLUMES_SINGLE_SINGLE="/data/rustfs1/mnmd"
 VOLUMES_SINGLE_MULTI="/data/rustfs{1...4}/mnmd"
 VOLUMES_MULTI_MULTI="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
+VOLUMES_ILM_2X4="http://rustfs-node{1...2}:9000/data/rustfs{1...4}/mnmd"
+ILM_TIER_ENDPOINT="http://rustfs-node3:9000"
 
 SERVICE_TIMEOUT=300
 
@@ -96,6 +96,12 @@ SELECTED_TOPOLOGIES=()
 CURRENT_TOPOLOGY=""
 ENDPOINT=""
 VOLUMES=""
+VALIDATION_CASE=""
+VALIDATION_ARTIFACTS_DIR=""
+VALIDATION_CANDIDATE_MANIFEST=""
+VALIDATION_TESTING_COMMIT=""
+VALIDATION_BINARY_SHA256=""
+VALIDATION_OBJECT_CLEANUP_STATUS=PASS
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-storage.XXXXXX")"
 trap 'rm -rf "${TEST_TMP}"; rm -f "${ADMIN_API_CODE_FILE}"' EXIT
@@ -187,6 +193,14 @@ RUSTFS_CONSOLE_ENABLE=${RUSTFS_CONSOLE_ENABLE}
 RUSTFS_OBS_LOGGER_LEVEL=${RUSTFS_OBS_LOGGER_LEVEL}
 RUSTFS_OBS_LOG_DIRECTORY="${RUSTFS_OBS_LOG_DIRECTORY}"
 EOF
+  if [ "${VALIDATION_CASE}" = "scanner.usage-convergence" ] || [ "${VALIDATION_CASE}" = "scanner.status-readiness" ]; then
+    printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=5\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
+  elif [[ "${VALIDATION_CASE}" == ilm.* ]]; then
+    printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=2\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
+    printf 'RUSTFS_DATA_USAGE_UPDATE_DIR_CYCLES=1\nRUSTFS_ILM_DEBUG_DAY_SECS=10\nRUSTFS_ILM_PROCESS_TIME=1\n'
+    printf 'RUSTFS_API_STALE_UPLOADS_CLEANUP_INTERVAL=2s\n'
+    printf 'HTTP_PROXY=\nHTTPS_PROXY=\nALL_PROXY=\nhttp_proxy=\nhttps_proxy=\nall_proxy=\n'
+  fi
 }
 
 write_rustfs_config() {
@@ -272,6 +286,7 @@ resolve_topology() {
     "${TOPO_SINGLE_SINGLE}") ENDPOINT="${ENDPOINT_SINGLE_SINGLE}"; VOLUMES="${VOLUMES_SINGLE_SINGLE}"; return 0 ;;
     "${TOPO_SINGLE_MULTI}")  ENDPOINT="${ENDPOINT_SINGLE_MULTI}";  VOLUMES="${VOLUMES_SINGLE_MULTI}";  return 0 ;;
     "${TOPO_MULTI_MULTI}")   ENDPOINT="${ENDPOINT_MULTI_MULTI}";   VOLUMES="${VOLUMES_MULTI_MULTI}";   return 0 ;;
+    "${TOPO_ILM_2X4}") ENDPOINT="${ENDPOINT_SINGLE_MULTI}"; VOLUMES="${VOLUMES_ILM_2X4}"; return 0 ;;
     *) die "unknown topology: $1 (single-single|single-multi|multi-multi)" ;;
   esac
 }
@@ -279,6 +294,12 @@ resolve_topology() {
 topology_nodes() {
   case "$1" in
     "${TOPO_SINGLE_SINGLE}"|"${TOPO_SINGLE_MULTI}") printf '%s' "${NODES[0]}" ;;
+    "${TOPO_ILM_2X4}")
+      if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+        printf '%s %s %s' "${NODES[0]}" "${NODES[1]}" "${NODES[2]}"
+      else
+        printf '%s %s' "${NODES[0]}" "${NODES[1]}"
+      fi ;;
     *) printf '%s' "${NODES[*]}" ;;
   esac
 }
@@ -318,8 +339,13 @@ EOF
   for node in "${nodes[@]}"; do printf '%s\n' "${script}" | run_remote "${node}"; done
 
   for node in "${nodes[@]}"; do
-    write_rustfs_config "${node}" "${VOLUMES}"
-    ensure_volume_dirs "${node}" "${VOLUMES}"
+    if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ] && [ "${node}" = "${NODES[2]}" ]; then
+      VALIDATION_CASE="" write_rustfs_config "${node}" "${VOLUMES_SINGLE_SINGLE}"
+      ensure_volume_dirs "${node}" "${VOLUMES_SINGLE_SINGLE}"
+    else
+      write_rustfs_config "${node}" "${VOLUMES}"
+      ensure_volume_dirs "${node}" "${VOLUMES}"
+    fi
   done
 
   start_and_wait_nodes "${nodes[@]}"
@@ -333,6 +359,16 @@ EOF
       sleep 5; waited=$((waited+5))
     done
     [ "${waited}" -lt "${SERVICE_TIMEOUT}" ] || die "S3 endpoint ${ENDPOINT} not ready"
+    if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+      waited=0
+      while [ "${waited}" -lt "${SERVICE_TIMEOUT}" ]; do
+        if curl --noproxy '*' -fsS --max-time 5 "${ILM_TIER_ENDPOINT}/minio/health/live" >/dev/null 2>&1; then
+          log "ILM warm tier ready: ${ILM_TIER_ENDPOINT}"; break
+        fi
+        sleep 5; waited=$((waited+5))
+      done
+      [ "${waited}" -lt "${SERVICE_TIMEOUT}" ] || die "ILM warm tier ${ILM_TIER_ENDPOINT} not ready"
+    fi
 
     rc alias set local "${ENDPOINT}" "${ACCESS_KEY}" "${SECRET_KEY}" >/dev/null 2>&1 \
       || die "rc alias set failed for ${ENDPOINT}"
@@ -496,6 +532,86 @@ run_test() {
       sed 's/^/      | /' "${TEST_TMP}/test.out" | tail -40
     fi
   fi
+}
+
+validation_write_evidence() {
+  local evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}" item
+  mkdir -p "${evidence_dir}"
+  cp "${TEST_TMP}/test.out" "${evidence_dir}/test.log"
+  for item in $(validation_evidence_items); do
+    if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
+  done
+  if [[ "${VALIDATION_CASE}" == ilm.* ]] && [ -d "${TEST_TMP}/ilm-evidence" ]; then
+    cp -R "${TEST_TMP}/ilm-evidence" "${evidence_dir}/ilm"
+  fi
+}
+
+validation_evidence_items() {
+  case "${VALIDATION_CASE}" in
+    scanner.usage-convergence)
+      printf '%s\n' validation-fixture.json validation-list.json validation-baseline-usage.json validation-scanner.json validation-usage.json ;;
+    scanner.status-readiness)
+      printf '%s\n' validation-scanner-node1.json validation-scanner-node2.json validation-scanner-contract.json ;;
+  esac
+}
+
+validation_write_result() {
+  local verdict="$1" reason="$2" cleanup_status="$3" item
+  local profile=single-4disk
+  if [ "${VALIDATION_CASE}" = scanner.status-readiness ] || [[ "${VALIDATION_CASE}" == ilm.* ]]; then
+    profile=ilm-2x4
+  fi
+  local args=("${SCRIPT_DIR}/scripts/validation_result.py"
+    --case-id "${VALIDATION_CASE}" --profile "${profile}"
+    --result-file "${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
+    --verdict "${verdict}" --cleanup-status "${cleanup_status}")
+  if [ -n "${reason}" ]; then args+=(--reason "${reason}"); fi
+  if [ "${verdict}" != RUNNING ]; then
+    args+=(--candidate-manifest "${VALIDATION_CANDIDATE_MANIFEST}"
+      --rc-bin "$(command -v rc)" --testing-commit "${VALIDATION_TESTING_COMMIT}"
+      --binary-sha256 "${VALIDATION_BINARY_SHA256}"
+      --evidence "evidence/${VALIDATION_CASE}/test.log")
+  fi
+  if [ "${verdict}" = PASS ]; then
+    for item in $(validation_evidence_items); do
+      args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
+    done
+    if [[ "${VALIDATION_CASE}" == ilm.* ]]; then
+      local evidence_root="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}"
+      local evidence_file
+      while IFS= read -r -d '' evidence_file; do
+        args+=(--evidence "${evidence_file#"${VALIDATION_ARTIFACTS_DIR}/"}")
+      done < <(find "${evidence_root}/ilm" -type f -print0 | sort -z)
+    fi
+  fi
+  python3 "${args[@]}"
+}
+
+test_validation_ilm_case() {
+  local harness_dir="${TEST_TMP}/ilm-evidence" harness_rc=0
+  local -a ilm_args=()
+  if [ "${VALIDATION_CASE}" = ilm.restart-persistence ]; then
+    ilm_args+=(--restart-hook "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
+      bash "${SCRIPT_DIR}/scripts/validation_ilm/restart_cluster.sh" "${NODES[0]}" "${NODES[1]}")")
+  fi
+  if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+    ilm_args+=(--tier-endpoint "${ILM_TIER_ENDPOINT}"
+      --tier-access-key "${ACCESS_KEY}" --tier-secret-key "${SECRET_KEY}")
+  fi
+  python3 -B "${SCRIPT_DIR}/scripts/validation_ilm/ilm_behavior.py" \
+    --case "${VALIDATION_CASE}" \
+    --endpoint "${ENDPOINT}" \
+    --scanner-endpoint "http://rustfs-node1:9000" \
+    --scanner-endpoint "http://rustfs-node2:9000" \
+    --access-key "${ACCESS_KEY}" --secret-key "${SECRET_KEY}" \
+    --run-id "${VALIDATION_CASE}-$(date +%s)-$$" \
+    --evidence-dir "${harness_dir}" \
+    --rc-bin "$(command -v rc)" \
+    "${ilm_args[@]}" \
+    --cleanup-on-failure || harness_rc=$?
+  python3 -B "${SCRIPT_DIR}/scripts/validation_ilm/verify_result.py" \
+    "${VALIDATION_CASE}" "${harness_dir}" || return 1
+  [ "${harness_rc}" -eq 0 ]
 }
 
 rc_run() {
@@ -683,6 +799,125 @@ test_stor134() { # admin usage APIs must respond promptly and converge to actual
   printf '\n'
   echo "usage never accounted for the 20 seeded objects (stale/zero usage signature)"
   rm_bucket "${bucket}"
+  return 1
+}
+
+validation_scanner_usage_matches() {
+  local scanner_file="$1" usage_file="$2" bucket="$3" baseline="$4" bytes="$5" uploaded="$6"
+  jq -e --argjson uploaded "${uploaded}" \
+    '.enabled == true and .freshness.state == "fresh" and .metrics.last_cycle_result == "success" and .metrics.leader_lock_held_by_this_process == true and .cycle_schedule.execution_role == "leader" and .freshness.last_cycle_end_unix_secs >= $uploaded' \
+    "${scanner_file}" >/dev/null 2>&1 && \
+    jq -e --arg bucket "${bucket}" --argjson baseline "${baseline}" --argjson bytes "${bytes}" \
+      '.usage_snapshot_complete == true and .usage_snapshot_converged != false and .scanner_cycle > $baseline and .buckets_usage[$bucket].objects_count == 20 and .buckets_usage[$bucket].size == $bytes' \
+      "${usage_file}" >/dev/null 2>&1
+}
+
+test_validation_scanner_usage_convergence() {
+  local bucket="val-usage-${RANDOM}-$$" i key size sha expected_size=0 baseline_cycle=0
+  local upload_end deadline case_rc=0 cleanup_rc=0
+  local fixture_tsv="${TEST_TMP}/validation-fixture.tsv"
+  VALIDATION_OBJECT_CLEANUP_STATUS=PASS
+  : > "${fixture_tsv}"
+  new_bucket "${bucket}" || return 1
+  (
+    admin_api GET "/rustfs/admin/v3/datausageinfo" "" "" > "${TEST_TMP}/validation-baseline-usage.json"
+    [ "$(admin_api_code)" = 200 ] || { echo "baseline usage API failed"; exit 1; }
+    baseline_cycle="$(jq -er '.scanner_cycle // 0 | numbers' "${TEST_TMP}/validation-baseline-usage.json")" || exit 1
+    for i in $(seq 1 20); do
+      key="obj-${i}"
+      size=$((1024 + i))
+      make_test_file "${TEST_TMP}/${key}" "${size}"
+      sha="$(sha256sum "${TEST_TMP}/${key}" | awk '{print $1}')"
+      printf '%s\t%s\t%s\n' "${key}" "${size}" "${sha}" >> "${fixture_tsv}"
+      expected_size=$((expected_size + size))
+      aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${TEST_TMP}/${key}"
+      assert_aws_ok || exit 1
+    done
+    jq -Rn --arg bucket "${bucket}" '[inputs | split("\t") | {key:.[0], size:(.[1]|tonumber), sha256:.[2]}] | {bucket:$bucket, objects:., expected_count:length, expected_size:(map(.size)|add)}' \
+      < "${fixture_tsv}" > "${TEST_TMP}/validation-fixture.json"
+    upload_end="$(date -u +%s)"
+    aws_run s3api list-objects-v2 --bucket "${bucket}"
+    assert_aws_ok || exit 1
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-list.json"
+    jq -e --slurpfile fixture "${TEST_TMP}/validation-fixture.json" \
+      '(.Contents // [] | map({key:.Key,size:.Size}) | sort_by(.key)) == ($fixture[0].objects | map({key,size}) | sort_by(.key))' \
+      "${TEST_TMP}/validation-list.json" >/dev/null || { echo "S3 fixture list differs from uploaded manifest"; exit 1; }
+
+    deadline=$((SECONDS + 300))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+      admin_api GET "/rustfs/admin/v3/scanner/status" "" "" > "${TEST_TMP}/validation-scanner.json"
+      local scanner_code usage_code
+      scanner_code="$(admin_api_code)"
+      admin_api GET "/rustfs/admin/v3/datausageinfo" "" "" > "${TEST_TMP}/validation-usage.json"
+      usage_code="$(admin_api_code)"
+      if [ "${scanner_code}" = 200 ] && [ "${usage_code}" = 200 ] && \
+        validation_scanner_usage_matches "${TEST_TMP}/validation-scanner.json" "${TEST_TMP}/validation-usage.json" \
+          "${bucket}" "${baseline_cycle}" "${expected_size}" "${upload_end}"; then
+        echo "scanner completed after upload; usage converged to 20 objects and ${expected_size} bytes"
+        exit 0
+      fi
+      sleep 5
+    done
+    echo "scanner or usage did not converge within 300 seconds"
+    exit 1
+  ) || case_rc=$?
+
+  for i in $(seq 1 20); do
+    aws_run s3api delete-object --bucket "${bucket}" --key "obj-${i}"
+    assert_aws_ok || cleanup_rc=1
+  done
+  aws_run s3api delete-bucket --bucket "${bucket}"
+  assert_aws_ok || cleanup_rc=1
+  if [ "${cleanup_rc}" -ne 0 ]; then
+    VALIDATION_OBJECT_CLEANUP_STATUS=FAIL
+    echo "validation bucket cleanup failed"
+  fi
+  [ "${case_rc}" -eq 0 ] && [ "${cleanup_rc}" -eq 0 ]
+}
+
+validation_scanner_status_ready() {
+  local node1="$1" node2="$2" started_at="$3"
+  jq -se --argjson started "${started_at}" '
+      length == 2 and
+      all(.[]; .enabled == true and
+        .runtime_config.cycle_interval_seconds == {value:5,source:"env"} and
+        .runtime_config.start_delay_seconds == {value:0,source:"env"}) and
+      ([.[] | select(.metrics.leader_lock_held_by_this_process == true)] | length) == 1 and
+      any(.[]; .metrics.leader_lock_held_by_this_process == true and
+        .metrics.leader_lock_state == "acquired" and
+        .metrics.last_cycle_result == "success" and
+        .metrics.last_cycle_end_unix_secs >= $started and
+        .freshness.state == "fresh" and
+        .cycle_schedule.execution_role == "leader")' \
+      "${node1}" "${node2}" >/dev/null
+}
+
+test_validation_scanner_status_readiness() {
+  local started_at deadline status_code node endpoint index
+  started_at="$(date -u +%s)"
+  deadline=$((SECONDS + 120))
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    status_code=0
+    for index in 1 2; do
+      node="${NODES[index-1]}"
+      endpoint="http://rustfs-node${index}:9000"
+      (API_ENDPOINT="${endpoint}"; admin_api GET /rustfs/admin/v3/scanner/status "" "" > "${TEST_TMP}/validation-scanner-node${index}.json"
+        [ "$(admin_api_code)" = 200 ]) || status_code=1
+      [ "${status_code}" -eq 0 ] || { echo "scanner status unavailable on ${node}"; break; }
+    done
+    if [ "${status_code}" -eq 0 ] && validation_scanner_status_ready \
+      "${TEST_TMP}/validation-scanner-node1.json" "${TEST_TMP}/validation-scanner-node2.json" "${started_at}"; then
+      jq -n --argjson started "${started_at}" --slurpfile node1 "${TEST_TMP}/validation-scanner-node1.json" \
+        --slurpfile node2 "${TEST_TMP}/validation-scanner-node2.json" \
+        '{started_at_unix:$started,cycle_interval_seconds:5,start_delay_seconds:0,
+          leader:([($node1[0],$node2[0]) | select(.metrics.leader_lock_held_by_this_process == true) |
+            {last_cycle_end_unix_secs:.metrics.last_cycle_end_unix_secs,last_cycle_result:.metrics.last_cycle_result}] | first)}' \
+        > "${TEST_TMP}/validation-scanner-contract.json"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "two-node scanner runtime or successful new leader cycle did not meet the 120-second deadline"
   return 1
 }
 
@@ -1080,6 +1315,10 @@ Options:
   --ssh-user <user>       SSH user for the test nodes
   --ssh-port <port>       SSH port for the test nodes
   --log-file <path>       append all output to a log file
+  --validation-case ID    run a canonical scanner case on its required topology
+  --validation-artifacts-dir DIR  write canonical result and evidence
+  --candidate-manifest FILE  immutable candidate manifest
+  --testing-commit SHA    auto-testing commit used for validation results
   --dry-run               preview only
   -y, --yes               skip confirmation
   -h, --help              show this help
@@ -1101,6 +1340,10 @@ main() {
       --ssh-user) SSH_USER="$1"; shift ;;
       --ssh-port) SSH_PORT="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
+      --validation-case) VALIDATION_CASE="$1"; shift ;;
+      --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
+      --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
+      --testing-commit) VALIDATION_TESTING_COMMIT="$1"; shift ;;
       --dry-run) DRY_RUN=1 ;;
       -y|--yes) ASSUME_YES=1 ;;
       -h|--help) usage; exit 0 ;;
@@ -1118,6 +1361,39 @@ main() {
   if [ "${all}" -eq 1 ]; then
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}" "${TOPO_MULTI_MULTI}")
   fi
+  if [ -n "${VALIDATION_CASE}" ]; then
+    case "${VALIDATION_CASE}" in
+      scanner.usage-convergence|scanner.status-readiness) ;;
+      ilm.configuration-roundtrip|ilm.invalid-configuration|ilm.current-expiration|ilm.tag-filter-expiration|ilm.disabled-rule|ilm.rule-removal|ilm.versioned-current-expiration|ilm.noncurrent-expiration|ilm.newer-noncurrent-retention|ilm.delete-all-versions|ilm.delete-marker-expiration|ilm.multipart-expiration|ilm.restart-persistence|ilm.transition-and-restore) ;;
+      *) die "unknown validation case: ${VALIDATION_CASE}" ;;
+    esac
+    [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
+    [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its own topology"
+    [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
+    if [ "${VALIDATION_CASE}" = scanner.status-readiness ] || [[ "${VALIDATION_CASE}" == ilm.* ]]; then
+      SELECTED_TOPOLOGIES=("${TOPO_ILM_2X4}")
+      [ "${#NODES[@]}" -ge 2 ] || die "scanner.status-readiness needs two test nodes"
+      if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+        [ "${#NODES[@]}" -ge 3 ] || die "ilm.transition-and-restore needs three test nodes"
+      fi
+    else
+      SELECTED_TOPOLOGIES=("${TOPO_SINGLE_MULTI}")
+    fi
+    if [ "${DRY_RUN}" -eq 0 ]; then
+      [ -n "${VALIDATION_ARTIFACTS_DIR}" ] || die "--validation-case requires --validation-artifacts-dir"
+      [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "--validation-case requires --candidate-manifest"
+      [ -n "${VALIDATION_TESTING_COMMIT}" ] || die "--validation-case requires --testing-commit"
+      [ ! -e "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation artifacts directory already exists"
+      PACKAGE_URL="$(jq -er '.package_url' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate URL missing"
+      PACKAGE_SHA256="$(jq -er '.package_sha256' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate package SHA missing"
+      [[ "${PACKAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid candidate package SHA"
+      jq -e '.source_sha | test("^[0-9a-f]{40}$")' "${VALIDATION_CANDIDATE_MANIFEST}" >/dev/null \
+        || die "candidate source commit missing"
+      [ "${VALIDATION_TESTING_COMMIT}" = "$(git -C "${SCRIPT_DIR}" rev-parse HEAD)" ] \
+        || die "testing commit does not match this checkout"
+      mkdir -p "${VALIDATION_ARTIFACTS_DIR}"
+    fi
+  fi
   [ "${#SELECTED_TOPOLOGIES[@]}" -gt 0 ] || die "no topology selected (--all-topologies / --topology)"
   local _p
   for _p in /root/.local/bin /home/*/.local/bin /usr/local/bin; do
@@ -1130,26 +1406,63 @@ main() {
   need_cmd jq "JSON processor"
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4 signing)"
+  if [ -n "${VALIDATION_CASE}" ]; then need_cmd python3 "validation result writer"; fi
+  if [[ "${VALIDATION_CASE}" == ilm.* ]] && [ "${DRY_RUN}" -eq 0 ]; then
+    python3 -c 'import boto3, botocore' || die "ILM validation requires boto3 and botocore"
+  fi
   log "nodes: ${NODES[*]}  package: $(resolve_package_url)"
   local overall_fail=0 topo
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
     log "== topology: ${topo} =="
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      validation_write_result RUNNING "validation case started" PENDING
+    fi
     env_setup "${topo}"
     CURRENT_TOPOLOGY="${topo}"
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      VALIDATION_BINARY_SHA256="$(printf 'sha256sum /usr/bin/rustfs\n' | run_remote "${NODES[0]}" | awk '{print $1}')"
+      [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
+    fi
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
-    run_all_tests
+    if [ -n "${VALIDATION_CASE}" ]; then
+      case "${VALIDATION_CASE}" in
+        scanner.usage-convergence) run_test "${VALIDATION_CASE}" "UsageConvergence" test_validation_scanner_usage_convergence ;;
+        scanner.status-readiness) run_test "${VALIDATION_CASE}" "StatusReadiness" test_validation_scanner_status_readiness ;;
+        ilm.*) run_test "${VALIDATION_CASE}" "ILMBehavior" test_validation_ilm_case ;;
+      esac
+    else
+      run_all_tests
+    fi
     results_summary
     record_topology_result "${topo}"
+    local cleanup_status=PASS
     if [ "${KEEP_ENV}" -eq 0 ] || [ "${topo}" != "${SELECTED_TOPOLOGIES[${#SELECTED_TOPOLOGIES[@]}-1]}" ]; then
-      env_teardown "${topo}"
+      env_teardown "${topo}" || cleanup_status=FAIL
+    fi
+    if [ "${VALIDATION_OBJECT_CLEANUP_STATUS}" != PASS ]; then cleanup_status=FAIL; fi
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      validation_write_evidence
+      if [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
+        validation_write_result PASS "" PASS
+      elif [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ]; then
+        validation_write_result INFRA_ERROR "environment teardown failed" FAIL
+      elif [[ "${VALIDATION_CASE}" == ilm.* ]] && [ -f "${TEST_TMP}/ilm-evidence/result.json" ] && \
+           jq -e '.status.state == "infra_error"' "${TEST_TMP}/ilm-evidence/result.json" >/dev/null; then
+        validation_write_result INFRA_ERROR "ILM harness preflight or execution infrastructure failed; inspect evidence" "${cleanup_status}"
+      else
+        validation_write_result FAIL "case failed or unsupported; inspect evidence" "${cleanup_status}"
+      fi
     fi
     if [ "${FAIL}" -gt 0 ]; then
       overall_fail=1
     fi
+    if [ "${UNSUPPORTED}" -gt 0 ] || [ "${cleanup_status}" != PASS ]; then overall_fail=1; fi
   done
   final_summary
   [ "${overall_fail}" -eq 0 ] || exit 1
   log "all done"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

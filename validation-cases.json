@@ -1,0 +1,4150 @@
+{
+  "schema": 1,
+  "source": "rustfs-release-validation/scenarios/catalog.yaml",
+  "source_commit": "524eb5b32c3236497fdd8a9271df0494fa3d9974",
+  "source_sha256": "463fdd02dee43e42fef4f3aacf7506709ce87af535e1a53d91c521bc2e361cad",
+  "modules": [
+    {
+      "id": "pool-lifecycle",
+      "target_environments": [
+        "lifecycle-a"
+      ],
+      "required_capabilities": [
+        "expansion",
+        "rebalance",
+        "decommission",
+        "restart-recovery"
+      ],
+      "cases": [
+        {
+          "id": "pool.status",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api"
+          ],
+          "assertions": [
+            "A clean seed topology reports exactly one active pool with a stable ID, non-empty command line, and internally valid capacity counters.",
+            "After expansion, rc and the Admin API report the same two unique pools, lifecycle states, operation states, and capacity values.",
+            "Pool-specific status selected by either numeric ID or exact command-line expression agrees with the corresponding list entry and no response exposes credentials."
+          ],
+          "probes": {
+            "rc": "rc --json admin pool list rustfs; rc --json admin pool status rustfs POOL_ID --by-id",
+            "adminApi": "GET /rustfs/admin/v3/pools/list"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.expand-and-rebalance",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Existing objects are written and checksum-verified while only the seed pool is configured.",
+            "Appending the second pool makes every declared node ready and preserves pool order, IDs, and the complete logical object manifest.",
+            "rc expansion start is acknowledged with a non-empty operation ID that remains stable in Admin API and rc status.",
+            "Rebalance is observed active, completes with non-zero object, version, or byte movement, and reports no failed state, last error, cleanup warning, or incomplete stop propagation.",
+            "Every object remains readable with identical size, SHA-256, metadata, and ETag after rebalance."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.expansion-restart-persistence",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "The expanded two-pool map survives a graceful full-cluster restart on the same candidate.",
+            "A rebalance already showing non-zero progress resumes after the restart under the same operation ID, never regresses its counters, and completes cleanly.",
+            "Every active node returns readiness and the same pool membership after restart.",
+            "Seed-pool objects remain checksum-correct when read through both expansion-pool nodes."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.rebalance-stop-resume",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "A rebalance with real data is observed in Started state with non-zero progress before stop is issued.",
+            "Stop converges on all participating pools, records stoppedAt, and has no failed peers, pending terminal reload, last error, or cleanup warning.",
+            "The stopped operation remains stopped under the same ID after a full-cluster restart and is not auto-resumed.",
+            "A new start uses a different operation ID, resumes remaining work, and reaches a clean non-zero terminal completion without data loss."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.rebalance-live-io",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "PUT, GET, HEAD, LIST, COPY, and DELETE remain available while rebalance is actively moving data.",
+            "The movement status remains active with non-zero progress across the online-I/O observation window.",
+            "Baseline and newly committed objects remain checksum-correct after terminal completion."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.decommission",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Seed data is created before expansion so the selected source pool provably owns customer objects.",
+            "Decommission start is acknowledged, becomes active, and reaches complete/decommissioned with non-zero moved objects and bytes.",
+            "Failed object and byte counters are zero, queued work is empty, and no unresolved entries remain.",
+            "The complete logical manifest is readable and checksum-correct from surviving-pool nodes."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.decommission-cancel-clear-resume",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Cancel is issued only after non-zero movement and its canceled/blocked state survives a full-cluster restart without corrupting committed objects or auto-resuming.",
+            "Clear removes only terminal decommission metadata, restores the pool to an eligible active state, and remains cleared after a second restart.",
+            "A subsequent start is accepted and completes cleanly with the original manifest intact."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.decommission-restart-recovery",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "A decommission with non-zero progress survives a graceful restart of every configured node.",
+            "Recovery never reports failed, canceled, unresolved, or regressed movement counters and eventually reaches terminal success.",
+            "Objects written before the restart remain checksum-correct on the surviving pool."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.decommission-versioned-integrity",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Multiple immutable versions and a delete marker created on the seed pool retain their exact version IDs and payload hashes after decommission.",
+            "Historical versions remain directly addressable and the sole delete marker remains latest; an unversioned GET returns that marker's exact identity without resurrecting the object."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.decommission-multipart-integrity",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "A completed multipart object retains its length, ETag, metadata, and SHA-256 after decommission.",
+            "An in-progress multipart upload and uploaded part remain addressable and can be completed after the source pool is retired.",
+            "The resumed upload disappears from the pending list and its final length, ETag, metadata, and payload are exact."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.decommission-live-io",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Concurrent PUT operations through multiple active endpoints succeed or retry only documented transient responses while decommission has non-zero progress.",
+            "Concurrent GET, HEAD, LIST, COPY, and DELETE operations remain customer-visible during movement.",
+            "Baseline and concurrently committed objects remain complete and checksum-correct after terminal success."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.retired-config-removal",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Only after successful decommission, the retired pool expression can be removed and the surviving-pool nodes can restart cleanly.",
+            "The resulting topology reports exactly one active pool and no reference to the retired pool command line.",
+            "Migrated objects and a fresh post-removal object remain readable through the stable service endpoint."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "pool.operation-guards",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Status/start/cancel/clear with unknown pool IDs, idle cancel/clear, single-pool rebalance, and attempts to retire the only pool fail closed without partial lifecycle metadata.",
+            "Duplicate starts are rejected, decommission is rejected while rebalance is active, and rebalance is rejected while decommission is active.",
+            "A canceled decommission cannot restart until its terminal metadata is explicitly cleared.",
+            "Cancel, stop, and clear return the cluster to a clean state while preserving all committed objects."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_pool_expand.sh"
+            ],
+            "case_ids": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "heal-scanner",
+      "target_environments": [
+        "single-4disk",
+        "cluster-1pool"
+      ],
+      "required_capabilities": [
+        "heal",
+        "scanner"
+      ],
+      "cases": [
+        {
+          "id": "heal.admin-healthy-noop",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "对健康对象分别执行 normal/deep，再重复查询",
+            "不修改用户数据或版本；Normal 只接受 `metadata_healthy`，Deep 才要求 `verified_healthy`，healthy 与 repaired 分开计数，不能把检查盘数当修复盘数。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A01",
+            "procedure": "docs/heal-cases.md#A01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F0"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-scope-isolation",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "分别以 root、bucket、prefix、object、pool/set 选择器启动",
+            "目标范围实际遍历；相邻前缀、其他桶及未选 set 的故障保持原状；按对象清单而非目录数量验收。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A02",
+            "procedure": "docs/heal-cases.md#A02",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DS",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-token-cross-node-status",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "从节点甲启动，经乙及稳定入口按原 token 查询",
+            "任务身份、scope、终态及核心计数有界收敛；状态缺失/未知不能解释为完成。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A03",
+            "procedure": "docs/heal-cases.md#A03",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-dry-run",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "对缺片与损坏对象执行 dryRun，参数化 remove/recreate",
+            "有明确 dry_run_observed 诊断；用户对象分片、xl.meta、版本与删除标记不变；后台修复干扰须排除。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A04",
+            "procedure": "docs/heal-cases.md#A04",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-overlap-and-force-start",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "活动中重发同范围、父子前缀和不相交请求，再 forceStart",
+            "按已固定 overlap policy 验证合并返回原 token 或明确冲突；forceStart 不能泄漏旧任务责任或并发破坏对象。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A05",
+            "procedure": "docs/heal-cases.md#A05",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DS",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-stop-and-stale-token",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "非零修复进度时 stop，稳定后新建任务，再发旧 token 的查询/停止",
+            "停止需等在途写结束并稳定；新任务身份独立，旧请求不得终止新任务；重复 stop 按公开契约处理。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A06",
+            "procedure": "docs/heal-cases.md#A06",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-invalid-request",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "发送非法 selector、重复 query、非法布尔/scanMode、冲突 flags、超长 body",
+            "服务端返回已核实的结构化错误；无误启动、范围扩大或持久化副作用；CLI 参数错误不能替代服务端负例。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A07",
+            "procedure": "docs/heal-cases.md#A07",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F0"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-authorization",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "匿名、坏签名、过期签名、无 HealAdminAction 用户与最小授权用户分别请求",
+            "未授权 start/status/stop 均不能越权或泄漏对象信息；授权用户可完成规定操作，凭据不得写入证据。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A08",
+            "procedure": "docs/heal-cases.md#A08",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F0"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-nolock-safety",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "通过签名 API 传 nolock=true，并与同对象提交制造确定性争用",
+            "兼容字段不得跳过存储层对象锁；最后成功写入和已确认删除保持正确，原生屏障与真机竞争证据分开。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A09",
+            "procedure": "docs/heal-cases.md#A09",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DL,DV",
+            "fault": "F1,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.admin-option-contract",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "参数化 recursive、recreate、remove、updateParity、readRepair 与合法/非法 pool/set 组合",
+            "仅测试已核实的候选语义；normal/deep 与危险 remove 的副作用明确；API 独有选项不得伪称 rc 已覆盖。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-a",
+            "designCode": "A10",
+            "procedure": "docs/heal-cases.md#A10",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.disk-loss-and-repair",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "让一个已确认 set 成员盘对 heal 服务不可用，持续读取，恢复原盘",
+            "记录真实故障窗口和源/目标盘身份；在可恢复条件下最终补齐目标分片及完整 manifest，不只验证降级 GET。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B01",
+            "procedure": "docs/heal-cases.md#B01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F4"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.disk-readonly-and-permission",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "仅对独占测试卷制造只读/拒绝访问，恢复后重试",
+            "不可写目标不得 reported repaired；错误及待修责任可见；恢复后真实写入目标且不落到系统盘或其他目录。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B02",
+            "procedure": "docs/heal-cases.md#B02",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F4,F5"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.disk-replacement-formatted",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "换入空的新逻辑盘，确认新 disk UUID/正确格式后触发重建",
+            "新盘与旧盘身份可区分且属于正确 pool/set/slot；逐版本重建完成，不能从隔离备份复制回来冒充 heal。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B03",
+            "procedure": "docs/heal-cases.md#B03",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F8"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.disk-replacement-unformatted",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "引入空未格式化测试盘，并与带异集群格式的盘分别比较",
+            "按候选支持的初始化契约安全接纳或明确拒绝；不得覆盖外来身份或将未就绪盘标为可写健康。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B04",
+            "procedure": "docs/heal-cases.md#B04",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F8"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.multiple-shard-loss",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "按实际同版本 EC 布局依次缺失 1..M 个 shard，覆盖 data/parity 角色组合",
+            "每个参数实例单独满足读取与写入 quorum；满足修复条件时全部目标重建，不把跨版本或跨 set 的 shard 合并。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B05",
+            "procedure": "docs/heal-cases.md#B05",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.read-quorum-boundary",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "保留恰好 R 个同版本权威 shard，测试读取及修复提交，再恢复写 quorum",
+            "读取边界和修复写入边界分别判定；不能因还能 GET 就要求在写 quorum 不足时提交成功。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B06",
+            "procedure": "docs/heal-cases.md#B06",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.below-read-quorum",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "使权威来源小于 R，执行 GET 与 deep heal，再恢复被隔离源",
+            "故障期间不得返回伪造的成功内容、空对象或误删记录；明确 unresolved/失败；恢复后原对象和版本完整。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B07",
+            "procedure": "docs/heal-cases.md#B07",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.below-write-quorum",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "构造读 quorum 尚存而写/锁 quorum 不足，执行 heal 与新 PUT",
+            "不能虚报持久化修复或成功写入；分别记录对象、元数据、分布式锁 quorum；恢复后核对所有已确认写入。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B08",
+            "procedure": "docs/heal-cases.md#B08",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DL",
+            "fault": "F4"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.node-outage-rejoin",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "停止同一跨节点 set 的一个节点，执行允许的降级 I/O，再重入",
+            "按实际丢失盘数判定可用性；缺失期间成功提交的对象补齐；节点重新 ready 不等于所有对象已重建。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B09",
+            "procedure": "docs/heal-cases.md#B09",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB,DV,DL",
+            "fault": "F6"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.disk-and-node-flapping",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "重复短暂离线/在线并在重建途中再次失联",
+            "重试与队列有界、身份稳定，无重复任务风暴；最终故障解除后收敛，所有已确认对象保持正确。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-b",
+            "designCode": "B10",
+            "procedure": "docs/heal-cases.md#B10",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB,DL",
+            "fault": "F4,F6"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.missing-part-file",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "仅隔离指定对象某个 part/shard，保留 format 与其他元数据，执行 deep heal",
+            "对应数据或校验分片重新生成，part/版本身份准确；不得只看到 xl.meta 重现就通过。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C01",
+            "procedure": "docs/heal-cases.md#C01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DM",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.data-shard-bitrot",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "在指定 data shard 的已知偏移翻转字节，包含首/中/尾位置",
+            "故障前后摘要证明注入生效；deep 或 read-repair 发现损坏并修复；独立 bitrot/EC 及 S3 全内容验证通过。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C02",
+            "procedure": "docs/heal-cases.md#C02",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DM",
+            "fault": "F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.parity-shard-bitrot",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "损坏 parity shard，使普通 GET 仍可能成功，再执行 deep heal",
+            "必须识别并重建损坏 parity；只有 GET 正确、无目标分片修复不能通过。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C03",
+            "procedure": "docs/heal-cases.md#C03",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DM",
+            "fault": "F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.truncated-and-zeroed-shard",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "分别截断 shard、置零和破坏校验头，保留正确元数据仲裁来源",
+            "短读、全零和校验损坏被准确识别；修复不能接受截断内容或错误长度。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C04",
+            "procedure": "docs/heal-cases.md#C04",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DM",
+            "fault": "F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.missing-or-corrupt-xlmeta",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "在少数成员上移走或损坏 xl.meta/inline 内容，保留足够权威来源",
+            "恢复同一对象的全部应存版本、数据引用与删除标记；不以新建空元数据替代真正修复。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C05",
+            "procedure": "docs/heal-cases.md#C05",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.stale-version-rejoin",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "盘离线后执行覆盖/版本删除，再让携带旧元数据的盘重入",
+            "以已确认的新代次/版本为准；旧当前值与已删版本不复活，旧盘被纠正而非成为新的错误权威。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C06",
+            "procedure": "docs/heal-cases.md#C06",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV,DL",
+            "fault": "F4"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.conflicting-subquorum-authority",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "用受控原生夹具构造互不构成 quorum 的版本/代次集合，再做对应真机反例",
+            "禁止把不同版本的 shard 数量并集当成权威；无法证明时安全拒绝且保留可恢复证据，不猜测较新时间戳。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C07",
+            "procedure": "docs/heal-cases.md#C07",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV",
+            "fault": "F3,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.metadata-payload-mismatch",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "构造元数据声称某长度/摘要但实际 part 不匹配的少数副本",
+            "元数据与内容联合判断；不把可解析的 xl.meta 当健康；权威不足时拒绝覆盖正确副本。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C08",
+            "procedure": "docs/heal-cases.md#C08",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F2,F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.foreign-format-and-unknown-schema",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "提供外来 disk/set 身份、未来 schema 或不支持的记录格式",
+            "明确隔离/拒绝且不破坏原记录，不把未知当 missing 后直接重建；解除故障后原数据可用。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C09",
+            "procedure": "docs/heal-cases.md#C09",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F3,F8"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.dangling-and-orphan-safety",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "构造 dangling part、旧 data_dir 与共享历史引用，分别 remove=false/true、宽限期前后检查",
+            "默认不得破坏仍可恢复数据；显式 remove 只清除具有充分删除证明且过期的本次孤儿，不删共享版本或 MPU。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C10",
+            "procedure": "docs/heal-cases.md#C10",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV,DM",
+            "fault": "F1,F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.bucket-incarnation-recreation",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "盘离线时完成旧桶合法清空/删除，再同名建桶写入新对象，恢复旧盘与旧任务",
+            "旧 bucket incarnation 的 checkpoint/MRF/元数据不得污染新桶；旧任务不得删除或恢复新 incarnation 的对象。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-c",
+            "designCode": "C11",
+            "procedure": "docs/heal-cases.md#C11",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV",
+            "fault": "F4,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.object-size-boundaries",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "覆盖 0/1 字节、页/inline/EC block 边界±1以及大对象",
+            "每个实际存储形态均确认后注入；长度、SHA-256、ETag、HEAD/LIST 与边界 Range 正确，无假设阈值。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D01",
+            "procedure": "docs/heal-cases.md#D01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.completed-multipart-object",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "修复已完成的不等长多 part 对象，分别损坏首/中/末 part",
+            "完整内容、part 顺序、原版本/ETag/元数据和跨 part Range 不变；multipart ETag 不能当整对象 MD5。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D02",
+            "procedure": "docs/heal-cases.md#D02",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DM",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.historical-versions",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "不同版本分布不同损坏位置，按对象和递归范围修复",
+            "所有原 versionId 可寻址且内容正确，最新版本身份不漂移，无多余版本或遗漏历史版本。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D03",
+            "procedure": "docs/heal-cases.md#D03",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV",
+            "fault": "F1,F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.delete-marker-semantics",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "缺失/陈旧 marker 副本后 heal，并按当前值与精确 marker versionId 查询",
+            "当前 GET/HEAD 与指定 marker 的状态码及身份头符合契约；marker 不复活数据，LIST versions 无重复。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D04",
+            "procedure": "docs/heal-cases.md#D04",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV",
+            "fault": "F3,F4"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.versioning-suspended-null",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "在版本开启、暂停、null 版本覆盖之间建夹具再修复",
+            "null 和非 null 版本不混淆，不新增假版本；暂停前历史对象仍准确可读。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D05",
+            "procedure": "docs/heal-cases.md#D05",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV",
+            "fault": "F1,F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.object-metadata-and-tags",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "包含用户 metadata、Content-Type/Encoding/Disposition、tags 的对象修复",
+            "对外 metadata、tags 和相关响应头逐项相同；不要求无关内部元数据字节完全一致。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D06",
+            "procedure": "docs/heal-cases.md#D06",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DS",
+            "fault": "F1,F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.range-head-and-conditions",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "修复前后验证 HEAD、合法/越界 Range、If-Match/If-None-Match 及时间条件",
+            "200/206/304/412/416 等按逐请求契约判断，绝不返回旧内容、错误范围或错误 ETag。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D07",
+            "procedure": "docs/heal-cases.md#D07",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DM",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.encrypted-objects",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "按候选支持的 SSE-S3/SSE-KMS/SSE-C 建加密对象并修复",
+            "授权解密后原内容及版本一致，物理验证使用正确编码/密文层；密钥不可用时不误删、不降级明文，证据脱敏。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D08",
+            "procedure": "docs/heal-cases.md#D08",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DE",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.object-lock-retention",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "对开启 retention/legal hold 的受保护版本修复，期间测试非法删除",
+            "heal 不绕过保留/hold，也不丢失其元数据；拒绝删除与合法修复均有明确证据。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D09",
+            "procedure": "docs/heal-cases.md#D09",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DO,DV",
+            "fault": "F1,F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.special-keys-and-pagination",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "覆盖中文、空格、百分号、编码斜线、多层前缀和多页对象列表",
+            "逻辑 key 与物理路径映射准确，不跨桶/前缀；分页无遗漏重复，不能把用户 key 当可执行 shell 或裸文件路径。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D10",
+            "procedure": "docs/heal-cases.md#D10",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DS",
+            "fault": "F1,F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.bucket-metadata-integrity",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "在隔离桶白名单内测试可支持的桶元数据恢复，并核对外部 bucket 配置",
+            "版本设置、策略/标签/保留配置按契约保持；不得遍历凭据配置或把未知内部记录当可重建数据。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-d",
+            "designCode": "D11",
+            "procedure": "docs/heal-cases.md#D11",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DS,DV",
+            "fault": "F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.manual-normal-attribution",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "禁止预读目标，保留 format，隔离背景干扰后显式 normal heal",
+            "证明本次 Admin token 实际覆盖目标并修复可由 normal 检出的缺失；不要求 normal 发现所有静默 bitrot。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-e",
+            "designCode": "E01",
+            "procedure": "docs/heal-cases.md#E01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.manual-deep-attribution",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "在普通读取仍可成功的 parity 损坏上显式 deep heal",
+            "按 token/对象/版本及物理变更证明 deep 检查和修复，不把后台提前修复算给手工任务。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-e",
+            "designCode": "E02",
+            "procedure": "docs/heal-cases.md#E02",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.read-repair-attribution",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "不发 Admin heal，对已确认的特定损坏对象发一次可追踪 GET/Range",
+            "读取正确且后续真实补片；若走异步队列需证实 source=read-repair，不能只有 GET 成功。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-e",
+            "designCode": "E03",
+            "procedure": "docs/heal-cases.md#E03",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.scanner-cold-object-repair",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "不 GET/HEAD 损坏目标、不发手工 heal，仅等待已启用的 scanner 路径",
+            "冷对象被发现并修复，来源和遍历窗口明确；scanner 周期结束但目标没检查不能通过。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-e",
+            "designCode": "E04",
+            "procedure": "docs/heal-cases.md#E04",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.mrf-offline-write-replay",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "成员离线时完成有 quorum 的 PUT/DELETE，确认待修责任后重入",
+            "durable MRF 责任持久且身份精确；只在 repaired/verified healthy/authoritatively absent 等已证明结果后释放，成功提交不丢失。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-e",
+            "designCode": "E05",
+            "procedure": "docs/heal-cases.md#E05",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DL,DV",
+            "fault": "F4"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.replacement-auto-rebuild",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "替换盘接纳后不发 Admin/目标 GET，观察自动 replacement heal",
+            "替换代次、ready/completion 与盘上全部目标版本一致；不能用服务 ready、队列空或计数重置代替完成。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-e",
+            "designCode": "E06",
+            "procedure": "docs/heal-cases.md#E06",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F8"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.root-graceful-coordinator-restart",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "root heal 非零进度时优雅重启原协调者，保留原拓扑与记录盘",
+            "在明确支持的边界内恢复原 task ID 和剩余责任/预算，完成后无遗留活动记录；不扩张为协调盘丢失后的故障转移。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F01",
+            "procedure": "docs/heal-cases.md#F01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DX",
+            "fault": "F6"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.target-graceful-restart",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "替换目标仅完成部分重建时优雅重启目标节点",
+            "故障确实发生于部分完成窗口；重启后续建同一目标盘/代次，最终 manifest 与全部目标分片正确。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F02",
+            "procedure": "docs/heal-cases.md#F02",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB,DV,DX",
+            "fault": "F6,F8"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.target-process-crash",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "部分重建时 SIGKILL 测试进程，再正常启动",
+            "unclean shutdown 与修复进度有真实证据；已提交对象不丢失，未完成目标不会被当完整；明确不是断电测试。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F03",
+            "procedure": "docs/heal-cases.md#F03",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB,DV,DX",
+            "fault": "F6,F8"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.coordinator-process-crash",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "协调者非优雅退出并恢复，分别观察 root、MRF、replacement",
+            "按各机制已核实的持久化边界判断；不得把丢失的易失 token 当成功，需显式记录剩余责任并可安全重扫恢复。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F04",
+            "procedure": "docs/heal-cases.md#F04",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB,DX",
+            "fault": "F6"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.full-cluster-restart",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "有未完成修复责任时重启全部测试节点，固定原拓扑/磁盘身份",
+            "有持久化保证的责任不遗失；全部端点恢复一致，旧版本/marker/MPU 与目标分片完整，重复重启不扩散错误。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F05",
+            "procedure": "docs/heal-cases.md#F05",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB,DV,DM",
+            "fault": "F6"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.cancelled-task-restart",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "完成取消及在途退出后重启，随后 forceStart/新任务正常修复",
+            "已取消的任务不自动复活；旧 checkpoint/token 不能取消或覆盖新任务，旧责任不会误标为修复完成。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F06",
+            "procedure": "docs/heal-cases.md#F06",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DX",
+            "fault": "F6"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.checkpoint-and-mrf-corruption",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "受控构造 checkpoint/MRF 截断、坏校验、未来 schema、陈旧代次及写入失败",
+            "已确认持久化责任不得静默删除或伪 ACK；未知记录保留且可诊断；精确崩溃窗口由原生屏障证明，不伪称真机命中。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F07",
+            "procedure": "docs/heal-cases.md#F07",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.race-unversioned-overwrite",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "同 key 连续覆盖与 heal 同时推进，包含提交尾部清理窗口",
+            "按可证明的提交顺序验证最终最后一次成功写入；不能回滚到旧 data_dir，未确认超时写入单独解析。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-g",
+            "designCode": "G01",
+            "procedure": "docs/heal-cases.md#G01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DL",
+            "fault": "F1,F2,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.race-versioned-put",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "修复历史版本时创建新版本并重复读取各 versionId",
+            "新旧版本不混片、不串内容；已返回成功的每个版本都保留，最新值按确定的先后关系验收。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-g",
+            "designCode": "G02",
+            "procedure": "docs/heal-cases.md#G02",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV,DL",
+            "fault": "F1,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.race-version-delete",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "对损坏的精确历史 versionId 发 DELETE，与 deep heal 竞争",
+            "已确认删除的版本不能被复活，其他历史版本不受影响；原生临界点测试与真机竞争分别留证。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-g",
+            "designCode": "G03",
+            "procedure": "docs/heal-cases.md#G03",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV",
+            "fault": "F1,F2,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.race-markers-and-batch-delete",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "与创建/删除 marker、批量版本删除和无版本删除分别交错",
+            "按逐项 DELETE 回执核对版本/marker 集合，无复活、误删或遗漏批量错误。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-g",
+            "designCode": "G04",
+            "procedure": "docs/heal-cases.md#G04",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DV",
+            "fault": "F3,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.race-multipart-complete-abort",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "heal 期间对不同已知 UploadId 分别续传、Complete、Abort",
+            "成功 Complete 内容只出现一次；Abort 不破坏已提交对象或别的 upload；未完成 part 不被伪造为完整对象。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-g",
+            "designCode": "G05",
+            "procedure": "docs/heal-cases.md#G05",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DM,DL",
+            "fault": "F1,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.race-copy-and-metadata-update",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "COPY 源/目标和标签/元数据更新与修复交错",
+            "最终对象内容与对应提交的 metadata 一致，读修复发现新代次应重验/放弃陈旧提交而非覆盖。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-g",
+            "designCode": "G06",
+            "procedure": "docs/heal-cases.md#G06",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DS,DL",
+            "fault": "F1,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.race-ilm-expiry-and-transition",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "分别与当前/历史版本过期、远端 transition/restore 同窗口执行",
+            "已授权过期不被恢复；迁移状态与远端版本引用正确；只有实际观察到交叠才计并发覆盖，tier 未配置需明确阻断对应实例。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-g",
+            "designCode": "G07",
+            "procedure": "docs/heal-cases.md#G07",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DV,DE",
+            "fault": "F1,F9,F11"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.race-replication-resync",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "在隔离复制两端与 heal 同时运行新增/删除/重同步",
+            "对端版本、删除语义及源数据最终一致，无无限回环或重复传播；不得依赖仅源端 GET 宣称复制正确。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-g",
+            "designCode": "G08",
+            "procedure": "docs/heal-cases.md#G08",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DV,DL",
+            "fault": "F1,F9,F11"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.slow-io-and-eio",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "在独占故障层注入有界延迟、短读、EIO，解除后观察恢复",
+            "暂态与永久错误分开，重试有界且无忙循环；解除故障后实际修复，期间不得提前标健康。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-i",
+            "designCode": "I01",
+            "procedure": "docs/heal-cases.md#I01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DX",
+            "fault": "F5"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.enospc-inodes-and-quota",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "限制专用测试卷空间/inode，并参数化本次桶配额",
+            "仅填专用受限卷、不耗尽共享真实盘；失败不破坏好副本或释放尚需容量，释放空间后正确续修。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-i",
+            "designCode": "I02",
+            "procedure": "docs/heal-cases.md#I02",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DM",
+            "fault": "F5,F11"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.network-partition-and-lock-quorum",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "仅隔离测试服务节点间流量，覆盖少数派、读/写/锁 quorum 边界及恢复",
+            "少数派不得承诺无安全性的修复或写入；cluster coverage 不完整不能显示全局健康；恢复无分叉、跨代覆盖。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-i",
+            "designCode": "I03",
+            "procedure": "docs/heal-cases.md#I03",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB,DV,DL",
+            "fault": "F7"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.queue-pressure-and-admission",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "多来源请求冲击有限队列，混合重复任务、不同优先级和多个桶",
+            "Full/Dropped/Merged 语义与实际任务一致；丢弃不能丢 durable 责任；在预先声明负载窗口内无无限堆积或健康误报。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-i",
+            "designCode": "I04",
+            "procedure": "docs/heal-cases.md#I04",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DX",
+            "fault": "F11"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.lock-timeout-and-caller-abort",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "真实对象锁争用超过预算及调用方断开，再释放锁恢复",
+            "取消/超时不得提前释放在途所有权或重复提交；陈旧 read-repair 必须重验代次；恢复后无泄漏和错误覆盖。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-i",
+            "designCode": "I05",
+            "procedure": "docs/heal-cases.md#I05",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DL,DV",
+            "fault": "F5,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.kms-and-tier-outage",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "仅让已分配测试 KMS/远端 tier 暂不可用，持续查询与修复",
+            "依赖故障不得解释为对象不存在/可删/已修复，不暴露密钥；恢复后原版本可解密或恢复，责任未丢失。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-i",
+            "designCode": "I06",
+            "procedure": "docs/heal-cases.md#I06",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DE,DV",
+            "fault": "F11"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.status-partial-disabled-unknown",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "分别检查 enabled/disabled/uninitialized、全体可达及缺失 peer 的状态",
+            "idle 只在覆盖完整且真实无活动时成立；partial/unknown/degraded/disabled 不被客户端转换为全部完成。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-j",
+            "designCode": "J01",
+            "procedure": "docs/heal-cases.md#J01",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB",
+            "fault": "F0,F6"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.outcome-counters-and-error-truth",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "同批次混合健康、可修、不可修、deferred、dry-run 对象",
+            "execution/coverage/disposition/计数和逐对象物理结果相符；unknown、skipped 或 completed_with_errors 不能算修复成功。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-j",
+            "designCode": "J02",
+            "procedure": "docs/heal-cases.md#J02",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.incremental-cursor-and-truncation",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "生成超过结果保留上限的任务，分页轮询 sinceSeq，并跨节点/终态读取",
+            "nextSeq/minSeq 单调且 gap/truncation 明示；有界 items 不是完整责任清单，最终须用独立 manifest/计数补证，不静默丢错误。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-j",
+            "designCode": "J03",
+            "procedure": "docs/heal-cases.md#J03",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DS,DX",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.repeat-idempotency",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "第一次修复后重复 normal/deep、重启再检查",
+            "versioned 首次允许所有 identity repaired 或至少一个 repaired 加其余正健康态，marker 仅 repaired/metadata_healthy，计数必须与 receipt 集合一致；normal repeat 接受 `metadata_healthy`，deep repeat 要求 `verified_healthy`，repeat marker 为 `metadata_healthy` 且 healed=0；unknown/skipped/failed 不得成为 PASS。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-j",
+            "designCode": "J04",
+            "procedure": "docs/heal-cases.md#J04",
+            "executionMode": "operator-assisted",
+            "topology": "H1,H2",
+            "fixture": "DB,DV",
+            "fault": "F1"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.performance-abba",
+          "source_status": "procedure-ready",
+          "priority": "P2",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "同硬件同候选按 ABBA 运行无 heal 基线和有 heal 负载，重复并固定限速",
+            "分别报告修复吞吐、GET/PUT P95/P99、错误率和 CPU/IO；阈值事先冻结，不能事后挑轮次或把功能 PASS 充性能验收。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-j",
+            "designCode": "J06",
+            "procedure": "docs/heal-cases.md#J06",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DX,DL",
+            "fault": "F1,F11"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "scanner.usage-convergence",
+          "source_status": "planned",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Scanner and data-usage results converge to the uploaded fixture."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-storage-test.sh"
+            ],
+            "case_ids": [
+              "STOR-134"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "heal-extended",
+      "target_environments": [],
+      "required_capabilities": [
+        "heal",
+        "scanner"
+      ],
+      "cases": [
+        {
+          "id": "heal.mixed-version-upgrade-rollback",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "固定前后两个明确兼容候选，覆盖滚动升级、混合 peer、回滚与重启",
+            "能力不足必须显示 partial/unsupported 而非完整成功；按格式兼容契约保留责任，旧版本不能误退休新版本记录。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F08",
+            "procedure": "docs/heal-cases.md#F08",
+            "executionMode": "operator-assisted",
+            "topology": "H2",
+            "fixture": "DB,DV",
+            "fault": "F6,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.dedicated-host-forced-restart",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "经专项授权在部分修复/持续写入时强制重启独占测试 VM/主机",
+            "保留平台事件与 ACK ledger；验证落盘和恢复，不把 SIGKILL 当断电；VM 强制停止也不等同于物理控制器断电。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-f",
+            "designCode": "F09",
+            "procedure": "docs/heal-cases.md#F09",
+            "executionMode": "operator-assisted",
+            "topology": "H6",
+            "fixture": "DB,DV,DX",
+            "fault": "F10"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.with-expansion-rebalance",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "先证明源 pool 持有夹具，再扩容并与修复同时 rebalance",
+            "修复目标不得指向错误 pool/set；新旧数据完整、移动终态正确，保留 scanner backlog 提交权威检查。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-h",
+            "designCode": "H01",
+            "procedure": "docs/heal-cases.md#H01",
+            "executionMode": "operator-assisted",
+            "topology": "H5",
+            "fixture": "DB,DV",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.with-rebalance-stop-resume",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "heal 活动期间 stop/restart/resume rebalance",
+            "两类任务状态和身份独立；停止/恢复移动不误终止修复或丢失对象，恢复后两者均满足各自契约。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-h",
+            "designCode": "H02",
+            "procedure": "docs/heal-cases.md#H02",
+            "executionMode": "operator-assisted",
+            "topology": "H5",
+            "fixture": "DB,DL",
+            "fault": "F1,F6"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.with-decommission",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "分别在待退役源和存活目标制造可恢复缺片，再执行退役",
+            "不得提前删源或以临时副本冒充迁移成功；按 Pool 既定写入限制验收；只剩 survivor 后仍完整可读且有物理证明。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-h",
+            "designCode": "H03",
+            "procedure": "docs/heal-cases.md#H03",
+            "executionMode": "operator-assisted",
+            "topology": "H5",
+            "fixture": "DB,DV,DM",
+            "fault": "F1,F2"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.with-decommission-cancel-clear",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "heal/移动争用中取消退役、Clear、恢复，并覆盖容量锁超时恢复",
+            "保持持久化后通知及在途退出顺序；不误取消新代次；对 #2423 的重试窗口单独注明真机是否实际触发，不只看最终绿色。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-h",
+            "designCode": "H04",
+            "procedure": "docs/heal-cases.md#H04",
+            "executionMode": "operator-assisted",
+            "topology": "H5",
+            "fixture": "DB,DL",
+            "fault": "F1,F9"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.after-retired-pool-removal",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "源 pool 完全退役移除并停机后，只在 survivor 上触发修复",
+            "不再向已移除源写入或依赖其兜底；来源权威和版本正确；#2422 路径不能出现无权威覆盖或错误回退。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-h",
+            "designCode": "H05",
+            "procedure": "docs/heal-cases.md#H05",
+            "executionMode": "operator-assisted",
+            "topology": "H5",
+            "fixture": "DB,DV",
+            "fault": "F1,F3"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.multi-pool-target-isolation",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "仅破坏选定 pool/set，并在另一 pool 保留不同对象与控制故障",
+            "选择器、任务、容量/配额和目标 drive 一致；未选 pool 不受错误修复，跨 pool 存在不等于该目标已修复。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-h",
+            "designCode": "H06",
+            "procedure": "docs/heal-cases.md#H06",
+            "executionMode": "operator-assisted",
+            "topology": "H5",
+            "fixture": "DB,DV",
+            "fault": "F1,F4"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.ec84-multi-set-restart",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "固定 EC8+4 单 set 与至少两 set，部分重建时重启/崩溃目标",
+            "每个 set 的故障覆盖和重建分别证明，不跨 set 拼 shard；必须满足真实盘数及映射，不能用 4 盘用例替代 EC8+4。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-h",
+            "designCode": "H07",
+            "procedure": "docs/heal-cases.md#H07",
+            "executionMode": "operator-assisted",
+            "topology": "H3,H4",
+            "fixture": "DB,DV,DX",
+            "fault": "F6,F8"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "heal.long-soak",
+          "source_status": "procedure-ready",
+          "priority": "P2",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "独占环境运行预注册 24h/72h 窗口，混合修复、掉线、写入和版本删除",
+            "每次 ACK 可追踪；最终全量 manifest 正确，队列/内存/FD/临时空间无无界增长，无后台 panic 或未解释持久责任。"
+          ],
+          "probes": {
+            "design": "docs/heal-validation.md#cases-j",
+            "designCode": "J05",
+            "procedure": "docs/heal-cases.md#J05",
+            "executionMode": "operator-assisted",
+            "topology": "H2,H5",
+            "fixture": "DX,DL,DV",
+            "fault": "F4,F6,F11"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs_heal_test.sh",
+              "rustfs-fault-tolerance-test.sh"
+            ],
+            "case_ids": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "ilm-expiration",
+      "target_environments": [
+        "ilm-2x4"
+      ],
+      "required_capabilities": [
+        "lifecycle",
+        "scanner",
+        "versioning",
+        "multipart",
+        "restart-recovery"
+      ],
+      "cases": [
+        {
+          "id": "scanner.status-readiness",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "admin-api"
+          ],
+          "assertions": [
+            "Scanner runtime settings match the accelerated test contract.",
+            "The leader completes a successful scanner cycle within the deadline."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.configuration-roundtrip",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "Lifecycle configuration create, read, list, and delete agree across clients."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "S3C-704"
+            ]
+          }
+        },
+        {
+          "id": "ilm.invalid-configuration",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Invalid days and status values fail with a 4xx response and do not persist partial configuration."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.current-expiration",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Due current objects are deleted while a nonmatching control object survives."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.tag-filter-expiration",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "A tag-filtered rule expires only the matching object and preserves the control object."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.disabled-rule",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "A disabled rule does not mutate its matching object after the accelerated due time."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.rule-removal",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Removing a rule before it becomes due prevents the queued lifecycle action."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.versioned-current-expiration",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Current-version expiration creates a delete marker and retains the addressable original version."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.noncurrent-expiration",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "A due noncurrent version is deleted without changing the latest version."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.newer-noncurrent-retention",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "NewerNoncurrentVersions retains the requested history and expires only older versions."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.delete-all-versions",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "ExpiredObjectAllVersions removes every version of the matching key."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.delete-marker-expiration",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "The noncurrent version and its resulting expired delete marker are removed."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.multipart-expiration",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "A due incomplete multipart upload is automatically aborted."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "ilm.transition-and-restore",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "An object transitions to a real remote RustFS tier without changing its bytes.",
+            "A restore request completes and the restored object remains checksum-correct."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "TIER-105",
+              "TIER-107"
+            ]
+          }
+        },
+        {
+          "id": "ilm.restart-persistence",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "A lifecycle rule survives a full cluster restart and still expires its object."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh",
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "bucket-replication",
+      "target_environments": [
+        "replication-2site"
+      ],
+      "required_capabilities": [
+        "bucket-replication",
+        "versioning",
+        "multipart",
+        "scanner",
+        "restart-recovery",
+        "outage-recovery"
+      ],
+      "cases": [
+        {
+          "id": "bucket-replication.source-versioning-required",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "An unversioned source is rejected without persisting a replication configuration."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "REP-103"
+            ]
+          }
+        },
+        {
+          "id": "bucket-replication.target-versioning-required",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "An unversioned target is rejected without creating a usable rule."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.configuration-roundtrip",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "rc and S3 agree on the rule, destination, flags, and removal result."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.put-object",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Payload, metadata, and source version identity converge on the target."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "REP-104"
+            ]
+          }
+        },
+        {
+          "id": "bucket-replication.sync-put-object",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "A synchronous PUT returns only after the matching target version is readable."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.prefix-filter",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "Prefix matching replicates the included key and excludes the control key."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.tag-filter",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Tag matching replicates the included version and excludes the control version."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.zero-byte-special-key",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Zero-byte and encoded keys retain their exact key, length, bytes, and version identity."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.multipart-object",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "A completed multipart object converges with the same size, checksum, and version identity."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "REP-108"
+            ]
+          }
+        },
+        {
+          "id": "bucket-replication.copy-object",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "CopyObject output is replicated with its replacement metadata and payload."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.delete-marker",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "A source delete marker converges by version ID while the preceding object version remains."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "REP-105"
+            ]
+          }
+        },
+        {
+          "id": "bucket-replication.version-delete",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Permanent deletion removes only the addressed target version."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.existing-object-enabled",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "Existing-object replication backfills an object created before the rule."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "REP-107"
+            ]
+          }
+        },
+        {
+          "id": "bucket-replication.existing-object-disabled",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "An object created before a rule stays absent when existing-object replication is disabled while a new control object replicates."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.target-check",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "The active target check validates write, version, multipart, delete, and cleanup paths without leaving probe artifacts."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.status-observability",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "rc list and status identify the configured target and expose no credentials."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.outage-recovery",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "A target-outage write converges automatically after the target returns."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "bucket-replication.source-restart-recovery",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "A queued write survives source restart and converges after target recovery."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "site-replication",
+      "target_environments": [
+        "replication-2site"
+      ],
+      "required_capabilities": [
+        "site-replication",
+        "versioning",
+        "iam",
+        "restart-recovery",
+        "outage-recovery"
+      ],
+      "cases": [
+        {
+          "id": "site-replication.unconfigured-info",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api"
+          ],
+          "assertions": [
+            "Fresh sites report disabled state without stale credentials or pending operations."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.invalid-credentials",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api"
+          ],
+          "assertions": [
+            "Invalid peer credentials fail closed without partially enabling either site."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.add-and-info",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api"
+          ],
+          "assertions": [
+            "Both sites converge on the same two unique deployments and a non-secret replication identity."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "SITE-101"
+            ]
+          }
+        },
+        {
+          "id": "site-replication.status-observability",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api"
+          ],
+          "assertions": [
+            "Status exposes bucket, IAM, ILM, peer-state, and metrics scopes without secrets."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.bucket-create",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Bucket creation on site A becomes visible on site B."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.object-bidirectional",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Objects flow in both directions with matching bytes, metadata, and version IDs and without loops."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "SITE-103"
+            ]
+          }
+        },
+        {
+          "id": "site-replication.versioning-metadata",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Enable converges, suspension fails closed while replication is active, and both sites remain enabled."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.lifecycle-expiry-toggle",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Expiry metadata is gated while disabled, converges after enable, and the global flag can be disabled again."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.bucket-policy-metadata",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Bucket policy create and delete operations converge exactly."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "SITE-104"
+            ]
+          }
+        },
+        {
+          "id": "site-replication.object-tags",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Successive object tag sets converge on the peer."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.delete-convergence",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Delete markers and permanent version deletes converge without deleting unrelated versions."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.iam-user-policy",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "User, policy, and mapping converge and enforce the same allow/deny boundary on the peer."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.iam-group-policy",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "Group membership and group policy mapping converge and authorize the member on the peer."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.service-account",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "A service account converges and enforces its session policy without leaking its secret."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.peer-edit",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "admin-api"
+          ],
+          "assertions": [
+            "A deployment-ID-targeted rename converges without changing endpoint or deployment identity."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.resync",
+          "source_status": "implemented",
+          "priority": "P1",
+          "channels": [
+            "admin-api"
+          ],
+          "assertions": [
+            "Resync start and status expose a durable operation ID and cancellation or terminal state is explicit."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "SITE-105"
+            ]
+          }
+        },
+        {
+          "id": "site-replication.outage-recovery",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Peer outage is observable and queued bucket/object operations converge after recovery."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.restart-persistence",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Peer membership and bidirectional replication survive both service restarts."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        },
+        {
+          "id": "site-replication.remove-all",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Remove-all disables both sites and subsequent buckets no longer propagate."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": [
+              "SITE-106"
+            ]
+          }
+        },
+        {
+          "id": "site-replication.service-account-rotation",
+          "source_status": "implemented",
+          "priority": "P0",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "A fresh post-removal group is created, then rotation settles in one request on both sites and bidirectional replication remains live."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-replication-test.sh"
+            ],
+            "case_ids": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "kms",
+      "target_environments": [],
+      "required_capabilities": [
+        "kms"
+      ],
+      "cases": [
+        {
+          "id": "kms.sse-kms-round-trip",
+          "source_status": "planned",
+          "priority": "P0",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Encrypted objects round-trip with the expected key and metadata semantics.",
+            "Expected failures do not return plaintext or leak key material."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-104",
+              "KMS-301",
+              "KMS-214"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "data-services",
+      "target_environments": [
+        "lifecycle-b"
+      ],
+      "required_capabilities": [
+        "lifecycle"
+      ],
+      "cases": [
+        {
+          "id": "tiering.transition-and-restore",
+          "source_status": "planned",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Transitioned objects remain readable and can be restored."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh"
+            ],
+            "case_ids": [
+              "TIER-105",
+              "TIER-107"
+            ]
+          }
+        },
+        {
+          "id": "events.delivery",
+          "source_status": "planned",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Configured object events are delivered once according to the case contract."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh"
+            ],
+            "case_ids": [
+              "EVT-103",
+              "EVT-104"
+            ]
+          }
+        },
+        {
+          "id": "audit.request-correlation",
+          "source_status": "planned",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Customer operations produce correlated audit records without secrets."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-tier-test.sh"
+            ],
+            "case_ids": [
+              "AUD-102",
+              "AUD-104",
+              "AUD-106"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "identity-access",
+      "target_environments": [],
+      "required_capabilities": [
+        "oidc",
+        "iam"
+      ],
+      "cases": [
+        {
+          "id": "iam.policy-enforcement",
+          "source_status": "planned",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "Allowed actions succeed and explicitly denied actions fail closed."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-security-test.sh"
+            ],
+            "case_ids": [
+              "IAM-105",
+              "IAM-109"
+            ]
+          }
+        },
+        {
+          "id": "oidc.login-and-session",
+          "source_status": "planned",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api"
+          ],
+          "assertions": [
+            "OIDC identity and session claims enforce the configured access boundary."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-security-test.sh"
+            ],
+            "case_ids": [
+              "OIDC-103"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "s3-compatibility",
+      "target_environments": [
+        "single-1disk"
+      ],
+      "required_capabilities": [
+        "s3-basic"
+      ],
+      "cases": [
+        {
+          "id": "s3.basic-object-round-trip",
+          "source_status": "planned",
+          "priority": "P0",
+          "channels": [
+            "rc",
+            "s3-api"
+          ],
+          "assertions": [
+            "Bucket and object CRUD preserve payload, metadata, ETag, and error semantics."
+          ],
+          "probes": {},
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "S3C-101",
+              "S3C-201",
+              "S3C-203",
+              "S3C-205",
+              "S3C-206",
+              "S3C-207"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

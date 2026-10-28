@@ -580,6 +580,11 @@ RUSTFS_CONSOLE_ENABLE=${RUSTFS_CONSOLE_ENABLE}
 RUSTFS_OBS_LOGGER_LEVEL=${RUSTFS_OBS_LOGGER_LEVEL}
 RUSTFS_OBS_LOG_DIRECTORY="${RUSTFS_OBS_LOG_DIRECTORY}"
 EOF
+  if [ "${RUSTFS_POOL_VALIDATION_MODE:-0}" = 1 ]; then
+    printf 'RUST_LOG=warn,rustfs::ecstore=info,rustfs::rebalance=debug\n'
+    printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_START_DELAY_SECS=0\nRUSTFS_SCANNER_CYCLE=2\n'
+    printf 'HTTP_PROXY=\nHTTPS_PROXY=\nALL_PROXY=\nhttp_proxy=\nhttps_proxy=\nall_proxy=\n'
+  fi
 }
 
 # Expand a volume expression's {N...M} range into concrete local paths, e.g.:

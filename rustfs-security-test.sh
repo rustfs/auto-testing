@@ -116,6 +116,13 @@ OIDC_RUN=0
 SELECTED_TOPOLOGIES=()
 ENDPOINT=""
 VOLUMES=""
+VALIDATION_CASE=""
+VALIDATION_ARTIFACTS_DIR=""
+VALIDATION_CANDIDATE_MANIFEST=""
+VALIDATION_TESTING_COMMIT=""
+VALIDATION_BINARY_SHA256=""
+VALIDATION_OBJECT_CLEANUP_STATUS=PASS
+RUN_TOKEN=""
 
 # ==================== Helpers ====================
 
@@ -244,6 +251,18 @@ RUSTFS_CONSOLE_ENABLE=${RUSTFS_CONSOLE_ENABLE}
 RUSTFS_OBS_LOGGER_LEVEL=${RUSTFS_OBS_LOGGER_LEVEL}
 RUSTFS_OBS_LOG_DIRECTORY="${RUSTFS_OBS_LOG_DIRECTORY}"
 EOF
+  if [ "${VALIDATION_CASE}" = oidc.login-and-session ]; then
+    cat <<EOF
+RUSTFS_OUTBOUND_ALLOW_ORIGINS=${VALIDATION_OIDC_ORIGIN}
+RUSTFS_IDENTITY_OPENID_ENABLE=on
+RUSTFS_IDENTITY_OPENID_CONFIG_URL=${VALIDATION_OIDC_CONFIG_URL}
+RUSTFS_IDENTITY_OPENID_ISSUER=${VALIDATION_OIDC_ISSUER}
+RUSTFS_IDENTITY_OPENID_CLIENT_ID=rustfs-validation
+RUSTFS_IDENTITY_OPENID_CLIENT_SECRET=${VALIDATION_OIDC_CLIENT_SECRET}
+RUSTFS_IDENTITY_OPENID_SCOPES=openid,profile,email
+RUSTFS_IDENTITY_OPENID_ROLE_POLICY=readonly
+EOF
+  fi
 }
 
 write_rustfs_config() {
@@ -582,6 +601,35 @@ run_test() {
   fi
 }
 
+validation_write_evidence() {
+  local evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}"
+  mkdir -p "${evidence_dir}"
+  cp "${TEST_TMP}/${VALIDATION_CASE}.out" "${evidence_dir}/test.log"
+  for item in validation-iam-policy.json validation-iam-observations.json; do
+    if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
+  done
+}
+
+validation_write_result() {
+  local verdict="$1" reason="$2" cleanup_status="$3"
+  local args=("${SCRIPT_DIR}/scripts/validation_result.py"
+    --case-id "${VALIDATION_CASE}" --profile single-1disk
+    --result-file "${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
+    --verdict "${verdict}" --cleanup-status "${cleanup_status}")
+  if [ -n "${reason}" ]; then args+=(--reason "${reason}"); fi
+  if [ "${verdict}" != RUNNING ]; then
+    args+=(--candidate-manifest "${VALIDATION_CANDIDATE_MANIFEST}"
+      --rc-bin "$(command -v rc)" --testing-commit "${VALIDATION_TESTING_COMMIT}"
+      --binary-sha256 "${VALIDATION_BINARY_SHA256}"
+      --evidence "evidence/${VALIDATION_CASE}/test.log")
+  fi
+  if [ "${verdict}" = PASS ]; then
+    args+=(--evidence "evidence/${VALIDATION_CASE}/validation-iam-policy.json"
+      --evidence "evidence/${VALIDATION_CASE}/validation-iam-observations.json")
+  fi
+  python3 "${args[@]}"
+}
+
 skip_test() {
   local id="$1" name="$2"
   SKIP=$((SKIP+1))
@@ -676,6 +724,56 @@ case_iam_109_deny_precedence() {
   aws_run_as "${user}" "${secret}" -- s3 ls s3://sec109-bucket; assert_aws_fails "deny overrides allow"
   rm_bucket sec109-bucket
   admin_user_remove "${user}" >/dev/null
+}
+
+validation_iam_policy_body() {
+  local user="$1" secret="$2" bucket="$3" policy_name="$4" policy="$5" out
+  out="$(admin_user_add "${user}" "${secret}")"; assert_admin_ok 200 "add validation user" || return 1
+  out="$(admin_policy_add "${policy_name}" "${policy}")"; assert_admin_ok 200 "add validation policy" || return 1
+  out="$(admin_policy_attach "${user}" "${policy_name}")"; assert_admin_ok 200 "attach validation policy" || return 1
+  printf 'validation policy attached to %s\n' "${user}"
+  printf '%s\n' "${policy}" > "${TEST_TMP}/validation-iam-policy.json"
+  printf 'validation-payload-%s\n' "${RUN_TOKEN}" > "${TEST_TMP}/validation-iam-source.bin"
+  aws_run_as "${user}" "${secret}" -- s3api put-object --bucket "${bucket}" --key object.bin --body "${TEST_TMP}/validation-iam-source.bin"
+  assert_aws_ok "allowed PUT" || return 1
+  aws_run_as "${user}" "${secret}" -- s3api get-object --bucket "${bucket}" --key object.bin "${TEST_TMP}/validation-iam-read.bin"
+  assert_aws_ok "allowed GET" || return 1
+  cmp "${TEST_TMP}/validation-iam-source.bin" "${TEST_TMP}/validation-iam-read.bin" || return 1
+  aws_run_as "${user}" "${secret}" -- s3api delete-object --bucket "${bucket}" --key object.bin
+  assert_aws_fails "explicit deny DELETE" || return 1
+  [[ "${AWS_OUT}" == *AccessDenied* ]] || { echo "DELETE failure was not AccessDenied"; return 1; }
+  aws_run s3api get-object --bucket "${bucket}" --key object.bin "${TEST_TMP}/validation-iam-root-read.bin"
+  assert_aws_ok "denied DELETE preserved object" || return 1
+  cmp "${TEST_TMP}/validation-iam-source.bin" "${TEST_TMP}/validation-iam-root-read.bin" || return 1
+  jq -n --arg user "${user}" --arg bucket "${bucket}" \
+    --arg sha256 "$(sha256sum "${TEST_TMP}/validation-iam-source.bin" | awk '{print $1}')" \
+    '{principal:$user,bucket:$bucket,allowed:["PutObject","GetObject"],explicitly_denied:"DeleteObject",object_preserved:true,payload_sha256:$sha256}' \
+    > "${TEST_TMP}/validation-iam-observations.json"
+}
+
+test_validation_iam_policy_enforcement() {
+  local user="valiam-${RUN_TOKEN//-/}" secret
+  secret="$(openssl rand -hex 24)" || return 1
+  local bucket="val-iam-${RUN_TOKEN}" policy_name="valiam-${RUN_TOKEN//-/}" result=0 out
+  local policy
+  policy="$(jq -nc --arg bucket "${bucket}" '{Version:"2012-10-17",Statement:[
+    {Effect:"Allow",Action:["s3:PutObject","s3:GetObject"],Resource:["arn:aws:s3:::"+$bucket+"/*"]},
+    {Effect:"Deny",Action:["s3:DeleteObject"],Resource:["arn:aws:s3:::"+$bucket+"/*"]}
+  ]}')"
+  new_bucket "${bucket}" || return 1
+  validation_iam_policy_body "${user}" "${secret}" "${bucket}" "${policy_name}" "${policy}" || result=$?
+  if [ -f "${TEST_TMP}/validation-iam-source.bin" ]; then
+    aws_run s3api delete-object --bucket "${bucket}" --key object.bin
+    [ "${AWS_CODE}" -eq 0 ] || VALIDATION_OBJECT_CLEANUP_STATUS=FAIL
+  fi
+  out="$(admin_user_remove "${user}")"
+  assert_admin_ok 200 "remove validation user" || VALIDATION_OBJECT_CLEANUP_STATUS=FAIL
+  out="$(admin_api DELETE "/rustfs/admin/v3/remove-canned-policy?name=${policy_name}")"
+  assert_admin_ok 200 "remove validation policy" || VALIDATION_OBJECT_CLEANUP_STATUS=FAIL
+  aws_run s3api delete-bucket --bucket "${bucket}"
+  [ "${AWS_CODE}" -eq 0 ] || VALIDATION_OBJECT_CLEANUP_STATUS=FAIL
+  [ "${VALIDATION_OBJECT_CLEANUP_STATUS}" = PASS ] || result=1
+  return "${result}"
 }
 
 case_iam_113_access_key_list_hides_secret() {
@@ -944,6 +1042,10 @@ parse_args() {
       --package-url) [ "$#" -ge 2 ] || die "--package-url requires a value"; PACKAGE_URL="$2"; shift ;;
       --version) [ "$#" -ge 2 ] || die "--version requires a value"; RUSTFS_VERSION="$2"; shift ;;
       --oidc-live) OIDC_LIVE=1 ;;
+      --validation-case) [ "$#" -ge 2 ] || die "--validation-case requires a value"; VALIDATION_CASE="$2"; shift ;;
+      --validation-artifacts-dir) [ "$#" -ge 2 ] || die "--validation-artifacts-dir requires a value"; VALIDATION_ARTIFACTS_DIR="$2"; shift ;;
+      --candidate-manifest) [ "$#" -ge 2 ] || die "--candidate-manifest requires a value"; VALIDATION_CANDIDATE_MANIFEST="$2"; shift ;;
+      --testing-commit) [ "$#" -ge 2 ] || die "--testing-commit requires a value"; VALIDATION_TESTING_COMMIT="$2"; shift ;;
       --keep-env) KEEP_ENV=1 ;;
       -y) ASSUME_YES=1 ;;
       --dry-run) DRY_RUN=1 ;;
@@ -951,6 +1053,25 @@ parse_args() {
     esac
     shift
   done
+  if [ -n "${VALIDATION_CASE}" ]; then
+    [ "${VALIDATION_CASE}" = iam.policy-enforcement ] || die "unknown validation case: ${VALIDATION_CASE}"
+    RUN_TOKEN="$(date -u +%y%m%d%H%M%S)-$$"
+    [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its topology"
+    [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
+    SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}")
+    if [ "${DRY_RUN}" -eq 0 ]; then
+      [ -n "${VALIDATION_ARTIFACTS_DIR}" ] || die "--validation-artifacts-dir required"
+      [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "--candidate-manifest required"
+      [ -n "${VALIDATION_TESTING_COMMIT}" ] || die "--testing-commit required"
+      [ ! -e "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation artifacts directory already exists"
+      PACKAGE_URL="$(jq -er '.package_url' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate URL missing"
+      PACKAGE_SHA256="$(jq -er '.package_sha256' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate package SHA missing"
+      [[ "${PACKAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid candidate package SHA"
+      jq -e '.source_sha | test("^[0-9a-f]{40}$")' "${VALIDATION_CANDIDATE_MANIFEST}" >/dev/null || die "candidate source commit missing"
+      [ "${VALIDATION_TESTING_COMMIT}" = "$(git -C "${SCRIPT_DIR}" rev-parse HEAD)" ] || die "testing commit does not match checkout"
+      mkdir -p "${VALIDATION_ARTIFACTS_DIR}"
+    fi
+  fi
   [ "${#SELECTED_TOPOLOGIES[@]}" -gt 0 ] || die "select a topology (--topology <name>) or --all-topologies"
 }
 
@@ -991,6 +1112,7 @@ main() {
   need_cmd aws "aws cli"
   need_cmd jq "jq"
   need_cmd python3 "python3"
+  if [ -n "${VALIDATION_CASE}" ]; then need_cmd rc "rc client provenance"; fi
   TEST_SCRIPT_REVISION="$(git -C "${SCRIPT_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)"
   log "test scripts commit: ${TEST_SCRIPT_REVISION}"
   if [ "${DRY_RUN}" -eq 0 ]; then
@@ -1004,15 +1126,36 @@ main() {
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
     CURRENT_TOPOLOGY="${topo}"
     log "===== topology ${topo} ====="
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      validation_write_result RUNNING "validation case started" PENDING
+    fi
     env_setup "${topo}"
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      VALIDATION_BINARY_SHA256="$(printf 'sha256sum /usr/bin/rustfs\n' | run_remote "${NODES[0]}" | awk '{print $1}')"
+      [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
+    fi
     if [ -z "${RUSTFS_VERSION_INFO}" ]; then
       RUSTFS_VERSION_INFO="$(detect_rustfs_version)"
     fi
     CASE_RESULTS=()
-    run_security_cases
+    if [ -n "${VALIDATION_CASE}" ]; then
+      run_test "${VALIDATION_CASE}" "PolicyEnforcement" test_validation_iam_policy_enforcement
+    else
+      run_security_cases
+    fi
     record_topology_results "${topo}"
-    if [ "${KEEP_ENV}" -eq 0 ]; then
-      env_teardown "${topo}"
+    local cleanup_status=PASS
+    if [ "${KEEP_ENV}" -eq 0 ]; then env_teardown "${topo}" || cleanup_status=FAIL; fi
+    if [ "${VALIDATION_OBJECT_CLEANUP_STATUS}" != PASS ]; then cleanup_status=FAIL; fi
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      validation_write_evidence
+      if [ "${FAIL}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
+        validation_write_result PASS "" PASS
+      elif [ "${FAIL}" -eq 0 ]; then
+        validation_write_result INFRA_ERROR "environment teardown failed" FAIL
+      else
+        validation_write_result FAIL "IAM assertion failed; inspect evidence" "${cleanup_status}"
+      fi
     fi
   done
 
@@ -1026,4 +1169,6 @@ main() {
   echo "security suite: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
 }
 
-main "$@"
+if [ "${RUSTFS_SECURITY_SCRIPT_SOURCE_ONLY:-0}" != 1 ]; then
+  main "$@"
+fi

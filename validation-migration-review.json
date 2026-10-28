@@ -1,0 +1,3223 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-10-28",
+  "source_commit": "524eb5b32c3236497fdd8a9271df0494fa3d9974",
+  "source_sha256": "463fdd02dee43e42fef4f3aacf7506709ce87af535e1a53d91c521bc2e361cad",
+  "reviewed_testing_commit": "f0744d198769feecb2cb038ab96b507a1784d44d",
+  "scope": "Test implementation migration and candidate live acceptance are independent. This review does not rewrite original results, change migration_status semantics or relax the canonical gate. Environment procedures remain disabled by default under the accepted delivery scope.",
+  "evidence_basis": "20261026-canonical-migration-ledger-7094.json plus later G01/G02 attempts and source review on 2026-10-28; historical result bytes and audit reports remain in the separate evidence store.",
+  "reviewed_files": {
+    "scripts/run_validation_case.sh": "ac51328ff860074f285999236a07ec8d2274d56607dc7c6c6389747fd7a0c498",
+    "scripts/validation_heal/authority.py": "8f2225f184427674de1f45aff4c4976c812f9d70fd4bc927ce460726a4ff74a0",
+    "scripts/validation_heal/authority_runner.py": "d1dce07019a37318f9fbfc9c4d7383fa259d8d6da881ebacf083a67d04fc2545",
+    "scripts/validation_heal/bounded_volume.py": "56f57d2bef882af81a7bf05365fa8b5ae01f9fcdd515b3bc930e1f36cf98e944",
+    "scripts/validation_heal/bucket_metadata.py": "3fba015f0c3ca60b979b404d51c3071a61324ba1d1e9558be85b178b8f2d19fb",
+    "scripts/validation_heal/bucket_records.py": "2b46fc9923eb9d5f6d913688885580e270ac697c68467f2ce63d484fa3d7c2e1",
+    "scripts/validation_heal/caller_abort.py": "908f666cd689f4b71c3a6fac0b795b26d9058c1e20efd1e8f4858dc2359810af",
+    "scripts/validation_heal/capacity.py": "67a2b0836603cb7ddbb526a528c5f7896527cec406ba30c92afed4fc8188c990",
+    "scripts/validation_heal/coordinator_crash.py": "9188d624e2429900c168e8500b740a4b3222831dc465eb74eab9fb62c11ed235",
+    "scripts/validation_heal/environment.py": "93f13101553e6d3052147f1b4848cead44c201dc8447b4de5c898f7c1201865a",
+    "scripts/validation_heal/environment_gate.py": "b54ccb7a100d111289380759eb4b10c65a324280d3f50551031d87243205fcb4",
+    "scripts/validation_heal/execution_policy.py": "b5582404e09f19d70255f8da71cea0895c154afe4e1b3f5497c2d76361e53b6a",
+    "scripts/validation_heal/flapping.py": "58ea6a0d480fa3188975658421f9dd8a92a89109fbaa2f34329f668f71bd1096",
+    "scripts/validation_heal/generation_fault.py": "5a35483a3e4d21cbfede1e1262bb6bf911bb077f7f08eaeb94b34204d19775c1",
+    "scripts/validation_heal/incarnation.py": "8ea507c13a471fbc52e9666c26a3ab3f6e276337d4c75579885ba9f929f277c9",
+    "scripts/validation_heal/incarnation_native.py": "1cd9d069953d833e1f37455ded67719d52a2dedc9bd57d1295de6167443002c0",
+    "scripts/validation_heal/incarnation_replay.py": "e53de3d51f910a4f8467f6bcfaeb3496a7bc8b655acc0e7cd4a906ad3f1ba364",
+    "scripts/validation_heal/journal_fault.py": "cc171b8f53f6faf54ef4ebf559a8cdfcf6ec0c59ca3e290cb636b57a9c5e1a12",
+    "scripts/validation_heal/lock_observer.py": "9f513ec659e27338b05a23447ce63dfaecbb69eb6a53852f9eacd86b3cc956d3",
+    "scripts/validation_heal/lock_source.py": "02881928da918e20ca1f184dfac91518e92974d0fbb408a9c0adde274e47d889",
+    "scripts/validation_heal/lock_successor.py": "05ce5bbe93cad2fa2bec5c7b6ea8c6d956e40690dff58ac850c4aa47a4d6a683",
+    "scripts/validation_heal/lock_timeout.py": "e7e672955cfdbe30579476989125b31ccb997014fdaabd7867749742abd37b39",
+    "scripts/validation_heal/lock_timeout_runner.py": "0b546bb38471d0005b6d01a56844d633cae938d4196f82e3177f4345f0065304",
+    "scripts/validation_heal/manager_fixture.py": "d73018ed9261b9d0545c5ca6a8db51c5a225bc196e085950320c1a4ab51045e5",
+    "scripts/validation_heal/manager_native.py": "40d77e6bd18384520659e1cbe20ba58892f22929ef694c6ad39ccfd6d2af3740",
+    "scripts/validation_heal/markers.py": "4ddb66c0a0defd041acaccdfbf7db6f79c51633b76143cf3557200c080e016b5",
+    "scripts/validation_heal/mpu_race_runner.py": "22cdb841747882a6666988fa916b85aaae548ebb5314927373ef181b6347d25d",
+    "scripts/validation_heal/mrf_records.py": "0a262ba5e0ac61605c48bc8c582b7f7903a03d51585ec8c242d242240f43a7c9",
+    "scripts/validation_heal/mrf_replay.py": "95d4419232bf12799f179abd12d2073e7831b093aa3b2dd4ef386c12826da879",
+    "scripts/validation_heal/multi_pool.py": "82397e5d5562af01e3c5010c28def365368a669bef82aa3b1efd5f5633561c20",
+    "scripts/validation_heal/multi_pool_layout.py": "365febcf07fe05ccd05af92e17d20b744e6603271e42555271208dfb96121671",
+    "scripts/validation_heal/native_regressions.py": "96ed809536d3275e72bdbcc64aa534f65976da5d6e0e85b7056623a14c7e3702",
+    "scripts/validation_heal/network.py": "c969e3acf791a86dc1d425306af421339e358bef02200bd9639fa5c65e317c29",
+    "scripts/validation_heal/network_gate.py": "f4291a98095aee46bf1213d5e70a59b83858b213a484cc2c452e82c514c02d1a",
+    "scripts/validation_heal/network_load.py": "169a7b59c5cf12b939446f778735ad7edcb939817f23420725349487c2a45d04",
+    "scripts/validation_heal/node_outage.py": "cf10109d7df387550a985bee9d65e4af19b3c6618563b19e3418d48da7b23fab",
+    "scripts/validation_heal/nolock.py": "be1812cd4f03a433f808b468e59e26868047a765a70e2b1890a5d61cd5af264b",
+    "scripts/validation_heal/outcome.py": "173ea18f85f9f340bf8bb9d97924a74d01697488fe9bb52896cab5a4441ee0af",
+    "scripts/validation_heal/outcome_grace.py": "a4cf21cd442be6280194796b179ff8d756322d557c108a3d559d9b0e7ed52374",
+    "scripts/validation_heal/outcome_recovery.py": "e623c993afcfebdf392fd54f7d2e958e8835828b37865b6452373229bffb80ea",
+    "scripts/validation_heal/performance.py": "81f85a2ea0ecad3b8ddec701eba776b98b1ace5f1e303631bc53cf5c73bf5a57",
+    "scripts/validation_heal/persistence.py": "a1f3d86cf359bbcbb6be1f60f01f3c8bb4c69dfc74cf678a85c4f0170a73ccda",
+    "scripts/validation_heal/persistence_mrf.py": "018fcbde989d2a2c4f9f4c18ce1b066a6acff323ac5fbc1f4818a6e3b2502c06",
+    "scripts/validation_heal/persistence_native.py": "368dcc4b6171b4aba119694dc7b510faf460cc5a4a7d8e36d1a28f2b0583355a",
+    "scripts/validation_heal/race.py": "ebae41951dea116549ef7f3082a5e023151e9769e016641c19ebbd91028cc86c",
+    "scripts/validation_heal/race_io.py": "b45930a0327e18716a1953210888760717621bf229981d0bd8ed7b3c0d4f1322",
+    "scripts/validation_heal/race_native.py": "fca55264c42ebad30fc796085512e959fa827753b3f0f52e14c09738f21464f6",
+    "scripts/validation_heal/race_native_contracts.json": "cdd6228d9c99dc1c550d4044743d78c58e95c22f0bb8076bc9611b2fc18e01a4",
+    "scripts/validation_heal/race_native_evidence.py": "caa2b5c63a419e2c0c29c6d5e38b50ab1ca34df03de10ccbd2e30954158339f4",
+    "scripts/validation_heal/recipes.json": "9dbfc7336e9cac1b8b8b7f8b5889eeb117cf4bca1678774249f553ddc8270a03",
+    "scripts/validation_heal/replace_drive.py": "dd7e13a85fdaf5e92b2f744167c6a8e4af9307ca827a78462e11082a2ba2349c",
+    "scripts/validation_heal/replacement.py": "051161cf09769f327596e30088fa0630014ddf5fac039dcca01e0b613ab84b98",
+    "scripts/validation_heal/replacement_preflight.py": "5440f25f5d9951e92513953733d4975f3893c883b0d4403ee6280131e2ca20d0",
+    "scripts/validation_heal/run_case.sh": "c8ae24b39c554c52a0f85689617c46d1eeba10d4525c403c82da11c06ac180e6",
+    "scripts/validation_heal/schema.py": "75a92ddea811e744a405ff1fde1968c92c8e2424b48e063a6ea23d07de529efa",
+    "scripts/validation_heal/schema_faults.py": "80a3f88920e6312950ef09f044ead08afbb5b7839a2f1c4895eba57cdf821e5d",
+    "scripts/validation_heal/status.py": "3c9af875227afafb3b9be61bb2c5a818fed247916b52e0fd4619cd8153c62cc0",
+    "scripts/validation_heal/unformatted.py": "70d00af8ac1ef7e9bbd1d500c5c4de06b7995bd5219dc59527c824a56cb8f2c2",
+    "scripts/validation_heal/version_race_runner.py": "5dd244ae2aa816907d3711a6a7c9bf3dac76265c76967f7803437195894ff0e0",
+    "scripts/validation_heal/versions.py": "fa77397a58b0db4499114c0e30a766ef67f997d1c88f22fcfe02752820b5eea0",
+    "scripts/validation_pool/case_plan.py": "277777e040501c8a79e7104471f411b054d901afb920d18f3e222d3a0b7b03bc",
+    "scripts/validation_pool/pool_behavior.py": "203bc3a2b7e85fb95482dd33efc937cff9f1f7e23f8ac2aa0b9ad2f40aff4632",
+    "scripts/validation_pool/run_case.sh": "a1de6d972964ae4232bdc1c7c4a61cb9e4a444825c7c1ced5c74cbc72f6a5ebe",
+    "test_validation_heal.py": "6e4e25d2437a49db1af0b3020bb3a2509496b21cb3c27216a6b0322aea9bfbdc",
+    "test_validation_heal_authority.py": "a4334246aa9572be05a3d6881779df1e2495d9706d3a9289ba9437ac866a688a",
+    "test_validation_heal_bucket_metadata.py": "331bb5aa9bce132bd2d69b81262dae0eeffd76761139c9a382dd3884f400fb1c",
+    "test_validation_heal_caller_abort.py": "0d67e6f3b399c4c0392c768cf7bf9d7dd8e6166d911b942d7ed3826cb0aacfc5",
+    "test_validation_heal_capacity.py": "a07caec36bba2522b7ad48a86a953f8a702fc5219e0dd63d34ecb8b6f6f139e5",
+    "test_validation_heal_coordinator_crash.py": "10b8ff58c618e85b4cc97e4780cc8abe1b183f1be6f64a8a5649fe36d8f3a691",
+    "test_validation_heal_environment.py": "6c3a22ae0d091db396b8f9875eed9779ac35e570c90496dffa262d4cb09c34c3",
+    "test_validation_heal_environment_gate.py": "2ecbb7fe0fe2e723aa93160f609b2c63e97c6aa807a217f67170b169a9e3f9a1",
+    "test_validation_heal_flapping.py": "e310601f83d75dd65f6fa268484f40d56a7f8e8412fa9499f942d86bd53e0e3d",
+    "test_validation_heal_g02_source.py": "e817c99de1c7b213ca8b6c1277064ed3de2f438b4f82fa1ece14588c67870ff4",
+    "test_validation_heal_g03_source.py": "9cf62d56f13decdb5665d4da6cd34840c17ae6277d3e6ce829640b1bcc4b02f3",
+    "test_validation_heal_incarnation.py": "e9ade5528ded36ad9d04ec5b7bff623b9f68a9e646a9ab118ff56420c0408455",
+    "test_validation_heal_incarnation_native.py": "2cb9ed6763f45c3e6f124ff4053a7b183f35b3327153ac67818d65b74442e0b6",
+    "test_validation_heal_incarnation_replay.py": "89aa38d154152b699026c790e65093f1e28d9c4c2b6e8b6bf0f742074a39c3d3",
+    "test_validation_heal_journal_fault.py": "712ae93218b99cf4a793784ac860fe3a8c4fe1ab3e3577a2c73371a4de9a5d27",
+    "test_validation_heal_lock_observer.py": "d4b450b9f8251390c1128123129b45e7c3ad3190b0de4f4f6c2ae4175cf03f51",
+    "test_validation_heal_lock_source.py": "6038f1f59e878c6d6607d531733475949f5e8f788d8aefccd1258def6e40c513",
+    "test_validation_heal_lock_successor.py": "d31a684464619470c0de8b3213f08aaf055d7f56b220b7c4c2ee725d31026b38",
+    "test_validation_heal_lock_timeout.py": "59cd644449ed038a269ec52d735566da2e79a81e3d36a887ed68c289af0c7741",
+    "test_validation_heal_lock_timeout_runner.py": "e07c3ed6955a5d5c004bb648b2884c6867520716a8619a8302f85e2c30f0f819",
+    "test_validation_heal_manager_native.py": "a5635fae08b57f2a7fff8725549c580ba7fe48c15df8421889c80f519ae46da4",
+    "test_validation_heal_mpu_race_runner.py": "d0831311db460fe476831718c7268334eba529dd2978add1569f0eeeb77c3ade",
+    "test_validation_heal_mrf.py": "f9c9eb680e8e4686290baa58dae7a0e390ad4026b1714a19669ec83610c1be01",
+    "test_validation_heal_multi_pool.py": "d2bf816363548378bf63eae21e09bf4770874538a471615d8e1d450828d79352",
+    "test_validation_heal_native.py": "207b043f91fb4ce64e3a535a353c1c81b99ebf62964f68a7f66eb81d99c6c7ec",
+    "test_validation_heal_network.py": "b1ed0b1416f9b7b0a1954056df304d3ec667f2e7af935a86589e3563c1756acf",
+    "test_validation_heal_nolock.py": "66ca7212e9fdb86ffdb2cd3a6e9186a2f484d57edda287a900972cb9409a1771",
+    "test_validation_heal_outcome.py": "6744c6f0f79aba06e9ac1a97e51b69e5f6cef86a361ee9e2a2d201156fd05631",
+    "test_validation_heal_outcome_grace.py": "391f5ad225f80661562f59be9cb5150a857c0d258e3aa852e00cc07b1068cf4e",
+    "test_validation_heal_outcome_recovery.py": "46b21a03ad7fc656273d930178c1ebefb212bcc9faa125b3834c6f87a102305c",
+    "test_validation_heal_performance.py": "92e3e09fca551c0a8a1daef4d7abdaba11e13dd4c021a33e601ad1e0bad7d924",
+    "test_validation_heal_persistence.py": "d258b82634bfd19db7c4b1f6fb5dadcf33fafc595e3663a3a30a4720d0079f4f",
+    "test_validation_heal_persistence_mrf.py": "61dfa042c6b237e00b058b2660962411e201cda8908027c6900649da344b4cbe",
+    "test_validation_heal_race.py": "1f2097aff5ad08c4d2834bfd38e1eb1d1b373ecde8f7e6a3455b713114a07d3d",
+    "test_validation_heal_race_native.py": "850c9683ac918834d22b002ec2f5a8c0d7fd2b74266461e4912776dfceb0d93d",
+    "test_validation_heal_schema.py": "5df440df29e7085d48590665129f87b0791f9fa8c7f64c8c0432000bc2002606",
+    "test_validation_heal_unformatted.py": "58bc43f3f0905c8c4b7d0f8e656d25f0a17e197b5a2dfb66a88b6af9747883a7",
+    "test_validation_pool.py": "300adcef396533b8cbb54864ccd043b9f1b897558042039ad9b9aec60ed2aade"
+  },
+  "cases": [
+    {
+      "case_id": "pool.status",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38047001285
+        ]
+      }
+    },
+    {
+      "case_id": "pool.expand-and-rebalance",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38054208114
+        ]
+      }
+    },
+    {
+      "case_id": "pool.expansion-restart-persistence",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38054287896
+        ]
+      }
+    },
+    {
+      "case_id": "pool.rebalance-stop-resume",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110959836
+        ]
+      }
+    },
+    {
+      "case_id": "pool.rebalance-live-io",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38054696080
+        ]
+      }
+    },
+    {
+      "case_id": "pool.decommission",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38051227313
+        ]
+      }
+    },
+    {
+      "case_id": "pool.decommission-cancel-clear-resume",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38052304396
+        ]
+      }
+    },
+    {
+      "case_id": "pool.decommission-restart-recovery",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38053814812
+        ]
+      }
+    },
+    {
+      "case_id": "pool.decommission-versioned-integrity",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38054128863
+        ]
+      }
+    },
+    {
+      "case_id": "pool.decommission-multipart-integrity",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_pool/run_case.sh",
+        "scripts/validation_pool/pool_behavior.py",
+        "scripts/validation_pool/case_plan.py",
+        "test_validation_pool.py"
+      ],
+      "source_variants": {
+        "catalog-assertions": [
+          "scripts/validation_pool/run_case.sh"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38053715867
+        ],
+        "original_result_sha256": "ac83aa195a66592971b36cff1734aad8ebf5f6231cd1f1cfe1a0f720fd0bc786"
+      }
+    },
+    {
+      "case_id": "pool.decommission-live-io",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38053444515
+        ]
+      }
+    },
+    {
+      "case_id": "pool.retired-config-removal",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38111198632
+        ]
+      }
+    },
+    {
+      "case_id": "pool.operation-guards",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38054540360
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-healthy-noop",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38056636793
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-scope-isolation",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38094094085
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-token-cross-node-status",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38198122041
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-dry-run",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38057908339
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-overlap-and-force-start",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39892106641
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-stop-and-stale-token",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38099706345
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-invalid-request",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38052868969,
+          38053214984
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-authorization",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38069648003
+        ]
+      }
+    },
+    {
+      "case_id": "heal.admin-nolock-safety",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/nolock.py",
+        "scripts/validation_heal/race_native_evidence.py",
+        "scripts/validation_heal/native_regressions.py",
+        "test_validation_heal_nolock.py",
+        "test_validation_heal_native.py"
+      ],
+      "source_variants": {
+        "overwrite-nolock": [
+          "scripts/validation_heal/nolock.py"
+        ],
+        "delete-nolock": [
+          "scripts/validation_heal/nolock.py"
+        ],
+        "native-lock-fence": [
+          "scripts/validation_heal/nolock.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "pending",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation."
+      }
+    },
+    {
+      "case_id": "heal.admin-option-contract",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39197088183
+        ]
+      }
+    },
+    {
+      "case_id": "heal.disk-loss-and-repair",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39899825839
+        ]
+      }
+    },
+    {
+      "case_id": "heal.disk-readonly-and-permission",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39927051614
+        ]
+      }
+    },
+    {
+      "case_id": "heal.disk-replacement-formatted",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/versions.py",
+        "scripts/validation_heal/replace_drive.py",
+        "scripts/validation_heal/replacement_preflight.py",
+        "test_validation_heal.py",
+        "test_validation_heal_environment.py"
+      ],
+      "source_variants": {
+        "new-disk-data": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "new-disk-versioned": [
+          "scripts/validation_heal/versions.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Environment admission: the current run-private endpoint is not an admitted exact mount and no reviewed mount-switch resource adapter is available. The source procedure and read-only predeployment refusal exist. Preserve old FAIL results; a new refused run is BLOCKED before fixture/deployment.",
+        "retained_runs": [
+          38084312163
+        ],
+        "original_result_sha256": "be7474e0e78707362d32dd95e93aa090275afb3ce60dbe9b76dd0dbab6181916"
+      }
+    },
+    {
+      "case_id": "heal.disk-replacement-unformatted",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/unformatted.py",
+        "scripts/validation_heal/replace_drive.py",
+        "scripts/validation_heal/replacement_preflight.py",
+        "test_validation_heal_unformatted.py",
+        "test_validation_heal_environment.py"
+      ],
+      "source_variants": {
+        "blank-unformatted": [
+          "scripts/validation_heal/unformatted.py"
+        ],
+        "foreign-format": [
+          "scripts/validation_heal/unformatted.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Environment admission: the current run-private endpoint is not an admitted exact mount and no reviewed mount-switch resource adapter is available. The source procedure and read-only predeployment refusal exist. Preserve old FAIL results; a new refused run is BLOCKED before fixture/deployment.",
+        "retained_runs": [
+          38087657754
+        ],
+        "original_result_sha256": "ba4b7bab6407b7bbf1965ca8c54f5fbdbb705c79728f02375680b67a867c7e7f"
+      }
+    },
+    {
+      "case_id": "heal.multiple-shard-loss",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39843970314
+        ]
+      }
+    },
+    {
+      "case_id": "heal.read-quorum-boundary",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39223475622
+        ]
+      }
+    },
+    {
+      "case_id": "heal.below-read-quorum",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38727279347
+        ]
+      }
+    },
+    {
+      "case_id": "heal.below-write-quorum",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39915022106
+        ]
+      }
+    },
+    {
+      "case_id": "heal.node-outage-rejoin",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/node_outage.py",
+        "scripts/validation_heal/mrf_records.py",
+        "test_validation_heal.py"
+      ],
+      "source_variants": {
+        "one-node-stop": [
+          "scripts/validation_heal/node_outage.py"
+        ],
+        "rejoin-with-new-versions": [
+          "scripts/validation_heal/node_outage.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38202851374
+        ],
+        "original_result_sha256": "f2f215cb5859a5b03db631537e8795c03a001d3b91e506ff678ae836b29836b4"
+      }
+    },
+    {
+      "case_id": "heal.disk-and-node-flapping",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/flapping.py",
+        "scripts/validation_heal/replacement.py",
+        "scripts/validation_heal/mrf_records.py",
+        "test_validation_heal_flapping.py"
+      ],
+      "source_variants": {
+        "drive-flap-3": [
+          "scripts/validation_heal/flapping.py"
+        ],
+        "node-flap-3": [
+          "scripts/validation_heal/flapping.py"
+        ],
+        "interrupt-rebuild-again": [
+          "scripts/validation_heal/flapping.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38104306522
+        ],
+        "original_result_sha256": "3a41b150a39603eefce45f868588bdd2dca7b5136b1b13346803f968f22bd126"
+      }
+    },
+    {
+      "case_id": "heal.missing-part-file",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38057373420
+        ]
+      }
+    },
+    {
+      "case_id": "heal.data-shard-bitrot",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39281951263
+        ]
+      }
+    },
+    {
+      "case_id": "heal.parity-shard-bitrot",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39286997859
+        ]
+      }
+    },
+    {
+      "case_id": "heal.truncated-and-zeroed-shard",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38203454300
+        ]
+      }
+    },
+    {
+      "case_id": "heal.missing-or-corrupt-xlmeta",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39322217398
+        ]
+      }
+    },
+    {
+      "case_id": "heal.stale-version-rejoin",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38085554143
+        ]
+      }
+    },
+    {
+      "case_id": "heal.conflicting-subquorum-authority",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/authority_runner.py",
+        "scripts/validation_heal/authority.py",
+        "scripts/validation_heal/generation_fault.py",
+        "test_validation_heal_authority.py"
+      ],
+      "source_variants": {
+        "disjoint-version-quorums": [
+          "scripts/validation_heal/authority_runner.py"
+        ],
+        "disjoint-incarnations": [
+          "scripts/validation_heal/authority_runner.py"
+        ],
+        "native-authority-fence": [
+          "scripts/validation_heal/authority_runner.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38119830051
+        ],
+        "original_result_sha256": "ccc86e06eea4bf6146af9f2ed35ee2d89ec495ebf3f61b219a6f62f927909576"
+      }
+    },
+    {
+      "case_id": "heal.metadata-payload-mismatch",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38235978152
+        ]
+      }
+    },
+    {
+      "case_id": "heal.foreign-format-and-unknown-schema",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/schema.py",
+        "scripts/validation_heal/schema_faults.py",
+        "test_validation_heal_schema.py"
+      ],
+      "source_variants": {
+        "foreign-disk": [
+          "scripts/validation_heal/schema.py"
+        ],
+        "foreign-set": [
+          "scripts/validation_heal/schema.py"
+        ],
+        "future-format": [
+          "scripts/validation_heal/schema.py"
+        ],
+        "future-object-schema": [
+          "scripts/validation_heal/schema.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38098069878
+        ],
+        "original_result_sha256": "c831443b952fa70fe26e8315527895f49aa9089912f9fc21122ffc5467dcfd59"
+      }
+    },
+    {
+      "case_id": "heal.dangling-and-orphan-safety",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38209676009
+        ]
+      }
+    },
+    {
+      "case_id": "heal.bucket-incarnation-recreation",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect. All source branches are present in the explicit diagnostic route; canonical admission remains independently blocked.",
+      "references": [
+        "scripts/validation_heal/incarnation.py",
+        "scripts/validation_heal/incarnation_replay.py",
+        "scripts/validation_heal/incarnation_native.py",
+        "scripts/validation_heal/manager_native.py",
+        "test_validation_heal_incarnation.py",
+        "test_validation_heal_incarnation_replay.py",
+        "test_validation_heal_incarnation_native.py"
+      ],
+      "source_variants": {
+        "old-metadata-rejoin": [
+          "scripts/validation_heal/incarnation.py"
+        ],
+        "old-checkpoint-replay": [
+          "scripts/validation_heal/incarnation.py"
+        ],
+        "old-mrf-replay": [
+          "scripts/validation_heal/incarnation.py"
+        ],
+        "native-incarnation-fence": [
+          "scripts/validation_heal/incarnation.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "blocked",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation."
+      }
+    },
+    {
+      "case_id": "heal.object-size-boundaries",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38067139720
+        ]
+      }
+    },
+    {
+      "case_id": "heal.completed-multipart-object",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38204339623
+        ]
+      }
+    },
+    {
+      "case_id": "heal.historical-versions",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/versions.py",
+        "test_validation_heal.py"
+      ],
+      "source_variants": {
+        "old-version-part": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "current-version-part": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "recursive-all-versions": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "multiple-version-targets": [
+          "scripts/validation_heal/versions.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38059278988
+        ],
+        "original_result_sha256": "9e7b278019acf80a56bcd395e2872ee6f227c5c0020c0b1be91246186441a9ee"
+      }
+    },
+    {
+      "case_id": "heal.delete-marker-semantics",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/versions.py",
+        "scripts/validation_heal/markers.py",
+        "test_validation_heal.py"
+      ],
+      "source_variants": {
+        "current-marker": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "historical-marker": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "missing-marker-replica": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "stale-disk-marker": [
+          "scripts/validation_heal/versions.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38204764944
+        ],
+        "original_result_sha256": "33c0aa8fe51cc436a3e6fe9d8a948b570d06f336552500f1774ff0f84001a030"
+      }
+    },
+    {
+      "case_id": "heal.versioning-suspended-null",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38061843290
+        ]
+      }
+    },
+    {
+      "case_id": "heal.object-metadata-and-tags",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38061589839
+        ]
+      }
+    },
+    {
+      "case_id": "heal.range-head-and-conditions",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38205235080
+        ]
+      }
+    },
+    {
+      "case_id": "heal.encrypted-objects",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38229589497
+        ]
+      }
+    },
+    {
+      "case_id": "heal.object-lock-retention",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38205854024
+        ]
+      }
+    },
+    {
+      "case_id": "heal.special-keys-and-pagination",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38207381816
+        ]
+      }
+    },
+    {
+      "case_id": "heal.bucket-metadata-integrity",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/bucket_metadata.py",
+        "scripts/validation_heal/bucket_records.py",
+        "test_validation_heal_bucket_metadata.py"
+      ],
+      "source_variants": {
+        "versioning-config": [
+          "scripts/validation_heal/bucket_metadata.py"
+        ],
+        "bucket-policy-tags": [
+          "scripts/validation_heal/bucket_metadata.py"
+        ],
+        "lock-config": [
+          "scripts/validation_heal/bucket_metadata.py"
+        ],
+        "unknown-record-negative": [
+          "scripts/validation_heal/bucket_metadata.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38096389824
+        ],
+        "original_result_sha256": "92eb6b1c9dcfbfc5c2a6f8e7b896fed244e1d7dbd8b2cc510ac61cdd83bd2f31"
+      }
+    },
+    {
+      "case_id": "heal.manual-normal-attribution",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38207956101
+        ]
+      }
+    },
+    {
+      "case_id": "heal.manual-deep-attribution",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38208251180
+        ]
+      }
+    },
+    {
+      "case_id": "heal.read-repair-attribution",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38237270640
+        ]
+      }
+    },
+    {
+      "case_id": "heal.scanner-cold-object-repair",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39863505276
+        ]
+      }
+    },
+    {
+      "case_id": "heal.mrf-offline-write-replay",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/mrf_replay.py",
+        "scripts/validation_heal/mrf_records.py",
+        "test_validation_heal_mrf.py"
+      ],
+      "source_variants": {
+        "offline-put": [
+          "scripts/validation_heal/mrf_replay.py"
+        ],
+        "offline-version-delete": [
+          "scripts/validation_heal/mrf_replay.py"
+        ],
+        "offline-marker": [
+          "scripts/validation_heal/mrf_replay.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38104630791
+        ],
+        "original_result_sha256": "cda6c4dd785e025c16b1ed7b2b62df6168a31b8528e9f7f0fc89495d70818fed"
+      }
+    },
+    {
+      "case_id": "heal.replacement-auto-rebuild",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/versions.py",
+        "scripts/validation_heal/replacement.py",
+        "test_validation_heal.py"
+      ],
+      "source_variants": {
+        "replacement-unversioned": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "replacement-versioned-marker": [
+          "scripts/validation_heal/versions.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38085937937
+        ],
+        "original_result_sha256": "4836929d6e21e88da89dcc6ae645ce3722554991d1fc01e53a9fbd0b03c6c167"
+      }
+    },
+    {
+      "case_id": "heal.root-graceful-coordinator-restart",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38096950043
+        ]
+      }
+    },
+    {
+      "case_id": "heal.target-graceful-restart",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/versions.py",
+        "scripts/validation_heal/replacement.py",
+        "test_validation_heal.py"
+      ],
+      "source_variants": {
+        "target-partial-graceful": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "versioned-target-partial": [
+          "scripts/validation_heal/versions.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38088240693
+        ],
+        "original_result_sha256": "609a60b2de601fcb3a9bc703f5d0cce7bddfefc08b5c951fe3830a29698975d4"
+      }
+    },
+    {
+      "case_id": "heal.target-process-crash",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/versions.py",
+        "scripts/validation_heal/replacement.py",
+        "test_validation_heal.py"
+      ],
+      "source_variants": {
+        "target-partial-sigkill": [
+          "scripts/validation_heal/versions.py"
+        ],
+        "target-partial-sigkill-versioned": [
+          "scripts/validation_heal/versions.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38088777413
+        ],
+        "original_result_sha256": "404c026c77dc6b4eb87c132a316b700eea620659b8ff44c98648d0e30c5605c9"
+      }
+    },
+    {
+      "case_id": "heal.coordinator-process-crash",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/coordinator_crash.py",
+        "scripts/validation_heal/replacement.py",
+        "test_validation_heal_coordinator_crash.py"
+      ],
+      "source_variants": {
+        "root-coordinator-kill": [
+          "scripts/validation_heal/coordinator_crash.py"
+        ],
+        "mrf-coordinator-kill": [
+          "scripts/validation_heal/coordinator_crash.py"
+        ],
+        "replacement-coordinator-kill": [
+          "scripts/validation_heal/coordinator_crash.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38105011828
+        ],
+        "original_result_sha256": "8100552121f4b50a621ebaa3012df968ec45b2e74038f49d53f34f085eed1fca"
+      }
+    },
+    {
+      "case_id": "heal.full-cluster-restart",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38227684435
+        ]
+      }
+    },
+    {
+      "case_id": "heal.cancelled-task-restart",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38102031029
+        ]
+      }
+    },
+    {
+      "case_id": "heal.checkpoint-and-mrf-corruption",
+      "implementation": "implemented",
+      "basis": "The five source live corruption/write-failure/rescan branches retain their original byte, responsibility and recovery oracles. The native-persist-fence route now executes and independently verifies six ECStore directory-fsync regressions and composes them with the ten existing manager publication/restart regressions, with manifest-before-execution and proof-after-verification checks plus a same-candidate composition guard. Manager successful reload ordering, actual commit interruptions and ECStore CAS persistence failures retain their separate scopes; no exhaustive file-fsync or physical power-loss coverage is claimed. Missing immutable artifacts limit execution, independently of implementation completion.",
+      "references": [
+        "scripts/validation_heal/persistence.py",
+        "scripts/validation_heal/persistence_mrf.py",
+        "scripts/validation_heal/journal_fault.py",
+        "scripts/validation_heal/manager_native.py",
+        "test_validation_heal_persistence.py",
+        "test_validation_heal_persistence_mrf.py",
+        "test_validation_heal_journal_fault.py",
+        "test_validation_heal_manager_native.py",
+        "scripts/validation_heal/persistence_native.py",
+        "scripts/validation_heal/manager_fixture.py",
+        "test_validation_heal_native.py"
+      ],
+      "source_variants": {
+        "checkpoint-truncate": [
+          "scripts/validation_heal/persistence.py"
+        ],
+        "mrf-checksum": [
+          "scripts/validation_heal/persistence.py"
+        ],
+        "future-schema": [
+          "scripts/validation_heal/persistence.py"
+        ],
+        "stale-generation": [
+          "scripts/validation_heal/persistence.py"
+        ],
+        "journal-write-failure": [
+          "scripts/validation_heal/persistence.py"
+        ],
+        "native-persist-fence": [
+          "scripts/validation_heal/persistence.py",
+          "scripts/validation_heal/manager_native.py",
+          "scripts/validation_heal/manager_fixture.py",
+          "scripts/validation_heal/persistence_native.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "blocked",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation."
+      }
+    },
+    {
+      "case_id": "heal.race-unversioned-overwrite",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/race.py",
+        "scripts/validation_heal/race_native_evidence.py",
+        "scripts/validation_heal/race_io.py",
+        "test_validation_heal_race.py",
+        "test_validation_heal_race_native.py"
+      ],
+      "source_variants": {
+        "overwrite-vs-deep": [
+          "scripts/validation_heal/race.py"
+        ],
+        "overwrite-vs-read-repair": [
+          "scripts/validation_heal/race.py"
+        ],
+        "native-commit-cleanup": [
+          "scripts/validation_heal/race.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Observed candidate PUT failure during overwrite-vs-deep. The Recorder retained ACK 000003 and refused to retry the ambiguous mutation. Recovery 40440199880 isolated the scene. Full live acceptance remains incomplete; this is not evidence of a missing overwrite test.",
+        "retained_runs": [
+          40439620403
+        ]
+      }
+    },
+    {
+      "case_id": "heal.race-versioned-put",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/race.py",
+        "scripts/validation_heal/version_race_runner.py",
+        "scripts/validation_heal/race_native_evidence.py",
+        "test_validation_heal_g02_source.py",
+        "test_validation_heal_race_native.py"
+      ],
+      "source_variants": {
+        "new-version-vs-historical-heal": [
+          "scripts/validation_heal/race.py"
+        ],
+        "read-all-versions-during-heal": [
+          "scripts/validation_heal/race.py"
+        ],
+        "native-version-fence": [
+          "scripts/validation_heal/race.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Observed HTTP 503 ServiceUnavailable on the third versioned PUT, with server storage_error_code=Lock. The request is durably recorded with zero retries. Recovery 40444795627 isolated the scene. Exact root cause is not inferred from the status code alone.",
+        "retained_runs": [
+          40444207551
+        ]
+      }
+    },
+    {
+      "case_id": "heal.race-version-delete",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/race.py",
+        "scripts/validation_heal/version_race_runner.py",
+        "scripts/validation_heal/race_native_evidence.py",
+        "test_validation_heal_g03_source.py",
+        "test_validation_heal_race_native.py"
+      ],
+      "source_variants": {
+        "delete-old-version-vs-deep": [
+          "scripts/validation_heal/race.py"
+        ],
+        "delete-current-version-vs-deep": [
+          "scripts/validation_heal/race.py"
+        ],
+        "native-delete-fence": [
+          "scripts/validation_heal/race.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "pending",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation."
+      }
+    },
+    {
+      "case_id": "heal.race-markers-and-batch-delete",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/race.py",
+        "scripts/validation_heal/race_native_evidence.py",
+        "scripts/validation_heal/race_io.py",
+        "test_validation_heal_race.py",
+        "test_validation_heal_race_native.py"
+      ],
+      "source_variants": {
+        "create-marker": [
+          "scripts/validation_heal/race.py"
+        ],
+        "delete-marker": [
+          "scripts/validation_heal/race.py"
+        ],
+        "batch-version-delete": [
+          "scripts/validation_heal/race.py"
+        ],
+        "unversioned-delete": [
+          "scripts/validation_heal/race.py"
+        ],
+        "native-marker-fence": [
+          "scripts/validation_heal/race.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "pending",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation."
+      }
+    },
+    {
+      "case_id": "heal.race-multipart-complete-abort",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/race.py",
+        "scripts/validation_heal/mpu_race_runner.py",
+        "scripts/validation_heal/race_native_evidence.py",
+        "test_validation_heal_mpu_race_runner.py",
+        "test_validation_heal_race_native.py"
+      ],
+      "source_variants": {
+        "upload-continue": [
+          "scripts/validation_heal/race.py"
+        ],
+        "complete": [
+          "scripts/validation_heal/race.py"
+        ],
+        "abort": [
+          "scripts/validation_heal/race.py"
+        ],
+        "native-mpu-fence": [
+          "scripts/validation_heal/race.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "pending",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation."
+      }
+    },
+    {
+      "case_id": "heal.race-copy-and-metadata-update",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          40427815826
+        ]
+      }
+    },
+    {
+      "case_id": "heal.race-ilm-expiry-and-transition",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "dedicated_ilm_tier",
+        "real_expire_transition_restore_window",
+        "remote_version_mapping",
+        "isolated_rule_cleanup"
+      ],
+      "reason_code": "ENV_DEDICATED_ILM_TIER_WINDOW",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要隔离 ILM/tier 租户、真实 Expire/Transition/Restore 窗口和远端版本映射；共享 ILM 环境不能安全制造交叠窗口。"
+      }
+    },
+    {
+      "case_id": "heal.race-replication-resync",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "isolated_replication_pair",
+        "resync_control",
+        "cross_endpoint_version_mapping",
+        "replication_overlap_window"
+      ],
+      "reason_code": "ENV_ISOLATED_REPLICATION_PAIR",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要隔离的复制两端、resync 控制、跨端版本映射和 Heal/resync 实际交叠窗口；当前固定 fleet 没有独占复制对。"
+      }
+    },
+    {
+      "case_id": "heal.slow-io-and-eio",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "dedicated_faultfs_or_device",
+        "slow_io_short_read_eio",
+        "namespace_isolation",
+        "fault_layer_restore"
+      ],
+      "reason_code": "ENV_DEDICATED_FAULT_IO",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要专用 faultfs 或故障设备、可恢复的 slow/short-read/EIO 注入和 namespace 隔离；共享盘模拟会污染其他运行。"
+      }
+    },
+    {
+      "case_id": "heal.enospc-inodes-and-quota",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/capacity.py",
+        "scripts/validation_heal/bounded_volume.py",
+        "test_validation_heal_capacity.py"
+      ],
+      "source_variants": {
+        "bounded-volume-enospc": [
+          "scripts/validation_heal/capacity.py"
+        ],
+        "bounded-inode-exhaustion": [
+          "scripts/validation_heal/capacity.py"
+        ],
+        "bucket-quota": [
+          "scripts/validation_heal/capacity.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38106408335
+        ],
+        "original_result_sha256": "f779fa1f4a24e2bc4ebbc3b07b447a2134e0fca4a44faedd5be42b461c7520df"
+      }
+    },
+    {
+      "case_id": "heal.network-partition-and-lock-quorum",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/network.py",
+        "scripts/validation_heal/network_gate.py",
+        "scripts/validation_heal/network_load.py",
+        "test_validation_heal_network.py"
+      ],
+      "source_variants": {
+        "minority-partition": [
+          "scripts/validation_heal/network.py"
+        ],
+        "read-boundary": [
+          "scripts/validation_heal/network.py"
+        ],
+        "write-boundary": [
+          "scripts/validation_heal/network.py"
+        ],
+        "lock-boundary": [
+          "scripts/validation_heal/network.py"
+        ],
+        "rejoin": [
+          "scripts/validation_heal/network.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38117058670
+        ],
+        "original_result_sha256": "aac97fc7d2b328c628f9f42f2a6b426990ed20442015e1801ade7a18c3c5a61a"
+      }
+    },
+    {
+      "case_id": "heal.queue-pressure-and-admission",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          39354651483
+        ]
+      }
+    },
+    {
+      "case_id": "heal.lock-timeout-and-caller-abort",
+      "implementation": "implemented",
+      "basis": "The source-plan entry serially executes real timeout and queued-successor controllers on H1/H2 with distinct namespaces, original request/ACK evidence chains, peer version/content and physical integrity checks, exact server lock identities and bounded FD finalization. Before deployment it composes one immutable successful artifact's I05 owner/unlink/stale, G02 explicit-version append and G03 explicit-version delete native subsets. The latter two provide real final-rename reconstruction barriers, foreground ACK/physical tail drain, exact typed outcomes and complete surviving body/version/dataDir/shard authority in 4/2 and 16/4. Coordinator clock-domain ordering binds actual TCP disconnect independently from native ownership proof; local guard release never claims distributed release. First failure retains the original scene and stops subsequent instances. Full independent source-plan live acceptance remains pending; product PASS is not an implementation prerequisite.",
+      "references": [
+        "scripts/validation_heal/lock_timeout_runner.py",
+        "scripts/validation_heal/lock_timeout.py",
+        "scripts/validation_heal/caller_abort.py",
+        "scripts/validation_heal/lock_observer.py",
+        "scripts/validation_heal/lock_successor.py",
+        "scripts/validation_heal/native_regressions.py",
+        "test_validation_heal_lock_timeout_runner.py",
+        "test_validation_heal_lock_timeout.py",
+        "test_validation_heal_caller_abort.py",
+        "test_validation_heal_lock_observer.py",
+        "test_validation_heal_lock_successor.py",
+        "scripts/validation_heal/race_native.py",
+        "scripts/validation_heal/race_native_evidence.py",
+        "scripts/validation_heal/race_native_contracts.json",
+        "test_validation_heal_race_native.py",
+        "scripts/validation_heal/lock_source.py",
+        "test_validation_heal_lock_source.py"
+      ],
+      "source_variants": {
+        "object-lock-timeout": [
+          "scripts/validation_heal/lock_source.py",
+          "scripts/validation_heal/lock_timeout_runner.py",
+          "scripts/validation_heal/lock_timeout.py"
+        ],
+        "caller-disconnect": [
+          "scripts/validation_heal/lock_source.py",
+          "scripts/validation_heal/lock_timeout_runner.py",
+          "scripts/validation_heal/lock_successor.py",
+          "scripts/validation_heal/lock_observer.py"
+        ],
+        "stale-read-repair": [
+          "scripts/validation_heal/lock_source.py",
+          "scripts/validation_heal/race_native.py",
+          "scripts/validation_heal/race_native_evidence.py",
+          "scripts/validation_heal/race_native_contracts.json"
+        ],
+        "native-lock-owner-fence": [
+          "scripts/validation_heal/lock_source.py",
+          "scripts/validation_heal/race_native_contracts.json"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "blocked",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation."
+      }
+    },
+    {
+      "case_id": "heal.kms-and-tier-outage",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "dedicated_kms_tier_tenant",
+        "dependency_network_isolation",
+        "key_redaction",
+        "tier_version_mapping"
+      ],
+      "reason_code": "ENV_DEDICATED_KMS_TIER_TENANT",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要专用 KMS/tier 租户、依赖网络隔离和安全的 key/tier 版本证据；不能在共享依赖上全局断网。"
+      }
+    },
+    {
+      "case_id": "heal.status-partial-disabled-unknown",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/status.py",
+        "test_validation_heal.py"
+      ],
+      "source_variants": {
+        "enabled-idle": [
+          "scripts/validation_heal/status.py"
+        ],
+        "disabled": [
+          "scripts/validation_heal/status.py"
+        ],
+        "uninitialized": [
+          "scripts/validation_heal/status.py"
+        ],
+        "missing-peer": [
+          "scripts/validation_heal/status.py"
+        ],
+        "recovered-complete": [
+          "scripts/validation_heal/status.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "The startup listener returns 503 until runtime initialization, then status reports idle. The required externally visible 200/uninitialized source window was not observed. Preserve the original oracle and NOT_OBSERVED branch; implementation completion does not certify product compatibility.",
+        "retained_runs": [
+          38209400619,
+          39929436131
+        ],
+        "original_result_sha256": "817e04d80bf59d0ce369573b2f6500eb2ff0cc47662c830e3bb524e073d628fa"
+      }
+    },
+    {
+      "case_id": "heal.outcome-counters-and-error-truth",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect. All source branches are present in the explicit diagnostic route; canonical admission remains independently blocked.",
+      "references": [
+        "scripts/validation_heal/outcome.py",
+        "scripts/validation_heal/outcome_grace.py",
+        "scripts/validation_heal/outcome_recovery.py",
+        "test_validation_heal_outcome.py",
+        "test_validation_heal_outcome_grace.py",
+        "test_validation_heal_outcome_recovery.py"
+      ],
+      "source_variants": {
+        "mixed-healthy-repaired-failed": [
+          "scripts/validation_heal/outcome.py"
+        ],
+        "dry-run": [
+          "scripts/validation_heal/outcome.py"
+        ],
+        "deferred": [
+          "scripts/validation_heal/outcome.py"
+        ],
+        "readonly-terminal-failure": [
+          "scripts/validation_heal/outcome.py"
+        ],
+        "unknown-negative": [
+          "scripts/validation_heal/outcome.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "blocked",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation."
+      }
+    },
+    {
+      "case_id": "heal.incremental-cursor-and-truncation",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38089238767
+        ]
+      }
+    },
+    {
+      "case_id": "heal.repeat-idempotency",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38059567206
+        ]
+      }
+    },
+    {
+      "case_id": "heal.performance-abba",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/performance.py",
+        "test_validation_heal_performance.py"
+      ],
+      "source_variants": {
+        "abba-repeat-1": [
+          "scripts/validation_heal/performance.py"
+        ],
+        "abba-repeat-2": [
+          "scripts/validation_heal/performance.py"
+        ],
+        "abba-repeat-3": [
+          "scripts/validation_heal/performance.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38195131282
+        ],
+        "original_result_sha256": "f3c6ec359b4ac5e3d8dc3776ddd75c760303a672c7ffed1385f482d3c79c3ac8"
+      }
+    },
+    {
+      "case_id": "scanner.usage-convergence",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38042200106
+        ]
+      }
+    },
+    {
+      "case_id": "heal.mixed-version-upgrade-rollback",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "immutable_release_pair",
+        "mixed_version_peer_status",
+        "rolling_upgrade_rollback",
+        "rollback_compatibility_matrix"
+      ],
+      "reason_code": "ENV_IMMUTABLE_RELEASE_PAIR",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要两个已固定且相互兼容的 RustFS release、混合版本 peer 状态和经过审核的回滚兼容矩阵；当前 auto-testing Heal 节点没有这组不可变双版本资源。"
+      }
+    },
+    {
+      "case_id": "heal.dedicated-host-forced-restart",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "dedicated_h6_host",
+        "platform_power_cycle",
+        "out_of_band_recovery",
+        "boot_id_evidence"
+      ],
+      "reason_code": "ENV_DEDICATED_H6_HOST",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要 H6 专用主机、平台强制停启权限、带外恢复和 boot_id/平台事件证据；共享 Heal 节点不能证明真实电源循环。"
+      }
+    },
+    {
+      "case_id": "heal.with-expansion-rebalance",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "h5_pool_expansion",
+        "rebalance_task",
+        "per_object_pool_set_mapping",
+        "retired_scanner_evidence"
+      ],
+      "reason_code": "ENV_H5_EXPANSION_REBALANCE",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要 H5 pool 扩容、rebalance 和 Heal 同时活动的完整拓扑，并逐对象保存 pool/set 迁移证据；当前 auto-testing 未绑定扩容前后布局与专用操作窗口。"
+      }
+    },
+    {
+      "case_id": "heal.with-rebalance-stop-resume",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "h5_rebalance",
+        "rebalance_stop_resume",
+        "independent_task_identity",
+        "service_restart_control"
+      ],
+      "reason_code": "ENV_H5_REBALANCE_LIFECYCLE",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要可观测的 H5 rebalance、停止/恢复/服务重启控制及独立 task 身份；当前 auto-testing 未绑定这两类任务的独立身份和操作窗口。"
+      }
+    },
+    {
+      "case_id": "heal.with-decommission",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "h5_decommission",
+        "survivor_pool",
+        "decommission_write_guard",
+        "movement_ack_physical_proof"
+      ],
+      "reason_code": "ENV_H5_DECOMMISSION",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要 H5 pool decommission、survivor 目标、写入限制和移动 ACK/物理权威证据；当前 auto-testing 未绑定本例退役前后拓扑和恢复方案。"
+      }
+    },
+    {
+      "case_id": "heal.with-decommission-cancel-clear",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "h5_decommission",
+        "cancel_clear_resume",
+        "capacity_lock_retry_window",
+        "generation_bound_ack_ledger"
+      ],
+      "reason_code": "ENV_H5_DECOMMISSION_CANCEL",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要退役取消/清理/新代次恢复以及 #2423 所需容量锁重试窗口；普通取消结果不能替代这个临界点。"
+      }
+    },
+    {
+      "case_id": "heal.after-retired-pool-removal",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "h5_retired_pool_removal",
+        "source_offline_proof",
+        "survivor_authority",
+        "retired_pool_write_guard"
+      ],
+      "reason_code": "ENV_H5_RETIRED_POOL_REMOVAL",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要完整迁移后移除 retired pool、源保持离线和 survivor-only 访问；当前 auto-testing 未提供本例源持续离线和 survivor-only 的绑定证据。"
+      }
+    },
+    {
+      "case_id": "heal.multi-pool-target-isolation",
+      "implementation": "implemented",
+      "basis": "Source branches have execution paths and strict original oracles in the referenced controller/helpers. Contract tests cover those paths; this source review is not a claim that every live branch passed or that an unattributed failure is a product defect.",
+      "references": [
+        "scripts/validation_heal/multi_pool.py",
+        "scripts/validation_heal/multi_pool_layout.py",
+        "test_validation_heal_multi_pool.py"
+      ],
+      "source_variants": {
+        "selected-pool": [
+          "scripts/validation_heal/multi_pool.py"
+        ],
+        "selected-set": [
+          "scripts/validation_heal/multi_pool.py"
+        ],
+        "unselected-control-fault": [
+          "scripts/validation_heal/multi_pool.py"
+        ]
+      },
+      "gaps": [],
+      "live": {
+        "state": "retained-failure",
+        "finding": "Retained failure or incomplete live evidence. Product behavior, environment and controller responsibility must be attributed separately; a FAIL alone does not demonstrate a missing test implementation.",
+        "retained_runs": [
+          38119207583
+        ],
+        "original_result_sha256": "e2c1a70ed32cf4db8815dfe3f397d82bde590489e8011fadf6d8ae6c2c90b967"
+      }
+    },
+    {
+      "case_id": "heal.ec84-multi-set-restart",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "h3_ec84_12_independent_disks",
+        "h4_ec84_24_independent_endpoints",
+        "per_set_identity",
+        "per_set_restart_crash_evidence"
+      ],
+      "reason_code": "ENV_EC84_MULTI_SET_TOPOLOGY",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "需要 H3 的 12 个独立盘和 H4 的至少 24 个独立 endpoint，并按 set 分别记录重启/崩溃窗口；当前 H4 资源不可用。"
+      }
+    },
+    {
+      "case_id": "heal.long-soak",
+      "implementation": "environment-gated",
+      "basis": "Source procedure, controller contract, original assertions and capability refusal are implemented. This delivery keeps the case disabled by default; a supplied candidate-bound resource adapter is still needed for live execution.",
+      "references": [
+        "scripts/validation_heal/environment_gate.py",
+        "scripts/validation_heal/environment.py",
+        "scripts/validation_heal/recipes.json",
+        "test_validation_heal_environment.py",
+        "test_validation_heal_environment_gate.py"
+      ],
+      "required_capabilities": [
+        "dedicated_soak_lane",
+        "wall_clock_24h_72h",
+        "resource_budget_monitoring",
+        "scheduled_fault_recovery"
+      ],
+      "reason_code": "ENV_DEDICATED_LONG_SOAK_LANE",
+      "gaps": [],
+      "live": {
+        "state": "disabled",
+        "finding": "必须在独占 H2/H5 lane 真实运行 24 小时和 72 小时，包含限速、监控、到期回收和完整资源预算；短跑不能替代 soak 证据。"
+      }
+    },
+    {
+      "case_id": "scanner.status-readiness",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38044125099
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.configuration-roundtrip",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38044956285
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.invalid-configuration",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38045047518
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.current-expiration",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38045154019
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.tag-filter-expiration",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38045412209
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.disabled-rule",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38045496042
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.rule-removal",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38045714246
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.versioned-current-expiration",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38051148291
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.noncurrent-expiration",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38050040606
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.newer-noncurrent-retention",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38049965929
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.delete-all-versions",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38049740183
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.delete-marker-expiration",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38049817172
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.multipart-expiration",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38049890130
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.transition-and-restore",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38050720293
+        ]
+      }
+    },
+    {
+      "case_id": "ilm.restart-persistence",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38050434607
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.source-versioning-required",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38049256196
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.target-versioning-required",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38107763760
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.configuration-roundtrip",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38107813352
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.put-object",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38107862949
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.sync-put-object",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38107913366
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.prefix-filter",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38107971953
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.tag-filter",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38108042411
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.zero-byte-special-key",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38108111726
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.multipart-object",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109163901
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.copy-object",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109217115
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.delete-marker",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109278883
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.version-delete",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109339732
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.existing-object-enabled",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109405912
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.existing-object-disabled",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109466432
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.target-check",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109538351
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.status-observability",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109591289
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.outage-recovery",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109645139
+        ]
+      }
+    },
+    {
+      "case_id": "bucket-replication.source-restart-recovery",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109704025
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.unconfigured-info",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109764474
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.invalid-credentials",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109818973
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.add-and-info",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109868478
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.status-observability",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109917609
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.bucket-create",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38109969984
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.object-bidirectional",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110029711
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.versioning-metadata",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110091819
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.lifecycle-expiry-toggle",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110141316
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.bucket-policy-metadata",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110223862
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.object-tags",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110289545
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.delete-convergence",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110361943
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.iam-user-policy",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110422925
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.iam-group-policy",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110479224
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.service-account",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110530482
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.peer-edit",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110586469
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.resync",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110637512
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.outage-recovery",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110690366
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.restart-persistence",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110779315
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.remove-all",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110839532
+        ]
+      }
+    },
+    {
+      "case_id": "site-replication.service-account-rotation",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38110909474
+        ]
+      }
+    },
+    {
+      "case_id": "kms.sse-kms-round-trip",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38042359938
+        ]
+      }
+    },
+    {
+      "case_id": "tiering.transition-and-restore",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38042759074
+        ]
+      }
+    },
+    {
+      "case_id": "events.delivery",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38046470999
+        ]
+      }
+    },
+    {
+      "case_id": "audit.request-correlation",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38050138583
+        ]
+      }
+    },
+    {
+      "case_id": "iam.policy-enforcement",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38043548625
+        ]
+      }
+    },
+    {
+      "case_id": "oidc.login-and-session",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38051425083
+        ]
+      }
+    },
+    {
+      "case_id": "s3.basic-object-round-trip",
+      "implementation": "implemented",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "references": [
+        "scripts/run_validation_case.sh"
+      ],
+      "gaps": [],
+      "live": {
+        "state": "accepted",
+        "basis": "independent-complete-live-audit",
+        "runs": [
+          38042083422
+        ]
+      }
+    }
+  ],
+  "review_notes": "All source implementation gaps recorded in this review are closed. See docs/validation-migration-implementation-review.md for source semantics, exact candidate prerequisites and separate native/fleet proof scopes. Counts describe the accepted migration delivery scope; the 13 default-disabled environment procedures still require reviewed external resource adapters. Accepted live results remain historical independent audits across multiple candidates, never a single-candidate product certification. No historical FAIL is rewritten."
+}

@@ -1,0 +1,55 @@
+{
+  "source_commit": "524eb5b32c3236497fdd8a9271df0494fa3d9974",
+  "files": [
+    {
+      "source_path": "scenarios/heal-recipes.json",
+      "target_path": "scripts/validation_heal/recipes.json",
+      "source_sha256": "4d81c83fa63c5b0720ff5f031ee595ea3c1f9e39f712e6d131bc50b9b12b164f"
+    },
+    {
+      "source_path": "scripts/heal_probe.py",
+      "target_path": "scripts/validation_heal/heal_probe.py",
+      "source_sha256": "3262c6744c6ae387c3f56095817740b3a34de7a1b9d34cb463b9167df68cef43"
+    },
+    {
+      "source_path": "scripts/heal_fault.py",
+      "target_path": "scripts/validation_heal/heal_fault.py",
+      "source_sha256": "c38ba8f9d129b67eacb8dd7920e534f6bbd40ec261870ebdde6823f067b98fd7"
+    },
+    {
+      "source_path": "scripts/heal_workload.py",
+      "target_path": "scripts/validation_heal/heal_workload.py",
+      "source_sha256": "216e9ca52545f1d52dd6f8fd63a7d634209e0780198355597d2489df61ece383"
+    },
+    {
+      "source_path": "scripts/heal_workload_journal.py",
+      "target_path": "scripts/validation_heal/heal_workload_journal.py",
+      "source_sha256": "a07fe6c130c60b523cca71d8f9d2c2fb4bd270eb052619a5a58d15373370041c"
+    },
+    {
+      "source_path": "docs/heal-operations.md",
+      "target_path": "docs/validation-heal-operations.md",
+      "source_sha256": "23f561ba81ff06c6450533ce1f8f9a3182a576504f5e6d6aca5494127d324bad"
+    },
+    {
+      "source_path": "scripts/prepare_heal_meta_inspector.py",
+      "target_path": "scripts/validation_heal/prepare_heal_meta_inspector.py",
+      "source_sha256": "e940b807f2ce37b8a04270913577221038808ff9e19454048251361fd9d16211"
+    },
+    {
+      "source_path": "tools/heal_meta_inspect.rs",
+      "target_path": "scripts/validation_heal/tools/heal_meta_inspect.rs",
+      "source_sha256": "f102a00ce5690fb6a286315b76f925cd27e0d2143c250a949e43da10d03faaab"
+    },
+    {
+      "source_path": "scripts/heal_signing.py",
+      "target_path": "scripts/validation_heal/heal_signing.py",
+      "source_sha256": "179394da660abad9c9a2f03b3eed7d4d46f5114940244f0ab8bbdb5e48f15537"
+    },
+    {
+      "source_path": "docs/heal-validation.md",
+      "target_path": "docs/validation-heal-contract.md",
+      "source_sha256": "c82cf8142e6400431eeeb58c936494ba2614a194d5bf92cde806cccf4aed3a85"
+    }
+  ]
+}

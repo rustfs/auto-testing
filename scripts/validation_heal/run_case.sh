@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RUSTFS_HEAL_SCRIPT_SOURCE_ONLY=1 source "${ROOT}/rustfs_heal_test.sh"
+ASSUME_YES=1
+candidate="" testing_commit="" artifacts="" case_id=""
+driver=healthy.py
+environment_gate=0
+replacement_admission_gate=0
+i05_args=()
+f07_args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --validation-case) case_id="$2"; shift 2 ;;
+    --candidate-manifest) candidate="$2"; shift 2 ;;
+    --testing-commit) testing_commit="$2"; shift 2 ;;
+    --validation-artifacts-dir) artifacts="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -y|--yes) shift ;;
+    *) die "unknown Heal validation option: $1" ;;
+  esac
+done
+case "${case_id}" in
+  heal.admin-healthy-noop|heal.admin-invalid-request|heal.admin-authorization) ;;
+  heal.bucket-incarnation-recreation) driver=incarnation.py ;;
+  heal.outcome-counters-and-error-truth) driver=outcome.py ;;
+  heal.checkpoint-and-mrf-corruption) driver=persistence.py ;;
+  heal.lock-timeout-and-caller-abort) driver=lock_timeout_runner.py ;;
+  heal.node-outage-rejoin) driver=node_outage.py ;;
+  heal.status-partial-disabled-unknown) driver=status.py ;;
+  heal.incremental-cursor-and-truncation) driver=cursor.py ;;
+  heal.admin-stop-and-stale-token) driver=stop.py ;;
+  heal.cancelled-task-restart) driver=cancel_restart.py ;;
+  heal.admin-overlap-and-force-start) driver=overlap.py ;;
+  heal.root-graceful-coordinator-restart) driver=root_restart.py ;;
+  heal.full-cluster-restart) driver=full_restart.py ;;
+  heal.mrf-offline-write-replay) driver=mrf_replay.py ;;
+  heal.performance-abba) driver=performance.py ;;
+  heal.admin-scope-isolation) driver=scopes.py ;;
+  heal.admin-option-contract) driver=options.py ;;
+  heal.queue-pressure-and-admission) driver=queue_pressure.py ;;
+  heal.bucket-metadata-integrity) driver=bucket_metadata.py ;;
+  heal.disk-replacement-unformatted) driver=unformatted.py; replacement_admission_gate=1 ;;
+  heal.disk-replacement-formatted) driver=versions.py; replacement_admission_gate=1 ;;
+  heal.below-write-quorum) driver=write_quorum.py ;;
+  heal.foreign-format-and-unknown-schema) driver=schema.py ;;
+  heal.encrypted-objects) driver=encrypted.py ;;
+  heal.coordinator-process-crash) driver=coordinator_crash.py ;;
+  heal.disk-and-node-flapping) driver=flapping.py ;;
+  heal.enospc-inodes-and-quota) driver=capacity.py ;;
+  heal.network-partition-and-lock-quorum) driver=network.py ;;
+  heal.multi-pool-target-isolation) driver=multi_pool.py ;;
+  heal.conflicting-subquorum-authority) driver=authority_runner.py ;;
+  heal.dangling-and-orphan-safety) driver=orphan.py ;;
+  heal.admin-nolock-safety) driver=nolock.py ;;
+  heal.race-unversioned-overwrite|heal.race-versioned-put|heal.race-version-delete|heal.race-markers-and-batch-delete|heal.race-multipart-complete-abort|heal.race-copy-and-metadata-update) driver=race.py ;;
+  heal.mixed-version-upgrade-rollback|heal.dedicated-host-forced-restart|heal.race-ilm-expiry-and-transition|heal.race-replication-resync|heal.with-expansion-rebalance|heal.with-rebalance-stop-resume|heal.with-decommission|heal.with-decommission-cancel-clear|heal.after-retired-pool-removal|heal.ec84-multi-set-restart|heal.slow-io-and-eio|heal.kms-and-tier-outage|heal.long-soak)
+    driver=environment_gate.py; environment_gate=1 ;;
+  heal.read-quorum-boundary) driver=quorum_boundary.py ;;
+  heal.historical-versions|heal.repeat-idempotency|heal.versioning-suspended-null|heal.below-read-quorum|heal.missing-or-corrupt-xlmeta|heal.object-metadata-and-tags|heal.multiple-shard-loss|heal.special-keys-and-pagination|heal.object-size-boundaries|heal.object-lock-retention|heal.metadata-payload-mismatch|heal.read-repair-attribution|heal.disk-readonly-and-permission|heal.scanner-cold-object-repair|heal.delete-marker-semantics|heal.stale-version-rejoin|heal.disk-loss-and-repair|heal.replacement-auto-rebuild|heal.target-graceful-restart|heal.target-process-crash) driver=versions.py ;;
+  heal.admin-token-cross-node-status|heal.admin-dry-run|heal.missing-part-file|heal.data-shard-bitrot|heal.parity-shard-bitrot|heal.truncated-and-zeroed-shard|heal.completed-multipart-object|heal.range-head-and-conditions|heal.manual-normal-attribution|heal.manual-deep-attribution)
+    driver=shards.py ;;
+  *) die "automatic Heal executor is not migrated: ${case_id}" ;;
+esac
+if [ "${environment_gate}" -eq 1 ]; then
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "${case_id}: environment-gated and disabled by default; set AUTO_TESTING_ENABLE_ENV_GATED_HEAL=1 with a capability manifest to prepare an operator-assisted run"
+    exit 0
+  fi
+  [ -f "${candidate}" ] || die "candidate manifest missing"
+  [ -n "${artifacts}" ] || die "validation artifacts directory required"
+  [ ! -e "${artifacts}" ] || die "fresh artifact directory required"
+  python3 -B "${ROOT}/scripts/validation_heal/${driver}" \
+    --case-id "${case_id}" \
+    --candidate-manifest "${candidate}" \
+    --testing-commit "${testing_commit}" \
+    --validation-artifacts-dir "${artifacts}"
+  exit 0
+fi
+[ "${#NODES[@]}" -ge 4 ] || die "H1/H2 requires four current auto-testing Heal nodes"
+NODES=("${NODES[0]}" "${NODES[1]}" "${NODES[2]}" "${NODES[3]}")
+if [ "${DRY_RUN}" -eq 1 ]; then
+  log "${case_id}: current Heal nodes ${NODES[*]}, immutable deb install, run-owned H1/H2 service and four roots per node"
+  log "Source branches, ACK ledger, candidate-bound physical evidence, exact task outcomes, full S3 verification and cleanup"
+  exit 0
+fi
+for program in python3 ssh curl jq rc; do need_cmd "${program}" "Heal validation"; done
+[ -f "${candidate}" ] || die "candidate manifest missing"
+[ -n "${artifacts}" ] && [ ! -e "${artifacts}" ] || die "fresh artifact directory required"
+[ "${testing_commit}" = "$(git -C "${ROOT}" rev-parse HEAD)" ] || die "testing commit differs from checkout"
+[[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || die "Functional Chain workflow identity required"
+PACKAGE_URL="$(jq -er '.package_url' "${candidate}")"
+PACKAGE_SHA256="$(jq -er '.package_sha256' "${candidate}")"
+[[ "${PACKAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid candidate package SHA-256"
+export RUSTFS_NODES="${NODES[*]}" RUSTFS_SSH_USER="${SSH_USER}" RUSTFS_SSH_PORT="${SSH_PORT}"
+tool_args=()
+if [ -n "${VALIDATION_HEAL_TOOL_DIRECTORY:-}" ]; then
+  tool_args=(--tool-directory "${VALIDATION_HEAL_TOOL_DIRECTORY}")
+fi
+if [ "${case_id}" = heal.lock-timeout-and-caller-abort ]; then
+  diagnostic_branch="${I05_DIAGNOSTIC_BRANCH:-source-plan}"
+  case "${diagnostic_branch}" in
+    timeout|queued-successor|source-plan) ;;
+    *) die "unsupported I05 diagnostic branch: ${diagnostic_branch}" ;;
+  esac
+  i05_args+=(--diagnostic-branch "${diagnostic_branch}")
+  if [ -n "${VALIDATION_HEAL_NATIVE_DIRECTORY:-}" ]; then
+    i05_args+=(--native-directory "${VALIDATION_HEAL_NATIVE_DIRECTORY}")
+  fi
+elif [ "${case_id}" = heal.checkpoint-and-mrf-corruption ] && [ -n "${VALIDATION_HEAL_NATIVE_DIRECTORY:-}" ]; then
+  f07_args+=(--native-directory "${VALIDATION_HEAL_NATIVE_DIRECTORY}")
+fi
+[ "${driver}" = healthy.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "physical Heal cases require candidate-bound bitrot tools"
+evidence="${artifacts}/evidence/${case_id}"
+mkdir -p "${artifacts}/cases" "${evidence}"
+rc_binary="$(command -v rc)"
+if [ "${case_id}" = heal.status-partial-disabled-unknown ]; then
+  rc_binary="$(python3 -B "${ROOT}/scripts/validation_heal/rc_binary.py" --directory "${evidence}/rc-client")"
+fi
+if [ "${driver}" = race.py ] || [ "${driver}" = nolock.py ]; then
+  python3 -B "${ROOT}/scripts/validation_heal/${driver}" preflight \
+    --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
+    > "${evidence}/native-preflight.json"
+fi
+if [ "${driver}" = lock_timeout_runner.py ]; then
+  python3 -B "${ROOT}/scripts/validation_heal/${driver}" preflight \
+    --candidate "${candidate}" --case-id "${case_id}" --testing-commit "${testing_commit}" \
+    "${tool_args[@]}" "${i05_args[@]}" --rc-bin "${rc_binary}" > "${evidence}/timeout-preflight.json"
+fi
+python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+  --result-file "${artifacts}/cases/${case_id}.json" --verdict RUNNING --cleanup-status PENDING
+
+bootstrap() {
+  local node
+  for node in "${NODES[@]}"; do
+    stop_existing "${node}"
+  done
+  step1_download
+  for node in "${NODES[@]}"; do
+    {
+      printf 'set -euo pipefail\n'
+      printf "printf '%%s  %%s\\n' %q /home/rustfs/packages/rustfs.deb | sha256sum -c -\n" "${PACKAGE_SHA256}"
+      printf 'sudo -n dpkg -i --force-confold /home/rustfs/packages/rustfs.deb\n'
+      printf 'sudo -n systemctl stop rustfs\n'
+    } | run_remote "${node}"
+  done
+}
+
+stop_existing() {
+  local node="$1"
+  run_remote "${node}" <<'REMOTE'
+set -euo pipefail
+load_state="$(systemctl show rustfs -p LoadState --value)"
+if [ "${load_state}" != not-found ]; then
+  sudo -n systemctl stop rustfs
+fi
+! systemctl is-active --quiet rustfs
+REMOTE
+}
+
+finalize_package() {
+  local node failed=0
+  for node in "${NODES[@]}"; do
+    (stop_existing "${node}") || failed=1
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+      'set -eu
+status=0
+state="$(dpkg-query -W -f="\${db:Status-Status}" rustfs 2>/dev/null)" || status=$?
+case "${status}:${state}" in
+  0:installed|0:config-files) sudo -n dpkg -P rustfs ;;
+  1:) ;;
+  *) printf "unexpected rustfs package query state\n" >&2; exit 1 ;;
+esac
+status=0
+state="$(dpkg-query -W -f="\${db:Status-Status}" rustfs 2>/dev/null)" || status=$?
+test "${status}:${state}" = "1:"' || failed=1
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+      '! systemctl is-active --quiet rustfs' || failed=1
+  done
+  return "${failed}"
+}
+
+bootstrap_rc=0 case_rc=0 cleanup_status=PASS binary_sha=""
+package_active=0
+on_exit() {
+  local exit_code=$?
+  trap - EXIT
+  if [ "${package_active}" -eq 1 ]; then
+    (finalize_package) >> "${evidence}/cleanup.log" 2>&1 || true
+  fi
+  exit "${exit_code}"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ "${replacement_admission_gate}" -eq 1 ]; then
+  preflight_rc=0
+  python3 -B "${ROOT}/scripts/validation_heal/replacement_preflight.py" \
+    --case-id "${case_id}" --candidate "${candidate}" --testing-commit "${testing_commit}" --evidence "${evidence}" \
+    > "${evidence}/predeployment-preflight.log" 2>&1 || preflight_rc=$?
+  cat "${evidence}/predeployment-preflight.log"
+  if [ "${preflight_rc}" -ne 0 ]; then
+    python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+      --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status PASS \
+      --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
+      --evidence "evidence/${case_id}/predeployment-preflight.log" \
+      --reason "${case_id} read-only predeployment admission could not complete; package and service state were left untouched"
+    exit 1
+  fi
+  preflight_evidence_args=(
+    --evidence "evidence/${case_id}/predeployment-preflight.log"
+    --evidence "evidence/${case_id}/healthy-summary.json"
+  )
+  while IFS= read -r preflight_file; do
+    preflight_relative="${preflight_file#${artifacts}/}"
+    [ "${preflight_relative}" != "${preflight_file}" ] || die "B03 preflight evidence escaped the artifact root"
+    preflight_evidence_args+=(--evidence "${preflight_relative}")
+  done < <(find "${evidence}/replacement-admission" -type f -name '*.json' -print | LC_ALL=C sort)
+  preflight_status="$(jq -er '.status' "${evidence}/healthy-summary.json")"
+  if [ "${preflight_status}" = BLOCKED ]; then
+    python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+      --result-file "${artifacts}/cases/${case_id}.json" --verdict BLOCKED --cleanup-status PASS \
+      --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
+      --predeployment-blocked "${preflight_evidence_args[@]}" \
+      --reason "${case_id} exact endpoint mount admission and a reviewed mount-switch adapter are unavailable; the read-only preflight stopped before service or package changes"
+    exit 1
+  elif [ "${preflight_status}" = INFRA_ERROR ]; then
+    python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+      --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status PASS \
+      --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
+      "${preflight_evidence_args[@]}" \
+      --reason "${case_id} read-only admission returned incomplete node evidence; package and service state were left untouched"
+    exit 1
+  elif [ "${preflight_status}" != ADMITTED ]; then
+    die "${case_id} predeployment admission returned an unknown status: ${preflight_status}"
+  fi
+fi
+package_active=1
+(bootstrap) > "${evidence}/setup.log" 2>&1 || bootstrap_rc=$?
+cat "${evidence}/setup.log"
+if [ "${bootstrap_rc}" -eq 0 ]; then
+  for node in "${NODES[@]}"; do
+    node_sha="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" sha256sum /usr/bin/rustfs | awk '{print $1}')"
+    [[ "${node_sha}" =~ ^[0-9a-f]{64}$ ]] || die "installed candidate digest unavailable on ${node}"
+    if [ -n "${binary_sha}" ] && [ "${binary_sha}" != "${node_sha}" ]; then die "node candidate digests differ"; fi
+    binary_sha="${node_sha}"
+  done
+  python3 -B "${ROOT}/scripts/validation_heal/${driver}" --candidate "${candidate}" \
+    --case-id "${case_id}" \
+    "${tool_args[@]}" "${i05_args[@]}" "${f07_args[@]}" \
+    --testing-commit "${testing_commit}" --binary-sha "${binary_sha}" --rc-bin "${rc_binary}" \
+    --evidence "${evidence}" > "${evidence}/test.log" 2>&1 || case_rc=$?
+  cat "${evidence}/test.log"
+  jq -e '.cleanup == "PASS"' "${evidence}/healthy-summary.json" >/dev/null 2>&1 || cleanup_status=FAIL
+else
+  case_rc=1
+fi
+(finalize_package) > "${evidence}/cleanup.log" 2>&1 || cleanup_status=FAIL
+package_active=0
+cat "${evidence}/cleanup.log"
+[ -n "${binary_sha}" ] || {
+  python3 -B "${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool \
+    --result-file "${artifacts}/cases/${case_id}.json" --verdict INFRA_ERROR --cleanup-status "${cleanup_status}" \
+    --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --rc-bin "${rc_binary}" \
+    --evidence "evidence/${case_id}/setup.log" --evidence "evidence/${case_id}/cleanup.log" \
+    --reason "Heal candidate bootstrap failed before a verified binary was installed"
+  exit 1
+}
+verdict=FAIL reason="Heal source assertions did not pass on every required H1/H2 branch"
+if [ "${case_rc}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
+  verdict=PASS; reason=""
+elif [ "${case_rc}" -eq 0 ]; then
+  verdict=INFRA_ERROR; reason="Heal environment finalization failed"
+fi
+if [ "${replacement_admission_gate:-0}" -eq 1 ] && [ "${cleanup_status}" = PASS ] && \
+   jq -e '.replacementAdmissionBlocked == true and .complete == false and .canonicalPassClaimed != true' \
+     "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+  verdict=BLOCKED; reason="${case_id} replacement admission did not permit deployment or fixture seed; the read-only gate or the reservation-time recheck blocked the case"
+fi
+if [ "${case_id}" = heal.bucket-incarnation-recreation ] && [ "${cleanup_status}" = PASS ] && \
+   jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
+     "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+  verdict=BLOCKED; reason="C11 diagnostic execution remains outside canonical PASS until every H1/H2 branch is independently audited"
+fi
+if [ "${case_id}" = heal.checkpoint-and-mrf-corruption ] && [ "${cleanup_status}" = PASS ] && \
+   jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
+     "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+  verdict=BLOCKED; reason="F07 diagnostic execution lacks full native cut coverage and independent live audit; partial success cannot certify the canonical case"
+fi
+if [ "${case_id}" = heal.outcome-counters-and-error-truth ] && [ "${cleanup_status}" = PASS ]; then
+  if [ "${case_rc}" -eq 0 ] || jq -e '.diagnosticBranchesPassed == true and .complete == false and .canonicalCasePassClaimed == false' \
+      "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+    verdict=BLOCKED; reason="J02 manual diagnostics require independent acceptance of all original source procedures; canonical admission remains disabled"
+  fi
+fi
+if [ "${case_id}" = heal.lock-timeout-and-caller-abort ]; then
+  # This route is an explicit diagnostic invocation, never canonical admission.
+  # Source-plan also retains independent native scope and awaits full live audit.
+  if [ "${cleanup_status}" = PASS ] && [ "${case_rc}" -eq 0 ] && \
+     jq -e '.diagnosticComplete == true and .complete == false and .canonicalCasePassClaimed == false' \
+       "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
+    verdict=BLOCKED; reason="I05 ${diagnostic_branch:-source-plan} execution completed; independent complete source-plan live audit remains required"
+  elif [ "${case_rc}" -eq 0 ]; then
+    verdict=INFRA_ERROR; reason="I05 diagnostic summary or cleanup is incomplete; canonical PASS is prohibited"
+  fi
+fi
+args=("${ROOT}/scripts/validation_result.py" --case-id "${case_id}" --profile cluster-1pool
+  --result-file "${artifacts}/cases/${case_id}.json" --verdict "${verdict}" --cleanup-status "${cleanup_status}"
+  --candidate-manifest "${candidate}" --testing-commit "${testing_commit}" --binary-sha256 "${binary_sha}"
+  --rc-bin "${rc_binary}" --evidence "evidence/${case_id}/setup.log"
+  --evidence "evidence/${case_id}/test.log" --evidence "evidence/${case_id}/cleanup.log"
+  --evidence "evidence/${case_id}/healthy-summary.json")
+if [ "${case_id}" = heal.status-partial-disabled-unknown ]; then
+  args+=(--evidence "evidence/${case_id}/rc-client/manifest.json")
+fi
+if [ -n "${reason}" ]; then args+=(--reason "${reason}"); fi
+python3 -B "${args[@]}"
+[ "${verdict}" = PASS ]

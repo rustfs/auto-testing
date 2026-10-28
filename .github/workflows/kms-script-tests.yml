@@ -5,12 +5,14 @@ on:
     paths:
       - rustfs-kms-test.sh
       - test_rustfs_kms_presign.py
+      - test_validation_kms.sh
       - .github/workflows/kms-script-tests.yml
   push:
     branches: [main]
     paths:
       - rustfs-kms-test.sh
       - test_rustfs_kms_presign.py
+      - test_validation_kms.sh
       - .github/workflows/kms-script-tests.yml
 
 permissions:
@@ -28,3 +30,5 @@ jobs:
         run: bash -n rustfs-kms-test.sh
       - name: Test presigned KMS case without a server
         run: python3 -m unittest test_rustfs_kms_presign.py
+      - name: Test canonical KMS round trip without a server
+        run: bash test_validation_kms.sh

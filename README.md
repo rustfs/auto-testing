@@ -1,6 +1,84 @@
 # auto-testing
 Auto testing scripts
 
+## Release validation migration
+
+`validation-cases.json` snapshots all 158 canonical cases from
+`rustfs-release-validation/scenarios/catalog.yaml` (66 implemented, 84
+procedure-ready, 8 planned). The source status is historical context. A run
+result carries `migration_status: verified` only after its assertions, topology,
+and live evidence are checked in this repository. `reuse_candidates` names
+existing suites to inspect and never grants coverage by itself.
+
+```bash
+python3 scripts/validation_catalog.py check
+python3 scripts/validation_catalog.py summary
+python3 -B -m unittest -v test_validation_migration.py
+```
+
+To refresh after an intentional source catalog change:
+
+```bash
+python3 scripts/validation_catalog.py sync \
+  --source /absolute/path/to/rustfs-release-validation/scenarios/catalog.yaml
+```
+
+`scripts/validation_report.py` accepts one JSON result per canonical case ID.
+Results must separately report source status, migration status, verdict,
+cleanup, candidate/rc provenance, and evidence for each source assertion.
+Pass `--gate-status implemented` only after the 66 migrated executors are
+ready; missing or unverified cases fail that gate. Without a gate status, the
+report shows migration progress and still rejects malformed or false PASS
+results.
+
+The executable canonical cases currently include `s3.basic-object-round-trip`,
+`scanner.usage-convergence`, `kms.sse-kms-round-trip`,
+`tiering.transition-and-restore`, `events.delivery`,
+`audit.request-correlation`, `iam.policy-enforcement`, and
+`scanner.status-readiness`. The S3, KMS, and IAM
+cases use single-disk
+deployment. The scanner case uses the storage suite's single-node four-disk
+deployment, waits for a post-upload successful scanner cycle, and requires a
+complete usage snapshot with exactly 20 objects and 20,690 logical bytes.
+Each requires a candidate manifest with `source_sha`, `package_url`, and
+`package_sha256`. The installed binary
+SHA-256 is measured on the test node and included in result provenance:
+
+```bash
+./rustfs-s3-compat-test.sh \
+  --validation-case s3.basic-object-round-trip \
+  --candidate-manifest /absolute/path/candidate.json \
+  --testing-commit "$(git rev-parse HEAD)" \
+  --validation-artifacts-dir /absolute/path/new-artifacts-dir \
+  --yes
+
+./rustfs-storage-test.sh \
+  --validation-case scanner.usage-convergence \
+  --candidate-manifest /absolute/path/candidate.json \
+  --testing-commit "$(git rev-parse HEAD)" \
+  --validation-artifacts-dir /absolute/path/another-new-artifacts-dir \
+  --yes
+
+./rustfs-kms-test.sh \
+  --validation-case kms.sse-kms-round-trip \
+  --candidate-manifest /absolute/path/candidate.json \
+  --testing-commit "$(git rev-parse HEAD)" \
+  --validation-artifacts-dir /absolute/path/kms-new-artifacts-dir \
+  --yes
+
+python3 scripts/validation_report.py \
+  --results-dir /absolute/path/new-artifacts-dir/cases \
+  --output /absolute/path/new-artifacts-dir/report.md
+```
+
+The report's full implemented-case gate is intentionally not enabled by these
+runs. Run it with `--gate-status implemented` only after all 66
+implemented source cases have verified executors and live results.
+
+S3, scanner, KMS, tiering, and IAM have live PASS evidence against nightly
+build `37958901959` attempt `1` on the current auto-testing fleet. Events and
+audit have local executor tests but still need live verification.
+
 ## Fault-tolerance suite
 
 `rustfs-fault-tolerance-test.sh` writes a machine-readable completion result

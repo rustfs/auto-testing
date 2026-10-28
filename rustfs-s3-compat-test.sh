@@ -20,6 +20,7 @@
 #   ./rustfs-s3-compat-test.sh --all-topologies --dry-run
 #
 set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Per-run temp dir (shared runners may leave stale /tmp files owned by other users)
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-test.XXXXXX")"
@@ -82,6 +83,12 @@ ASSUME_YES=0
 KEEP_ENV=0
 LOG_FILE=""
 SELECTED_TOPOLOGIES=()
+VALIDATION_CASE=""
+VALIDATION_ARTIFACTS_DIR=""
+VALIDATION_CANDIDATE_MANIFEST=""
+VALIDATION_TESTING_COMMIT=""
+VALIDATION_OBJECT_CLEANUP_STATUS=PASS
+VALIDATION_BINARY_SHA256=""
 ENDPOINT=""
 VOLUMES=""
 
@@ -356,10 +363,11 @@ EOF
 }
 
 env_teardown() {
-  local topo="$1" nodes_str nodes=()
+  local topo="$1" nodes_str nodes=() failed=0 node
   read -r -a nodes <<<"$(topology_nodes "${topo}")"
   log "environment teardown: ${topo}"
-  for node in "${NODES[@]}"; do cleanup_node "${node}"; done
+  for node in "${NODES[@]}"; do cleanup_node "${node}" || failed=1; done
+  return "${failed}"
 }
 
 # ==================== Server-domain / virtual-hosted-style helpers ====================
@@ -473,6 +481,48 @@ run_test() {
       sed 's/^/      | /' "${TEST_TMP}/test.out" | tail -40
     fi
   fi
+}
+
+validation_write_evidence() {
+  local evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}"
+  local item
+  mkdir -p "${evidence_dir}"
+  cp "${TEST_TMP}/test.out" "${evidence_dir}/test.log"
+  for item in validation-put.json validation-head.json validation-list.json validation-missing.txt; do
+    if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
+  done
+}
+
+validation_write_result() {
+  local verdict="$1" reason="$2" cleanup_status="$3"
+  local result_file="${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
+  local args=(
+    "${SCRIPT_DIR}/scripts/validation_result.py"
+    --case-id "${VALIDATION_CASE}"
+    --profile "single-1disk"
+    --result-file "${result_file}"
+    --verdict "${verdict}"
+    --cleanup-status "${cleanup_status}"
+  )
+  if [ -n "${reason}" ]; then args+=(--reason "${reason}"); fi
+  if [ "${verdict}" != RUNNING ]; then
+    [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "validation result requires --candidate-manifest"
+    [ -n "${VALIDATION_TESTING_COMMIT}" ] || die "validation result requires --testing-commit"
+    args+=(
+      --candidate-manifest "${VALIDATION_CANDIDATE_MANIFEST}"
+      --rc-bin "$(command -v rc)"
+      --testing-commit "${VALIDATION_TESTING_COMMIT}"
+      --binary-sha256 "${VALIDATION_BINARY_SHA256}"
+    )
+    args+=(--evidence "evidence/${VALIDATION_CASE}/test.log")
+  fi
+  if [ "${verdict}" = PASS ]; then
+    local item
+    for item in validation-put.json validation-head.json validation-list.json validation-missing.txt; do
+      args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
+    done
+  fi
+  python3 "${args[@]}"
 }
 
 # rc helper: capture output + exit code. rc exit 7 = gated/unsupported.
@@ -909,6 +959,64 @@ run_all_tests() {
   run_test SNW-110 "ExtractQuota"            test_snw110
   run_test SNW-112 "ExtractVersioning"       test_snw112
   run_test SNW-114 "ResponseAndChecksum"     test_snw114
+}
+
+# Keep the validation fixture together so CRUD, ETag, metadata, and errors
+# describe the same object rather than separate S3C-* fixtures.
+test_validation_s3_basic_object_round_trip() {
+  local bucket="val-basic-${RANDOM}-$$" key="object" source="${TEST_TMP}/validation-basic-source"
+  local downloaded="${TEST_TMP}/validation-basic-downloaded" expected_sha expected_etag put_etag
+  local case_rc=0 cleanup_rc=0
+  VALIDATION_OBJECT_CLEANUP_STATUS=PASS
+  make_test_file "${source}" 4096
+  expected_sha="$(sha256sum "${source}" | awk '{print $1}')"
+  expected_etag="\"$(md5_of_file "${source}")\""
+
+  new_bucket "${bucket}" || return 1
+  (
+    aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${source}" \
+      --metadata validation=roundtrip --content-type application/octet-stream
+    assert_aws_ok || exit 1
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-put.json"
+    put_etag="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag // empty')"
+    [ "${put_etag}" = "${expected_etag}" ] || { echo "PUT ETag mismatch: ${put_etag}"; exit 1; }
+
+    aws_run s3api head-object --bucket "${bucket}" --key "${key}"
+    assert_aws_ok || exit 1
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-head.json"
+    printf '%s' "${AWS_OUT}" | jq -e --arg etag "${expected_etag}" \
+      '.ContentLength == 4096 and .ETag == $etag and .Metadata.validation == "roundtrip" and .ContentType == "application/octet-stream"' >/dev/null \
+      || { echo "HEAD fields mismatch: ${AWS_OUT}"; exit 1; }
+
+    aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${downloaded}"
+    assert_aws_ok || exit 1
+    [ "$(sha256sum "${downloaded}" | awk '{print $1}')" = "${expected_sha}" ] \
+      || { echo "GET payload mismatch"; exit 1; }
+
+    aws_run s3api list-objects-v2 --bucket "${bucket}"
+    assert_aws_ok || exit 1
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-list.json"
+    printf '%s' "${AWS_OUT}" | jq -e --arg key "${key}" \
+      'any(.Contents[]?; .Key == $key and .Size == 4096)' >/dev/null \
+      || { echo "LIST omitted the object: ${AWS_OUT}"; exit 1; }
+
+    aws_run s3api delete-object --bucket "${bucket}" --key "${key}"
+    assert_aws_ok || exit 1
+    aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${downloaded}"
+    assert_aws_fails_with "NoSuchKey" || exit 1
+    printf '%s\n' "${AWS_OUT}" > "${TEST_TMP}/validation-missing.txt"
+  ) || case_rc=$?
+
+  # Finalization is explicit because the old rm_bucket helper ignores errors.
+  aws_run s3api delete-object --bucket "${bucket}" --key "${key}"
+  if [ "${AWS_CODE}" -ne 0 ] && ! printf '%s' "${AWS_OUT}" | grep -qiE 'NoSuchKey|not exist'; then cleanup_rc=1; fi
+  aws_run s3api delete-bucket --bucket "${bucket}"
+  assert_aws_ok || cleanup_rc=1
+  if [ "${cleanup_rc}" -ne 0 ]; then
+    VALIDATION_OBJECT_CLEANUP_STATUS=FAIL
+    echo "validation bucket cleanup failed"
+  fi
+  [ "${case_rc}" -eq 0 ] && [ "${cleanup_rc}" -eq 0 ]
 }
 
 # ---------- 1. Bucket basics ----------
@@ -2776,6 +2884,10 @@ Options:
   --ssh-user USER            SSH user for the nodes (default azureuser)
   --ssh-port PORT            SSH port for the nodes (default 22)
   --log-file FILE            Append all output to FILE
+  --validation-case ID       Run only s3.basic-object-round-trip (single-single)
+  --validation-artifacts-dir DIR  Write canonical validation result and evidence
+  --candidate-manifest FILE  Immutable candidate manifest for validation results
+  --testing-commit SHA       auto-testing commit used for validation results
   --dry-run                  Preview commands without executing them
   -y, --yes                  Skip all confirmation prompts
   -h, --help                 Show this help
@@ -2797,6 +2909,10 @@ main() {
       --ssh-user) SSH_USER="$1"; shift ;;
       --ssh-port) SSH_PORT="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
+      --validation-case) VALIDATION_CASE="$1"; shift ;;
+      --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
+      --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
+      --testing-commit) VALIDATION_TESTING_COMMIT="$1"; shift ;;
       --dry-run) DRY_RUN=1 ;;
       -y|--yes) ASSUME_YES=1 ;;
       -h|--help) usage; exit 0 ;;
@@ -2813,6 +2929,27 @@ main() {
   fi
   if [ "${all}" -eq 1 ]; then
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}" "${TOPO_MULTI_MULTI}")
+  fi
+  if [ -n "${VALIDATION_CASE}" ]; then
+    [ "${VALIDATION_CASE}" = "s3.basic-object-round-trip" ] || die "unknown validation case: ${VALIDATION_CASE}"
+    [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
+    [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its own topology"
+    SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}")
+    [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
+    if [ "${DRY_RUN}" -eq 0 ]; then
+      [ -n "${VALIDATION_ARTIFACTS_DIR}" ] || die "--validation-case requires --validation-artifacts-dir"
+      [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "--validation-case requires --candidate-manifest"
+      [ -n "${VALIDATION_TESTING_COMMIT}" ] || die "--validation-case requires --testing-commit"
+      [ ! -e "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation artifacts directory already exists"
+      PACKAGE_URL="$(jq -er '.package_url' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate URL missing"
+      PACKAGE_SHA256="$(jq -er '.package_sha256' "${VALIDATION_CANDIDATE_MANIFEST}")" || die "candidate package SHA missing"
+      [[ "${PACKAGE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid candidate package SHA"
+      jq -e '.source_sha | test("^[0-9a-f]{40}$")' "${VALIDATION_CANDIDATE_MANIFEST}" >/dev/null \
+        || die "candidate source commit missing"
+      [ "${VALIDATION_TESTING_COMMIT}" = "$(git -C "${SCRIPT_DIR}" rev-parse HEAD)" ] \
+        || die "testing commit does not match this checkout"
+      mkdir -p "${VALIDATION_ARTIFACTS_DIR}"
+    fi
   fi
   [ "${#SELECTED_TOPOLOGIES[@]}" -gt 0 ] || die "no topology selected (--all-topologies / --topology)"
   # aws may be installed under a user-local bin not present in the default PATH.
@@ -2834,21 +2971,47 @@ main() {
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
     log "== topology: ${topo} =="
     CURRENT_TOPOLOGY="${topo}"
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      validation_write_result RUNNING "validation case started" PENDING
+    fi
     env_setup "${topo}"
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      VALIDATION_BINARY_SHA256="$(printf 'sha256sum /usr/bin/rustfs\n' | run_remote "${NODES[0]}" | awk '{print $1}')"
+      [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
+    fi
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
-    run_all_tests
+    if [ -n "${VALIDATION_CASE}" ]; then
+      run_test "${VALIDATION_CASE}" "BasicObjectRoundTrip" test_validation_s3_basic_object_round_trip
+    else
+      run_all_tests
+    fi
     results_summary
     record_topology_result "${topo}"
+    local cleanup_status=PASS
     if [ "${KEEP_ENV}" -eq 0 ] || [ "${topo}" != "${SELECTED_TOPOLOGIES[${#SELECTED_TOPOLOGIES[@]}-1]}" ]; then
-      env_teardown "${topo}"
+      env_teardown "${topo}" || cleanup_status=FAIL
+    fi
+    if [ "${VALIDATION_OBJECT_CLEANUP_STATUS}" != PASS ]; then cleanup_status=FAIL; fi
+    if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+      validation_write_evidence
+      if [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ] && [ "${cleanup_status}" = PASS ]; then
+        validation_write_result PASS "" PASS
+      elif [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ]; then
+        validation_write_result INFRA_ERROR "environment teardown failed" FAIL
+      else
+        validation_write_result FAIL "case failed or unsupported; inspect evidence" "${cleanup_status}"
+      fi
     fi
     if [ "${FAIL}" -gt 0 ]; then
       overall_fail=1
     fi
+    if [ "${UNSUPPORTED}" -gt 0 ] || [ "${cleanup_status}" != PASS ]; then overall_fail=1; fi
   done
   final_summary
   [ "${overall_fail}" -eq 0 ] || exit 1
   log "all done"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
