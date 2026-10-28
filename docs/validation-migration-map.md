@@ -9,7 +9,7 @@ live run proves each source assertion on the required topology.
 
 ## Current acceptance and remaining work
 
-Count reconciliation (2026-10-23): the append-only ledger
+Count reconciliation (2026-10-23; updated 2026-10-28): the append-only ledger
 `canonical-migration-ledger-20261023-b08-39915022106.json` follows the
 B01 ledger and attaches the complete B08 live acceptance plus the latest B02
 failure evidence. The B02 complete acceptance below is a later independent
@@ -17,11 +17,13 @@ record; it does not replace that retained failure or replay all 158 cases on
 one candidate.
 
 All 158 canonical IDs are retained. Independent complete live acceptance is
-**115/158**. The current ledger has 20 retained live failures, six pending
-native/live race acceptances, four orchestration/evidence blockers and 13 environment cases
-disabled by default. The active acceptance backlog is 30 cases. Counts are
-case-level canonical results across immutable candidates; diagnostic, native,
-isolation and partial results do not increment PASS.
+**115/158**. The current ledger has 21 retained live failures, five pending
+native/live race acceptances, four orchestration/evidence blockers and 13
+environment cases disabled by default. The active acceptance backlog remains
+30 cases: G02 moved from pending race acceptance to retained live failure
+after its first live run failed before completing the required matrix.
+Counts are case-level canonical results across immutable candidates;
+diagnostic, native, isolation and partial results do not increment PASS.
 
 | Reconciled case | Complete live run | Required coverage | Original result SHA-256 |
 | --- | --- | --- | --- |
@@ -39,8 +41,8 @@ isolation and partial results do not increment PASS.
 | Acceptance state | Cases | Remaining requirement |
 | --- | ---: | --- |
 | Independently accepted complete live PASS | 115 | Preserve original provenance and complete results. |
-| Retained live failures with existing executors | 20 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
-| Native and live race acceptance pending | 6 | A09 and G01–G05 require independently verified native groups, reviewed candidate-specific runtime admission and complete H1/H2 live evidence. |
+| Retained live failures with existing executors | 21 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
+| Native and live race acceptance pending | 5 | A09 and G01/G03–G05 require independently verified native groups, reviewed candidate-specific runtime admission and complete H1/H2 live evidence. |
 | Orchestration or evidence blocked | 4 | C11, F07, I05 and J02 need their remaining native or full live evidence closure. |
 | Environment gated, disabled by default | 13 | Control flows, oracles and unmet reasons are implemented; dedicated resource adapters and real execution remain conditional on the required resources. |
 
@@ -52,7 +54,47 @@ Hosted-only tools [40086026324/1](https://github.com/rustfs/rustfs/actions/runs/
 
 The registry exposes eight native prerequisite groups: A09, G01–G06 and part of I05. This is separate from runtime admission. The pinned helper admits A09, G05 and G06 on this candidate; it intentionally rejects G01–G04 on the same source before bootstrap because their runtime candidate contracts remain pinned to other reviewed sources. G01–G03 may use their reviewed version candidate `bd0671ba781d8ebf509f4f03533228dfb44496f1`, and G04 uses marker candidate `8380466f3a27c3c3ef4115084178a0ab99a78f32`, each with its own exact package and matching helper/tools. Alternatively, a separate source review and matching tools build must precede extending runtime admission. Do not infer admission from registry membership or mix artifacts from different candidates or helpers.
 
-All ten native tests pass. G06 subsequently passed all eight H1/H2 public branches in [40427815826/1](https://github.com/rustfs/rustfs/actions/runs/40427815826); an independent audit verified its ACK, physical, peer S3, overlap and 20 cleanup receipts, adding one canonical PASS. A09 and G01–G05 still need their complete source branches and clean finalization; I05's native subset does not supply its missing full timeout/stale-generation controller and live closure.
+All ten native tests pass. G06 subsequently passed all eight H1/H2 public branches in [40427815826/1](https://github.com/rustfs/rustfs/actions/runs/40427815826); an independent audit verified its ACK, physical, peer S3, overlap and 20 cleanup receipts, adding one canonical PASS. A09 and G01/G03–G05 still need their complete source branches and clean finalization. G02's native/runtime prerequisites were admitted, but its first live run failed before completing the required matrix and is recorded below. I05's native subset does not supply its missing full timeout/stale-generation controller and live closure.
+
+### G02 retained live failure (2026-10-27)
+
+G02 `heal.race-versioned-put` run [40444207551/1](https://github.com/rustfs/rustfs/actions/runs/40444207551)
+used RustFS candidate `bd0671ba781d8ebf509f4f03533228dfb44496f1`,
+auto-testing `7094c16a5a5cf3b0f818c7be463f3bc0f8fd7645`, and the audited
+candidate-bound native tools from [40311010126/1](https://github.com/rustfs/rustfs/actions/runs/40311010126).
+The H1 `new-version-vs-historical-heal` branch failed at foreground ACK 000003:
+PUT `objects/0256.bin` returned HTTP 503 `ServiceUnavailable` after 5.026 s,
+with zero retries. The service log binds request
+`2b5289c8-0faa-472d-b5c6-fe9db521659d` to `storage_error_code=Some(Lock)` and
+records a contemporaneous `rename_data` operation pending for over 5 s on
+`/data/rustfs4`. This supports a Heal/PUT lock-contention diagnosis; the log
+does not correlate that rename operation to the request ID, so it is not a
+complete call-level causal trace. This was a real failed PUT, not a recorder
+false positive or successful ACK.
+
+The branch result is `FAIL/cleanup FAIL`; its last-ACK receipt records
+`unresolvedMutation=true` and
+`lastACKPhysicalAuthorityVerified=false`. Evidence-based recovery run
+[40444795627](https://github.com/rustfs/rustfs/actions/runs/40444795627)
+isolated the active namespace. It did not restore the scene, delete the
+namespace or rewrite the verdict, and it claimed no canonical PASS. The
+original failed scene remains retained and must not be replayed in place.
+
+The Auto Testing PR [#113](https://github.com/rustfs/auto-testing/pull/113)
+contains the migrated G02 executor and remains Draft. RustFS PR
+[#8455](https://github.com/rustfs/rustfs/pull/8455) completed its distributed
+4-node/4-disk E2E in run [40631115072](https://github.com/rustfs/rustfs/actions/runs/40631115072)
+on candidate `4454b029dd462e0f58f1b3acc0f4cd62137c24d6`: 92 tests passed and
+873 were skipped. The PR includes Heal lock-wait observation and extensive
+Heal regressions, but the E2E result does not bind those changes to the failed
+PUT request or establish that the G02 lock contention is fixed. It is
+supporting candidate evidence, not an immutable G02 package or case result.
+Retest only after reviewing a concrete source correction, building and
+auditing a package pinned to its exact candidate SHA with matching
+tools/helper, and confirming the current Auto Testing fleet is safe for a
+fresh run. A complete H1/H2 matrix, physical and peer S3 verification, and
+clean run-owned finalization are required before G02 can add a canonical PASS.
+Until then the 115/158 total is unchanged.
 
 ### Hosted runner inspection (2026-10-26)
 
