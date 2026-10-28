@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import copy
 import json
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from scripts.validation_catalog import build_snapshot, validate_reuse_candidates, validate_snapshot
 from scripts.validation_report import validate_results
+from scripts.validation_migration_review import summarize, validate_review
 
 
 ROOT = Path(__file__).resolve().parent
@@ -251,6 +253,120 @@ class ResultWriterTest(unittest.TestCase):
             b04_value = json.loads(b04.read_text(encoding="utf-8"))
             self.assertEqual(b04_value["case_id"], "heal.disk-replacement-unformatted")
             self.assertIsNone(b04_value["provenance"]["binary_sha256"])
+
+
+class ImplementationReviewTest(unittest.TestCase):
+    def setUp(self):
+        self.catalog = json.loads((ROOT / "validation-cases.json").read_text())
+        self.review = json.loads((ROOT / "validation-migration-review.json").read_text())
+
+    def test_explicit_review_covers_the_entire_catalog(self):
+        validate_review(self.review, self.catalog)
+        summary = summarize(self.review)
+        self.assertEqual(summary["total"], 158)
+        self.assertEqual(sum(summary["implementation"].values()), 158)
+        self.assertEqual(sum(summary["live"].values()), 158)
+        self.assertFalse(summary["candidate_pass_claimed"])
+        self.assertFalse(summary["all_cases_live_accepted"])
+
+    def test_retained_failure_is_independent_of_implementation_completion(self):
+        # Candidate failures must never silently become missing test code.
+        case = next(case for case in self.review["cases"]
+                    if case["implementation"] == "implemented"
+                    and case["live"]["state"] == "retained-failure")
+        before = summarize(self.review)["implementation"]
+        case["live"]["finding"] = "Candidate request returned a retained unexpected response; cause remains under review."
+        validate_review(self.review, self.catalog)
+        self.assertEqual(before, summarize(self.review)["implementation"])
+        with tempfile.TemporaryDirectory() as directory:
+            result = {"schema_version": 1, "case_id": case["case_id"],
+                      "source_status": next(source["source_status"] for module in self.catalog["modules"]
+                                            for source in module["cases"] if source["id"] == case["case_id"]),
+                      "migration_status": "unverified", "profile": "cluster-1pool",
+                      "verdict": "FAIL", "cleanup_status": "PASS", "reason": case["live"]["finding"]}
+            result_path = Path(directory) / "retained.json"
+            result_path.write_text(json.dumps(result))
+            original = result_path.read_bytes()
+            _, errors = validate_results(self.catalog, Path(directory), gate_statuses=set(),
+                                         gate_cases={case["case_id"]})
+            self.assertIn(f"{case['case_id']}: gate verdict is 'FAIL'", errors)
+            self.assertEqual(original, result_path.read_bytes())
+
+    def test_missing_or_duplicate_id_is_rejected(self):
+        for change, reason in (("missing", "missing implementation reviews"),
+                               ("duplicate", "duplicate implementation case")):
+            with self.subTest(change=change):
+                review = copy.deepcopy(self.review)
+                if change == "missing":
+                    review["cases"].pop()
+                else:
+                    review["cases"].append(copy.deepcopy(review["cases"][0]))
+                with self.assertRaisesRegex(ValueError, reason):
+                    validate_review(review, self.catalog)
+
+    def test_source_or_code_drift_requires_another_review(self):
+        for change, reason in (("source", "another source catalog"),
+                               ("code", "implementation changed since review"),
+                               ("branch", "source branch coverage changed")):
+            with self.subTest(change=change):
+                review = copy.deepcopy(self.review)
+                if change == "source":
+                    review["source_commit"] = "0" * 40
+                elif change == "code":
+                    review["reviewed_files"][next(iter(review["reviewed_files"]))] = "0" * 64
+                else:
+                    case = next(case for case in review["cases"] if "source_variants" in case)
+                    case["source_variants"].pop(next(iter(case["source_variants"])))
+                with self.assertRaisesRegex(ValueError, reason):
+                    validate_review(review, self.catalog)
+
+    def test_partial_implementation_must_name_a_concrete_gap(self):
+        case = self.review["cases"][0]
+        case.update(implementation="partial", gaps=[])
+        with self.assertRaisesRegex(ValueError, "actionable gaps"):
+            validate_review(self.review, self.catalog)
+
+    def test_default_disabled_environment_requirements_cannot_disappear(self):
+        case = next(case for case in self.review["cases"] if case["implementation"] == "environment-gated")
+        case["required_capabilities"] = []
+        with self.assertRaisesRegex(ValueError, "environment requirements drifted"):
+            validate_review(self.review, self.catalog)
+
+    def test_unreviewed_or_nonlocal_branch_references_are_rejected(self):
+        for name, reason in (("../outside.py", "nonlocal implementation reference"),
+                             ("validation-migration-review.json", "unreviewed implementation reference")):
+            with self.subTest(name=name):
+                review = copy.deepcopy(self.review)
+                review["cases"][0]["references"] = [name]
+                with self.assertRaisesRegex(ValueError, reason):
+                    validate_review(review, self.catalog)
+
+    def test_invalid_record_types_raise_a_review_error(self):
+        for invalid in (None, [], {"implementation": []}, {"case_id": "unknown"}):
+            with self.subTest(invalid=invalid):
+                review = copy.deepcopy(self.review)
+                review["cases"][0] = invalid
+                with self.assertRaises(ValueError):
+                    validate_review(review, self.catalog)
+
+    def test_require_complete_checks_code_gaps_without_demanding_product_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "review.json"
+            command = [sys.executable, "-B", str(ROOT / "scripts/validation_migration_review.py"),
+                       "--review", str(path), "--require-complete"]
+            path.write_text(json.dumps(self.review))
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertGreater(json.loads(result.stdout)["live"]["retained-failure"], 0)
+            self.assertFalse(json.loads(result.stdout)["candidate_pass_claimed"])
+            # A real implementation gap must fail even with unchanged product results.
+            case = next(case for case in self.review["cases"]
+                        if case["implementation"] == "implemented" and case["live"]["state"] == "retained-failure")
+            case.update(implementation="partial", gaps=["Missing source controller in this negative fixture."])
+            path.write_text(json.dumps(self.review))
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["remaining_implementation"][0]["case_id"], case["case_id"])
 
 
 if __name__ == "__main__":

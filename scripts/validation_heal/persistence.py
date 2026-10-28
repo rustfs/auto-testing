@@ -28,6 +28,7 @@ try:
     from .scanner_repair import JournalWindow
     from .fleet_node import PROCESS_FIELDS
     from .persistence_mrf import run as run_mrf_checksum
+    from . import persistence_native
     from .versions import public_version_id, verify_proof, version_identity
 except ImportError:
     import checkpoint as checkpoints, journal_fault as journal
@@ -43,6 +44,7 @@ except ImportError:
     from scanner_repair import JournalWindow
     from fleet_node import PROCESS_FIELDS
     from persistence_mrf import run as run_mrf_checksum
+    import persistence_native
     from versions import public_version_id, verify_proof, version_identity
 
 
@@ -737,6 +739,63 @@ def run_checkpoint_fault(args, topology, nodes, fixture, branch, candidate):
     return result
 
 
+def collect_native_persistence(args, candidate):
+    """Execute and re-verify the exact hosted ECStore subset when supplied.
+
+    The six directory-fsync regressions are an independent native subset. They
+    share the candidate identity with the manager evidence, but they never
+    mutate the fleet and never certify the canonical F07 case. Missing native
+    artifacts keep the diagnostic prerequisite visible without fabricating a
+    PASS; a retained native failure is written as evidence for later triage.
+    """
+    raw = getattr(args, "native_directory", None) or os.environ.get("VALIDATION_HEAL_NATIVE_DIRECTORY")
+    if not raw:
+        return None
+    root = Path(raw)
+    tools, evidence = root / "native-tools", root / "native-evidence"
+    out = args.evidence / "native-persistence"
+    args.evidence.mkdir(parents=True, exist_ok=True)
+    try:
+        manifest, _ = persistence_native.binding(tools, evidence)
+        require(manifest["candidateCommit"] == candidate["source_sha"],
+                "F07 native and fleet candidates differ")
+        persistence_native.run(tools, evidence, out, args.testing_commit)
+        proof = persistence_native.verify(tools, evidence, out, args.testing_commit)
+        require(proof.get("candidateCommit") == candidate["source_sha"],
+                "F07 verified native proof changed the selected candidate")
+        save(args.evidence / "independent-native-persistence.json", proof)
+        return proof
+    except (Exception, KeyboardInterrupt) as exc:
+        failure = {"complete": False, "canonicalCasePassClaimed": False,
+                   "fleetPassClaimed": False, "nativeDirectory": str(root.resolve()),
+                   "failure": {"type": type(exc).__name__, "message": str(exc)}}
+        save(args.evidence / "independent-native-persistence-failure.json", failure)
+        return failure
+
+
+def native_branch_result(topology, fixture, manager_proof, persistence_proof):
+    complete = isinstance(persistence_proof, dict) and persistence_proof.get("complete") is True
+    attempted = persistence_proof is not None
+    if complete:
+        require(manager_proof.get("candidateCommit") == persistence_proof.get("candidateCommit")
+                and manager_proof.get("candidateCommit") is not None,
+                "F07 manager and directory-fsync proofs mix candidates")
+    result = {"requestedTopology": topology, "requestedFixture": fixture, "topology": None,
+        "fixture": None, "branch": "native-persist-fence", "verdict": "PREREQUISITE_PASS",
+        "cleanup": "PASS", "nativeProof": manager_proof, "nativePersistenceProof": persistence_proof,
+        "nativeExecutionAttempted": attempted, "fleetBranchExecuted": False,
+        "canonicalCasePassClaimed": False,
+        "evidenceScope": "exact-candidate checkpoint/MRF publication plus ECStore directory-fsync native subset",
+        "individualFsyncHooksClaimed": False, "physicalPowerLossClaimed": False,
+        "requiredNativeCoverageComplete": complete,
+        "requiredNativeCoverageScope": "source native-persist-fence: manager commit interruptions plus ECStore directory-fsync regressions",
+        "remainingNativeCoverage": None if complete else
+            "provide and pass the exact candidate-bound ECStore directory-fsync artifact"}
+    if attempted and not complete:
+        result["nativeFailureRetained"] = True
+    return result
+
+
 def main():
     def interrupted(signum, frame): raise KeyboardInterrupt(f"F07 interrupted by signal {signum}")
     signal.signal(signal.SIGTERM, interrupted)
@@ -744,6 +803,7 @@ def main():
     for name in ("candidate", "rc-bin", "evidence", "tool-directory"): parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--testing-commit", required=True)
     parser.add_argument("--binary-sha", required=True)
+    parser.add_argument("--native-directory", type=Path, default=os.environ.get("VALIDATION_HEAL_NATIVE_DIRECTORY"))
     parser.add_argument("--case-id", choices=(CASE_ID,), required=True)
     args = parser.parse_args()
     require(select(CASE_ID)[0]["variants"] == list(BRANCHES), "F07 recipe branches changed")
@@ -752,6 +812,7 @@ def main():
             "F07 checkpoint failure contract requires an exact reviewed candidate with identical checkpoint sources")
     native = verify_manager(os.environ.get("VALIDATION_HEAL_MANAGER_DIRECTORY", ""), candidate, CASE_ID)
     save(args.evidence / "independent-native-persistence-prerequisites.json", native)
+    native_persistence = collect_native_persistence(args, candidate)
     require(re.fullmatch(r"[0-9a-f]{40}", args.testing_commit) and re.fullmatch(r"[0-9a-f]{64}", args.binary_sha)
             and re.fullmatch(r"[1-9][0-9]*", os.environ.get("GITHUB_RUN_ID", "")), "F07 requires immutable workflow and binary identities")
     nodes = os.environ.get("RUSTFS_NODES", "vm000 vm001 vm002 vm003").split()
@@ -767,25 +828,29 @@ def main():
                     elif branch == "mrf-checksum":
                         result = run_mrf_checksum(args, topology, selected, fixture, candidate)
                     elif branch == "native-persist-fence":
-                        result = {"requestedTopology": topology, "requestedFixture": fixture, "topology": None,
-                            "fixture": None, "branch": branch, "verdict": "PREREQUISITE_PASS", "cleanup": "PASS",
-                            "nativeProof": native, "fleetBranchExecuted": False, "canonicalCasePassClaimed": False,
-                            "evidenceScope": "exact-candidate checkpoint/MRF publication native prerequisite",
-                            "individualFsyncHooksClaimed": False, "physicalPowerLossClaimed": False,
-                            "requiredNativeCoverageComplete": False,
-                            "remainingNativeCoverage": "review every required checkpoint/MRF fsync and commit cut against the source assertions"}
+                        result = native_branch_result(topology, fixture, native, native_persistence)
                     else:
                         result = {"topology": topology, "fixture": fixture, "branch": branch, "verdict": "BLOCKED", "cleanup": "PASS",
                             "reason": BLOCKERS[branch], "fleetBranchExecuted": False, "canonicalCasePassClaimed": False}
                     results.append(result)
                     if result["cleanup"] != "PASS": return 1
     finally:
+        def branch_passed(row):
+            if row["cleanup"] != "PASS":
+                return False
+            if row["branch"] in BLOCKERS:
+                return row["verdict"] == "BLOCKED"
+            if row["branch"] == "native-persist-fence":
+                return row["verdict"] == "PREREQUISITE_PASS" and (
+                    not row.get("nativeExecutionAttempted") or row.get("requiredNativeCoverageComplete") is True)
+            return row["verdict"] == "PASS"
         save(args.evidence / "healthy-summary.json", {"caseId": CASE_ID, "results": results, "complete": False,
             "cleanup": "PASS" if results and all(row["cleanup"] == "PASS" for row in results) else "FAIL",
-            "diagnosticBranchesPassed": len(results) == 24 and all(row["cleanup"] == "PASS" and
-                row["verdict"] == ("BLOCKED" if row["branch"] in BLOCKERS else
-                    "PREREQUISITE_PASS" if row["branch"] == "native-persist-fence" else "PASS") for row in results),
-            "canonicalCasePassClaimed": False, "reason": "full native cut coverage and independent live audit remain blocked"})
+            "diagnosticBranchesPassed": len(results) == 24 and all(branch_passed(row) for row in results),
+            "nativePersistenceProof": native_persistence, "canonicalCasePassClaimed": False,
+            "reason": ("independent complete live audit remains pending"
+                if native_persistence and native_persistence.get("complete") is True else
+                "exact candidate-bound ECStore native evidence and independent complete live audit remain pending")})
     return 1
 
 

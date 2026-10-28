@@ -9,6 +9,7 @@ driver=healthy.py
 environment_gate=0
 replacement_admission_gate=0
 i05_args=()
+f07_args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --validation-case) case_id="$2"; shift 2 ;;
@@ -98,15 +99,17 @@ if [ -n "${VALIDATION_HEAL_TOOL_DIRECTORY:-}" ]; then
   tool_args=(--tool-directory "${VALIDATION_HEAL_TOOL_DIRECTORY}")
 fi
 if [ "${case_id}" = heal.lock-timeout-and-caller-abort ]; then
-  diagnostic_branch="${I05_DIAGNOSTIC_BRANCH:-timeout}"
+  diagnostic_branch="${I05_DIAGNOSTIC_BRANCH:-source-plan}"
   case "${diagnostic_branch}" in
-    timeout|queued-successor) ;;
+    timeout|queued-successor|source-plan) ;;
     *) die "unsupported I05 diagnostic branch: ${diagnostic_branch}" ;;
   esac
   i05_args+=(--diagnostic-branch "${diagnostic_branch}")
   if [ -n "${VALIDATION_HEAL_NATIVE_DIRECTORY:-}" ]; then
     i05_args+=(--native-directory "${VALIDATION_HEAL_NATIVE_DIRECTORY}")
   fi
+elif [ "${case_id}" = heal.checkpoint-and-mrf-corruption ] && [ -n "${VALIDATION_HEAL_NATIVE_DIRECTORY:-}" ]; then
+  f07_args+=(--native-directory "${VALIDATION_HEAL_NATIVE_DIRECTORY}")
 fi
 [ "${driver}" = healthy.py ] || [ "${#tool_args[@]}" -gt 0 ] || die "physical Heal cases require candidate-bound bitrot tools"
 evidence="${artifacts}/evidence/${case_id}"
@@ -245,7 +248,7 @@ if [ "${bootstrap_rc}" -eq 0 ]; then
   done
   python3 -B "${ROOT}/scripts/validation_heal/${driver}" --candidate "${candidate}" \
     --case-id "${case_id}" \
-    "${tool_args[@]}" "${i05_args[@]}" \
+    "${tool_args[@]}" "${i05_args[@]}" "${f07_args[@]}" \
     --testing-commit "${testing_commit}" --binary-sha "${binary_sha}" --rc-bin "${rc_binary}" \
     --evidence "${evidence}" > "${evidence}/test.log" 2>&1 || case_rc=$?
   cat "${evidence}/test.log"
@@ -293,11 +296,11 @@ if [ "${case_id}" = heal.outcome-counters-and-error-truth ] && [ "${cleanup_stat
 fi
 if [ "${case_id}" = heal.lock-timeout-and-caller-abort ]; then
   # This route is an explicit diagnostic invocation, never canonical admission.
-  # Even an all-green timeout subset leaves the source's other branches open.
+  # Source-plan also retains independent native scope and awaits full live audit.
   if [ "${cleanup_status}" = PASS ] && [ "${case_rc}" -eq 0 ] && \
      jq -e '.diagnosticComplete == true and .complete == false and .canonicalCasePassClaimed == false' \
        "${evidence}/healthy-summary.json" >/dev/null 2>&1; then
-    verdict=BLOCKED; reason="I05 ${diagnostic_branch:-timeout} diagnostic completed; exact disconnect ownership, remaining native fences, stale-generation controller and complete source H1/H2 DL/DV acceptance remain required"
+    verdict=BLOCKED; reason="I05 ${diagnostic_branch:-source-plan} execution completed; independent complete source-plan live audit remains required"
   elif [ "${case_rc}" -eq 0 ]; then
     verdict=INFRA_ERROR; reason="I05 diagnostic summary or cleanup is incomplete; canonical PASS is prohibited"
   fi

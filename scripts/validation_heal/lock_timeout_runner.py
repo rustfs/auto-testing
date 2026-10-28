@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy and retain the I05 timeout diagnostic; never certify the whole case."""
+"""Run I05 source procedures and retain failures pending independent live audit."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -15,6 +15,7 @@ import sys
 import time
 
 try:
+    from . import lock_source
     from .heal_probe import Probe, compare_inventories, require, save, validate_binding
     from .heal_workload import Recorder, seed, verify_seed
     from .healthy import Fleet, physical_content, validate_topology
@@ -26,6 +27,7 @@ try:
     from .shards import map_target, verify_cohort
     from .timeout_retention import seal_successor_scene
 except ImportError:
+    import lock_source
     from heal_probe import Probe, compare_inventories, require, save, validate_binding
     from heal_workload import Recorder, seed, verify_seed
     from healthy import Fleet, physical_content, validate_topology
@@ -72,7 +74,9 @@ def preflight(args):
     require(nodes[:4] == list(NODES), 'I05 requires the current vm000-vm003 Heal node binding')
     inspector = verify_inspector(args.tool_directory, candidate)
     require(args.rc_bin.is_file(), 'I05 requires the pinned client binary')
-    if getattr(args, 'diagnostic_branch', 'timeout') == 'queued-successor':
+    if getattr(args, 'diagnostic_branch', 'timeout') == 'source-plan':
+        lock_source.verify_source_native(args, candidate)
+    elif getattr(args, 'diagnostic_branch', 'timeout') == 'queued-successor':
         verify_native_prerequisite(args, candidate)
     return candidate, inspector
 
@@ -102,6 +106,8 @@ def run_topology(args, candidate, inspector, topology):
     directory = args.evidence / topology
     directory.mkdir(parents=True, exist_ok=False)
     run_id = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}-{topology.lower()}"
+    if getattr(args, 'source_plan', False):
+        run_id += '-' + branch
     nodes = list(NODES[:1] if topology == 'H1' else NODES)
     bucket = 'rv-heal-' + hashlib.sha256(run_id.encode()).hexdigest()[:16]
     fleet = Fleet(nodes, directory, run_id, args.tool_directory,
@@ -132,7 +138,8 @@ def run_topology(args, candidate, inspector, topology):
         fleet.deploy(args.binary_sha, bucket, access, secret)
         fleet.record('actual-topology', validate_topology(fleet.snapshot('deployed-topology'), topology))
         recorder = Recorder(probe, directory / 'fixture')
-        # A bounded diagnostic fixture, not the full source DL/DV workload.
+        # DV history plus one concurrent, unretried DL request/ACK ledger.
+        # Large historical GETs make real timeout/disconnect contention observable.
         expected = seed(recorder, bucket, 'DV', 2, [MIN_BACKPRESSURE_BYTES, 1024])
         target = next(row for row in expected if not row['deleteMarker'] and not row['isLatest']
                       and row['payload']['size'] >= MIN_BACKPRESSURE_BYTES)
@@ -194,6 +201,9 @@ def run_topology(args, candidate, inspector, topology):
             require(physical_content(stopped) == physical_content(
                     fleet.snapshot('I05-successor-stopped-after-integrity', quiescent=True)),
                     'I05 successor streaming verification changed physical content')
+        if getattr(args, 'source_plan', False):
+            result['sourceEvidenceChain'] = fleet.record('I05-source-evidence-chain',
+                lock_source.link_fleet_evidence(directory, branch, binding, diagnostic))
         result['diagnosticComplete'] = True
     except (Exception, KeyboardInterrupt) as error:
         result['failure'] = error_info(error)
@@ -232,7 +242,8 @@ def run(args):
             'I05 deployment requires the installed binary digest')
     candidate, inspector = preflight(args)
     branch = getattr(args, 'diagnostic_branch', 'timeout')
-    native_proof = verify_native_prerequisite(args, candidate) if branch == 'queued-successor' else None
+    native_proof = (lock_source.verify_source_native(args, candidate) if branch == 'source-plan' else
+                    verify_native_prerequisite(args, candidate) if branch == 'queued-successor' else None)
     # run_case.sh creates this parent and opens test.log before invoking us.
     # Reuse only those wrapper files; a prior topology or summary is a replay.
     require(not args.evidence.is_symlink(), 'I05 evidence directory must not be a symlink')
@@ -240,6 +251,8 @@ def run(args):
     require(all(path.name in {'timeout-preflight.json', 'setup.log', 'test.log'}
                 and path.is_file() and not path.is_symlink() for path in args.evidence.iterdir()),
             'I05 requires fresh topology and summary evidence before deployment')
+    if branch == 'source-plan':
+        return lock_source.run_source_plan(args, candidate, inspector, run_topology, native_proof)
     if native_proof is not None:
         save(args.evidence / 'native-prerequisite.json', native_proof)
     results = []
@@ -277,8 +290,8 @@ def main():
     parser.add_argument('--rc-bin', type=Path, required=True)
     parser.add_argument('--evidence', type=Path, required=not preflight_only)
     parser.add_argument('--topologies', nargs='+', choices=('H1', 'H2'), default=['H1', 'H2'])
-    parser.add_argument('--diagnostic-branch', choices=('timeout', 'queued-successor'),
-                        default=os.environ.get('I05_DIAGNOSTIC_BRANCH', 'timeout'))
+    parser.add_argument('--diagnostic-branch', choices=('timeout', 'queued-successor', 'source-plan'),
+                        default=os.environ.get('I05_DIAGNOSTIC_BRANCH', 'source-plan'))
     parser.add_argument('--native-directory', type=Path, default=os.environ.get('VALIDATION_HEAL_NATIVE_DIRECTORY'))
     args = parser.parse_args(argv)
     require(args.topologies in (['H1'], ['H2'], ['H1', 'H2']), 'I05 topology order must be H1 then H2')
@@ -286,7 +299,7 @@ def main():
         preflight(args)
         print(json.dumps({'preflightPassed': True, 'candidateCommit': CANDIDATE,
                           'diagnosticBranch': args.diagnostic_branch,
-                          'nativePrerequisitePassed': args.diagnostic_branch == 'queued-successor',
+                          'nativePrerequisitePassed': args.diagnostic_branch in ('queued-successor', 'source-plan'),
                           'diagnosticOnly': True, 'canonicalCasePassClaimed': False}))
         return 0
     signal.signal(signal.SIGTERM, interrupted)

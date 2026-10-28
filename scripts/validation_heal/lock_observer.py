@@ -13,13 +13,13 @@ from urllib.parse import parse_qs, urlsplit
 try:
     from .caller_abort import disconnect_get
     from .fleet_node import PROCESS_FIELDS, runtime_config
-    from .heal_probe import MAX_BODY, Probe, canonical, require, save, validate_binding, validate_s3_request
+    from .heal_probe import CLOCK_DOMAIN, MAX_BODY, Probe, canonical, require, save, validate_binding, validate_s3_request
     from .healthy import Fleet
     from .scanner_repair import JournalWindow
 except ImportError:
     from caller_abort import disconnect_get
     from fleet_node import PROCESS_FIELDS, runtime_config
-    from heal_probe import MAX_BODY, Probe, canonical, require, save, validate_binding, validate_s3_request
+    from heal_probe import CLOCK_DOMAIN, MAX_BODY, Probe, canonical, require, save, validate_binding, validate_s3_request
     from healthy import Fleet
     from scanner_repair import JournalWindow
 
@@ -249,7 +249,8 @@ def observe_disconnect(probe, fleet, bucket, entry, output, *, while_admitted=No
                 break
             require(time.monotonic() < deadline, 'NOT_OBSERVED: I05 verification did not return to its FD count baseline')
             time.sleep(.2)
-        result = {'observationComplete': True, 'baselineResources': baseline,
+        result = {'observationComplete': True, 'clockDomain': CLOCK_DOMAIN,
+            'observationCompletedMonotonicNs': time.monotonic_ns(), 'baselineResources': baseline,
             'admission': admitted, 'finalAttempt': observed,
             'admittedWork': admitted_work,
             'disconnectedWork': disconnected_work,

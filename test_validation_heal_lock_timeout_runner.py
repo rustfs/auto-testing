@@ -187,6 +187,67 @@ class TimeoutRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'exact reviewed'): runner.preflight(self.args)
         self.assertFalse(self.fleets or self.events)
 
+    def test_source_plan_runs_four_isolated_instances_through_real_recorder(self):
+        self.args.diagnostic_branch = 'source-plan'
+        proof = {'nativeOwnerAndStaleFencesPassed': True}
+        def link(directory, branch, binding, diagnostic):
+            self.assertEqual(directory, self.fleets[-1].evidence)
+            self.assertEqual(binding['runId'], self.fleets[-1].run_id)
+            self.assertTrue(list((directory / 'fixture').glob('*-ack.json')))
+            self.events.append('source-chain')
+            return {'sourceEvidenceComplete': True}
+        with patch.object(runner, 'preflight', return_value=(self.candidate, self.inspector)), \
+                patch.object(runner.lock_source, 'verify_source_native', return_value=proof), \
+                patch.object(runner, 'verify_native_prerequisite', return_value=proof), \
+                patch.object(runner, 'observe_successor', side_effect=self.successor), \
+                patch.object(runner, 'map_target', side_effect=self.new_target), \
+                patch.object(runner, 'verify_cohort', side_effect=self.integrity), \
+                patch.object(runner.lock_source, 'link_fleet_evidence', side_effect=link) as chain:
+            result = runner.run(self.args)
+        self.assertTrue(result['sourceProceduresComplete'])
+        self.assertFalse(result['canonicalCasePassClaimed'] or result['wholeCasePassClaimed'])
+        self.assertEqual(chain.call_count, 4)
+        self.assertEqual([fleet.runtime_profile for fleet in self.fleets],
+                         ['lock-timeout'] * 2 + ['lock-successor'] * 2)
+        self.assertEqual(len({fleet.run_id for fleet in self.fleets}), 4)
+        self.assertEqual({fleet.evidence.relative_to(self.args.evidence).as_posix() for fleet in self.fleets},
+            {'source-plan/timeout/H1', 'source-plan/timeout/H2',
+             'source-plan/queued-successor/H1', 'source-plan/queued-successor/H2'})
+        bindings = [json.loads(next(fleet.evidence.glob('*-binding.json')).read_text()) for fleet in self.fleets]
+        self.assertEqual(len({binding['bucketPrefix'] for binding in bindings}), 4)
+        self.assertEqual([event for event in self.events if event in ('source-chain', 'cleanup')],
+                         ['source-chain', 'cleanup'] * 4)
+
+    def test_source_chain_failure_preserves_original_scene_before_cleanup(self):
+        self.args.diagnostic_branch = 'source-plan'
+        with patch.object(runner, 'preflight', return_value=(self.candidate, self.inspector)), \
+                patch.object(runner.lock_source, 'verify_source_native', return_value={}), \
+                patch.object(runner.lock_source, 'link_fleet_evidence', side_effect=ValueError('broken original ACK')):
+            result = runner.run(self.args)
+        self.assertFalse(result['sourceProceduresComplete'])
+        self.assertEqual(len(self.fleets), 1)
+        self.assertIn('broken original ACK', result['diagnostics'][0]['failure']['message'])
+        self.assertTrue(result['diagnostics'][0]['namespacesRetained'])
+        self.assertNotIn('cleanup', self.events)
+        self.assertIn('original-failure-scene', self.events)
+        self.assertTrue(list(self.fleets[0].evidence.glob('*-original-failure-logs.json')))
+
+    def test_source_plan_requires_native_before_deployment_and_evidence_creation(self):
+        self.args.diagnostic_branch = 'source-plan'
+        with patch.object(runner, 'preflight', return_value=(self.candidate, self.inspector)):
+            with self.assertRaisesRegex(ValueError, 'requires exact-source native evidence'):
+                runner.run(self.args)
+        self.assertFalse(self.fleets or self.events or self.args.evidence.exists())
+
+    def test_cli_defaults_to_complete_source_plan(self):
+        argv = self.cli()
+        start = argv.index('--diagnostic-branch')
+        del argv[start:start + 2]
+        with patch.dict(os.environ, {}, clear=True), patch.object(runner.sys, 'argv', argv), \
+                patch.object(runner, 'run', return_value={'diagnosticComplete': True}) as run:
+            self.assertEqual(runner.main(), 0)
+        self.assertEqual(run.call_args.args[0].diagnostic_branch, 'source-plan')
+
     def test_queued_successor_preflight_requires_exact_candidate_native_group(self):
         self.args.diagnostic_branch = 'queued-successor'
         self.args.native_directory = self.root / 'native'
@@ -342,7 +403,7 @@ class TimeoutRunnerTests(unittest.TestCase):
         return ['lock_timeout_runner.py', '--candidate', str(self.candidate_file), '--case-id', runner.CASE_ID,
                 '--testing-commit', self.args.testing_commit, '--binary-sha', self.args.binary_sha,
                 '--tool-directory', str(self.args.tool_directory), '--rc-bin', str(self.rc),
-                '--evidence', str(self.args.evidence)]
+                '--evidence', str(self.args.evidence), '--diagnostic-branch', 'timeout']
 
     def test_actual_cli_accepts_wrapper_directory_and_keeps_canonical_summary_blocked(self):
         self.args.evidence.mkdir()

@@ -279,6 +279,7 @@ def _observe_timeout(probe, fleet, bucket, entry, output, bound):
                         'NOT_OBSERVED: I05 backpressure census exceeded its observation budget')
                 proof['backpressureSocket'] = socket_state
                 proof['readResponseBackpressureObservedAfterTimeout'] = True
+                proof.update(clockDomain=CLOCK_DOMAIN, observedMonotonicNs=time.monotonic_ns())
                 save(output / 'timeout.json', proof)
                 return proof
             time.sleep(.1)

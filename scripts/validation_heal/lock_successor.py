@@ -276,6 +276,7 @@ def observe_successor(probe, fleet, bucket, entry, output):
                 if attempt is not None:
                     require(attempt['states'] == ['acquiring'],
                             'I05 successor acquired before caller disconnect')
+                    attempt.update(clockDomain=CLOCK_DOMAIN, observedMonotonicNs=time.monotonic_ns())
                     save(output / 'queued.json', attempt)
                     return attempt
                 time.sleep(.02)
@@ -308,6 +309,7 @@ def observe_successor(probe, fleet, bucket, entry, output):
                         after_ack = physical_content(after)
                         target = physical_append(physical, after, bucket, baseline, added)
                         save(output / 'successor-complete.json', {**attempt, 'added': added,
+                            'clockDomain': CLOCK_DOMAIN, 'observedMonotonicNs': time.monotonic_ns(),
                             'queuedBeforeDisconnectObserved': True, 'originalDiagnosticDropBeforeAcquire': True,
                             'heldAtDisconnectProven': False, 'canonicalCasePassClaimed': False})
                         return attempt

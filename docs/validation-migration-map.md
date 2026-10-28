@@ -7,7 +7,30 @@ and SHA-256 bind the snapshot to the source catalog. `reuse_candidates` lists co
 it is not a coverage claim. A case's run result remains `unverified` until a
 live run proves each source assertion on the required topology.
 
-## Current acceptance and remaining work
+## Current implementation scope (2026-10-28)
+
+The migration delivers test procedures and original oracles in auto-testing.
+Candidate live failures are recorded independently from missing test code.
+The explicit [implementation review](validation-migration-implementation-review.md)
+and `validation-migration-review.json` record **145 implemented cases,
+13 default-disabled environment procedures and zero partial implementations**.
+The 13 procedures require reviewed resource adapters to execute. F07 composes
+same-candidate manager interruption and ECStore directory-fsync evidence. I05
+runs timeout and queued-successor on H1/H2 in one source plan, with separate
+same-artifact native owner and full-content/physical generation checks. All
+30 implemented cases without full live acceptance retain their candidate
+failures or pending evidence independently. Source-path review and local
+contract tests do not certify every live branch.
+
+Run `python3 -B scripts/validation_migration_review.py --require-complete` for
+the independent counts and implementation gate. It exits zero when the source
+implementation has no recorded gaps; retained product FAIL does not change
+that decision. `validation_report.py` continues to enforce original assertions,
+cleanup and provenance for product acceptance. Unknown failure causes remain
+unclassified. Detailed execution prerequisites and evidence scopes are in the
+[implementation review](validation-migration-implementation-review.md).
+
+## Current live acceptance and retained evidence
 
 Count reconciliation (2026-10-23; updated 2026-10-28): the append-only ledger
 `canonical-migration-ledger-20261023-b08-39915022106.json` follows the
@@ -17,12 +40,12 @@ record; it does not replace that retained failure or replay all 158 cases on
 one candidate.
 
 All 158 canonical IDs are retained. Independent complete live acceptance is
-**115/158**. The current ledger has 21 retained live failures, five pending
+**115/158**. The current review retains 22 live failures, four pending
 native/live race acceptances, four orchestration/evidence blockers and 13
-environment cases disabled by default. The active acceptance backlog remains
-30 cases: G02 moved from pending race acceptance to retained live failure
-after its first live run failed before completing the required matrix.
-Counts are case-level canonical results across immutable candidates;
+environment cases disabled by default. G01 and G02's actual failed PUTs are
+included in retained failures; historical ledger bytes are unchanged. These
+30 unaccepted active cases are a live acceptance backlog, not 30 missing test
+implementations. Counts span immutable candidates and historical audits;
 diagnostic, native, isolation and partial results do not increment PASS.
 
 | Reconciled case | Complete live run | Required coverage | Original result SHA-256 |
@@ -41,12 +64,12 @@ diagnostic, native, isolation and partial results do not increment PASS.
 | Acceptance state | Cases | Remaining requirement |
 | --- | ---: | --- |
 | Independently accepted complete live PASS | 115 | Preserve original provenance and complete results. |
-| Retained live failures with existing executors | 21 | Diagnose each failure, fix the responsible product or controller path and verify the complete required matrix. |
-| Native and live race acceptance pending | 5 | A09 and G01/G03–G05 require independently verified native groups, reviewed candidate-specific runtime admission and complete H1/H2 live evidence. |
-| Orchestration or evidence blocked | 4 | C11, F07, I05 and J02 need their remaining native or full live evidence closure. |
+| Retained live failures with existing executors | 22 | Preserve original results and attribute the cause; product failures do not imply missing test implementation. |
+| Native and live race acceptance pending | 4 | A09 and G03–G05 await complete live acceptance; existing native/runtime paths retain their candidate gates. |
+| Orchestration or evidence blocked | 4 | C11/F07/I05/J02 have source execution paths awaiting independent complete live acceptance; no implementation gaps remain in the current review. |
 | Environment gated, disabled by default | 13 | Control flows, oracles and unmet reasons are implemented; dedicated resource adapters and real execution remain conditional on the required resources. |
 
-The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 30 unaccepted cases remain active migration work. C11/F07/J02 have explicit diagnostic routes, while canonical admission stays blocked until independent complete acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
+The current delivery keeps the 13 environment cases disabled with explicit reasons. The other 30 unaccepted cases retain their original live states independently of their completed implementations. C11/F07/I05/J02 have explicit execution routes, while canonical admission stays blocked until independent complete live acceptance. J02's real four-disk regression reproduced scheduler-level whole-batch retries overwriting an earlier repair receipt. RustFS commit `7951bb629821246868ee3761b321dd07c06db45c` retains exhausted Admin batch results; its 210 manager tests and five process-isolated receipt integrations pass.
 
 ### Native prerequisites and runtime admission (2026-10-26)
 
@@ -54,7 +77,7 @@ Hosted-only tools [40086026324/1](https://github.com/rustfs/rustfs/actions/runs/
 
 The registry exposes eight native prerequisite groups: A09, G01–G06 and part of I05. This is separate from runtime admission. The pinned helper admits A09, G05 and G06 on this candidate; it intentionally rejects G01–G04 on the same source before bootstrap because their runtime candidate contracts remain pinned to other reviewed sources. G01–G03 may use their reviewed version candidate `bd0671ba781d8ebf509f4f03533228dfb44496f1`, and G04 uses marker candidate `8380466f3a27c3c3ef4115084178a0ab99a78f32`, each with its own exact package and matching helper/tools. Alternatively, a separate source review and matching tools build must precede extending runtime admission. Do not infer admission from registry membership or mix artifacts from different candidates or helpers.
 
-All ten native tests pass. G06 subsequently passed all eight H1/H2 public branches in [40427815826/1](https://github.com/rustfs/rustfs/actions/runs/40427815826); an independent audit verified its ACK, physical, peer S3, overlap and 20 cleanup receipts, adding one canonical PASS. A09 and G01/G03–G05 still need their complete source branches and clean finalization. G02's native/runtime prerequisites were admitted, but its first live run failed before completing the required matrix and is recorded below. I05's native subset does not supply its missing full timeout/stale-generation controller and live closure.
+All ten native tests pass. G06 subsequently passed all eight H1/H2 public branches in [40427815826/1](https://github.com/rustfs/rustfs/actions/runs/40427815826); an independent audit verified its ACK, physical, peer S3, overlap and 20 cleanup receipts, adding one canonical PASS. A09 and G01/G03–G05 still need their complete source branches and clean finalization. G02's native/runtime prerequisites were admitted, but its first live run failed before completing the required matrix and is recorded below. I05 now composes the timeout/disconnect controllers and separate full-content/physical native generation checks through `lock_source.py`; complete independent source-plan live acceptance remains pending.
 
 ### G02 retained live failure (2026-10-27)
 
@@ -568,7 +591,7 @@ and precise versioned tags, then faults an external data part, an entire xl.meta
 header, or a parity part. Exact physical/version references, complete S3
 inventories, HEAD and ranges must agree after repair. This executor still
 requires live evidence.
-Four Heal cases remain outside canonical dispatch: C11, F07, I05 and J02. All four have explicit diagnostic routes that preserve their blocking canonical verdicts; I05's H1/H2 timeout and queued-successor diagnostics have independently audited live results, exact-source native prerequisites and stopped-scene isolation. Exact server barriers and the complete source DL/DV branches remain required. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment_cases.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
+Four Heal cases retain a canonical acceptance gate: C11, F07, I05 and J02. All have dispatch routes. All four have explicit diagnostic routes that preserve their blocking canonical verdicts; I05's H1/H2 timeout and queued-successor diagnostics have independently audited live results, exact-source native prerequisites and stopped-scene isolation. I05 now composes both H1/H2 controllers with separate same-artifact native owner and full-content/physical generation checks. The native proof does not establish that the fleet request held a distributed lock at disconnect, and the composed source plan still requires independent complete live audit. The 13 environment-gated cases have disabled-by-default control flows and oracles in `environment.py`; actual execution requires an assigned and reviewed auto-testing resource adapter, and canonical results remain review-gated. See [the environment gate reference](validation-heal-environment-gates.md) for each missing resource, capability and native barrier.
 H4 needs at least 24 independent disk endpoints; H6 and native-fence branches
 retain their platform and source-bound evidence requirements.
 

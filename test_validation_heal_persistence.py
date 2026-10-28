@@ -219,6 +219,86 @@ class PersistenceContractTests(unittest.TestCase):
             with self.subTest(branch=branch), self.assertRaisesRegex(ValueError, "cannot mutate"):
                 persistence.run_checkpoint_fault(None, "H1", ["node"], "DB", branch, {})
 
+    def test_native_persistence_is_collected_and_failures_remain_independent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            native_dir = root / "native"
+            evidence = root / "evidence"
+            args = SimpleNamespace(native_directory=native_dir, evidence=evidence,
+                                   testing_commit="a" * 40)
+            candidate = {"source_sha": "1aa9be87d18cf941e5020f19e8622c26ba4b10ac"}
+            manifest = {"candidateCommit": candidate["source_sha"]}
+            proof = {**manifest, "complete": True, "exactTests": 6,
+                     "canonicalCasePassClaimed": False, "fleetPassClaimed": False}
+            with patch.object(persistence.persistence_native, "binding", return_value=(manifest, root / "binary")), \
+                 patch.object(persistence.persistence_native, "run") as run, \
+                 patch.object(persistence.persistence_native, "verify", return_value=proof) as verify:
+                result = persistence.collect_native_persistence(args, candidate)
+            run.assert_called_once_with(native_dir / "native-tools", native_dir / "native-evidence",
+                                        evidence / "native-persistence", "a" * 40)
+            verify.assert_called_once_with(native_dir / "native-tools", native_dir / "native-evidence",
+                                           evidence / "native-persistence", "a" * 40)
+            self.assertEqual(result, proof)
+            self.assertEqual(json.loads((evidence / "independent-native-persistence.json").read_text()), proof)
+            branch = persistence.native_branch_result("H1", "DB", {"candidateCommit": candidate["source_sha"]}, result)
+            self.assertTrue(branch["requiredNativeCoverageComplete"])
+            self.assertFalse(branch["canonicalCasePassClaimed"])
+            self.assertFalse(branch["fleetBranchExecuted"])
+
+            failed_evidence = root / "failed"
+            failed_args = SimpleNamespace(native_directory=native_dir, evidence=failed_evidence,
+                                          testing_commit="a" * 40)
+            with patch.object(persistence.persistence_native, "binding", return_value=(manifest, root / "binary")), \
+                 patch.object(persistence.persistence_native, "run", side_effect=RuntimeError("native failed")), \
+                 patch.object(persistence.persistence_native, "verify") as verify_failed:
+                failure = persistence.collect_native_persistence(failed_args, candidate)
+            verify_failed.assert_not_called()
+            self.assertFalse(failure["complete"])
+            self.assertFalse(failure["canonicalCasePassClaimed"])
+            retained = json.loads((failed_evidence / "independent-native-persistence-failure.json").read_text())
+            self.assertEqual(retained["failure"]["message"], "native failed")
+            failed_branch = persistence.native_branch_result("H1", "DB", {"manager": True}, failure)
+            self.assertFalse(failed_branch["requiredNativeCoverageComplete"])
+            self.assertTrue(failed_branch["nativeFailureRetained"])
+            self.assertFalse(failed_branch["canonicalCasePassClaimed"])
+
+    def test_manager_and_directory_fsync_proofs_cannot_mix_candidates(self):
+        with self.assertRaisesRegex(ValueError, "mix candidates"):
+            persistence.native_branch_result("H1", "DB", {"candidateCommit": "a" * 40},
+                {"candidateCommit": "b" * 40, "complete": True})
+
+    def test_native_evidence_from_a_different_candidate_never_executes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = SimpleNamespace(native_directory=root / "native", evidence=root / "evidence",
+                                   testing_commit="a" * 40)
+            candidate = {"source_sha": "072b57b37559fbe626aeda8abf61617fdcbdd926"}
+            manifest = {"candidateCommit": "1aa9be87d18cf941e5020f19e8622c26ba4b10ac"}
+            with patch.object(persistence.persistence_native, "binding", return_value=(manifest, root / "binary")), \
+                 patch.object(persistence.persistence_native, "run") as run, \
+                 patch.object(persistence.persistence_native, "verify") as verify:
+                failure = persistence.collect_native_persistence(args, candidate)
+            run.assert_not_called()
+            verify.assert_not_called()
+            self.assertFalse(failure["complete"])
+            self.assertIn("native and fleet candidates differ", failure["failure"]["message"])
+            self.assertTrue((args.evidence / "independent-native-persistence-failure.json").is_file())
+
+    def test_native_proof_cannot_change_candidate_after_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = SimpleNamespace(native_directory=root / "native", evidence=root / "evidence",
+                                   testing_commit="a" * 40)
+            candidate = {"source_sha": "1aa9be87d18cf941e5020f19e8622c26ba4b10ac"}
+            manifest = {"candidateCommit": candidate["source_sha"]}
+            with patch.object(persistence.persistence_native, "binding", return_value=(manifest, root / "binary")), \
+                 patch.object(persistence.persistence_native, "run"), \
+                 patch.object(persistence.persistence_native, "verify", return_value={"complete": True, "candidateCommit": "b" * 40}):
+                failure = persistence.collect_native_persistence(args, candidate)
+            self.assertFalse(failure["complete"])
+            self.assertIn("changed the selected candidate", failure["failure"]["message"])
+            self.assertFalse((args.evidence / "independent-native-persistence.json").exists())
+
     def test_native_branch_reuses_exact_evidence_without_claiming_fleet_or_full_case_pass(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); candidate = root / "candidate.json"
