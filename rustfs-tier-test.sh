@@ -894,7 +894,7 @@ $(sha256_hex "${canonical_request}")"
     -H "x-amz-content-sha256: ${payload_hash}" \
     -H "x-amz-date: ${amz_date}" \
     -H "Authorization: ${auth}" \
-    "${curl_args[@]}" \
+    ${curl_args[@]+"${curl_args[@]}"} \
     -X "${method}" "${url}")" || code="000"
   printf '%s' "${code}" > "${ADMIN_API_CODE_FILE}"
   cat "${tmp}"
@@ -1916,6 +1916,77 @@ wait_remote_state() {
   return 1
 }
 
+# An empty current listing is insufficient for a versioned bucket. Compare the
+# complete user-visible inventory, including delete markers, without pagination.
+assert_versioned_bucket_state() {
+  local bucket="$1" versions="$2" markers="$3"
+  aws_run s3api list-objects-v2 --bucket "${bucket}" --no-paginate
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e '
+    type == "object" and .IsTruncated == false and .KeyCount == 0 and
+    ((.Contents // []) | type == "array" and length == 0)' >/dev/null \
+    || { echo "current object listing is not provably empty: ${AWS_OUT}"; return 1; }
+  aws_run s3api list-object-versions --bucket "${bucket}" --no-paginate
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e --argjson versions "${versions}" --argjson markers "${markers}" '
+    type == "object" and .IsTruncated == false and
+    ((.Versions // []) | type == "array") and
+    ((.DeleteMarkers // []) | type == "array") and
+    (([.Versions[]? | {Key, VersionId}] | sort_by(.Key, .VersionId)) ==
+      ($versions | sort_by(.Key, .VersionId))) and
+    (([.DeleteMarkers[]? | {Key, VersionId}] | sort_by(.Key, .VersionId)) ==
+      ($markers | sort_by(.Key, .VersionId)))' >/dev/null \
+    || { echo "unexpected user version inventory: ${AWS_OUT}"; return 1; }
+}
+
+delete_object_versions_and_assert() {
+  local bucket="$1" objects="$2" payload
+  payload="$(jq -nc --argjson objects "${objects}" '{Objects:$objects,Quiet:false}')" || return 1
+  aws_run s3api delete-objects --bucket "${bucket}" --delete "${payload}"
+  assert_aws_ok || return 1
+  # DeleteObjects can return HTTP 200 with per-object failures.
+  printf '%s' "${AWS_OUT}" | jq -e --argjson expected "${objects}" '
+    type == "object" and ((.Errors // []) | type == "array" and length == 0) and
+    (.Deleted | type == "array") and
+    (([.Deleted[] | {Key, VersionId}] | sort_by(.Key, .VersionId)) ==
+      ($expected | sort_by(.Key, .VersionId)))' >/dev/null \
+    || { echo "version deletion was incomplete: ${AWS_OUT}"; return 1; }
+}
+
+wait_tier_removed_after_cleanup() {
+  local tier="$1" started="${SECONDS}" deadline=$((SECONDS + REMOTE_STATE_TIMEOUT))
+  local body code remaining sleep_for request_limit="${API_REQUEST_TIMEOUT}"
+  local API_REQUEST_TIMEOUT="${API_REQUEST_TIMEOUT}"
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    remaining=$((deadline - SECONDS))
+    API_REQUEST_TIMEOUT="${request_limit}"
+    if [ "${API_REQUEST_TIMEOUT}" -gt "${remaining}" ]; then API_REQUEST_TIMEOUT="${remaining}"; fi
+    body="$(admin_api DELETE "/rustfs/admin/v3/tier/${tier}" "force=false")"
+    code="$(admin_api_code)"
+    if [ "${code}" = "200" ]; then
+      remaining=$((deadline - SECONDS))
+      [ "${remaining}" -gt 0 ] || break
+      if [ "${API_REQUEST_TIMEOUT}" -gt "${remaining}" ]; then API_REQUEST_TIMEOUT="${remaining}"; fi
+      assert_tier_absent "${tier}" || return 1
+      unregister_case_tier "${tier}"
+      return 0
+    fi
+    if [ "${code}" != "409" ] || [ "$(xml_error_code "${body}")" != "XMinioAdminTierBackendInUse" ]; then
+      record_case_failure tier_remove_unexpected_response \
+        "operation=RemoveTier; tier=${tier}; status=${code}; error_code=$(bounded_safe_excerpt "$(xml_error_code "${body}")" 128)"
+      return 1
+    fi
+    remaining=$((deadline - SECONDS))
+    [ "${remaining}" -gt 0 ] || break
+    sleep_for="${REMOTE_PROBE_INTERVAL}"
+    if [ "${sleep_for}" -gt "${remaining}" ]; then sleep_for="${remaining}"; fi
+    sleep "${sleep_for}"
+  done
+  record_case_failure tier_remove_timeout \
+    "operation=RemoveTier; tier=${tier}; elapsed=$((SECONDS-started)); last_status=${code:-none}"
+  return 1
+}
+
 delete_lifecycle_and_assert_absent() {
   local bucket="$1"
   aws_run s3api delete-bucket-lifecycle --bucket "${bucket}"
@@ -2123,6 +2194,7 @@ run_all_tests() {
   run_test TIER-112 "TieredObjectDelete"   test_tier112
   run_test TIER-113 "EmptyPrefixAddAfterTransition" test_tier113
   run_test TIER-114 "ReferencedTierForceRemove"     test_tier114
+  run_test TIER-115 "VersionedTierDeleteCleanup"      test_tier115
   run_test EVT-101 "TargetCrud"            test_evt101
   run_test EVT-102 "BucketRuleCrud"        test_evt102
   run_test EVT-103 "ObjectCreatedDelivery" test_evt103
@@ -2608,6 +2680,80 @@ test_tier114() { # force=true must override a lifecycle-only tier reference; non
   assert_tier_absent "${ref_tier}" || return 1
 
   delete_lifecycle_and_assert_absent "${ref_source}" || return 1
+}
+
+test_tier115() {
+  local topo_tag token source remote tier key=versioned.txt out job version marker body status i
+  local v1 v2 versions markers objects
+  # Recovery scans may take over a minute after lifecycle removal.
+  local REMOTE_STATE_TIMEOUT=180
+  token="${RUN_TOKEN//-/}"
+  case "${CURRENT_TOPOLOGY}" in single-single) topo_tag=ss ;; single-multi) topo_tag=sm ;; *) topo_tag=na ;; esac
+  source="t115-${topo_tag}-${RUN_TOKEN}-src"
+  remote="t115-${topo_tag}-${RUN_TOKEN}-remote"
+  tier="T115R${token}"
+  new_remote_bucket "${remote}" || return 1
+  aws_target_run s3api get-bucket-versioning --bucket "${remote}" \
+    --query '{Status: Status}' --output json
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e 'type == "object" and has("Status") and .Status == null' >/dev/null \
+    || { echo "this case requires a fresh unversioned remote bucket"; return 1; }
+  wait_remote_state "${remote}" "" empty || return 1
+  add_tier rustfs "${tier}" "${TARGET_ENDPOINT}" "${remote}" "${ACCESS_KEY}" "${SECRET_KEY}"
+  assert_rc_ok || return 1
+  new_bucket "${source}" || return 1
+  aws_run s3api put-bucket-versioning --bucket "${source}" --versioning-configuration Status=Enabled
+  assert_aws_ok || return 1
+  rc_run ilm rule add "local/${source}" --storage-class "${tier}" --transition-days 0
+  assert_rc_ok || return 1
+
+  for i in 1 2; do
+    make_test_file "${TEST_TMP}/tier115-v${i}" 1048576
+    aws_run s3api put-object --bucket "${source}" --key "${key}" --body "${TEST_TMP}/tier115-v${i}"
+    assert_aws_ok || return 1
+    version="$(printf '%s' "${AWS_OUT}" | jq -er '.VersionId | select(type == "string" and length > 0 and . != "null")')" || return 1
+    if [ "${i}" -eq 1 ]; then v1="${version}"; else v2="${version}"; fi
+    out="$(run_transition "${source}")" || return 1
+    job="$(printf '%s' "${out}" | jq -r '.job_id // empty')" || return 1
+    if [ -n "${job}" ]; then wait_transition_job "${job}" >/dev/null || return 1; fi
+    wait_object_transitioned "${source}" "${key}" "${tier}" || return 1
+    aws_run s3api head-object --bucket "${source}" --key "${key}" --version-id "${version}"
+    assert_aws_ok || return 1
+    printf '%s' "${AWS_OUT}" | jq -e --arg tier "${tier}" --arg version "${version}" \
+      '.StorageClass == $tier and .VersionId == $version' >/dev/null || return 1
+  done
+  [ "${v1}" != "${v2}" ] || { echo "overwrites did not create distinct versions"; return 1; }
+  wait_remote_state "${remote}" "" nonempty || return 1
+  delete_lifecycle_and_assert_absent "${source}" || return 1
+
+  # A Console-style ordinary delete hides the key, but preserves both versions.
+  aws_run s3api delete-object --bucket "${source}" --key "${key}"
+  assert_aws_ok || return 1
+  marker="$(printf '%s' "${AWS_OUT}" | jq -er 'select(.DeleteMarker == true) | .VersionId | select(type == "string" and length > 0 and . != "null")')" || return 1
+  versions="$(jq -nc --arg key "${key}" --arg v1 "${v1}" --arg v2 "${v2}" '[{Key:$key,VersionId:$v1},{Key:$key,VersionId:$v2}]')"
+  markers="$(jq -nc --arg key "${key}" --arg marker "${marker}" '[{Key:$key,VersionId:$marker}]')"
+  assert_versioned_bucket_state "${source}" "${versions}" "${markers}" || return 1
+  body="$(admin_api DELETE "/rustfs/admin/v3/tier/${tier}" "force=true")"; status="$(admin_api_code)"
+  [ "${status}" = "409" ] && [ "$(xml_error_code "${body}")" = "XMinioAdminTierBackendInUse" ] \
+    || { echo "force remove did not protect historical versions: HTTP ${status}"; return 1; }
+  assert_tier_present "${tier}" || return 1
+  for i in 1 2; do
+    if [ "${i}" -eq 1 ]; then version="${v1}"; else version="${v2}"; fi
+    aws_run s3api get-object --bucket "${source}" --key "${key}" --version-id "${version}" "${TEST_TMP}/tier115-get${i}"
+    assert_aws_ok || return 1
+    cmp "${TEST_TMP}/tier115-v${i}" "${TEST_TMP}/tier115-get${i}" || return 1
+  done
+
+  printf 'Ordinary delete: current listing empty; both historical versions protected and readable.\n'
+  objects="$(jq -nc --argjson versions "${versions}" --argjson markers "${markers}" '$versions + $markers')"
+  delete_object_versions_and_assert "${source}" "${objects}" || return 1
+  assert_versioned_bucket_state "${source}" '[]' '[]' || return 1
+  printf 'All user versions and delete markers removed; waiting for natural remote cleanup.\n'
+  # Do not delete the source bucket, remote data, or restore the lifecycle rule:
+  # only the product's persisted free-version cleanup may empty the remote tier.
+  wait_remote_state "${remote}" "" empty || return 1
+  wait_tier_removed_after_cleanup "${tier}" || return 1
+  printf 'Remote namespace empty; ordinary tier removal succeeded; configuration absent.\n'
 }
 
 test_evt101() {
