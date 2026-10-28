@@ -132,7 +132,7 @@ When copying the tier runner outside this checkout, keep
 closed if that secure log helper is missing.
 
 Use `rustfs_tier_report.py` as the final gate. A complete two-topology run must
-contain 56 unique terminal results; FAIL, RUNNING, missing, duplicate, corrupt,
+contain 60 unique terminal results; FAIL, RUNNING, missing, duplicate, corrupt,
 or non-allowlisted UNSUPPORTED results make the command exit non-zero while it
 still writes the Markdown report.
 
@@ -153,5 +153,16 @@ Local contract tests:
 
 ```bash
 ./test_rustfs_tier.sh
+RUSTFS_TIER_TEST_MODE=versioned-cleanup ./test_rustfs_tier.sh
 python3 -m unittest -v test_rustfs_tier_report.py
 ```
+
+`TIER-115` (`VersionedTierDeleteCleanup`) runs in both topologies. It transitions
+both versions of one key into a fresh unversioned remote bucket, removes the lifecycle rule, and confirms that an
+ordinary delete hides the key while historical versions still block even a
+forced tier removal. Both versions must remain readable. After deleting every
+version and delete marker (checking per-object `DeleteObjects` errors), the case
+requires natural remote cleanup and successful ordinary tier removal. The source
+bucket and remote objects stay untouched by teardown until these assertions
+finish. Cleanup and removal each have a 180-second deadline; only the expected
+in-use response is retried after the remote namespace becomes empty.

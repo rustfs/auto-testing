@@ -46,12 +46,23 @@ class TierReportTest(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
         return path
 
-    def test_complete_two_topology_matrix_has_56_unique_rows(self) -> None:
+    def test_complete_two_topology_matrix_has_60_unique_rows(self) -> None:
         self.write_matrix()
         validation = report.validate_results(self.results)
         self.assertEqual([], validation.errors)
-        self.assertEqual(56, len(validation.rows))
-        self.assertIn("- Total: 56", report.render_markdown(validation))
+        self.assertEqual(60, len(validation.rows))
+        self.assertIn("- Total: 60", report.render_markdown(validation))
+
+    def test_versioned_cleanup_case_is_required_for_both_topologies(self) -> None:
+        for topology in report.TOPOLOGIES:
+            with self.subTest(topology=topology):
+                self.write_matrix()
+                (self.results / f"{topology}--TIER-115.json").unlink()
+                validation = report.validate_results(self.results)
+                self.assertTrue(
+                    any(f"{topology}/TIER-115" in error for error in validation.errors),
+                    validation.errors,
+                )
 
     def test_first_topology_failure_is_not_hidden_by_second(self) -> None:
         self.write_matrix()

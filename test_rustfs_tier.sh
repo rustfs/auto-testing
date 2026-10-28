@@ -319,6 +319,152 @@ test_wire_oracles_reject_http_500() (
   fi
 )
 
+test_admin_api_empty_payload_is_safe_under_nounset() (
+  reset_harness
+  local args_file="${TEST_ROOT}/admin-api-args" body
+  API_ENDPOINT="${ENDPOINT}"
+  curl() {
+    printf '%s\n' "$@" > "${args_file}"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -o ]; then printf '{}' > "$2"; break; fi
+      shift
+    done
+    printf 200
+  }
+  body="$(admin_api POST /rustfs/admin/v3/ilm/transition/run 'bucket=source')"
+  assert_eq '{}' "${body}" "empty-payload admin response"
+  assert_eq 200 "$(admin_api_code)" "empty-payload admin status"
+  assert_not_contains --data-binary "$(cat "${args_file}")" "empty payload has no body argument"
+)
+
+test_versioned_inventory_requires_complete_exact_lists() (
+  reset_harness
+  local versions='[{"Key":"key","VersionId":"v1"},{"Key":"key","VersionId":"v2"}]'
+  local markers='[{"Key":"key","VersionId":"marker"}]'
+  local current='{"IsTruncated":false,"KeyCount":0}'
+  local inventory='{"IsTruncated":false,"Versions":[{"Key":"key","VersionId":"v2"},{"Key":"key","VersionId":"v1"}],"DeleteMarkers":[{"Key":"key","VersionId":"marker"}]}'
+  aws_run() {
+    AWS_CODE=0
+    case "$2" in
+      list-objects-v2) AWS_OUT="${current}" ;;
+      list-object-versions) AWS_OUT="${inventory}" ;;
+      *) fail "unexpected inventory operation: $*" ;;
+    esac
+    [[ "$(joined_args "$@")" == *'<--no-paginate>'* ]] || fail "inventory must inspect truncation explicitly"
+  }
+  assert_versioned_bucket_state bucket "${versions}" "${markers}" || fail "exact inventory should pass"
+  local invalid
+  for invalid in '{"IsTruncated":true}' '{"IsTruncated":false,"Versions":{}}' \
+    '{"IsTruncated":false}' '{"IsTruncated":false,"Versions":[{"Key":"key","VersionId":"other"}]}' 'not-json'; do
+    inventory="${invalid}"
+    if assert_versioned_bucket_state bucket "${versions}" "${markers}" >/dev/null 2>&1; then
+      fail "incomplete or malformed version inventory passed: ${invalid}"
+    fi
+  done
+  inventory='{"IsTruncated":false}'
+  assert_versioned_bucket_state bucket '[]' '[]' || fail "empty version listing should pass"
+  for invalid in '{"KeyCount":0}' '{"IsTruncated":true,"KeyCount":0}' \
+    '{"IsTruncated":false,"KeyCount":1,"Contents":[{"Key":"key"}]}' 'not-json'; do
+    current="${invalid}"
+    if assert_versioned_bucket_state bucket '[]' '[]' >/dev/null 2>&1; then
+      fail "invalid current listing passed: ${invalid}"
+    fi
+  done
+)
+
+test_version_delete_checks_individual_results() (
+  reset_harness
+  local objects='[{"Key":"key","VersionId":"v1"},{"Key":"key","VersionId":"marker"}]'
+  local response='{"Deleted":[{"Key":"key","VersionId":"marker"},{"Key":"key","VersionId":"v1"}]}'
+  aws_run() {
+    assert_eq 'delete-objects' "$2" "version removal operation"
+    assert_eq "${objects}" "$(printf '%s' "$6" | jq -c .Objects)" "exact deletion set"
+    AWS_CODE=0
+    AWS_OUT="${response}"
+  }
+  delete_object_versions_and_assert bucket "${objects}" || fail "all version results should pass"
+  local invalid
+  for invalid in '{"Errors":[{"Key":"key","VersionId":"v1","Code":"AccessDenied"}]}' \
+    '{"Deleted":[{"Key":"key","VersionId":"v1"}]}' '{}' 'not-json'; do
+    response="${invalid}"
+    if delete_object_versions_and_assert bucket "${objects}" >/dev/null 2>&1; then
+      fail "HTTP 200 with failed/incomplete version deletions passed: ${invalid}"
+    fi
+  done
+)
+
+test_cleanup_tier_remove_retries_only_expected_conflict() (
+  reset_harness
+  case_resources_reset
+  register_case_tier T115UNIT
+  local calls="${TEST_ROOT}/tier115-remove-calls"
+  : > "${calls}"
+  admin_api() {
+    printf '%s %s %s\n' "$1" "$3" "${API_REQUEST_TIMEOUT}" >> "${calls}"
+    if [ "$(wc -l < "${calls}")" -eq 1 ]; then
+      printf 409 > "${ADMIN_API_CODE_FILE}"
+      printf '<Error><Code>XMinioAdminTierBackendInUse</Code></Error>'
+    else
+      printf 200 > "${ADMIN_API_CODE_FILE}"
+    fi
+  }
+  tier_is_configured() { return 1; }
+  sleep() { :; }
+  wait_tier_removed_after_cleanup T115UNIT || fail "expected conflict should converge"
+  assert_eq 2 "$(wc -l < "${calls}" | tr -d ' ')" "bounded remove attempts"
+  assert_eq 0 "${#CASE_TIERS[@]}" "tier unregistered after proven removal"
+  assert_not_contains force=true "$(cat "${calls}")" "ordinary removal only"
+)
+
+test_cleanup_tier_remove_rejects_unexpected_responses() (
+  reset_harness
+  local status error_code calls="${TEST_ROOT}/tier115-remove-error-calls"
+  admin_api() {
+    printf 'call\n' >> "${calls}"
+    printf '%s' "${status}" > "${ADMIN_API_CODE_FILE}"
+    printf '<Error><Code>%s</Code></Error>' "${error_code}"
+  }
+  tier_is_configured() { fail "failed removal must not check absence"; }
+  for status in 500 400 202 000 409; do
+    error_code=XMinioAdminTierBackendInUse
+    if [ "${status}" = 409 ]; then error_code=UnexpectedConflict; fi
+    : > "${calls}"
+    if wait_tier_removed_after_cleanup T115UNIT >/dev/null 2>&1; then
+      fail "unexpected status/code passed: ${status}/${error_code}"
+    fi
+    assert_eq 1 "$(wc -l < "${calls}" | tr -d ' ')" "unexpected response is not retried"
+  done
+  status=409
+  error_code=''
+  if wait_tier_removed_after_cleanup T115UNIT >/dev/null 2>&1; then fail "malformed conflict passed"; fi
+)
+
+test_cleanup_tier_remove_deadline_and_absence_proof() (
+  reset_harness
+  case_resources_reset
+  register_case_tier T115UNIT
+  SECONDS=0
+  local REMOTE_STATE_TIMEOUT=5 REMOTE_PROBE_INTERVAL=3 API_REQUEST_TIMEOUT=120
+  local timeouts="${TEST_ROOT}/tier115-remove-timeouts"
+  : > "${timeouts}"
+  admin_api() {
+    printf '%s\n' "${API_REQUEST_TIMEOUT}" >> "${timeouts}"
+    printf 409 > "${ADMIN_API_CODE_FILE}"
+    printf '<Error><Code>XMinioAdminTierBackendInUse</Code></Error>'
+  }
+  sleep() { SECONDS=$((SECONDS + $1)); }
+  if wait_tier_removed_after_cleanup T115UNIT >/dev/null 2>&1; then fail "persistent conflict passed"; fi
+  assert_eq $'5\n2' "$(cat "${timeouts}")" "each request stays within remaining budget"
+  assert_eq 5 "${SECONDS}" "wall-clock deadline"
+  assert_eq 120 "${API_REQUEST_TIMEOUT}" "request budget restored"
+  assert_eq 1 "${#CASE_TIERS[@]}" "timed out tier remains registered"
+  SECONDS=0
+  admin_api() { printf 200 > "${ADMIN_API_CODE_FILE}"; }
+  tier_is_configured() { return 0; }
+  if wait_tier_removed_after_cleanup T115UNIT >/dev/null 2>&1; then fail "HTTP 200 without config disappearance passed"; fi
+  assert_eq 1 "${#CASE_TIERS[@]}" "unproven tier remains registered"
+)
+
 test_tier_query_valid_contract() (
   reset_harness
   case_resources_reset
@@ -1240,6 +1386,21 @@ with open(hardlink_target, "rb") as stream:
 PY
 }
 
+run_versioned_cleanup_contract_tests() {
+  test_admin_api_empty_payload_is_safe_under_nounset
+  test_versioned_inventory_requires_complete_exact_lists
+  test_version_delete_checks_individual_results
+  test_cleanup_tier_remove_retries_only_expected_conflict
+  test_cleanup_tier_remove_rejects_unexpected_responses
+  test_cleanup_tier_remove_deadline_and_absence_proof
+}
+
+if [ "${RUSTFS_TIER_TEST_MODE:-all}" = versioned-cleanup ]; then
+  run_versioned_cleanup_contract_tests
+  printf 'PASS: versioned tier deletion inventories, per-object results, retry, deadline, and removal proof\n'
+  exit 0
+fi
+
 if [ "${RUSTFS_TIER_TEST_MODE:-all}" = log-stress ]; then
   test_full_fifo_and_stopped_logger_has_bounded_term
   test_full_fifo_stopped_logger_parallel_stress
@@ -1257,6 +1418,7 @@ test_cleanup_upgrades_pass_and_unsupported
 test_term_uses_cleanup_fallback
 test_rc_provenance_with_spaced_path_and_digest
 test_wire_oracles_reject_http_500
+run_versioned_cleanup_contract_tests
 test_tier_query_valid_contract
 test_tier_query_rejects_invalid_payloads
 test_tier_query_failure_diagnostics_are_safe_and_bounded
