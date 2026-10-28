@@ -44,6 +44,7 @@ ASSUME_YES=0
 PACKAGE_URL="${PACKAGE_URL:-}"
 FT_STRICT="${FT_STRICT:-0}"
 SETTLE_SECS="${FT_SETTLE_SECS:-45}"
+RECOVERY_TIMEOUT_SECS="${FT_RECOVERY_TIMEOUT_SECS:-120}"
 
 # ---------------------------------------------------------------- config ----
 NODES_ENV="${RUSTFS_NODES:-}"
@@ -69,6 +70,8 @@ SNMD_DRIVES=("/data/rustfs1/mnmd" "/data/rustfs2/mnmd" "/data/rustfs3/mnmd" "/da
 # client-facing endpoints (must resolve from the runner host)
 EP1="http://rustfs-node1:9000"
 EP2="http://rustfs-node2:9000"
+EP3="http://rustfs-node3:9000"
+EP4="http://rustfs-node4:9000"
 VOLUMES_SNMD="http://rustfs-node1:9000/data/rustfs{1...4}/mnmd"
 VOLUMES_4X1="http://rustfs-node{1...4}:9000/data/rustfs1/mnmd"
 VOLUMES_3X4="http://rustfs-node{1...3}:9000/data/rustfs{1...4}/mnmd"
@@ -134,11 +137,12 @@ declare -A SEEN_CASE_SET=()
 declare -A OBJECT_SHA256=()
 
 CASES_A=(A1/read A1/write A2/read A2/write A3/read A3/write A4/read A4/read-a1-probe A4/write)
-CASES_B=(B1/read B1/read-node2 B1/write B2/read B2/read-node2 B2/write B3/read B3/write B4/read B4/read-b1-probe B4/write)
+CASES_B=(B1/read B1/read-node2 B1/write B2/read B2/read-node2 B2/write B3/read B3/write B4/read B4/read-b1-probe B4/write B5/recovery-traffic)
 CASES_C=(C1/read C1/write C2/read C2/write C3/read C3/write)
 CASES_C2=(C2-1/read C2-1/write C2-2/read C2-2/write C2-3/read C2-3/write)
 CASES_D=(D1/read D1/write D2/read D2/write D3/read D3/write)
 CASES_E=(E1/read E1/write E2/read E2/write E3/read E3/write)
+CASES_F=(F1/read F1/write F2/ready F2/ready-fresh F2/ready-untouched F2/read F2/write F3/read F3/write)
 
 register_expected_cases() {
   local case_id
@@ -160,6 +164,7 @@ register_scenarios() {
       C2) register_expected_cases "${CASES_C2[@]}" ;;
       D)  register_expected_cases "${CASES_D[@]}" ;;
       E)  register_expected_cases "${CASES_E[@]}" ;;
+      F)  register_expected_cases "${CASES_F[@]}" ;;
       *)  die "unknown scenario: ${scenario}" ;;
     esac
   done
@@ -299,6 +304,103 @@ capture_health() { # capture_health <label> <endpoint-base>
 settle() {
   log "settling ${SETTLE_SECS}s for failure/recovery detection"
   [ "${DRY_RUN}" -eq 1 ] || sleep "${SETTLE_SECS}"
+}
+
+# Recovery probes must wait until the probe endpoint re-admits the restored
+# peers. systemd READY on a restarted node only means that node serves
+# requests; EP1 keeps the peer's drives offline until its recovery monitor
+# sees RUSTFS_DRIVE_RETURNING_SUCCESS_THRESHOLD (3) consecutive probes spaced
+# RUSTFS_DRIVE_RETURNING_PROBE_INTERVAL_SECS (2s) apart. Probing inside that
+# window measures the hysteresis, not the EC contract (rustfs/backlog#2618).
+# A timeout is not fatal: the probes that follow report the non-convergence,
+# and the elapsed time lands in the evidence directory either way.
+await_write_quorum() { # await_write_quorum <label> <endpoint-base>
+  local label="$1" ep="$2" started now state
+  local out="${EVIDENCE}/recovery-${label//\//_}.secs"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: ${label} waits for write quorum @ ${ep}"
+    return 0
+  fi
+  started="$(date +%s)"
+  while :; do
+    state="$(curl -s --max-time 5 "${ep}/health/ready" 2>/dev/null | jq -r '
+      if (.details.storage.writeQuorum | type) != "boolean" then "absent"
+      elif .details.storage.writeQuorum and (.details.lock.ready != false) then "ready"
+      else "waiting" end' 2>/dev/null || true)"
+    now="$(date +%s)"
+    case "${state}" in
+      ready)
+        printf '%s\n' "$((now - started))" > "${out}"
+        log "[${label}] write quorum restored after $((now - started))s"
+        return 0
+        ;;
+      absent)
+        # Builds without readiness details: keep the historical settle.
+        warn "[${label}] /health/ready has no storage.writeQuorum; settling instead"
+        settle
+        return 0
+        ;;
+    esac
+    if [ "$((now - started))" -ge "${RECOVERY_TIMEOUT_SECS}" ]; then
+      printf 'timeout\n' > "${out}"
+      warn "[${label}] write quorum not restored within ${RECOVERY_TIMEOUT_SECS}s (last state: ${state:-unreachable})"
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+expect_ready_stable() { # expect_ready_stable <case-id> <endpoint-base>
+  # /health/ready must answer 200 on every poll across a sustained window.
+  # The sequential-restart regression (rustfs#8669) surfaced as previously
+  # healthy nodes flipping to 503 InsufficientReadQuorum right after a peer
+  # restart, so a single spot check is not enough here.
+  local case_id="$1" ep="$2" i code
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: ${case_id} ready stability @ ${ep}"
+    return 0
+  fi
+  for i in 1 2 3 4 5; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${ep}/health/ready" 2>/dev/null || echo 000)"
+    if [ "${code}" != "200" ]; then
+      record "UNEXPECTED" "${case_id}" "ready round ${i}: /health/ready returned ${code} (want 200)"
+      return 0
+    fi
+    if [ "${i}" -lt 5 ]; then sleep 2; fi
+  done
+  record "pass" "${case_id}" "ready stayed 200 across 5 rounds"
+}
+
+sustained_recovery_traffic() { # sustained_recovery_traffic <case-id> <endpoint> <rounds>
+  # After all drives return, sustained write traffic plus readiness probes
+  # must stay green: recovery starvation leaves remote disks stuck in
+  # `Suspect` (rustfs#8270), which shows up as failed writes or a degraded
+  # /health/ready under exactly this load.
+  local case_id="$1" ep="$2" rounds="${3:-6}" i code key
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: ${case_id} sustained traffic @ ${ep}"
+    return 0
+  fi
+  local probe="${TMP}/probe.bin"
+  for ((i = 1; i <= rounds; i++)); do
+    key="${PROBE_PREFIX}-traffic-${i}"
+    s3op "${case_id}" "${ep}" put-object --bucket "${BASELINE_BUCKET}" --key "${key}" --body "${probe}"
+    if s3_harness_failed; then
+      record "HARNESS_ERROR" "${case_id}" "traffic write round ${i}"
+      return 0
+    fi
+    if [ "${S3_RC}" -ne 0 ]; then
+      record "UNEXPECTED" "${case_id}" "write round ${i}: aws-cli-rc=${S3_RC} code=${S3_CODE}"
+      return 0
+    fi
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${ep}/health/ready" 2>/dev/null || echo 000)"
+    if [ "${code}" != "200" ]; then
+      record "UNEXPECTED" "${case_id}" "ready round ${i}: /health/ready returned ${code} (want 200)"
+      return 0
+    fi
+    sleep 2
+  done
+  record "pass" "${case_id}" "${rounds} write+ready rounds OK after recovery"
 }
 
 expect_read() { # expect_read <case-id> <endpoint> <ok|fail> <key>
@@ -586,10 +688,50 @@ scenario_b() {
   expect_write "B3/write" "${EP1}" "fail" "${PROBE_PREFIX}-b3"
 
   start_nodes "${NODES[1]}" "${NODES[2]}" "${NODES[3]}" # B4: recovery
+  await_write_quorum "B4" "${EP1}"
   capture_health "B4-recovered" "${EP1}"
   expect_read  "B4/read"          "${EP1}" "ok" "ft-mid-1m.bin"
   expect_read  "B4/read-b1-probe" "${EP1}" "ok" "${PROBE_PREFIX}-b1"
   expect_write "B4/write"         "${EP1}" "ok" "${PROBE_PREFIX}-b4"
+  # B5: rustfs#8270 — sustained traffic after recovery must keep writes and
+  # readiness green; drives must not get stuck in `Suspect`.
+  sustained_recovery_traffic "B5/recovery-traffic" "${EP1}" 6
+  do_cleanup
+}
+
+scenario_f() {
+  # rustfs#8669: restarting members one at a time must never cost the
+  # cluster more than the one member that is down. The regression had peers
+  # keep treating the just-restarted member as unreachable, so stopping the
+  # NEXT member left observers effectively two members short: untouched
+  # nodes answered /health/ready 503 with internal InsufficientReadQuorum.
+  log "=== F: sequential node restarts on multi-node 4x1, EC:2 (readq 2, writeq 3) ==="
+  seed_baseline "${EP1}"
+  # F1: restart one member and let it rejoin fully.
+  stop_node "${NODES[1]}"; settle
+  start_nodes "${NODES[1]}"
+  await_write_quorum "F1" "${EP1}"
+  capture_health "F1-restarted" "${EP1}"
+  expect_read  "F1/read"  "${EP1}" "ok" "ft-mid-1m.bin"
+  expect_write "F1/write" "${EP1}" "ok" "${PROBE_PREFIX}-f1"
+
+  # F2: stop the next member IMMEDIATELY after F1's restart converged.
+  # NODES[1] maps to rustfs-node2 (EP2, freshly restarted), NODES[2] to
+  # rustfs-node3, NODES[3] to rustfs-node4 (untouched).
+  stop_node "${NODES[2]}"; settle
+  capture_health "F2" "${EP1}"
+  expect_ready_stable "F2/ready"           "${EP1}"
+  expect_ready_stable "F2/ready-fresh"     "${EP2}"
+  expect_ready_stable "F2/ready-untouched" "${EP4}"
+  expect_read  "F2/read"  "${EP4}" "ok" "ft-mid-1m.bin"
+  expect_write "F2/write" "${EP1}" "ok" "${PROBE_PREFIX}-f2"
+
+  # F3: bring the stopped member back; everything must converge.
+  start_nodes "${NODES[2]}"
+  await_write_quorum "F3" "${EP1}"
+  capture_health "F3-recovered" "${EP1}"
+  expect_read  "F3/read"  "${EP1}" "ok" "ft-mid-1m.bin"
+  expect_write "F3/write" "${EP1}" "ok" "${PROBE_PREFIX}-f3"
   do_cleanup
 }
 
@@ -610,6 +752,7 @@ scenario_c() {
   expect_write "C2/write" "${EP1}" "fail" "${PROBE_PREFIX}-c2"
 
   start_nodes "${NODES[2]}" "${NODES[3]}"
+  await_write_quorum "C3" "${EP1}"
   capture_health "C3-recovered" "${EP1}"
   expect_read  "C3/read"  "${EP1}" "ok" "ft-small-16k.bin"
   expect_write "C3/write" "${EP1}" "ok" "${PROBE_PREFIX}-c3"
@@ -634,6 +777,7 @@ scenario_c2() {
   expect_write "C2-2/write" "${EP1}" "fail" "${PROBE_PREFIX}-c2-2"
 
   start_nodes "${NODES[2]}" "${NODES[3]}"
+  await_write_quorum "C2-3" "${EP1}"
   capture_health "C2-3-recovered" "${EP1}"
   expect_read  "C2-3/read"  "${EP1}" "ok" "ft-mid-1m.bin"
   expect_write "C2-3/write" "${EP1}" "ok" "${PROBE_PREFIX}-c2-3"
@@ -662,6 +806,7 @@ scenario_d() {
   expect_write "D2/write" "${EP1}" "fail" "${PROBE_PREFIX}-d2"
 
   start_nodes "${NODES[2]}" "${NODES[3]}"
+  await_write_quorum "D3" "${EP1}"
   capture_health "D3-recovered" "${EP1}"
   expect_read  "D3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
   expect_write "D3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-d3"
@@ -688,6 +833,7 @@ scenario_e() {
   expect_write "E2/write" "${EP1}" "fail" "${PROBE_PREFIX}-e2"
 
   start_nodes "${NODES[1]}" "${NODES[2]}"; settle
+  await_write_quorum "E3" "${EP1}"
   capture_health "E3-recovered" "${EP1}"
   expect_read  "E3/read"  "${EP1}" "ok"   "ft-small-16k.bin"
   expect_write "E3/write" "${EP1}" "ok"   "${PROBE_PREFIX}-e3"
@@ -699,7 +845,7 @@ usage() {
   cat <<EOF
 Usage: $0 [options]
   --cleanup              stop services, unhide drives, purge data, then exit
-  --scenario A|B|C|C2|D|E|M  run one scenario (M = matrix sweep)
+  --scenario A|B|C|C2|D|E|F|M  run one scenario (M = matrix sweep)
   --all                  run all scenarios (A, B, C, C2, D, E)
   --package-url URL      .deb to install (required for test runs)
   --results-file FILE    write the machine-readable completeness result
@@ -709,32 +855,33 @@ Usage: $0 [options]
   --strict               known-divergence also fails the suite (FT_STRICT=1)
   --matrix               full topology x EC outage sweep (38 combinations)
   --matrix-topo KEY [EC] sweep one topology (like 4x2), optionally one EC level
-Environment: RUSTFS_NODES, RUSTFS_SSH_USER, FT_SETTLE_SECS, FT_STRICT, MATRIX_EC
+Environment: RUSTFS_NODES, RUSTFS_SSH_USER, FT_SETTLE_SECS, FT_RECOVERY_TIMEOUT_SECS,
+             FT_STRICT, MATRIX_EC
 EOF
 }
 
 # ── matrix: topology x EC exhaustive outage sweep ───────────────────────────
 # For each topology (nodes x drives-per-node) and each EC level P in 1..N/2:
-#   install + seed, full-capacity read/write asserts, then stop nodes one by
-#   one. Per-phase expectations derive from quorum arithmetic:
-#     online drives D >= data (N-P)      -> reads OK
-#     online drives D >= data + 1        -> writes OK
-#     otherwise                          -> reads and writes fail
+#   install with RUSTFS_STORAGE_CLASS_STANDARD=EC:P + seed, full-capacity
+#   read/write asserts, then stop nodes one by one. Per-phase expectations
+#   derive from the product quorum arithmetic (WriteLayout::from_parity):
+#     online drives D >= data (N-P)                   -> reads OK
+#     online drives D >= data + (data == parity)      -> writes OK
+#     otherwise                                       -> reads and writes fail
 # Case ids: M-<topo>EC<P>-full | -n<k> | -rec. Register new topologies by
 # appending to MATRIX_TOPOS.
-# 4x1 (one drive per node) is excluded: the product rejects a distributed
-# pool whose nodes do not all have at least 2 drive endpoints - startup
-# dies with FATAL "Incorrect number of endpoints provided, size 1"
-# (BelowMinimum) before any case can run (see runs 36204915029 and
-# 36239607351). Revisit if the startup constraint is lifted.
-MATRIX_TOPOS=("1x2" "1x4" "2x2" "2x4" "3x2" "3x4" "4x2" "4x3" "4x4")
+MATRIX_TOPOS=("1x2" "1x4" "2x2" "2x4" "3x2" "3x4" "4x1" "4x2" "4x3" "4x4")
 
+# One ellipses expression spanning every node, so each topology is a single
+# pool with one N-drive erasure set. Space-separated per-node expressions
+# would make every node its own server pool (rustfs/backlog#2618): stopping a
+# node then takes a whole pool offline, and single-drive pools (4x1) cannot
+# start at all.
 matrix_volumes_expr() { # <nodes> <drives-per>
-  local list="" i
-  for ((i = 1; i <= $1; i++)); do
-    list+="${list:+ }http://rustfs-node${i}:9000/data/rustfs{1...$2}/mnmd"
-  done
-  printf '%s' "$list"
+  local host="rustfs-node1" drive="rustfs1"
+  [ "$1" -gt 1 ] && host="rustfs-node{1...$1}"
+  [ "$2" -gt 1 ] && drive="rustfs{1...$2}"
+  printf 'http://%s:9000/data/%s/mnmd' "${host}" "${drive}"
 }
 
 matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
@@ -744,7 +891,7 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   local total=$(( nodes * per ))
   local data=$(( total - parity ))
   local readq=$(( data ))
-  local writeq=$(( data + 1 ))
+  local writeq=$(( data + (data == parity ? 1 : 0) ))
   local tag="M-${key}EC${parity}"
   log "matrix[${tag}]: total=${total} readq=${readq} writeq=${writeq}"
   # Register this combination's case ids up front: unregistered verdicts
@@ -756,7 +903,7 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   done
   mc+=("${tag}-rec/read" "${tag}-rec/write")
   register_expected_cases "${mc[@]}"
-  install_and_start "$(matrix_volumes_expr "${nodes}" "${per}")"
+  install_and_start "$(matrix_volumes_expr "${nodes}" "${per}")" "RUSTFS_STORAGE_CLASS_STANDARD=\"EC:${parity}\""
   seed_baseline "${EP1}"
 
   # full capacity
@@ -788,12 +935,13 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   for ((idx = 1; idx < nodes; idx++)); do restart+=("${NODES[$((idx))]}"); done
   if [ "${#restart[@]}" -gt 0 ]; then start_nodes "${restart[@]}"; fi
   settle
+  await_write_quorum "${tag}-rec" "${EP1}"
   expect_read  "${tag}-rec/read"  "${EP1}" "ok" "ft-small-16k.bin"
   expect_write "${tag}-rec/write" "${EP1}" "ok" "${PROBE_PREFIX}-${tag}-rec"
   do_cleanup
 }
 
-run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (36 combos)
+run_matrix() { # [topo-filter like 4x2] - sweep EC 1..N/2 per topology (38 combos)
   local filter="${1:-}" spec nodes_n per parity combos=0
   for spec in "${MATRIX_TOPOS[@]}"; do
     [ -n "${filter}" ] && [ "${spec}" != "${filter}" ] && continue
@@ -863,8 +1011,8 @@ main() {
     # E must be registered, not just executed: unregistered verdicts land in
     # harness_errors and fail the evidence contract (#96 ran scenario_e via
     # --all but never registered its cases).
-    register_scenarios A B C C2 D E
-    scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d; scenario_e
+    register_scenarios A B C C2 D E F
+    scenario_a; scenario_b; scenario_c; scenario_c2; scenario_d; scenario_e; scenario_f
   elif [ "${matrix}" -eq 1 ]; then
     run_matrix "${matrix_topo}"
   elif [ -n "${scenario}" ]; then
@@ -876,6 +1024,7 @@ main() {
       C2) scenario_c2 ;;
       D)  scenario_d  ;;
       E)  scenario_e  ;;
+      F)  scenario_f  ;;
       M)  run_matrix "${matrix_topo}" ;;
       *)  die "unknown scenario: ${scenario}" ;;
     esac

@@ -1041,6 +1041,17 @@ step6_monitor_heal() {
       printf '\033[1;31m[ERROR]\033[0m heal reported failed objects (%s)\n' "${failed_n}" >&2
       printf '%s\n' "--- full heal status JSON ---" >&2
       printf '%s\n' "${body}" >&2
+      # Keep the status snapshot and the per-object entries with the other
+      # artifacts: the stderr dump above scrolls out of view, and without
+      # these files the failed objects' identities and errors are not
+      # recoverable after the run (rustfs/backlog#2618 follow-up, heal
+      # objects_failed=6 on run 38157194577).
+      if [ -n "${LOG_FILE}" ] && [ -d "$(dirname "${LOG_FILE}")" ]; then
+        evdir="$(dirname "${LOG_FILE}")"
+        printf '%s\n' "${body}" > "${evdir}/heal-failed-status.json" 2>/dev/null || true
+        printf '%s\n' "${body}" | jq -c '.items[]? | select(.type == "object")' \
+          > "${evdir}/heal-failed-objects.ndjson" 2>/dev/null || true
+      fi
       die "heal failed (summary=${summary}, objects_failed=${failed_n})"
     fi
 
@@ -1110,6 +1121,43 @@ step7_analyze_results() {
   if printf '%s' "${summary}" | grep -qiE '^(finished|completed|success|done|stopped)$' \
     && [ "${failed_n}" -eq 0 ]; then
     log "heal test PASSED: cluster heal complete, 0 failed, data read-back OK, ${NODES[${OUTAGE_NODE_INDEX}]}_used=${outage_used}GB"
+
+    # HEAL-STEP 8: MRF intent cleanup for deleted buckets (backlog#8590).
+    # Legacy durable PartialWrite intents whose bucket has been deleted must
+    # not remain active: the heal scheduler retries them indefinitely against
+    # a nonexistent bucket (rustfs/backlog#8590).
+    local mrf_leak
+    mrf_leak="$(printf '%s' "${summary}" | grep -oE '"bucket":"[^"]*"' | sort -u | while read -r bq; do
+      bq_name=$(printf '%s' "${bq}" | sed 's/"bucket":"//;s/"//')
+      if ! aws s3api head-bucket --bucket "${bq_name}" 2>/dev/null; then
+        printf 'MRF intent references deleted bucket: %s\n' "${bq_name}"
+      fi
+    done)"
+    if [ -n "${mrf_leak}" ]; then
+      log "HEAL-STEP 8 MRF intent leak: ${mrf_leak}"
+    fi
+
+    # HEAL-STEP 9: inline-object heal rollback backups must not be stranded
+    # (rustfs#8608). A leftover rustfs_inline_rb/xl.meta.bkp under a live
+    # object keeps the durable MRF repair retrying that object with SlowDown
+    # forever; after a completed heal no such residue may remain.
+    local bkp_residue="" node_residue
+    for node in "${NODES[@]}"; do
+      node_residue="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+        "find /data/rustfs* -name '.rustfs.sys' -prune -o \\( -name 'xl.meta.bkp' -o -type d -name 'rustfs_inline_rb' \\) -print 2>/dev/null" || true)"
+      if [ -n "${node_residue}" ]; then
+        bkp_residue="${bkp_residue}
+${node}:
+${node_residue}"
+      fi
+    done
+    if [ -n "${bkp_residue}" ]; then
+      warn "HEAL-STEP 9 rollback-backup residue after heal (rustfs#8608):
+${bkp_residue}"
+    else
+      log "HEAL-STEP 9: no rollback-backup residue on any drive"
+    fi
+
     return 0
   fi
   die "heal test FAILED: summary=${summary} failed=${failed_n} ${NODES[${OUTAGE_NODE_INDEX}]}_used=${outage_used}GB"

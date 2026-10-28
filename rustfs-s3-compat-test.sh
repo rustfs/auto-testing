@@ -775,6 +775,90 @@ test_s3c1403() { # concurrent UploadPart must not fail while write quorum is met
   rm_bucket "${bucket}"
 }
 
+test_s3c1404() { # re-deleting an object whose latest version is a delete marker must succeed (rustfs#8742)
+  local bucket="s3c1404-b"
+  new_bucket "${bucket}" || return 1
+  aws_run s3api put-bucket-versioning --bucket "${bucket}" --versioning-configuration Status=Enabled
+  assert_aws_ok "enable versioning" || { rm_bucket "${bucket}"; return 1; }
+  make_test_file "${TEST_TMP}/s3c1404-v" 1024
+  aws_run s3api put-object --bucket "${bucket}" --key f --body "${TEST_TMP}/s3c1404-v"
+  assert_aws_ok "put-object f" || { rm_bucket "${bucket}"; return 1; }
+  aws_run s3api delete-object --bucket "${bucket}" --key f
+  assert_aws_ok "first delete (creates the marker)" || { rm_bucket "${bucket}"; return 1; }
+  # The latest version is now a delete marker. AWS S3 treats deleting an
+  # already-deleted (or nonexistent) object as success; the regression
+  # answered the second delete with 503 SlowDown instead.
+  aws_run s3api delete-object --bucket "${bucket}" --key f
+  assert_aws_ok "second delete over the delete marker (rustfs#8742)" || { rm_bucket "${bucket}"; return 1; }
+  aws_run s3api delete-object --bucket "${bucket}" --key never-existed
+  assert_aws_ok "delete of a key that never existed" || { rm_bucket "${bucket}"; return 1; }
+  rm_bucket "${bucket}"
+}
+
+test_s3c1405() { # CreateBucket on an existing bucket must not 503 under write load (rustfs#8741)
+  local bucket="s3c1405-b" i rc=0 ok_puts=0
+  new_bucket "${bucket}" || return 1
+  make_test_file "${TEST_TMP}/s3c1405-v" 1048576
+  # Steady PutObject traffic holds the bucket lifecycle read lock; the
+  # existence check used to run only after the exclusive locks were taken,
+  # so an overlapping CreateBucket waited out the 5s lock timeout and came
+  # back 503 SlowDown. Load must overlap every create attempt below.
+  (
+    local_end=$((SECONDS + 24))
+    while [ "${SECONDS}" -lt "${local_end}" ]; do
+      aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3api put-object \
+        --bucket "${bucket}" --key "load-${RANDOM}" --body "${TEST_TMP}/s3c1405-v" >/dev/null 2>&1 || true
+    done
+  ) &
+  local loader_pid=$!
+  for i in 1 2 3 4; do
+    if aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3api create-bucket --bucket "${bucket}" \
+      >"${TEST_TMP}/s3c1405-cb-${i}.json" 2>&1; then
+      : # owner/already-exists response is fine
+    elif grep -q 'SlowDown' "${TEST_TMP}/s3c1405-cb-${i}.json"; then
+      echo "create-bucket attempt ${i} returned SlowDown under write load (rustfs#8741):"
+      head -c 300 "${TEST_TMP}/s3c1405-cb-${i}.json"
+      rc=1
+    fi
+    sleep 3
+  done
+  wait "${loader_pid}"
+  aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'length(Contents || `[]`)'
+  [ "${AWS_CODE}" -eq 0 ] || { echo "list after load failed: ${AWS_OUT}"; return 1; }
+  ok_puts="${AWS_OUT}"
+  [ "${ok_puts}" -ge 3 ] || { echo "write load did not materialize (${ok_puts} objects); run is vacuous"; return 1; }
+  return "${rc}"
+}
+
+test_s3c1406() { # a bucket emptied of all objects must be deletable (rustfs#8499)
+  local bucket="s3c1406-b" i
+  new_bucket "${bucket}" || return 1
+  make_test_file "${TEST_TMP}/s3c1406-v" 4096
+  for i in $(seq 1 20); do
+    aws_run s3api put-object --bucket "${bucket}" --key "obj-${i}" --body "${TEST_TMP}/s3c1406-v"
+    assert_aws_ok "put-object obj-${i}" || { rm_bucket "${bucket}"; return 1; }
+  done
+  for i in $(seq 1 20); do
+    aws_run s3api delete-object --bucket "${bucket}" --key "obj-${i}"
+    assert_aws_ok "delete-object obj-${i}" || { rm_bucket "${bucket}"; return 1; }
+  done
+  # Usage accounting may converge asynchronously; a persistently stale
+  # object count keeps DeleteBucket answering BucketNotEmpty forever
+  # (rustfs#8499). Tolerate a bounded convergence window, nothing more.
+  local deadline=$(( $(date +%s) + 90 )) deleted=0
+  while [ "$(date +%s)" -lt "${deadline}" ]; do
+    aws_run s3api delete-bucket --bucket "${bucket}"
+    if [ "${AWS_CODE}" -eq 0 ]; then
+      deleted=1
+      break
+    fi
+    printf '%s' "${AWS_OUT}" | grep -q 'BucketNotEmpty' \
+      || { echo "unexpected delete-bucket failure: ${AWS_OUT}"; return 1; }
+    sleep 5
+  done
+  [ "${deleted}" -eq 1 ] || { echo "bucket still BucketNotEmpty 90s after emptying (rustfs#8499)"; return 1; }
+}
+
 run_all_tests() {
   run_test S3C-101 "CreateBucket"            test_s3c101
   run_test S3C-102 "HeadBucket"              test_s3c102
@@ -861,6 +945,9 @@ run_all_tests() {
   run_test S3C-1401 "CopyMetadataOnCopy"     test_s3c1401
   run_test S3C-1402 "AwsChunkedNoDecodedLen" test_s3c1402
   run_test S3C-1403 "ConcurrentUploadPart"   test_s3c1403
+  run_test S3C-1404 "DeleteMarkerRedelete"   test_s3c1404
+  run_test S3C-1405 "CreateBucketUnderLoad"  test_s3c1405
+  run_test S3C-1406 "BucketDeletableAfterEmpty" test_s3c1406
   run_test SNW-101 "BasicTarExtract"         test_snw101
   run_test SNW-102 "PrefixNormalization"     test_snw102
   run_test SNW-103 "IgnoreDirs"              test_snw103

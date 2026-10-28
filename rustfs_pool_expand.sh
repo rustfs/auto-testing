@@ -1195,9 +1195,9 @@ step0_reset() {
         "${RUSTFS_USER}" "${RUSTFS_USER}" "${RUSTFS_USER}"
       # Recreate the volume directories with the service user as owner.
       printf 'for i in 1 2 3 4; do\n'
-      printf '  ${SUDO} rm -rf /data/rustfs${i}/mnmd\n'
+      printf '  ${SUDO} rm -rf /data/rustfs${i}\n'
       printf '  ${SUDO} mkdir -p /data/rustfs${i}/mnmd\n'
-      printf '  ${SUDO} chown -R %s:%s /data/rustfs${i}/mnmd\n' "${RUSTFS_USER}" "${RUSTFS_USER}"
+      printf '  ${SUDO} chown -R %s:%s /data/rustfs${i}\n' "${RUSTFS_USER}" "${RUSTFS_USER}"
       printf 'done\n'
     } | run_remote "${node}"
   done
@@ -1512,6 +1512,85 @@ step9_decommission() {
   fi
 }
 
+step10_survivor_metadata() {
+  # rustfs#8726: after a decommissioned pool is removed from the server
+  # list, the surviving pools keep their original ids while their indexes
+  # shift (id 1 sitting at index 0). The pool-metadata write path asserted
+  # pool.id == index, so every later metadata write failed with 500 and the
+  # server logged "pool metadata layout changed". Only meaningful after
+  # step 9 finalized the removal (--finalize-decommission).
+  log "step 10: surviving-pool metadata writes after pool removal"
+  if [ "${FINALIZE_DECOMMISSION}" -ne 1 ]; then
+    log "step 10 skipped: --finalize-decommission is off, no pool was removed"
+    emit_step_result 10 "surviving-pool metadata writes after removal" "SKIP"
+    return 0
+  fi
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: step 10 survivor metadata checks"
+    emit_step_result 10 "surviving-pool metadata writes after removal" "PASS"
+    return 0
+  fi
+  local body ids probe_bucket="pool-step10-survivor" code node found
+  # (a) pool ids must stay unique after the removal (the stale-id bug also
+  # collided a re-added pool with the survivor's id).
+  body="$(admin_api GET /rustfs/admin/v3/pools/list "")"
+  code="$(admin_api_code)"
+  [ "${code}" = "200" ] || die "pools/list returned HTTP ${code}: ${body}"
+  ids="$(printf '%s' "${body}" | jq -c '[.[].id]')"
+  if [ "$(printf '%s' "${ids}" | jq 'length')" -ne "$(printf '%s' "${ids}" | jq 'unique | length')" ]; then
+    die "duplicate pool ids after removal (rustfs#8726): ${ids}"
+  fi
+  log "pool ids unique after removal: ${ids}"
+  # (b) bucket metadata writes must succeed on the survivors: a create +
+  # delete round-trip persists pool/bucket metadata.
+  body="$(admin_api PUT "/${probe_bucket}" "")"
+  code="$(admin_api_code)"
+  if [ "${code}" != "200" ] && [ "${code}" != "409" ]; then
+    die "create-bucket on surviving pools returned HTTP ${code} (rustfs#8726): ${body}"
+  fi
+  body="$(admin_api DELETE "/${probe_bucket}" "")"
+  code="$(admin_api_code)"
+  if [ "${code}" != "200" ] && [ "${code}" != "204" ] && [ "${code}" != "404" ]; then
+    die "delete-bucket on surviving pools returned HTTP ${code} (rustfs#8726): ${body}"
+  fi
+  log "bucket create/delete round-trip OK on surviving pools"
+  # (c) the regression's log signature must be absent on every node.
+  found=""
+  for node in "${NODES[@]}"; do
+    if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" '
+        SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
+        ${SUDO} journalctl -u rustfs --since "-15 min" --no-pager 2>/dev/null \
+          | grep -F "pool metadata layout changed" | head -3' | grep -q .; then
+      found="${found} ${node}"
+    fi
+  done
+  [ -z "${found}" ] || die "survivors logged 'pool metadata layout changed' (rustfs#8726):${found}"
+  # (d) one more full restart must leave the surviving layout writable.
+  log "restarting all nodes to confirm the surviving layout is stable"
+  service_action_all restart
+  for node in "${NODES[@]}"; do
+    wait_service_active "${node}"
+  done
+  verify_stage_readiness "${#NODES[@]}"
+  if [ "${#NODES[@]}" -ge 4 ]; then
+    verify_pools 3
+  else
+    verify_pools 2
+  fi
+  body="$(admin_api PUT "/${probe_bucket}" "")"
+  code="$(admin_api_code)"
+  if [ "${code}" != "200" ] && [ "${code}" != "409" ]; then
+    die "post-restart create-bucket returned HTTP ${code} (rustfs#8726): ${body}"
+  fi
+  body="$(admin_api DELETE "/${probe_bucket}" "")"
+  code="$(admin_api_code)"
+  if [ "${code}" != "200" ] && [ "${code}" != "204" ] && [ "${code}" != "404" ]; then
+    die "post-restart delete-bucket returned HTTP ${code} (rustfs#8726): ${body}"
+  fi
+  log "step 10 OK: survivors accept metadata writes across a restart"
+  emit_step_result 10 "surviving-pool metadata writes after removal" "PASS"
+}
+
 # ==================== CLI parsing ====================
 
 usage() {
@@ -1519,7 +1598,7 @@ usage() {
 Usage: rustfs-pool-expand.sh [options]
 
 Options:
-  --all                      Run the full workflow (steps 1-9)
+  --all                      Run the full workflow (steps 1-10)
   --step N                   Run a single step (repeatable)
   --steps 1,3,5-7            Run steps in order
   --with-warp                Automate step 4 (warp writes + usage monitoring)
@@ -1589,6 +1668,7 @@ run_steps() {
     [7]="expand to the third pool (all nodes)"
     [8]="start data rebalance (admin API)"
     [9]="decommission pool ${DECOMMISSION_POOL_ID} (admin API)"
+    [10]="surviving-pool metadata writes after pool removal"
   )
   for step in "${SELECTED_STEPS[@]}"; do
     CURRENT_STEP_NUM="${step}"
@@ -1603,6 +1683,7 @@ run_steps() {
       7) desc="${STEP_DESC[7]}"; step7_expand_pool3 ;;
       8) desc="${STEP_DESC[8]}"; step8_rebalance ;;
       9) desc="${STEP_DESC[9]}"; step9_decommission ;;
+      10) desc="${STEP_DESC[10]}"; step10_survivor_metadata ;;
       *) die "unknown step: ${step}" ;;
     esac
     CURRENT_STEP_NUM=""
@@ -1683,7 +1764,7 @@ main() {
     exit 0
   fi
   if [ "${all}" -eq 1 ]; then
-    SELECTED_STEPS=(1 2 3 4 5 6 7 8 9)
+    SELECTED_STEPS=(1 2 3 4 5 6 7 8 9 10)
   fi
   PACKAGE_URL="$(resolve_package_url)"
   if [ "${PREFLIGHT}" -eq 1 ]; then

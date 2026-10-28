@@ -86,6 +86,14 @@ with `--results-file`. A complete `--all` run contains 38 unique probe results;
 AWS CLI/parser failures, duplicate probes, missing probes, and incomplete runs
 are harness failures rather than RustFS product verdicts.
 
+Recovery phases poll the probe endpoint's `/health/ready` until
+`details.storage.writeQuorum` is true before probing, so they assert the EC
+contract rather than the peer drive re-admission window. The wait is bounded by
+`FT_RECOVERY_TIMEOUT_SECS` (default 120); the elapsed seconds (or `timeout`)
+land in `evidence/recovery-<phase>.secs`. The matrix sweep (`--matrix`,
+`--matrix-topo`) runs every topology as a single pool and applies each EC level
+through `RUSTFS_STORAGE_CLASS_STANDARD`.
+
 ```bash
 bash -n rustfs-fault-tolerance-test.sh
 python3 -B -m unittest -v test_rustfs_fault_tolerance.py
