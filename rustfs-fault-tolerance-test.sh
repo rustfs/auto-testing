@@ -706,6 +706,9 @@ scenario_f() {
   # NEXT member left observers effectively two members short: untouched
   # nodes answered /health/ready 503 with internal InsufficientReadQuorum.
   log "=== F: sequential node restarts on multi-node 4x1, EC:2 (readq 2, writeq 3) ==="
+  # The previous scenario's do_cleanup stopped every service and purged the
+  # drive directories; every scenario must rebuild the cluster first.
+  install_and_start "${VOLUMES_4X1}"
   seed_baseline "${EP1}"
   # F1: restart one member and let it rejoin fully.
   stop_node "${NODES[1]}"; settle
