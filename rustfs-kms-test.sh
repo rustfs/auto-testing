@@ -2373,7 +2373,13 @@ main() {
         fi
       fi
       if [ "${FAIL}" -gt 0 ]; then overall_fail=1; fi
-      if [ "${UNSUPPORTED}" -gt 0 ] || [ "${cleanup_status}" != PASS ]; then overall_fail=1; fi
+      # A teardown failure is a real infra error in any mode. UNSUPPORTED
+      # cases (environment gates such as the rc-restart exit-7 skip) are
+      # expected in plain lane runs — the validation flow is the only mode
+      # that treats them as incomplete. Failing the lane on them made every
+      # topology exit 1 despite PASS=42/43 FAIL=0 (chain 40796474356).
+      if [ "${cleanup_status}" != PASS ]; then overall_fail=1; fi
+      if [ -n "${VALIDATION_CASE}" ] && [ "${UNSUPPORTED}" -gt 0 ]; then overall_fail=1; fi
     done
   done
   final_summary
