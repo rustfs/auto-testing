@@ -948,6 +948,7 @@ run_all_tests() {
   run_test S3C-1404 "DeleteMarkerRedelete"   test_s3c1404
   run_test S3C-1405 "CreateBucketUnderLoad"  test_s3c1405
   run_test S3C-1406 "BucketDeletableAfterEmpty" test_s3c1406
+  run_test S3C-1407 "VersionOnlyBucketNotEmpty" test_s3c1407
   run_test SNW-101 "BasicTarExtract"         test_snw101
   run_test SNW-102 "PrefixNormalization"     test_snw102
   run_test SNW-103 "IgnoreDirs"              test_snw103
@@ -1043,6 +1044,8 @@ test_s3c102() {
 }
 
 test_s3c103() {
+  local started
+  started="$(date +%s)"
   new_bucket "s3c103-b1" || return 1
   rc_run ls "local/"
   assert_rc_ok "rc ls local/" || return 1
@@ -1051,7 +1054,71 @@ test_s3c103() {
   assert_aws_ok || return 1
   printf '%s' "${AWS_OUT}" | jq -e '.Buckets[] | select(.Name=="s3c103-b1")' >/dev/null \
     || { echo "aws list-buckets missing bucket: ${AWS_OUT}"; return 1; }
+  printf '%s' "${AWS_OUT}" | jq -e --argjson started "${started}" '
+    [.Buckets[] | select(.Name=="s3c103-b1")] |
+    length == 1 and (.[0].CreationDate | type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$") and
+      ((sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) as $created |
+       $created >= ($started - 5) and $created <= (now + 5)))
+  ' >/dev/null || { echo "missing or invalid bucket creation date: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c103-b1"
+}
+
+test_s3c1407() {
+  local bucket="s3c1407-b" version_id="" marker_id="" case_rc=0 cleanup_rc=0
+  new_bucket "${bucket}" || return 1
+  : > "${TEST_TMP}/s3c1407-version"
+  : > "${TEST_TMP}/s3c1407-marker"
+  printf 'historical version must survive bucket rejection\n' > "${TEST_TMP}/s3c1407-source"
+  (
+    aws_run s3api put-bucket-versioning --bucket "${bucket}" --versioning-configuration Status=Enabled
+    assert_aws_ok || exit 1
+    aws_run s3api put-object --bucket "${bucket}" --key f --body "${TEST_TMP}/s3c1407-source"
+    assert_aws_ok || exit 1
+    printf '%s' "${AWS_OUT}" | jq -er '.VersionId | strings | select(length > 0 and . != "null")' \
+      > "${TEST_TMP}/s3c1407-version" || { echo "missing object version ID"; exit 1; }
+    aws_run s3api delete-object --bucket "${bucket}" --key f
+    assert_aws_ok || exit 1
+    printf '%s' "${AWS_OUT}" | jq -er 'select(.DeleteMarker == true) | .VersionId | strings | select(length > 0 and . != "null")' \
+      > "${TEST_TMP}/s3c1407-marker" || { echo "missing delete marker ID"; exit 1; }
+    version_id="$(cat "${TEST_TMP}/s3c1407-version")"
+    marker_id="$(cat "${TEST_TMP}/s3c1407-marker")"
+    [ "${version_id}" != "${marker_id}" ] || { echo "object and marker version IDs collided"; exit 1; }
+    aws_run s3api list-objects-v2 --bucket "${bucket}"
+    assert_aws_ok || exit 1
+    printf '%s' "${AWS_OUT}" | jq -e '(.Contents // [] | length) == 0' >/dev/null \
+      || { echo "fixture still has a current object"; exit 1; }
+    aws_run s3api delete-bucket --bucket "${bucket}"
+    assert_aws_fails_with "BucketNotEmpty" || exit 1
+    aws_run s3api get-object --bucket "${bucket}" --key f --version-id "${version_id}" "${TEST_TMP}/s3c1407-download"
+    assert_aws_ok || exit 1
+    cmp -s "${TEST_TMP}/s3c1407-source" "${TEST_TMP}/s3c1407-download" \
+      || { echo "bucket rejection damaged historical version"; exit 1; }
+    aws_run s3api delete-object --bucket "${bucket}" --key f --version-id "${version_id}"
+    assert_aws_ok || exit 1
+    aws_run s3api list-object-versions --bucket "${bucket}"
+    assert_aws_ok || exit 1
+    printf '%s' "${AWS_OUT}" | jq -e --arg marker "${marker_id}" '
+      (.Versions // [] | length) == 0 and
+      [.DeleteMarkers[]? | {Key, VersionId}] == [{Key:"f", VersionId:$marker}]
+    ' >/dev/null || { echo "fixture does not contain only the delete marker"; exit 1; }
+    aws_run s3api delete-bucket --bucket "${bucket}"
+    assert_aws_fails_with "BucketNotEmpty" || exit 1
+  ) || case_rc=$?
+  if [ -s "${TEST_TMP}/s3c1407-version" ]; then
+    version_id="$(cat "${TEST_TMP}/s3c1407-version")"
+    aws_run s3api delete-object --bucket "${bucket}" --key f --version-id "${version_id}"
+    assert_aws_ok || cleanup_rc=1
+  fi
+  if [ -s "${TEST_TMP}/s3c1407-marker" ]; then
+    marker_id="$(cat "${TEST_TMP}/s3c1407-marker")"
+    aws_run s3api delete-object --bucket "${bucket}" --key f --version-id "${marker_id}"
+    assert_aws_ok || cleanup_rc=1
+  fi
+  aws_run s3api delete-bucket --bucket "${bucket}"
+  assert_aws_ok || cleanup_rc=1
+  [ "${cleanup_rc}" -eq 0 ] || echo "version-only bucket cleanup failed"
+  [ "${case_rc}" -eq 0 ] && [ "${cleanup_rc}" -eq 0 ]
 }
 
 test_s3c104() {
@@ -1060,11 +1127,17 @@ test_s3c104() {
   assert_aws_ok || return 1
   # non-empty bucket -> BucketNotEmpty
   new_bucket "s3c104-b2" || return 1
-  aws_run s3api put-object --bucket "s3c104-b2" --key f --body /etc/hostname
+  printf 'preserve after rejected bucket deletion\n' > "${TEST_TMP}/s3c104-source"
+  aws_run s3api put-object --bucket "s3c104-b2" --key f --body "${TEST_TMP}/s3c104-source"
   assert_aws_ok || return 1
   aws_run s3api delete-bucket --bucket "s3c104-b2"
   assert_aws_fails_with "BucketNotEmpty" || return 1
+  aws_run s3api get-object --bucket "s3c104-b2" --key f "${TEST_TMP}/s3c104-download"
+  assert_aws_ok || return 1
+  cmp -s "${TEST_TMP}/s3c104-source" "${TEST_TMP}/s3c104-download" \
+    || { echo "rejected bucket deletion changed object bytes"; return 1; }
   aws_run s3api delete-object --bucket "s3c104-b2" --key f
+  assert_aws_ok || return 1
   aws_run s3api delete-bucket --bucket "s3c104-b2"
   assert_aws_ok || return 1
 }
@@ -1288,8 +1361,20 @@ test_s3c301() {
   assert_aws_ok || return 1
   final_etag="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
   printf '%s' "${final_etag}" | grep -q -- "-3\"" || { echo "ETag not -3 form: ${final_etag}"; return 1; }
+  printf '%s' "${AWS_OUT}" | jq -e '
+    .Bucket == "s3c301-b1" and .Key == "big" and
+    (.Location | type == "string" and test("^https?://[^/]+/.+"))
+  ' >/dev/null || { echo "multipart completion omitted Location/Bucket/Key: ${AWS_OUT}"; return 1; }
+  aws_run s3api head-object --bucket "s3c301-b1" --key big
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e --arg etag "${final_etag}" \
+    '.ETag == $etag and .ContentLength == 15728640' >/dev/null \
+    || { echo "multipart HEAD disagrees with completion: ${AWS_OUT}"; return 1; }
   aws_run s3api get-object --bucket "s3c301-b1" --key big ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e --arg etag "${final_etag}" \
+    '.ETag == $etag and .ContentLength == 15728640' >/dev/null \
+    || { echo "multipart GET disagrees with completion: ${AWS_OUT}"; return 1; }
   [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-mp)" ] || { echo "multipart download MD5 mismatch"; return 1; }
   rm_bucket "s3c301-b1"
 }
@@ -1396,16 +1481,33 @@ test_s3c305() {
 
 test_s3c401() {
   new_bucket "s3c401-b1" || return 1
-  local i
+  local i method key
+  printf 'user object, not internal metadata\n' > "${TEST_TMP}/s3c401-source"
   for i in a b c d e; do
-    aws_run s3api put-object --bucket "s3c401-b1" --key "obj-${i}" --body /etc/hostname
+    aws_run s3api put-object --bucket "s3c401-b1" --key "obj-${i}" --body "${TEST_TMP}/s3c401-source"
+    assert_aws_ok || return 1
   done
-  aws_run s3api list-objects-v2 --bucket "s3c401-b1"
-  assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '[.Contents[]?] | length == 5' >/dev/null || { echo "not 5 objects: ${AWS_OUT}"; return 1; }
-  local keys
-  keys="$(printf '%s' "${AWS_OUT}" | jq -r '[.Contents[].Key] | join(",")')"
-  [ "${keys}" = "obj-a,obj-b,obj-c,obj-d,obj-e" ] || { echo "not lexicographic: ${keys}"; return 1; }
+  for key in xl.meta nested/xl.meta; do
+    aws_run s3api put-object --bucket "s3c401-b1" --key "${key}" --body "${TEST_TMP}/s3c401-source"
+    assert_aws_ok || return 1
+  done
+  for method in list-objects list-objects-v2; do
+    aws_run s3api "${method}" --bucket "s3c401-b1"
+    assert_aws_ok || return 1
+    printf '%s' "${AWS_OUT}" | jq -e '
+      [.Contents[]?.Key] == ["nested/xl.meta","obj-a","obj-b","obj-c","obj-d","obj-e","xl.meta"]
+    ' >/dev/null || { echo "${method} omitted or misordered user keys: ${AWS_OUT}"; return 1; }
+  done
+  for key in xl.meta nested/xl.meta; do
+    aws_run s3api get-object --bucket "s3c401-b1" --key "${key}" "${TEST_TMP}/s3c401-download"
+    assert_aws_ok || return 1
+    cmp -s "${TEST_TMP}/s3c401-source" "${TEST_TMP}/s3c401-download" \
+      || { echo "user key ${key} content mismatch"; return 1; }
+  done
+  for key in obj-a obj-b obj-c obj-d obj-e xl.meta nested/xl.meta; do
+    aws_run s3api delete-object --bucket "s3c401-b1" --key "${key}"
+    assert_aws_ok || return 1
+  done
   rm_bucket "s3c401-b1"
 }
 
