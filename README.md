@@ -71,6 +71,19 @@ python3 scripts/validation_report.py \
   --output /absolute/path/new-artifacts-dir/report.md
 ```
 
+The legacy S3 topology suite also checks historical regressions: fresh bucket
+creation timestamps (`S3C-103`), preservation of object bytes after rejected
+bucket deletion (`S3C-104`), multipart completion Location and ETag agreement
+with HEAD/GET (`S3C-301`), and V1/V2 listing and downloads of user keys named
+`xl.meta` (`S3C-401`). `S3C-1407` rejects deletion of buckets containing only
+historical versions or only a delete marker, verifies historical bytes, and
+explicitly removes its versions during cleanup. These cases run through the
+existing topology suite; `--validation-case` does not select legacy case IDs.
+
+Run `python3 -m unittest test_rustfs_s3_regressions.py` to exercise the assertions
+with mutated responses without a cluster. This validates the test oracles and
+cleanup logic, not live RustFS behavior.
+
 The report's full implemented-case gate is intentionally not enabled by these
 runs. Run it with `--gate-status implemented` only after all 66
 implemented source cases have verified executors and live results.
