@@ -1058,8 +1058,8 @@ test_s3c103() {
     [.Buckets[] | select(.Name=="s3c103-b1")] |
     length == 1 and (.[0].CreationDate | type == "string" and
       test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$") and
-      (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) as $created |
-      $created >= ($started - 5) and $created <= (now + 5))
+      ((sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) as $created |
+       $created >= ($started - 5) and $created <= (now + 5)))
   ' >/dev/null || { echo "missing or invalid bucket creation date: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c103-b1"
 }
