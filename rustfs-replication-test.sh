@@ -992,7 +992,7 @@ test_rep110() {
     || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
   local deadline=$(( $(date +%s) + 120 )) gone=0
   while [ "$(date +%s)" -lt "${deadline}" ]; do
-    aws_run s3api head-object --bucket rep110-dst --key gone.txt
+    aws_run_site2 s3api head-object --bucket rep110-dst --key gone.txt
     if [ "${AWS_CODE}" -ne 0 ]; then
       printf '%s' "${AWS_OUT}" | grep -q 'Not Found' \
         || { echo "target HEAD failed unexpectedly (want 404 Not Found): ${AWS_OUT}"; break; }
@@ -1007,7 +1007,9 @@ test_rep110() {
     rm_bucket_force site2 rep110-dst
     return 1
   fi
-  aws_run s3api list-objects-v2 --bucket rep110-dst
+  aws_run_site2 s3api list-objects-v2 --bucket rep110-dst
+  assert_aws_ok "list target objects after replicated delete" \
+    || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
   printf '%s' "${AWS_OUT}" | jq -e '(.Contents // [] | length) == 0' >/dev/null \
     || { echo "deleted object still listed on target: ${AWS_OUT}"; rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
   rm_bucket_force main rep110-src
