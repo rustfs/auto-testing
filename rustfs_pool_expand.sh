@@ -1194,10 +1194,16 @@ step0_reset() {
       printf 'id -u %s >/dev/null 2>&1 || ${SUDO} useradd -r -s /bin/false -d /opt/%s %s\n' \
         "${RUSTFS_USER}" "${RUSTFS_USER}" "${RUSTFS_USER}"
       # Recreate the volume directories with the service user as owner.
+      # Clean the volume CONTENTS, never the volume root itself: on the
+      # shared fleet /data/rustfs{1..4} are mount points, and rm -rf on a
+      # mount point fails with EBUSY, which aborts this whole remote script
+      # under set -e (the validation flow calls step0_reset as its
+      # physical-cleanup hook and turns that failure into INFRA_ERROR).
+      # Every other suite already cleans mnmd the same way.
       printf 'for i in 1 2 3 4; do\n'
-      printf '  ${SUDO} rm -rf /data/rustfs${i}\n'
+      printf '  ${SUDO} rm -rf /data/rustfs${i}/mnmd\n'
       printf '  ${SUDO} mkdir -p /data/rustfs${i}/mnmd\n'
-      printf '  ${SUDO} chown -R %s:%s /data/rustfs${i}\n' "${RUSTFS_USER}" "${RUSTFS_USER}"
+      printf '  ${SUDO} chown -R %s:%s /data/rustfs${i}/mnmd\n' "${RUSTFS_USER}" "${RUSTFS_USER}"
       printf 'done\n'
     } | run_remote "${node}"
   done
