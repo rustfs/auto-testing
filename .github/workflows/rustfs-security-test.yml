@@ -1,0 +1,409 @@
+# Copyright 2024 RustFS Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: RustFS Security Test
+
+on:
+  workflow_call:
+    inputs:
+      chain_manifest:
+        description: Verified candidate and chain attempt from the chain driver
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      rustfs_version:
+        description: 'RustFS release tag to test. Leave empty for nightly.'
+        required: false
+        default: ''
+      package_url:
+        description: 'Direct .deb URL (nightly/R2/dev). Overrides rustfs_version.'
+        required: false
+        type: string
+      topology:
+        description: 'Topology to run (all = SNSD, SNMD, MNMD)'
+        type: choice
+        options:
+          - all
+          - single-single
+          - single-multi
+          - multi-multi
+        default: all
+      oidc_live:
+        description: 'Run the live Keycloak OIDC/SSO gate as part of the suite'
+        type: boolean
+        default: true
+      cleanup_before:
+        description: 'Reset the nodes before the test (DESTROYS existing data/config)'
+        type: boolean
+        default: true
+      cleanup_after:
+        description: 'Reset the nodes after the test (DESTROYS test data/config)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# The security suite uses the same shared VMs as the other functional tests,
+# so it must serialize with them instead of running in parallel.
+concurrency:
+  group: rustfs-shared-functional-tests-v2
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUSTFS_ACCESS_KEY: ${{ secrets.RUSTFS_ACCESS_KEY }}
+  RUSTFS_SECRET_KEY: ${{ secrets.RUSTFS_SECRET_KEY }}
+  RUSTFS_NODES: ${{ secrets.RUSTFS_NODES || vars.RUSTFS_NODES }}
+  RUSTFS_SSH_USER: ${{ secrets.RUSTFS_SSH_USER || vars.RUSTFS_SSH_USER }}
+  RUSTFS_NIGHTLY_PACKAGE_URL: ${{ vars.RUSTFS_NIGHTLY_PACKAGE_URL || 'https://dl.rustfs.com/artifacts/rustfs/packages/nightly/rustfs-nightly-latest.deb' }}
+  PF_TESTING_GH_TOKEN: ${{ secrets.PF_TESTING_GH_TOKEN }}
+
+jobs:
+  security-test:
+    runs-on: smoke-testing
+    timeout-minutes: 60
+    if: ${{ inputs.chain_manifest != '' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
+        with:
+          persist-credentials: false
+
+      - name: Initialize security evidence
+        id: evidence
+        run: |
+          set -euo pipefail
+          umask 077
+          SECURITY_ARTIFACTS_DIR="${RUNNER_TEMP}/rustfs-security-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -- "${SECURITY_ARTIFACTS_DIR}" "${SECURITY_ARTIFACTS_DIR}-scratch"
+          printf 'SECURITY_ARTIFACTS_DIR=%s\n' "${SECURITY_ARTIFACTS_DIR}" >> "${GITHUB_ENV}"
+
+      - name: Bind functional candidate
+        id: chain
+        if: ${{ inputs.chain_manifest != '' }}
+        env:
+          CHAIN_MANIFEST: ${{ inputs.chain_manifest }}
+        run: python3 scripts/functional_chain_evidence.py consume
+
+      - name: Checkout rustfs OIDC live gate
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
+        with:
+          repository: rustfs/rustfs
+          ref: ${{ steps.chain.outputs.source_sha || 'main' }}
+          path: rustfs-repo
+          persist-credentials: false
+
+
+      - name: Show environment
+        run: |
+          uname -a
+          jq --version
+          openssl version
+          aws --version || true
+          docker --version || true
+          df -h /data | tail -1
+
+      - name: Admit clean shared environment
+        id: environment
+        timeout-minutes: 5
+        env:
+          FUNCTIONAL_ENVIRONMENT_RECEIPT: ${{ runner.temp }}/environment-security.json
+        run: python3 scripts/functional_environment.py enter --suite security
+
+      - name: Cleanup environment (before)
+        timeout-minutes: 5
+        if: ${{ inputs.cleanup_before != 'false' || github.event_name != 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
+          SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
+          for node in "${NODES[@]}"; do
+            ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${SSH_USER}@${node}" '
+              set -euo pipefail
+              SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
+              ${SUDO} systemctl stop rustfs 2>/dev/null || true
+              if ${SUDO} dpkg -l rustfs 2>/dev/null | grep -q "^ii"; then
+                ${SUDO} dpkg -P rustfs
+              fi
+              for i in 1 2 3 4; do ${SUDO} rm -rf /data/rustfs${i}/mnmd; done
+              ${SUDO} rm -rf /var/log/rustfs /var/lib/rustfs/kms
+            '
+          done
+
+      - name: Run security suite
+        id: test
+        timeout-minutes: 45
+        # Collect reports and backlog evidence before the final suite verdict.
+        continue-on-error: true
+        env:
+          REPORT_FILE: ${{ env.SECURITY_ARTIFACTS_DIR }}/suite-report.md
+          TMPDIR: ${{ env.SECURITY_ARTIFACTS_DIR }}-scratch
+          RUSTFS_SECURITY_OIDC_LIVE_SCRIPT: ${{ github.workspace }}/rustfs-repo/scripts/test/oidc_keycloak_live.sh
+        run: |
+          set -euo pipefail
+          chmod +x rustfs-security-test.sh
+          PACKAGE_URL='${{ inputs.package_url }}'
+          RUSTFS_VERSION='${{ inputs.rustfs_version }}'
+          TOPOLOGY='${{ inputs.topology }}'
+          ARGS=(-y)
+          if [ "${TOPOLOGY}" = "all" ] || [ -z "${TOPOLOGY}" ] || [ "${TOPOLOGY}" = "null" ]; then
+            ARGS+=(--all-topologies)
+          else
+            ARGS+=(--topology "${TOPOLOGY}")
+          fi
+          if [ "${{ inputs.oidc_live }}" = "true" ] || [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            ARGS+=(--oidc-live)
+          fi
+          if [ -n "${PACKAGE_URL}" ]; then
+            ARGS+=(--package-url "${PACKAGE_URL}")
+          elif [ -n "${RUSTFS_VERSION}" ] && [ "${RUSTFS_VERSION}" != "null" ]; then
+            ARGS+=(--version "${RUSTFS_VERSION}")
+          else
+            ARGS+=(--package-url "${RUSTFS_NIGHTLY_PACKAGE_URL}")
+          fi
+          GITHUB_STEP_SUMMARY=/dev/null ./rustfs-security-test.sh "${ARGS[@]}" 2>&1 | tee "${SECURITY_ARTIFACTS_DIR}/suite.log"
+
+      - name: Generate report
+        id: report
+        timeout-minutes: 2
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        env:
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          set -euo pipefail
+          LOG_FILE="${SECURITY_ARTIFACTS_DIR}/suite.log"
+          RESULT=failure
+          if [ "${TEST_OUTCOME}" = "success" ] && [ -s "${SECURITY_ARTIFACTS_DIR}/suite-report.md" ]; then
+            RESULT=success
+          fi
+
+          # The final verdict checks cases after diagnostics and cleanup.
+          # The suite log lines carry ANSI
+          # color escapes both before and after the verdict tag
+          # (e.g. "\e[1;31m[FAIL]\e[0m STS-105 ..."), so the pattern allows
+          # any number of escapes on each side of it.
+          ESC=$'\033'
+          VERDICTS_TOTAL="$(grep -cE "^(${ESC}\[[0-9;]*m)*\[(PASS|FAIL|UNSUPPORTED)\](${ESC}\[[0-9;]*m)* [A-Z]" "${LOG_FILE}" 2>/dev/null || true)"
+          VERDICTS_FAIL="$(grep -cE "^(${ESC}\[[0-9;]*m)*\[FAIL\](${ESC}\[[0-9;]*m)* [A-Z]" "${LOG_FILE}" 2>/dev/null || true)"
+          VERDICTS_TOTAL=$(( ${VERDICTS_TOTAL:-0} + 0 )); VERDICTS_FAIL=$(( ${VERDICTS_FAIL:-0} + 0 ))
+          VERDICTS_PASS=$(( VERDICTS_TOTAL - VERDICTS_FAIL ))
+          VERDICTS_SKIPPED="$(grep -cE "^(${ESC}\[[0-9;]*m)*\[SKIP\](${ESC}\[[0-9;]*m)* [A-Z]" "${LOG_FILE}" 2>/dev/null || true)"
+          VERDICTS_SKIPPED=$(( ${VERDICTS_SKIPPED:-0} + 0 ))
+          HARNESS_OK=0
+          if [ "${TEST_OUTCOME}" = "success" ]; then
+            HARNESS_OK=1
+          elif [ "${TEST_OUTCOME}" = "failure" ] && [ "${VERDICTS_TOTAL}" -gt 0 ] && [ "${VERDICTS_PASS}" -ge 1 ]; then
+            HARNESS_OK=1
+          fi
+          {
+            echo "# RustFS security test report"
+            echo ""
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Attempt: ${GITHUB_RUN_ATTEMPT}"
+            echo "- Workflow Commit: ${GITHUB_SHA}"
+            echo "- Trigger: ${GITHUB_EVENT_NAME}"
+            echo "- Test Step Outcome: ${RESULT}"
+            echo "- Suite Step Outcome: ${TEST_OUTCOME}"
+            echo ""
+            # The dashboard prioritizes case rows over the step outcome.
+            # Keep partial case results in the artifact when the suite fails.
+            if [ -s "${SECURITY_ARTIFACTS_DIR}/suite-report.md" ]; then
+              cat "${SECURITY_ARTIFACTS_DIR}/suite-report.md"
+              echo ""
+            fi
+            if [ "${VERDICTS_SKIPPED}" -gt 0 ]; then
+              echo "- Product result: ${VERDICTS_PASS} passed, ${VERDICTS_FAIL} failed, ${VERDICTS_SKIPPED} skipped (failing cases are tracked in rustfs/backlog)"
+            else
+              echo "- Product result: ${VERDICTS_PASS} passed, ${VERDICTS_FAIL} failed (failing cases are tracked in rustfs/backlog)"
+            fi
+          } > "${SECURITY_ARTIFACTS_DIR}/report.md"
+          cat "${SECURITY_ARTIFACTS_DIR}/report.md" >> "${GITHUB_STEP_SUMMARY}"
+          # Preserve the harness verdict separately from the final case verdict.
+          [ "${HARNESS_OK}" = "1" ]
+
+      - name: Upload functional report to dashboard
+        timeout-minutes: 2
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ env.PF_TESTING_GH_TOKEN }}
+          REPORT_FILE: ${{ env.SECURITY_ARTIFACTS_DIR }}/report.md
+          SUITE: security
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "PF_TESTING_GH_TOKEN is not configured; skipping dashboard upload"
+            exit 0
+          fi
+          DATE="$(date -u +%Y-%m-%d)"
+          REPORT_PATH="functional-reports/${SUITE}/${DATE}.md"
+          # Base64-encode the report into a temp file and feed it to jq via
+          # --rawfile: large reports (e.g. pool) exceed the OS argv limit and
+          # make `jq --arg content "${CONTENT}"` fail with "Argument list too long".
+          B64_FILE="$(mktemp)"
+          python3 -c 'import base64,sys;print(base64.b64encode(open(sys.argv[1],"rb").read()).decode())' "${REPORT_FILE}" > "${B64_FILE}"
+          SHA="$(gh api "repos/rustfs/dashboard/contents/${REPORT_PATH}" -q '.sha' 2>/dev/null || true)"
+          if [ -n "${SHA}" ]; then
+            jq -n --arg msg "report(${SUITE}): ${DATE}" --rawfile content "${B64_FILE}" --arg sha "${SHA}" \
+              '{message:$msg, content:($content|rtrimstr("\n")), sha:$sha}' \
+              | gh api --method PUT "repos/rustfs/dashboard/contents/${REPORT_PATH}" --input - >/dev/null
+          else
+            jq -n --arg msg "report(${SUITE}): ${DATE}" --rawfile content "${B64_FILE}" \
+              '{message:$msg, content:($content|rtrimstr("\n"))}' \
+              | gh api --method PUT "repos/rustfs/dashboard/contents/${REPORT_PATH}" --input - >/dev/null
+          fi
+          rm -f "${B64_FILE}"
+
+      - name: Manage backlog issues (dedup / label / auto-close)
+        timeout-minutes: 2
+        # Replaces the old per-run failure filing. One entry point that:
+        # - dedups by signal: failing cases are matched against open backlog
+        #   issues by label (category + case ID); covered cases become a
+        #   comment on the existing issue, only uncovered cases file a new one
+        # - labels new issues (functional-test, category, case IDs, env)
+        # - closes fixed issues after a fully green run
+        # - never files or closes on cancelled runs
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PF_TESTING_GH_TOKEN }}
+          SUITE: 'security'
+          SUITE_LABEL: 'Security'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "PF_TESTING_GH_TOKEN is not configured; skipping backlog issue management"
+            exit 0
+          fi
+          if [ ! -f scripts/issue_manager.py ]; then
+            echo "issue_manager.py not found in auto-testing checkout; skipping"
+            exit 0
+          fi
+          PACKAGE_URL='${{ inputs.package_url }}'
+          RUSTFS_VERSION='${{ inputs.rustfs_version }}'
+          PACKAGE_SOURCE=""
+          if [ -n "${PACKAGE_URL}" ]; then
+            PACKAGE_SOURCE="${PACKAGE_URL}"
+          elif [ -n "${RUSTFS_VERSION}" ]; then
+            PACKAGE_SOURCE="version ${RUSTFS_VERSION}"
+          else
+            PACKAGE_SOURCE="${RUSTFS_NIGHTLY_PACKAGE_URL}"
+          fi
+          python3 scripts/issue_manager.py handle \
+            --repo rustfs/backlog \
+            --suite "${SUITE}" --category "${SUITE}" --suite-label "${SUITE_LABEL}" \
+            --outcome "${{ steps.test.outcome }}" \
+            --report-file "${SECURITY_ARTIFACTS_DIR}/report.md" \
+            --log "${SECURITY_ARTIFACTS_DIR}/suite.log" \
+            --run-url "${RUN_URL}/attempts/${GITHUB_RUN_ATTEMPT}#summary" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --attempt "${GITHUB_RUN_ATTEMPT}" \
+            --commit "${GITHUB_SHA}" \
+            --trigger "${{ github.event_name }}" \
+            --package-source "${PACKAGE_SOURCE}" \
+            --date "$(date -u +%Y-%m-%d)"
+
+      - name: Upload report and logs
+        timeout-minutes: 2
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustfs-security-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SECURITY_ARTIFACTS_DIR }}/report.md
+            ${{ env.SECURITY_ARTIFACTS_DIR }}/suite.log
+            ${{ env.SECURITY_ARTIFACTS_DIR }}/suite-report.md
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Cleanup environment (after)
+        id: environment_cleanup
+        timeout-minutes: 5
+        if: ${{ always() && (inputs.cleanup_after != 'false' || github.event_name != 'workflow_dispatch') && steps.environment.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
+          SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
+          for node in "${NODES[@]}"; do
+            ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${SSH_USER}@${node}" '
+              set -euo pipefail
+              SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -n"
+              ${SUDO} systemctl stop rustfs 2>/dev/null || true
+              if ${SUDO} dpkg -l rustfs 2>/dev/null | grep -q "^ii"; then
+                ${SUDO} dpkg -P rustfs
+              fi
+              for i in 1 2 3 4; do ${SUDO} rm -rf /data/rustfs${i}/mnmd; done
+              ${SUDO} rm -rf /var/log/rustfs /var/lib/rustfs/kms
+            '
+          done
+
+      - name: Release environment only after successful cleanup
+        if: ${{ always() && steps.environment.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          FUNCTIONAL_ENVIRONMENT_RECEIPT: ${{ runner.temp }}/environment-security.json
+          CLEANUP_OUTCOME: ${{ steps.environment_cleanup.outcome }}
+        run: python3 scripts/functional_environment.py finish --suite security --cleanup-outcome "$CLEANUP_OUTCOME"
+
+      - name: Retain environment ownership and cleanup receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: functional-environment-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/environment-security.json
+          if-no-files-found: error
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "RustFS security test failed"
+          echo "Package source: ${{ inputs.package_url || 'nightly (R2 latest)' }}"
+          echo "See the uploaded report and logs for details."
+
+      - name: Record chain evidence
+        id: chain_record
+        if: ${{ always() && inputs.chain_manifest != '' && steps.evidence.outcome == 'success' }}
+        env:
+          CHAIN_MANIFEST: ${{ inputs.chain_manifest }}
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_TEST_OUTCOME: ${{ steps.test.outcome }}
+          CHAIN_REPORT_OUTCOME: ${{ steps.report.outcome }}
+        run: >-
+          python3 scripts/functional_chain_evidence.py record --suite security
+          --report "${SECURITY_ARTIFACTS_DIR}/suite-report.md"
+          --output "${RUNNER_TEMP}/chain-security-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/security.json"
+
+      - name: Upload chain evidence
+        if: ${{ always() && steps.chain_record.outputs.written == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: functional-chain-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/chain-security-${{ github.run_id }}-${{ github.run_attempt }}/security.json
+          if-no-files-found: error
+
+      - name: Enforce suite and report result
+        if: ${{ always() }}
+        env:
+          SUITE_OUTCOME: ${{ steps.test.outcome }}
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
+        run: |
+          test "$SUITE_OUTCOME" = success
+          test "$REPORT_OUTCOME" = success
+          python3 scripts/functional_chain_evidence.py verify-report --suite security --report "${SECURITY_ARTIFACTS_DIR}/suite-report.md"

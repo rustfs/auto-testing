@@ -1,0 +1,53 @@
+name: Functional Chain Script Tests
+
+on:
+  pull_request:
+    paths:
+      - .github/scheduled-validations.json
+      - .github/workflows/functional-chain-health.yml
+      - .github/workflows/functional-chain-script-tests.yml
+      - .github/workflows/rustfs-*.yml
+      - scripts/check_functional_runners.py
+      - scripts/functional_chain_evidence.py
+      - scripts/functional_chain_health.py
+      - scripts/functional_environment.py
+      - scripts/prepare_functional_package.py
+      - scripts/prepare_retained_validation_recovery.py
+      - scripts/resolve_functional_candidate.py
+      - scripts/retain_validation_evidence.py
+      - scripts/test_functional_dispatch.py
+      - scripts/test_prepare_functional_package.py
+      - scripts/validation_registry.py
+  push:
+    branches: [main]
+    paths:
+      - .github/scheduled-validations.json
+      - .github/workflows/functional-chain-health.yml
+      - .github/workflows/functional-chain-script-tests.yml
+      - .github/workflows/rustfs-*.yml
+      - scripts/check_functional_runners.py
+      - scripts/functional_chain_evidence.py
+      - scripts/functional_chain_health.py
+      - scripts/functional_environment.py
+      - scripts/prepare_functional_package.py
+      - scripts/prepare_retained_validation_recovery.py
+      - scripts/resolve_functional_candidate.py
+      - scripts/retain_validation_evidence.py
+      - scripts/test_functional_dispatch.py
+      - scripts/test_prepare_functional_package.py
+      - scripts/validation_registry.py
+
+permissions:
+  contents: read
+
+jobs:
+  functional-chain-script-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Test dispatch payload and package staging
+        run: python3 -m unittest test_functional_dispatch.py test_prepare_functional_package.py
+        working-directory: scripts
