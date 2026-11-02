@@ -17,7 +17,10 @@
 # Usage:
 #   ./rustfs-s3-compat-test.sh --all-topologies -y --package-url <deb url>
 #   ./rustfs-s3-compat-test.sh --topology single-single -y --version 1.0.0-rc.4-preview.1
+#   ./rustfs-s3-compat-test.sh --topology single-single -y --suite worm --package-url <deb url>
 #   ./rustfs-s3-compat-test.sh --all-topologies --dry-run
+# Deep Object Lock against an already-running endpoint (no deploy):
+#   ./scripts/campaign/run-worm-object-lock.sh --endpoint http://127.0.0.1:9000
 #
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -458,12 +461,22 @@ $(printf '%s' "${canonical_request}" | openssl dgst -sha256 -hex 2>/dev/null | a
 
 # ==================== Test harness ====================
 
-PASS=0; FAIL=0; UNSUPPORTED=0
+PASS=0; FAIL=0; UNSUPPORTED=0; SCHEDULED=0
 FAILED_TESTS=()
+# Comma-separated case ids. Empty runs the whole suite. --suite worm sets
+# S3C-602..605 so a campaign can select deep Object Lock without a new harness.
+SELECTED_CASES=""
 
 # run_test <id> <name> <function>
 run_test() {
   local id="$1" name="$2" fn="$3" out rc
+  if [ -n "${SELECTED_CASES}" ]; then
+    case ",${SELECTED_CASES}," in
+      *",${id},"*) ;;
+      *) return 0 ;;
+    esac
+  fi
+  SCHEDULED=$((SCHEDULED+1))
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     return 0
@@ -859,6 +872,16 @@ test_s3c1406() { # a bucket emptied of all objects must be deletable (rustfs#849
   [ "${deleted}" -eq 1 ] || { echo "bucket still BucketNotEmpty 90s after emptying (rustfs#8499)"; return 1; }
 }
 
+# Deep Object Lock: default retention, GOVERNANCE, COMPLIANCE, and legal hold.
+# Campaigns with an existing endpoint should call this via
+# scripts/campaign/run-worm-object-lock.sh instead of a retention-metadata check.
+worm_object_lock_tests() {
+  run_test S3C-602 "DefaultRetention"        test_s3c602
+  run_test S3C-603 "GovernanceProtection"    test_s3c603
+  run_test S3C-604 "ComplianceProtection"    test_s3c604
+  run_test S3C-605 "LegalHold"               test_s3c605
+}
+
 run_all_tests() {
   run_test S3C-101 "CreateBucket"            test_s3c101
   run_test S3C-102 "HeadBucket"              test_s3c102
@@ -895,10 +918,7 @@ run_all_tests() {
   run_test S3C-506 "RestoreByMarkerRemove"   test_s3c506
   run_test S3C-507 "SuspendedSemantics"      test_s3c507
   run_test S3C-601 "LockBucketCreate"        test_s3c601
-  run_test S3C-602 "DefaultRetention"        test_s3c602
-  run_test S3C-603 "GovernanceProtection"    test_s3c603
-  run_test S3C-604 "ComplianceProtection"    test_s3c604
-  run_test S3C-605 "LegalHold"               test_s3c605
+  worm_object_lock_tests
   run_test S3C-606 "NonLockBucketReject"     test_s3c606
   run_test S3C-701 "ObjectTagCrud"           test_s3c701
   run_test S3C-702 "BucketTagCrud"           test_s3c702
@@ -1691,6 +1711,64 @@ test_s3c507() {
 
 # ---------- 6. Object Lock / retention / legal hold ----------
 
+# Remove one version or delete marker. Caller must already know the id.
+worm_delete_version() {
+  local bucket="$1" key="$2" vid="$3"
+  [ -n "${vid}" ] && [ "${vid}" != "null" ] || { echo "missing version id for ${bucket}/${key}"; return 1; }
+  aws_run s3api delete-object --bucket "${bucket}" --key "${key}" --version-id "${vid}"
+  assert_aws_ok || return 1
+}
+
+# GOVERNANCE cleanup only. COMPLIANCE must not call this; bypass cannot lift it.
+worm_bypass_delete_version() {
+  local bucket="$1" key="$2" vid="$3"
+  [ -n "${vid}" ] && [ "${vid}" != "null" ] || { echo "missing version id for ${bucket}/${key}"; return 1; }
+  aws_run s3api delete-object --bucket "${bucket}" --key "${key}" --version-id "${vid}" --bypass-governance-retention
+  assert_aws_ok || return 1
+}
+
+worm_delete_bucket() {
+  local bucket="$1"
+  aws_run s3api delete-bucket --bucket "${bucket}"
+  assert_aws_ok || { echo "bucket ${bucket} still not empty after WORM cleanup"; return 1; }
+}
+
+# Prove one version cannot be replaced or deleted.
+# A same-key PUT may create a new version; its id is stored in WORM_OVERWRITE_VID.
+# The original version's bytes must still match ${expected}.
+WORM_OVERWRITE_VID=""
+assert_object_lock_protects_version() {
+  local bucket="$1" key="$2" vid="$3" expected="$4"
+  local got="${TEST_TMP}/worm-got" overwrite="${TEST_TMP}/worm-overwrite" overwrite_vid
+  WORM_OVERWRITE_VID=""
+  aws_run s3api get-object --bucket "${bucket}" --key "${key}" --version-id "${vid}" "${got}"
+  assert_aws_ok || return 1
+  [ "$(md5_of_file "${got}")" = "$(md5_of_file "${expected}")" ] \
+    || { echo "protected version ${vid} bytes differ before overwrite"; return 1; }
+  printf 'worm-overwrite-%s\n' "${vid}" > "${overwrite}"
+  if [ "$(md5_of_file "${overwrite}")" = "$(md5_of_file "${expected}")" ]; then
+    printf 'x' >> "${overwrite}"
+  fi
+  aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${overwrite}"
+  assert_aws_ok || return 1
+  overwrite_vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
+  [ -n "${overwrite_vid}" ] && [ "${overwrite_vid}" != "null" ] \
+    || { echo "overwrite put returned no VersionId"; return 1; }
+  [ "${overwrite_vid}" != "${vid}" ] \
+    || { echo "overwrite reused protected version ${vid}"; return 1; }
+  aws_run s3api get-object --bucket "${bucket}" --key "${key}" --version-id "${vid}" "${got}"
+  assert_aws_ok || return 1
+  [ "$(md5_of_file "${got}")" = "$(md5_of_file "${expected}")" ] \
+    || { echo "overwrite replaced protected version ${vid}"; return 1; }
+  aws_run s3api delete-object --bucket "${bucket}" --key "${key}" --version-id "${vid}"
+  assert_aws_fails_with "AccessDenied" || return 1
+  aws_run s3api get-object --bucket "${bucket}" --key "${key}" --version-id "${vid}" "${got}"
+  assert_aws_ok || return 1
+  [ "$(md5_of_file "${got}")" = "$(md5_of_file "${expected}")" ] \
+    || { echo "protected version ${vid} changed after denied delete"; return 1; }
+  WORM_OVERWRITE_VID="${overwrite_vid}"
+}
+
 test_s3c601() {
   aws_run s3api create-bucket --bucket "s3c601-lk" --object-lock-enabled-for-bucket
   assert_aws_ok || return 1
@@ -1705,108 +1783,137 @@ test_s3c601() {
 }
 
 test_s3c602() {
-  aws_run s3api create-bucket --bucket "s3c602-lk" --object-lock-enabled-for-bucket
+  local bucket="s3c602-lk-${RANDOM}-$$" vid
+  aws_run s3api create-bucket --bucket "${bucket}" --object-lock-enabled-for-bucket
   assert_aws_ok || return 1
-  aws_run s3api put-object-lock-configuration --bucket "s3c602-lk" \
+  # Default retention applies only to objects written after this configuration.
+  # Writing first, then setting the bucket rule, leaves that version unlocked.
+  aws_run s3api put-object-lock-configuration --bucket "${bucket}" \
     --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"GOVERNANCE","Days":1}}}'
   assert_aws_ok || return 1
-  make_test_file ${TEST_TMP}/s3c-v 512
-  aws_run s3api put-object --bucket "s3c602-lk" --key f --body ${TEST_TMP}/s3c-v
+  make_test_file "${TEST_TMP}/s3c-v" 512
+  aws_run s3api put-object --bucket "${bucket}" --key f --body "${TEST_TMP}/s3c-v"
   assert_aws_ok || return 1
-  aws_run s3api head-object --bucket "s3c602-lk" --key f
+  vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
+  [ -n "${vid}" ] && [ "${vid}" != "null" ] || { echo "put-object returned no VersionId"; return 1; }
+  aws_run s3api head-object --bucket "${bucket}" --key f
+  assert_aws_ok || return 1
   printf '%s' "${AWS_OUT}" | jq -e '.ObjectLockMode == "GOVERNANCE" and .ObjectLockRetainUntilDate != null' >/dev/null \
-    || { echo "default retention not applied: ${AWS_OUT}"; return 1; }
-  rm_bucket "s3c602-lk"
+    || { echo "default retention not applied to object written after configuration: ${AWS_OUT}"; return 1; }
+  assert_object_lock_protects_version "${bucket}" f "${vid}" "${TEST_TMP}/s3c-v" || return 1
+  # The same bucket default also locks the version created by the overwrite PUT.
+  worm_bypass_delete_version "${bucket}" f "${WORM_OVERWRITE_VID}" || return 1
+  worm_bypass_delete_version "${bucket}" f "${vid}" || return 1
+  worm_delete_bucket "${bucket}"
 }
 
 test_s3c603() {
-  aws_run s3api create-bucket --bucket "s3c603-lk" --object-lock-enabled-for-bucket
+  local bucket="s3c603-lk-${RANDOM}-$$" vid until marker
+  aws_run s3api create-bucket --bucket "${bucket}" --object-lock-enabled-for-bucket
   assert_aws_ok || return 1
-  make_test_file ${TEST_TMP}/s3c-v 512
-  aws_run s3api put-object --bucket "s3c603-lk" --key f --body ${TEST_TMP}/s3c-v
-  local vid
+  make_test_file "${TEST_TMP}/s3c-v" 512
+  aws_run s3api put-object --bucket "${bucket}" --key f --body "${TEST_TMP}/s3c-v"
+  assert_aws_ok || return 1
   vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
-  [ -n "${vid}" ] || { echo "put-object returned no VersionId"; return 1; }
-  local until
+  [ -n "${vid}" ] && [ "${vid}" != "null" ] || { echo "put-object returned no VersionId"; return 1; }
   until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
-  aws_run s3api put-object-retention --bucket "s3c603-lk" --key f \
+  # Attach GOVERNANCE to this version before any delete or overwrite probe.
+  aws_run s3api put-object-retention --bucket "${bucket}" --key f --version-id "${vid}" \
     --retention "{\"Mode\":\"GOVERNANCE\",\"RetainUntilDate\":\"${until}\"}"
   assert_aws_ok || return 1
+  assert_object_lock_protects_version "${bucket}" f "${vid}" "${TEST_TMP}/s3c-v" || return 1
   # Simple delete without --version-id only creates a delete marker; Object Lock
   # does not block delete markers (AWS S3 semantics), so this must succeed.
-  aws_run s3api delete-object --bucket "s3c603-lk" --key f
+  aws_run s3api delete-object --bucket "${bucket}" --key f
   assert_aws_ok || return 1
-  # The protected version must still exist, unchanged.
-  aws_run s3api list-object-versions --bucket "s3c603-lk" --prefix f
+  marker="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
+  [ -n "${marker}" ] && [ "${marker}" != "null" ] || { echo "simple delete returned no delete-marker version"; return 1; }
+  aws_run s3api list-object-versions --bucket "${bucket}" --prefix f
   printf '%s' "${AWS_OUT}" | jq -e --arg v "${vid}" \
     '[.Versions[]? | select(.VersionId == $v and .Size > 0)] | length > 0' >/dev/null \
-    || { echo "protected version missing/unchanged check failed after simple delete"; return 1; }
-  # Direct delete of the protected version must be denied without bypass.
-  aws_run s3api delete-object --bucket "s3c603-lk" --key f --version-id "${vid}"
+    || { echo "protected version missing after simple delete"; return 1; }
+  aws_run s3api delete-object --bucket "${bucket}" --key f --version-id "${vid}"
   assert_aws_fails_with "AccessDenied" || return 1
-  # With bypass governance retention (and permission) it succeeds.
-  aws_run s3api delete-object --bucket "s3c603-lk" --key f --version-id "${vid}" --bypass-governance-retention
+  aws_run s3api get-object --bucket "${bucket}" --key f --version-id "${vid}" "${TEST_TMP}/s3c-got"
   assert_aws_ok || return 1
-  rm_bucket "s3c603-lk"
+  [ "$(md5_of_file "${TEST_TMP}/s3c-got")" = "$(md5_of_file "${TEST_TMP}/s3c-v")" ] \
+    || { echo "protected version bytes changed after denied delete"; return 1; }
+  worm_bypass_delete_version "${bucket}" f "${vid}" || return 1
+  worm_delete_version "${bucket}" f "${WORM_OVERWRITE_VID}" || return 1
+  worm_delete_version "${bucket}" f "${marker}" || return 1
+  worm_delete_bucket "${bucket}"
 }
 
 test_s3c604() {
-  aws_run s3api create-bucket --bucket "s3c604-lk" --object-lock-enabled-for-bucket
+  local bucket="s3c604-lk-${RANDOM}-$$" vid until marker
+  aws_run s3api create-bucket --bucket "${bucket}" --object-lock-enabled-for-bucket
   assert_aws_ok || return 1
-  make_test_file ${TEST_TMP}/s3c-v 512
-  aws_run s3api put-object --bucket "s3c604-lk" --key f --body ${TEST_TMP}/s3c-v
-  local vid
+  make_test_file "${TEST_TMP}/s3c-v" 512
+  aws_run s3api put-object --bucket "${bucket}" --key f --body "${TEST_TMP}/s3c-v"
+  assert_aws_ok || return 1
   vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
-  [ -n "${vid}" ] || { echo "put-object returned no VersionId"; return 1; }
-  local until
+  [ -n "${vid}" ] && [ "${vid}" != "null" ] || { echo "put-object returned no VersionId"; return 1; }
   until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
-  aws_run s3api put-object-retention --bucket "s3c604-lk" --key f \
+  aws_run s3api put-object-retention --bucket "${bucket}" --key f --version-id "${vid}" \
     --retention "{\"Mode\":\"COMPLIANCE\",\"RetainUntilDate\":\"${until}\"}"
   assert_aws_ok || return 1
+  assert_object_lock_protects_version "${bucket}" f "${vid}" "${TEST_TMP}/s3c-v" || return 1
   # Simple delete without --version-id only creates a delete marker (allowed).
-  aws_run s3api delete-object --bucket "s3c604-lk" --key f
+  aws_run s3api delete-object --bucket "${bucket}" --key f
   assert_aws_ok || return 1
-  aws_run s3api list-object-versions --bucket "s3c604-lk" --prefix f
+  marker="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
+  [ -n "${marker}" ] && [ "${marker}" != "null" ] || { echo "simple delete returned no delete-marker version"; return 1; }
+  aws_run s3api list-object-versions --bucket "${bucket}" --prefix f
   printf '%s' "${AWS_OUT}" | jq -e --arg v "${vid}" \
     '[.Versions[]? | select(.VersionId == $v and .Size > 0)] | length > 0' >/dev/null \
     || { echo "protected version missing after simple delete"; return 1; }
   # Direct delete of the protected version is denied and cannot be bypassed.
-  aws_run s3api delete-object --bucket "s3c604-lk" --key f --version-id "${vid}"
+  aws_run s3api delete-object --bucket "${bucket}" --key f --version-id "${vid}"
   assert_aws_fails_with "AccessDenied" || return 1
-  aws_run s3api delete-object --bucket "s3c604-lk" --key f --version-id "${vid}" --bypass-governance-retention
+  aws_run s3api delete-object --bucket "${bucket}" --key f --version-id "${vid}" --bypass-governance-retention
   assert_aws_fails_with "AccessDenied" || return 1
-  # NOTE: the COMPLIANCE-locked version cannot be removed before expiry; bucket
-  # cleanup depends on retention expiry or a fresh test environment.
-  rm_bucket "s3c604-lk"
+  aws_run s3api get-object --bucket "${bucket}" --key f --version-id "${vid}" "${TEST_TMP}/s3c-got"
+  assert_aws_ok || return 1
+  [ "$(md5_of_file "${TEST_TMP}/s3c-got")" = "$(md5_of_file "${TEST_TMP}/s3c-v")" ] \
+    || { echo "COMPLIANCE version bytes changed after denied delete"; return 1; }
+  # The overwrite version and delete marker are not under COMPLIANCE.
+  worm_delete_version "${bucket}" f "${WORM_OVERWRITE_VID}" || return 1
+  worm_delete_version "${bucket}" f "${marker}" || return 1
+  # The COMPLIANCE version cannot be removed before ${until}. Leave the bucket.
+  rm_bucket "${bucket}"
 }
 
 test_s3c605() {
-  aws_run s3api create-bucket --bucket "s3c605-lk" --object-lock-enabled-for-bucket
+  local bucket="s3c605-lk-${RANDOM}-$$" vid marker
+  aws_run s3api create-bucket --bucket "${bucket}" --object-lock-enabled-for-bucket
   assert_aws_ok || return 1
-  make_test_file ${TEST_TMP}/s3c-v 512
-  aws_run s3api put-object --bucket "s3c605-lk" --key f --body ${TEST_TMP}/s3c-v
-  local vid
+  make_test_file "${TEST_TMP}/s3c-v" 512
+  aws_run s3api put-object --bucket "${bucket}" --key f --body "${TEST_TMP}/s3c-v"
+  assert_aws_ok || return 1
   vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
-  [ -n "${vid}" ] || { echo "put-object returned no VersionId"; return 1; }
-  aws_run s3api put-object-legal-hold --bucket "s3c605-lk" --key f --version-id "${vid}" --legal-hold Status=ON
+  [ -n "${vid}" ] && [ "${vid}" != "null" ] || { echo "put-object returned no VersionId"; return 1; }
+  aws_run s3api put-object-legal-hold --bucket "${bucket}" --key f --version-id "${vid}" --legal-hold Status=ON
   assert_aws_ok || return 1
+  assert_object_lock_protects_version "${bucket}" f "${vid}" "${TEST_TMP}/s3c-v" || return 1
   # Simple delete without --version-id only creates a delete marker (allowed).
-  aws_run s3api delete-object --bucket "s3c605-lk" --key f
+  aws_run s3api delete-object --bucket "${bucket}" --key f
   assert_aws_ok || return 1
-  aws_run s3api list-object-versions --bucket "s3c605-lk" --prefix f
+  marker="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
+  [ -n "${marker}" ] && [ "${marker}" != "null" ] || { echo "simple delete returned no delete-marker version"; return 1; }
+  aws_run s3api list-object-versions --bucket "${bucket}" --prefix f
   printf '%s' "${AWS_OUT}" | jq -e --arg v "${vid}" \
     '[.Versions[]? | select(.VersionId == $v and .Size > 0)] | length > 0' >/dev/null \
     || { echo "protected version missing after simple delete"; return 1; }
-  # Direct delete of the legal-hold-protected version must be denied.
-  aws_run s3api delete-object --bucket "s3c605-lk" --key f --version-id "${vid}"
+  aws_run s3api delete-object --bucket "${bucket}" --key f --version-id "${vid}"
   assert_aws_fails_with "AccessDenied" || return 1
-  aws_run s3api get-object-legal-hold --bucket "s3c605-lk" --key f --version-id "${vid}"
+  aws_run s3api get-object-legal-hold --bucket "${bucket}" --key f --version-id "${vid}"
   printf '%s' "${AWS_OUT}" | jq -e '.LegalHold.Status == "ON"' >/dev/null || { echo "legal hold not ON: ${AWS_OUT}"; return 1; }
-  aws_run s3api put-object-legal-hold --bucket "s3c605-lk" --key f --version-id "${vid}" --legal-hold Status=OFF
+  aws_run s3api put-object-legal-hold --bucket "${bucket}" --key f --version-id "${vid}" --legal-hold Status=OFF
   assert_aws_ok || return 1
-  aws_run s3api delete-object --bucket "s3c605-lk" --key f --version-id "${vid}"
-  assert_aws_ok || return 1
-  rm_bucket "s3c605-lk"
+  worm_delete_version "${bucket}" f "${vid}" || return 1
+  worm_delete_version "${bucket}" f "${WORM_OVERWRITE_VID}" || return 1
+  worm_delete_version "${bucket}" f "${marker}" || return 1
+  worm_delete_bucket "${bucket}"
 }
 
 test_s3c606() {
@@ -2979,6 +3086,8 @@ Usage: rustfs-s3-compat-test.sh [options]
 Options:
   --all-topologies           Run all three topologies in order
   --topology NAME            single-single | single-multi | multi-multi (repeatable)
+  --suite worm               Run only deep Object Lock cases S3C-602..605
+  --cases ID[,ID...]         Run only these case ids (repeatable flag; commas or repeats)
   --version VER              RustFS release tag to test (default 1.0.0-rc.4-preview.1)
   --package-url URL          Direct .deb URL (overrides --version)
   --sha256 HEX               Verify the downloaded package checksum
@@ -2996,14 +3105,36 @@ Options:
 USAGE
 }
 
+append_selected_cases() {
+  local raw="$1" item
+  local -a items=()
+  [ -n "${raw}" ] || die "--cases requires a case id"
+  IFS=',' read -r -a items <<<"${raw}"
+  for item in "${items[@]}"; do
+    [ -n "${item}" ] || die "--cases requires a case id"
+    if [ -n "${SELECTED_CASES}" ]; then SELECTED_CASES="${SELECTED_CASES},${item}";
+    else SELECTED_CASES="${item}"; fi
+  done
+}
+
 main() {
   [ "$#" -eq 0 ] && { usage; exit 0; }
-  local opt all=0
+  local opt all=0 suite_set=0 cases_set=0
   while [ "$#" -gt 0 ]; do
     opt="$1"; shift
     case "${opt}" in
       --all-topologies) all=1 ;;
       --topology) SELECTED_TOPOLOGIES+=("$1"); shift ;;
+      --suite)
+        [ "${suite_set}" -eq 0 ] || die "--suite cannot be repeated"
+        suite_set=1
+        case "$1" in
+          worm|object-lock) append_selected_cases "S3C-602,S3C-603,S3C-604,S3C-605" ;;
+          *) die "unknown suite: $1 (supported: worm)" ;;
+        esac
+        shift
+        ;;
+      --cases) cases_set=1; append_selected_cases "$1"; shift ;;
       --version) RUSTFS_VERSION="$1"; shift ;;
       --package-url) PACKAGE_URL="$1"; shift ;;
       --sha256) PACKAGE_SHA256="$1"; shift ;;
@@ -3021,6 +3152,7 @@ main() {
       *) die "unknown option: ${opt} (see --help)" ;;
     esac
   done
+  [ "${suite_set}" -eq 0 ] || [ "${cases_set}" -eq 0 ] || die "--suite cannot be combined with --cases"
   if [ -n "${LOG_FILE}" ]; then
     mkdir -p "$(dirname "${LOG_FILE}")"
     if ! touch "${LOG_FILE}" 2>/dev/null; then
@@ -3034,6 +3166,7 @@ main() {
   fi
   if [ -n "${VALIDATION_CASE}" ]; then
     [ "${VALIDATION_CASE}" = "s3.basic-object-round-trip" ] || die "unknown validation case: ${VALIDATION_CASE}"
+    [ -z "${SELECTED_CASES}" ] || die "--validation-case cannot be combined with --suite or --cases"
     [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
     [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its own topology"
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}")
@@ -3081,11 +3214,16 @@ main() {
       VALIDATION_BINARY_SHA256="$(printf 'sha256sum /usr/bin/rustfs\n' | run_remote "${NODES[0]}" | awk '{print $1}')"
       [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
     fi
-    PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
+    PASS=0; FAIL=0; UNSUPPORTED=0; SCHEDULED=0; FAILED_TESTS=()
     if [ -n "${VALIDATION_CASE}" ]; then
       run_test "${VALIDATION_CASE}" "BasicObjectRoundTrip" test_validation_s3_basic_object_round_trip
     else
       run_all_tests
+    fi
+    if [ -n "${SELECTED_CASES}" ] && [ "${SCHEDULED}" -eq 0 ]; then
+      FAIL=$((FAIL+1))
+      FAILED_TESTS+=("no tests matched ${SELECTED_CASES}")
+      printf '\033[1;31m[FAIL]\033[0m no tests matched %s\n' "${SELECTED_CASES}"
     fi
     results_summary
     record_topology_result "${topo}"
