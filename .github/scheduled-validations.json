@@ -1,0 +1,606 @@
+{
+  "schema": 1,
+  "workflow_state_policy": "Observe runtime state; never enable a workflow. Disabled entries remain visible.",
+  "plans": {
+    "nightly": {
+      "cadences": [
+        "nightly"
+      ],
+      "timezone": "UTC"
+    },
+    "weekly": {
+      "cadences": [
+        "nightly",
+        "weekly"
+      ],
+      "timezone": "UTC"
+    },
+    "monthly": {
+      "cadences": [
+        "nightly",
+        "weekly",
+        "monthly"
+      ],
+      "timezone": "UTC"
+    }
+  },
+  "suites": [
+    {
+      "id": "upgrade",
+      "workflow": ".github/workflows/rustfs-upgrade-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-upgrade-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "s3",
+      "workflow": ".github/workflows/rustfs-s3-compat-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-s3-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "kms",
+      "workflow": ".github/workflows/rustfs-kms-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-kms-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "tier",
+      "workflow": ".github/workflows/rustfs-tier-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-tier-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "storage",
+      "workflow": ".github/workflows/rustfs-storage-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-storage-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "heal",
+      "workflow": ".github/workflows/rustfs-heal-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-heal-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "pool",
+      "workflow": ".github/workflows/rustfs-pool-expand-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-pool-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "security",
+      "workflow": ".github/workflows/rustfs-security-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-security-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "replication",
+      "workflow": ".github/workflows/rustfs-replication-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-replication-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "fault-tolerance",
+      "workflow": ".github/workflows/rustfs-fault-tolerance-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-fault-tolerance-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "table",
+      "workflow": ".github/workflows/rustfs-table-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-table-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "performance",
+      "workflow": ".github/workflows/rustfs-performance-test.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_run",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "performance-fleet",
+      "resource_lock": "rustfs-performance-suite",
+      "owner": "@overtrue",
+      "required": false,
+      "optional_reason": "Performance may be unavailable only when the full plan explicitly records that decision.",
+      "evidence": "functional-chain-performance-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    }
+  ],
+  "workflows": [
+    {
+      "workflow": ".github/workflows/rustfs-validation-sweep.yml",
+      "name": "RustFS Validation Sweep",
+      "roles": [
+        "periodic",
+        "manual"
+      ],
+      "events": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "schedule": [
+        "30 19 * * *"
+      ],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "workflow",
+      "max_age_hours": 60,
+      "result_owner": "rustfs-validation-sweep.yml",
+      "disposition": "canonical validation cases executed in rotating batches",
+      "failure_owner": "workflow",
+      "origin": "baseline",
+      "alert_contract": "scheduled-validation"
+    },
+    {
+      "workflow": ".github/workflows/functional-chain-health.yml",
+      "name": "Functional chain health",
+      "roles": [
+        "periodic",
+        "manual",
+        "health"
+      ],
+      "events": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "cadence": "hourly",
+      "timezone": "UTC",
+      "schedule": [
+        "23 * * * *"
+      ],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "workflow",
+      "max_age_hours": 12,
+      "result_owner": "functional-chain-health.yml",
+      "disposition": "retained independent entry",
+      "failure_owner": "watchdog",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-fault-tolerance-matrix.yml",
+      "name": "RustFS Fault-Tolerance Matrix",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "none",
+      "result_owner": "rustfs-fault-tolerance-matrix.yml",
+      "disposition": "retained independent entry",
+      "monitor_reason": "Event-driven or operator-requested work has no periodic freshness obligation.",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-fault-tolerance-test.yml",
+      "name": "RustFS Fault-Tolerance Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-functional-chain.yml",
+      "name": "RustFS Functional Chain",
+      "roles": [
+        "periodic",
+        "manual"
+      ],
+      "events": [
+        "workflow_dispatch",
+        "repository_dispatch"
+      ],
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "complete-chain",
+      "max_age_hours": 36,
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "repository_dispatch nightly-candidate-ready plus manual replay; rustfs workflow_run chain stays active during dual-run",
+      "failure_owner": "watchdog",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-heal-test.yml",
+      "name": "RustFS Heal Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-kms-test.yml",
+      "name": "RustFS KMS Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-performance-test.yml",
+      "name": "RustFS Performance Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-pool-expand-test.yml",
+      "name": "RustFS Pool Expansion Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-replication-test.yml",
+      "name": "RustFS Replication Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-s3-compat-test.yml",
+      "name": "RustFS S3 Compatibility Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-security-test.yml",
+      "name": "RustFS Security Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-storage-test.yml",
+      "name": "RustFS Storage Engine Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-table-test.yml",
+      "name": "RustFS Table Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-tier-test.yml",
+      "name": "RustFS Tier Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-upgrade-test.yml",
+      "name": "RustFS Upgrade Test",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "origin": "baseline"
+    }
+  ]
+}
