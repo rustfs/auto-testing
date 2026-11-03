@@ -4,18 +4,22 @@ on:
   pull_request:
     paths:
       - rustfs-s3-compat-test.sh
+      - scripts/campaign/run-worm-object-lock.sh
       - test_rustfs_s3_usage.py
       - test_rustfs_s3_signing.py
       - test_rustfs_s3_regressions.py
+      - test_rustfs_worm_object_lock.py
       - test_validation_s3_basic.sh
       - .github/workflows/s3-script-tests.yml
   push:
     branches: [main]
     paths:
       - rustfs-s3-compat-test.sh
+      - scripts/campaign/run-worm-object-lock.sh
       - test_rustfs_s3_usage.py
       - test_rustfs_s3_signing.py
       - test_rustfs_s3_regressions.py
+      - test_rustfs_worm_object_lock.py
       - test_validation_s3_basic.sh
       - .github/workflows/s3-script-tests.yml
 
@@ -31,10 +35,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Validate shell syntax
-        run: bash -n rustfs-s3-compat-test.sh
+        run: bash -n rustfs-s3-compat-test.sh scripts/campaign/run-worm-object-lock.sh
       - name: Install independent SigV4 verifier
         run: python3 -m pip install botocore==1.43.19
       - name: Test S3 cases and signatures without a cluster
-        run: python3 -m unittest test_rustfs_s3_usage.py test_rustfs_s3_signing.py test_rustfs_s3_regressions.py
+        run: python3 -m unittest test_rustfs_s3_usage.py test_rustfs_s3_signing.py test_rustfs_s3_regressions.py test_rustfs_worm_object_lock.py
       - name: Test validation S3 round trip without a cluster
         run: bash test_validation_s3_basic.sh

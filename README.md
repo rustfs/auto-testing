@@ -84,6 +84,51 @@ Run `python3 -m unittest test_rustfs_s3_regressions.py` to exercise the assertio
 with mutated responses without a cluster. This validates the test oracles and
 cleanup logic, not live RustFS behavior.
 
+## Deep WORM / Object Lock
+
+A bucket-default retention write is not WORM coverage. The campaign
+full-feature line `[PASS] WORM/object-lock retention set` only created an
+`at-worm-*` lock bucket and set GOVERNANCE for one day. Its objects were
+written before that default was in effect, so the check never proved that a
+version could not be deleted or overwritten, and it never ran COMPLIANCE or
+legal hold.
+
+Deep coverage is `S3C-602` through `S3C-605` in `rustfs-s3-compat-test.sh`:
+
+| Case | Proves |
+| --- | --- |
+| `S3C-602` DefaultRetention | GOVERNANCE default is configured before the object is written. That version keeps its bytes across a same-key PUT, and version delete is `AccessDenied`. |
+| `S3C-603` GovernanceProtection | Per-version GOVERNANCE blocks version delete. Bypass can remove it. A same-key PUT does not replace the locked bytes. A delete without a version id only adds a delete marker. |
+| `S3C-604` ComplianceProtection | COMPLIANCE blocks version delete, including `--bypass-governance-retention`. |
+| `S3C-605` LegalHold | Legal hold `ON` blocks version delete. `OFF` allows that version to be removed. |
+
+`S3C-602` writes the object only after `put-object-lock-configuration`.
+`S3C-603`, `S3C-604`, and `S3C-605` attach protection to the returned version
+id before any delete or overwrite probe. `S3C-604` cannot remove its
+COMPLIANCE object before the one-day retain-until. Each case uses a fresh
+bucket name (`s3c60N-lk-<random>-<pid>`), so a later run does not collide
+with that leftover bucket.
+
+Campaign `scripts/run-auto-testing-full.sh` should call the lighter harness
+after the endpoint is healthy. That harness reuses the same four functions
+and does not deploy a cluster:
+
+```bash
+./scripts/campaign/run-worm-object-lock.sh \
+  --endpoint "http://127.0.0.1:29000"
+```
+
+A topology run that installs RustFS selects the same cases with:
+
+```bash
+./rustfs-s3-compat-test.sh --topology single-single -y \
+  --package-url <deb url> --suite worm
+```
+
+`python3 -m unittest test_rustfs_worm_object_lock.py` checks the oracles,
+the write-after-default-retention order, and that both entry points schedule
+exactly `S3C-602`..`S3C-605`.
+
 The report's full implemented-case gate is intentionally not enabled by these
 runs. Run it with `--gate-status implemented` only after all 66
 implemented source cases have verified executors and live results.
