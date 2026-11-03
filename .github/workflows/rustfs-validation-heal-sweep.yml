@@ -132,7 +132,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${SKIP_TOOLS}" = "true" ]; then
-            RUN="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0]')"
+            # Filter client-side: the ?status=success query param does not
+            # match this endpoint reliably (observed returning 0 despite an
+            # existing successful run).
+            RUN="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?per_page=10" \
+              --jq '[.workflow_runs[] | select(.conclusion == "success")][0] // empty')"
+            [ -n "${RUN}" ] || { echo "no successful validation-tools run to reuse"; exit 1; }
           else
             BEFORE="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?per_page=1" --jq '.workflow_runs[0].id')"
             # native/manager builds are pinned to reviewed reference
