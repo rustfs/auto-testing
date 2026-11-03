@@ -135,13 +135,15 @@ jobs:
             RUN="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0]')"
           else
             BEFORE="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?per_page=1" --jq '.workflow_runs[0].id')"
+            # native/manager builds are pinned to reviewed reference
+            # candidates (REVIEWED_CANDIDATES allowlist) and fail on any
+            # other source SHA; the nightly sweep only needs the inspector
+            # and the shared fixture encoder, which build for any candidate.
             gh api --method POST "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/dispatches" \
               -F ref="main" \
               -f "inputs[candidate_sha]=${CANDIDATE_SHA}" \
               -f "inputs[auto_testing_sha]=${GITHUB_SHA}" \
-              -f "inputs[build_native_heal]=true" \
-              -f "inputs[build_shared_heal]=true" \
-              -f "inputs[build_manager_native]=true" >/dev/null
+              -f "inputs[build_shared_heal]=true" >/dev/null
             echo "dispatched validation-tools build for candidate ${CANDIDATE_SHA}"
             # Wait for the dispatched run to appear, then for it to finish.
             RUN=""
@@ -181,7 +183,7 @@ jobs:
           set -euo pipefail
           ROOT="${RUNNER_TEMP}/validation-heal-tools"
           mkdir -p "${ROOT}"
-          for KIND in tools native shared; do
+          for KIND in tools shared; do
             NAME="rustfs-validation-${KIND}-${TOOL_RUN_ID}-${TOOL_ATTEMPT}"
             DEST="${ROOT}/${KIND}"
             gh api "repos/rustfs/rustfs/actions/runs/${TOOL_RUN_ID}/artifacts?per_page=100" \
@@ -206,7 +208,6 @@ jobs:
             > "${VALIDATION_ROOT}/tool-manifest.json"
           {
             echo "VALIDATION_HEAL_TOOL_DIRECTORY=${RUNNER_TEMP}/validation-heal-tools/tools"
-            echo "VALIDATION_HEAL_NATIVE_DIRECTORY=${RUNNER_TEMP}/validation-heal-tools/native"
             echo "VALIDATION_HEAL_SHARED_DIRECTORY=${RUNNER_TEMP}/validation-heal-tools/shared"
           } >> "${GITHUB_ENV}"
 
@@ -248,11 +249,24 @@ jobs:
               "heal.after-retired-pool-removal", "heal.ec84-multi-set-restart",
               "heal.slow-io-and-eio", "heal.kms-and-tier-outage", "heal.long-soak",
           }
+          # Candidate-pinned races/diagnostics: their executors hard-require
+          # the reviewed reference candidate (source_contract allowlists in
+          # race.py / I05 / F07) and cannot run against arbitrary nightlies.
+          candidate_pinned = {
+              "heal.race-unversioned-overwrite", "heal.race-versioned-put",
+              "heal.race-version-delete", "heal.race-markers-and-batch-delete",
+              "heal.race-multipart-complete-abort", "heal.race-copy-and-metadata-update",
+              "heal.admin-nolock-safety", "heal.lock-timeout-and-caller-abort",
+              "heal.checkpoint-and-mrf-corruption", "heal.outcome-counters-and-error-truth",
+              "heal.bucket-incarnation-recreation",
+          }
           catalog = json.loads(Path("validation-cases.json").read_text())
           selected = [c["id"] for m in catalog["modules"] if m["id"] in ("heal-scanner", "heal-extended")
                       for c in m["cases"] if c.get("source_status") == "procedure-ready"]
-          runnable = [i for i in selected if i not in env_gated]
+          excluded = env_gated | candidate_pinned
+          runnable = [i for i in selected if i not in excluded]
           blocked = sorted(i for i in selected if i in env_gated)
+          pinned = sorted(i for i in selected if i in candidate_pinned)
           one = os.environ.get("SELECTED_CASE", "").strip()
           if one:
               if one not in runnable:
@@ -264,7 +278,9 @@ jobs:
           root = Path(os.environ["HEAL_ROOT"])
           (root / "heal-cases.txt").write_text("\n".join(runnable) + "\n")
           (root / "blocked-cases.txt").write_text("\n".join(blocked) + "\n")
-          print(f"selected {len(runnable)} runnable heal case(s); {len(blocked)} environment-gated BLOCKED")
+          (root / "pinned-cases.txt").write_text("\n".join(pinned) + "\n")
+          print(f"selected {len(runnable)} runnable heal case(s); "
+                f"{len(blocked)} environment-gated + {len(pinned)} candidate-pinned BLOCKED")
           PY
 
       - name: Admit clean shared environment
@@ -289,23 +305,32 @@ jobs:
             echo "::group::case ${CASE_ID}"
             rm -rf "${HEAL_ROOT}/run"
             rm -f "${HEAL_ROOT}/results/${CASE_ID//\//_}.timeout"
-            if timeout 900 ./scripts/run_validation_case.sh \
-                 "${CASE_ID}" "${HEAL_ROOT}/candidate.json" \
-                 "${AUTO_TESTING_SHA}" "${HEAL_ROOT}/run" \
-                 < /dev/null \
-                 > "${HEAL_ROOT}/results/${CASE_ID//\//_}.log" 2>&1; then
-              printf '%s\tPASS\n' "${CASE_ID}" >> "${HEAL_ROOT}/results.txt"
-              echo "case ${CASE_ID}: PASS"
-            else
-              rc=$?
-              if [ "${rc}" -eq 124 ]; then
-                printf '%s\tTIMEOUT\n' "${CASE_ID}" >> "${HEAL_ROOT}/results.txt"
-                echo "case ${CASE_ID}: TIMEOUT after 900s"
-              else
-                printf '%s\tFAIL\n' "${CASE_ID}" >> "${HEAL_ROOT}/results.txt"
-                echo "case ${CASE_ID}: FAIL rc=${rc} (log retained in the sweep artifact)"
-              fi
+            rc=0
+            timeout 900 ./scripts/run_validation_case.sh \
+              "${CASE_ID}" "${HEAL_ROOT}/candidate.json" \
+              "${AUTO_TESTING_SHA}" "${HEAL_ROOT}/run" \
+              < /dev/null \
+              > "${HEAL_ROOT}/results/${CASE_ID//\//_}.log" 2>&1 || rc=$?
+            # The case verdict is authoritative from the result JSON: drivers
+            # may self-report BLOCKED (diagnostic gates) with a nonzero exit;
+            # only FAIL / INFRA_ERROR / TIMEOUT keep the sweep red.
+            VERDICT=""
+            if [ -f "${HEAL_ROOT}/run/cases/${CASE_ID}.json" ]; then
+              VERDICT="$(jq -r '.verdict // empty' "${HEAL_ROOT}/run/cases/${CASE_ID}.json" 2>/dev/null || true)"
+              cp "${HEAL_ROOT}/run/cases/${CASE_ID}.json" "${HEAL_ROOT}/results/${CASE_ID//\//_}.result.json" 2>/dev/null || true
             fi
+            STATUS="FAIL"
+            if [ "${VERDICT}" = "PASS" ] && [ "${rc}" -eq 0 ]; then
+              STATUS="PASS"
+            elif [ "${VERDICT}" = "BLOCKED" ]; then
+              STATUS="BLOCKED"
+            elif [ "${rc}" -eq 124 ]; then
+              STATUS="TIMEOUT"
+            elif [ "${VERDICT}" = "INFRA_ERROR" ]; then
+              STATUS="FAIL"
+            fi
+            printf '%s\t%s\n' "${CASE_ID}" "${STATUS}" >> "${HEAL_ROOT}/results.txt"
+            echo "case ${CASE_ID}: ${STATUS} (rc=${rc} verdict=${VERDICT:-none})"
             if [ -f "${HEAL_ROOT}/run/report.md" ]; then
               cp "${HEAL_ROOT}/run/report.md" "${HEAL_ROOT}/results/${CASE_ID//\//_}.report.md" 2>/dev/null || true
             fi
@@ -350,6 +375,7 @@ jobs:
           failed = sum(1 for _, _, s in rows if s == "FAIL")
           timed_out = sum(1 for _, _, s in rows if s == "TIMEOUT")
           blocked = (root / "blocked-cases.txt").read_text().split()
+          pinned = (root / "pinned-cases.txt").read_text().split()
           run_url = (f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
                      f"{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}")
           report = [
@@ -382,12 +408,18 @@ jobs:
           ]
           report += [f"- {c}: BLOCKED" for c in blocked]
           report += [
+              "", "## Candidate-pinned races/diagnostics (BLOCKED)", "",
+              "These executors hard-require the reviewed reference candidate",
+              "(native contract allowlists); they run only on interactive", "validation dispatches:", "",
+          ]
+          report += [f"- {c}: BLOCKED" for c in pinned]
+          report += [
               "", "## Totals", "",
               f"- Total: {len(rows)}",
               f"- PASS: {passed}",
               f"- FAIL: {failed}",
               f"- TIMEOUT: {timed_out}",
-              f"- BLOCKED: {len(blocked)}", "",
+              f"- BLOCKED: {len(blocked) + len(pinned) + sum(1 for _, _, s in rows if s == 'BLOCKED')}", "",
               "Failing cases keep this workflow red only as a report; the sweep artifact",
               "retains every case log and per-case report for diagnosis.", "",
           ]
@@ -480,7 +512,7 @@ jobs:
           HEAL_ROOT: ${{ runner.temp }}/validation-heal
         run: |
           set -euo pipefail
-          if grep -q $'\tFAIL$' "${HEAL_ROOT}/results.txt" || grep -q $'\tTIMEOUT$' "${HEAL_ROOT}/results.txt"; then
+          if grep -qE $'\t(FAIL|TIMEOUT)$' "${HEAL_ROOT}/results.txt"; then
             echo "validation heal sweep has failing or timed-out cases:"
             grep -E $'\t(FAIL|TIMEOUT)$' "${HEAL_ROOT}/results.txt"
             exit 1
