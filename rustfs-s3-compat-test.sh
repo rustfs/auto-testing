@@ -3245,7 +3245,12 @@ main() {
     if [ "${FAIL}" -gt 0 ]; then
       overall_fail=1
     fi
-    if [ "${UNSUPPORTED}" -gt 0 ] || [ "${cleanup_status}" != PASS ]; then overall_fail=1; fi
+    # UNSUPPORTED cases (environment gates such as the rc-restart exit-7 skip) are
+    # expected in plain lane runs — the validation flow is the only mode
+    # that treats them as incomplete. Failing the lane on them made every
+    # topology exit 1 despite PASS=97 FAIL=0 (run 41595673455).
+    if [ "${cleanup_status}" != PASS ]; then overall_fail=1; fi
+    if [ -n "${VALIDATION_CASE}" ] && [ "${UNSUPPORTED}" -gt 0 ]; then overall_fail=1; fi
   done
   final_summary
   [ "${overall_fail}" -eq 0 ] || exit 1
