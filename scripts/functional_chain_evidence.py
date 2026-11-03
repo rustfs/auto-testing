@@ -228,7 +228,10 @@ def aggregate(chain, directory, needs, allow_skipped=(), plan=None):
     selected = plan["suites"]
     allowed = {name for name in allow_skipped if name}
     require(allowed <= set(plan["optional_suites"]), "aggregate allow-list names a required or unknown lane")
-    require(set(needs) == set(SUITES), "aggregate is missing a required lane")
+    # Disabled lanes stay registered but are absent from needs while their job
+    # is commented out. Every suite this plan scheduled must still be present.
+    require(set(selected) <= set(needs), "aggregate is missing a scheduled lane")
+    require(set(needs) <= set(SUITES), "aggregate names a lane that is not registered")
     require(all(value.get("result") == "skipped" for name, value in needs.items() if name not in selected),
             "an unselected suite unexpectedly ran")
     skipped = {name for name in selected if needs[name].get("result") == "skipped"}

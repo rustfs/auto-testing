@@ -31,6 +31,10 @@
 #
 # Reusable workflows run from this driver's commit in one Actions run. Each
 # selected suite still runs after an earlier failure; the final job checks its plan.
+# The nightly plan includes validation-cases: one rotating window of catalog
+# cases with lane executors, on the same fleet lock as s3/heal/pool. Interactive
+# heal cases stay on workflow_dispatch. validation-package and validation-tools
+# builds stay on rustfs/rustfs and are not scheduled here.
 name: RustFS Functional Chain
 
 on:
@@ -327,13 +331,13 @@ jobs:
           GH_TOKEN: ${{ secrets.PF_TESTING_GH_TOKEN }}
           PERFORMANCE_OPTIONAL: ${{ contains(fromJSON(steps.selection.outputs.optional_suites), 'performance') }}
         run: |
-          # TEMPORARY: the pf-testing environment is broken, so the
-          # performance lane is disabled until it is repaired. Forcing
-          # offline keeps the chain on its designed skip path: the lane job
-          # is skipped, aggregate receives --allow-skipped performance
-          # (required=false in scheduled-validations.json), and the report
-          # records the optional-lane skip with its reason.
-          # Restore the probe below once the environment is healthy again.
+          # TEMPORARY: the pf-testing environment is broken. The performance
+          # workflow policy is disabled, so Nightly does not select the suite
+          # and this probe does not run. The offline force remains as a
+          # backstop if the suite is selected again before the probe is
+          # restored. Restore the probe below once the environment is healthy,
+          # set the workflow policy back to active, and uncomment the
+          # performance job.
           # if python3 scripts/check_functional_runners.py pf-testing; then
           #   echo "performance_ready=online" >> "$GITHUB_OUTPUT"
           # else
@@ -864,16 +868,31 @@ jobs:
       chain_manifest: ${{ needs.prepare.outputs.manifest }}
     secrets: inherit
 
-  performance:
-    needs: [prepare]
-    if: ${{ always() && needs.prepare.result == 'success' && contains(fromJSON(needs.prepare.outputs.suites || '[]'), 'performance') && needs.prepare.outputs.performance_ready == 'online' }}
-    uses: ./.github/workflows/rustfs-performance-test.yml
+  validation-cases:
+    needs: [prepare, table]
+    if: ${{ always() && needs.prepare.result == 'success' && contains(fromJSON(needs.prepare.outputs.suites || '[]'), 'validation-cases') }}
+    uses: ./.github/workflows/rustfs-validation-cases.yml
     with:
       chain_manifest: ${{ needs.prepare.outputs.manifest }}
+      rotate: true
+      limit: 12
     secrets: inherit
 
+  # TEMPORARY: pf-testing is broken, so Nightly does not schedule performance.
+  # The suite stays registered with workflow policy "disabled". Restore this
+  # job, add it back to complete-chain needs, set that policy to "active",
+  # and uncomment the probe in prepare.
+  # performance:
+  #   needs: [prepare]
+  #   if: ${{ always() && needs.prepare.result == 'success' && contains(fromJSON(needs.prepare.outputs.suites || '[]'), 'performance') && needs.prepare.outputs.performance_ready == 'online' }}
+  #   uses: ./.github/workflows/rustfs-performance-test.yml
+  #   with:
+  #     chain_manifest: ${{ needs.prepare.outputs.manifest }}
+  #   secrets: inherit
+
   complete-chain:
-    needs: [prepare, upgrade, s3, kms, tier, storage, heal, pool, security, replication, fault-tolerance, table, performance]
+    # performance stays commented out while pf-testing is broken.
+    needs: [prepare, upgrade, s3, kms, tier, storage, heal, pool, security, replication, fault-tolerance, table, validation-cases]
     if: ${{ always() && needs.prepare.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

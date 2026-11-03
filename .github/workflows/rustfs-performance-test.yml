@@ -1,5 +1,12 @@
 name: RustFS Performance Test
 
+# TEMPORARY DISABLE: the pf-testing environment is broken. Job conditions are
+# forced off so neither Nightly nor a manual dispatch enters that fleet.
+# The workflow file and suite registration stay. To re-enable, restore the
+# commented job conditions below, set this workflow's policy back to "active"
+# in .github/scheduled-validations.json, and uncomment the performance job in
+# rustfs-functional-chain.yml.
+
 on:
   workflow_call:
     inputs:
@@ -86,7 +93,8 @@ env:
 
 jobs:
   runner-check:
-    if: ${{ inputs.chain_manifest != '' || github.event_name == 'workflow_dispatch' }}
+    # if: ${{ inputs.chain_manifest != '' || github.event_name == 'workflow_dispatch' }}
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -110,7 +118,8 @@ jobs:
       RUSTFS_WARP_CONCURRENCY: ${{ inputs.warp_concurrency || '64' }}
     # Run on manual dispatch, or when the nightly build completed successfully.
     # Skipped when nightly failed.
-    if: ${{ inputs.chain_manifest != '' || github.event_name == 'workflow_dispatch' }}
+    # if: ${{ inputs.chain_manifest != '' || github.event_name == 'workflow_dispatch' }}
+    if: false
     steps:
       - name: Checkout chain tooling
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7

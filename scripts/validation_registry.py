@@ -86,8 +86,11 @@ def select_plan(registry, cadence="nightly", requested="", event="workflow_dispa
     require(not requested or event == "workflow_dispatch", "automatic plans cannot override suite selection")
     by_id = {item["id"]: item for item in registry["suites"]}
     explicit = bool(requested and requested != "all")
+    # Disabled workflow policy keeps the suite registered but unschedulable.
+    # Explicit selection still fails below so an operator sees why it was refused.
     names = requested.split(",") if explicit else [item["id"] for item in registry["suites"]
-              if item["cadence"] in registry["plans"][cadence]["cadences"]]
+              if item["cadence"] in registry["plans"][cadence]["cadences"]
+              and workflow_entry(item["workflow"], registry)["policy"] == "active"]
     require(names and all(name == name.strip() and name in by_id for name in names)
             and len(names) == len(set(names)), "unknown, empty or duplicate selected suite")
     selected = set()

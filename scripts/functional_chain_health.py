@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from functional_chain_evidence import validate_records
 from resolve_functional_candidate import UPSTREAM_REPOSITORY, api, chain_repository, read_json_artifact, require, resolve, sha
-from validation_registry import load_registry, select_plan, suite_ids, validate_plan, workflow_entry
+from validation_registry import load_registry, select_plan, validate_plan, workflow_entry
 
 WORKFLOW = "rustfs-functional-chain.yml"
 ENTRY = workflow_entry(".github/workflows/" + WORKFLOW)
@@ -32,7 +32,8 @@ def validate_summary(summary, run):
     require(chain["run_id"] == run["id"] and chain["attempt"] == run["run_attempt"] and chain["workflow_sha"] == run["head_sha"], "complete evidence belongs to another run attempt")
     require(sha(chain["testing_sha"]) and chain["testing_sha"] == chain["workflow_sha"], "harness revision must be the chain workflow commit")
     plan = validate_plan(summary["plan"]) if "plan" in summary else select_plan(load_registry())
-    require(plan["suites"] == list(suite_ids()), "partial suite execution cannot satisfy complete-chain health")
+    full = select_plan(load_registry(), plan.get("cadence") or "nightly")
+    require(plan["suites"] == full["suites"], "partial suite execution cannot satisfy complete-chain health")
     skipped = summary.get("skipped_lanes", [])
     require(isinstance(skipped, list) and len(skipped) == len(set(skipped))
             and set(skipped) <= set(plan["optional_suites"]), "required suite was skipped")
@@ -107,7 +108,8 @@ def expected_attempt(run):
             "selection plan size is invalid")
     archive = api(f"repos/{chain_repository()}/actions/artifacts/{artifact['id']}/zip", binary=True)
     plan = validate_plan(read_json_artifact(archive, artifact, run, name, "suite-plan.json"))
-    return plan["suites"] == list(suite_ids())
+    full = select_plan(load_registry(), plan.get("cadence") or "nightly")
+    return plan["suites"] == full["suites"]
 
 
 def list_runs(page_size):
