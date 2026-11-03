@@ -31,8 +31,8 @@
 #
 # Reusable workflows run from this driver's commit in one Actions run. Each
 # selected suite still runs after an earlier failure; the final job checks its plan.
-# The nightly plan includes validation-cases: one rotating window of catalog
-# cases with lane executors, on the same fleet lock as s3/heal/pool. Interactive
+# The nightly plan includes validation-cases: the full sweepable catalog
+# on every run, on the same fleet lock as s3/heal/pool. Interactive
 # heal cases stay on workflow_dispatch. validation-package and validation-tools
 # builds stay on rustfs/rustfs and are not scheduled here.
 name: RustFS Functional Chain
@@ -874,8 +874,8 @@ jobs:
     uses: ./.github/workflows/rustfs-validation-cases.yml
     with:
       chain_manifest: ${{ needs.prepare.outputs.manifest }}
-      rotate: true
-      limit: 12
+      rotate: false
+      limit: 0
     secrets: inherit
 
   # TEMPORARY: pf-testing is broken, so Nightly does not schedule performance.
