@@ -178,6 +178,7 @@ jobs:
             if ./scripts/run_validation_case.sh \
                  "${CASE_ID}" "${SWEEP_ROOT}/candidate.json" \
                  "${AUTO_TESTING_SHA}" "${SWEEP_ROOT}/run" \
+                 < /dev/null \
                  > "${SWEEP_ROOT}/results/${CASE_ID//\//_}.log" 2>&1; then
               printf '%s\tPASS\n' "${CASE_ID}" >> "${SWEEP_ROOT}/results.txt"
               echo "case ${CASE_ID}: PASS"
