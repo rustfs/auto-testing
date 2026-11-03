@@ -29,15 +29,15 @@ on:
         type: string
         required: true
       rotate:
-        description: Take the UTC day-of-year window instead of the first N cases
+        description: Take the UTC day-of-year window instead of the full catalog
         type: boolean
         required: false
-        default: true
+        default: false
       limit:
-        description: Cases in the rotating window, or the manual cap when rotate is false
+        description: Cases in the rotating window, or the manual cap when rotate is false (0 = everything)
         type: number
         required: false
-        default: 12
+        default: 0
       case:
         description: Single canonical case id; overrides rotation
         type: string
@@ -64,7 +64,7 @@ on:
         description: 'Maximum cases (0 = everything selected). Ignored for a single case.'
         type: number
         required: false
-        default: 12
+        default: 0
       rotate:
         description: 'Use the nightly UTC rotation window'
         type: boolean
@@ -103,7 +103,7 @@ env:
 jobs:
   validation-cases:
     runs-on: smoke-testing
-    timeout-minutes: 180
+    timeout-minutes: 330
     if: ${{ inputs.chain_manifest != '' || github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout chain tooling
@@ -214,7 +214,7 @@ jobs:
 
       - name: Run validation cases
         id: test
-        timeout-minutes: 150
+        timeout-minutes: 300
         continue-on-error: true
         env:
           AUTO_TESTING_SHA: ${{ steps.chain.outputs.testing_sha || steps.resolved.outputs.testing_sha }}
@@ -229,6 +229,7 @@ jobs:
             if ./scripts/run_validation_case.sh \
                  "${CASE_ID}" "${CASES_ROOT}/candidate.json" \
                  "${AUTO_TESTING_SHA}" "${CASES_ROOT}/run" \
+                 < /dev/null \
                  > "${CASES_ROOT}/results/${CASE_ID//\//_}.log" 2>&1; then
               printf '%s\tPASS\n' "${CASE_ID}" >> "${CASES_ROOT}/results.txt"
               echo "case ${CASE_ID}: PASS"
