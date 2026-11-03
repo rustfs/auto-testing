@@ -15,6 +15,7 @@ on:
       - scripts/prepare_retained_validation_recovery.py
       - scripts/resolve_functional_candidate.py
       - scripts/retain_validation_evidence.py
+      - scripts/select_validation_cases.py
       - scripts/test_functional_dispatch.py
       - scripts/test_prepare_functional_package.py
       - scripts/validation_registry.py
@@ -33,6 +34,7 @@ on:
       - scripts/prepare_retained_validation_recovery.py
       - scripts/resolve_functional_candidate.py
       - scripts/retain_validation_evidence.py
+      - scripts/select_validation_cases.py
       - scripts/test_functional_dispatch.py
       - scripts/test_prepare_functional_package.py
       - scripts/validation_registry.py

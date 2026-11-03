@@ -14,21 +14,16 @@
 
 name: RustFS Validation Sweep
 
-# Executes the migrated canonical validation cases (rustfs/auto-testing#113)
-# on the shared functional fleet. Everything with a lane executor is swept in
-# rotating nightly batches so the whole set is covered roughly weekly; a
-# single case or one module can be dispatched manually. That is the
-# implemented catalog (66 today) plus the eight planned cases whose dedicated
-# executors already exist and have live PASS evidence - fresh nightly
-# evidence feeds their acceptance review. heal.* cases stay on the
-# interactive validation flow: they require reviewed native/tool collectors
-# built by separate validation-tools runs before fleet execution.
+# Manual case or module entry for the migrated catalog (rustfs/auto-testing#113).
+# Nightly batches run as the validation-cases suite inside the functional
+# chain, against the dispatched candidate and on the shared fleet lock.
+# heal.* cases stay on the interactive validation flow: they require reviewed
+# native/tool collectors built by separate validation-tools runs on rustfs/rustfs.
+# Restore the schedule below only to run a separate sweep again:
+# schedule:
+#   - cron: "30 19 * * *"
 
 on:
-  schedule:
-    # After the nightly functional chain settles (chain starts ~16:48 UTC and
-    # runs for about two hours).
-    - cron: "30 19 * * *"
   workflow_dispatch:
     inputs:
       case:
@@ -76,6 +71,9 @@ jobs:
   sweep:
     if: github.repository == 'rustfs/auto-testing'
     runs-on: smoke-testing
+    concurrency:
+      group: rustfs-shared-functional-tests-v2
+      cancel-in-progress: false
     timeout-minutes: 150
     steps:
       - name: Checkout chain tooling
@@ -154,59 +152,7 @@ jobs:
           SWEEP_ROOT: ${{ runner.temp }}/validation-sweep
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import datetime
-          import json
-          import os
-          from pathlib import Path
-          sweep_root = Path(os.environ["SWEEP_ROOT"])
-
-          catalog = json.loads(Path("validation-cases.json").read_text())
-          def sweepable(case):
-              status = case.get("source_status")
-              if status == "implemented":
-                  return True
-              # The remaining planned non-heal cases route to the lane
-              # executors and already have live PASS evidence; sweeping them
-              # nightly produces fresh evidence for their acceptance review.
-              return status == "planned" and not case["id"].startswith("heal.")
-
-          selected = [(case["id"], module["id"]) for module in catalog["modules"]
-                      for case in module["cases"]
-                      if sweepable(case)]
-          if not selected:
-              raise SystemExit("catalog has no sweepable cases")
-
-          one_case = os.environ.get("SELECTED_CASE", "").strip()
-          module_filter = os.environ.get("SELECTED_MODULE", "").strip()
-          known = {case_id for case_id, _ in selected}
-          modules = {module_id for _, module_id in selected}
-          if one_case:
-              if one_case not in known:
-                  raise SystemExit(f"unknown case or no lane executor for it: {one_case}")
-              selected = [(one_case, dict(selected)[one_case])]
-          elif module_filter:
-              if module_filter not in modules:
-                  raise SystemExit(f"unknown module or no implemented cases: {module_filter}")
-              selected = [pair for pair in selected if pair[1] == module_filter]
-          elif os.environ.get("SWEEP_EVENT") == "schedule":
-              # Stateless rotation: every night take one window of the catalog
-              # so a full sweep needs len(selected)/limit nights and no state
-              # has to be carried between runs.
-              limit = max(1, int(os.environ.get("CASE_LIMIT") or 12))
-              day = datetime.datetime.now(datetime.timezone.utc).timetuple().tm_yday
-              start = (day * limit) % len(selected)
-              selected = (selected[start:] + selected[:start])[:limit]
-          limit = int(os.environ.get("CASE_LIMIT") or 0)
-          if one_case or module_filter or (not os.environ.get("SWEEP_EVENT") == "schedule"):
-              if limit > 0:
-                  selected = selected[:limit]
-
-          (sweep_root / "sweep-cases.txt").write_text("".join(f"{case_id}\n" for case_id, _ in selected))
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"count={len(selected)}\n")
-          print(f"selected {len(selected)} case(s):", ", ".join(c for c, _ in selected))
-          PY
+          python3 scripts/select_validation_cases.py --output "${SWEEP_ROOT}/sweep-cases.txt"
 
       - name: Admit clean shared environment
         id: environment

@@ -259,8 +259,28 @@
       "resource_lock": "rustfs-performance-suite",
       "owner": "@overtrue",
       "required": false,
-      "optional_reason": "Performance may be unavailable only when the full plan explicitly records that decision.",
+      "optional_reason": "Temporarily disabled: the pf-testing environment is broken. Workflow policy is disabled so Nightly does not select this suite. Restore policy to active and uncomment the functional-chain performance job to re-enable.",
       "evidence": "functional-chain-performance-{run_id}-{attempt}",
+      "inputs": [
+        "chain_manifest"
+      ]
+    },
+    {
+      "id": "validation-cases",
+      "workflow": ".github/workflows/rustfs-validation-cases.yml",
+      "cadence": "nightly",
+      "timezone": "UTC",
+      "events": [
+        "workflow_call",
+        "workflow_dispatch"
+      ],
+      "dependencies": [],
+      "environment": "functional-fleet",
+      "resource_lock": "rustfs-shared-functional-tests-v2",
+      "owner": "@overtrue",
+      "required": true,
+      "optional_reason": null,
+      "evidence": "functional-chain-validation-cases-{run_id}-{attempt}",
       "inputs": [
         "chain_manifest"
       ]
@@ -268,30 +288,44 @@
   ],
   "workflows": [
     {
-      "workflow": ".github/workflows/rustfs-validation-sweep.yml",
-      "name": "RustFS Validation Sweep",
+      "workflow": ".github/workflows/rustfs-validation-cases.yml",
+      "name": "RustFS Validation Cases",
       "roles": [
-        "periodic",
         "manual"
       ],
       "events": [
-        "schedule",
+        "workflow_call",
         "workflow_dispatch"
       ],
-      "cadence": "nightly",
+      "cadence": "event",
       "timezone": "UTC",
-      "schedule": [
-        "30 19 * * *"
-      ],
+      "schedule": [],
       "owner": "@overtrue",
       "policy": "active",
-      "monitor": "workflow",
-      "max_age_hours": 60,
+      "monitor": "functional-chain",
+      "result_owner": "rustfs-functional-chain.yml",
+      "disposition": "Nightly catalog window inside the functional chain; interactive heal cases stay on workflow_dispatch",
+      "origin": "baseline"
+    },
+    {
+      "workflow": ".github/workflows/rustfs-validation-sweep.yml",
+      "name": "RustFS Validation Sweep",
+      "roles": [
+        "manual"
+      ],
+      "events": [
+        "workflow_dispatch"
+      ],
+      "cadence": "event",
+      "timezone": "UTC",
+      "schedule": [],
+      "owner": "@overtrue",
+      "policy": "active",
+      "monitor": "none",
       "result_owner": "rustfs-validation-sweep.yml",
-      "disposition": "canonical validation cases executed in rotating batches",
-      "failure_owner": "workflow",
-      "origin": "baseline",
-      "alert_contract": "scheduled-validation"
+      "disposition": "Manual case or module entry. Nightly batches run as validation-cases inside the functional chain.",
+      "monitor_reason": "Nightly catalog batches run as the validation-cases suite on nightly-candidate-ready. This workflow is manual only.",
+      "origin": "baseline"
     },
     {
       "workflow": ".github/workflows/functional-chain-health.yml",
@@ -436,10 +470,10 @@
       "timezone": "UTC",
       "schedule": [],
       "owner": "@overtrue",
-      "policy": "active",
+      "policy": "disabled",
       "monitor": "functional-chain",
       "result_owner": "rustfs-functional-chain.yml",
-      "disposition": "reusable suite and isolated manual entry; repository_dispatch relay retired",
+      "disposition": "Temporarily disabled because the pf-testing environment is broken. Nightly does not select this suite. Restore policy to active and uncomment the functional-chain performance job to re-enable.",
       "origin": "baseline"
     },
     {

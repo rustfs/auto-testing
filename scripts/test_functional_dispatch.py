@@ -3,14 +3,18 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 import resolve_functional_candidate as resolver
-from functional_chain_evidence import current_chain
-from validation_registry import check_wiring, load_registry, select_plan
+from datetime import datetime, timezone
+
+from functional_chain_evidence import aggregate, current_chain
+from select_validation_cases import select_validation_cases
+from validation_registry import check_wiring, load_registry, select_plan, workflow_entry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,9 +182,40 @@ class DispatchContractTests(unittest.TestCase):
     def test_repository_dispatch_selects_the_full_plan(self):
         plan = select_plan(load_registry(), "nightly", "", "repository_dispatch")
         self.assertIn("upgrade", plan["suites"])
-        self.assertIn("performance", plan["optional_suites"])
+        self.assertIn("validation-cases", plan["suites"])
+        self.assertNotIn("performance", plan["suites"])
+        self.assertNotIn("performance", plan["optional_suites"])
+        self.assertEqual(workflow_entry(".github/workflows/rustfs-performance-test.yml")["policy"], "disabled")
         with self.assertRaises(ValueError):
             select_plan(load_registry(), "nightly", "s3", "repository_dispatch")
+        with self.assertRaises(ValueError):
+            select_plan(load_registry(), "nightly", "performance", "workflow_dispatch")
+
+    def test_disabled_performance_is_not_required_in_aggregate_needs(self):
+        plan = select_plan(load_registry(), "nightly", "", "repository_dispatch")
+        needs = {name: {"result": "skipped"} for name in plan["suites"]}
+        with self.assertRaises(ValueError) as caught:
+            aggregate({"schema": 1}, Path("/tmp/chain-evidence-absent"), needs, plan=plan)
+        message = str(caught.exception)
+        self.assertIn("skipped without preflight permission", message)
+        self.assertNotIn("performance", message)
+        omitted = {name: {"result": "success"} for name in plan["suites"] if name != "validation-cases"}
+        with self.assertRaises(ValueError) as missing:
+            aggregate({"schema": 1}, Path("/tmp/chain-evidence-absent"), omitted, plan=plan)
+        self.assertIn("missing a scheduled lane", str(missing.exception))
+
+    def test_nightly_validation_window_rotates_and_skips_interactive_heal(self):
+        catalog = json.loads((ROOT / "validation-cases.json").read_text())
+        first = select_validation_cases(catalog, limit=12, rotate=True, when=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        again = select_validation_cases(catalog, limit=12, rotate=True, when=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        second = select_validation_cases(catalog, limit=12, rotate=True, when=datetime(2026, 1, 2, tzinfo=timezone.utc))
+        self.assertEqual(first, again)
+        self.assertEqual(len(first), 12)
+        self.assertNotEqual(first, second)
+        self.assertTrue(all(not case_id.startswith("heal.") for case_id, _ in first))
+        self.assertEqual(select_validation_cases(catalog, case="pool.status"), [("pool.status", "pool-lifecycle")])
+        with self.assertRaises(ValueError):
+            select_validation_cases(catalog, case="heal.admin-healthy-noop")
 
     def test_registry_matches_ported_workflows(self):
         check_wiring(load_registry())
@@ -190,7 +225,21 @@ class DispatchContractTests(unittest.TestCase):
         self.assertIn("types: [nightly-candidate-ready]", chain)
         self.assertNotIn("\n  workflow_run:\n", chain)
         self.assertIn("performance_ready == 'online'", chain)
+        self.assertIn("validation-cases:", chain)
+        self.assertIsNone(re.search(r"(?m)^  performance:\s*$", chain))
+        self.assertIn("\n  # performance:\n", chain)
         self.assertNotIn("repository: rustfs/auto-testing", chain)
+        heal = (WORKFLOWS / "rustfs-heal-test.yml").read_text()
+        self.assertIn("http://rustfs-node1:9000", heal)
+        self.assertNotIn('--endpoint "${{ env.RUSTFS_API_ENDPOINT }}"', heal)
+        self.assertIn('ENDPOINT="${RUSTFS_API_ENDPOINT:-http://rustfs-node1:9000}"', heal)
+        performance = (WORKFLOWS / "rustfs-performance-test.yml").read_text()
+        self.assertIn("if: false", performance)
+        self.assertIn("pf-testing environment is broken", performance)
+        sweep = (WORKFLOWS / "rustfs-validation-sweep.yml").read_text()
+        self.assertIn("select_validation_cases.py", sweep)
+        self.assertIn("group: rustfs-shared-functional-tests-v2", sweep)
+        self.assertIsNone(re.search(r"(?m)^  schedule:\s*$", sweep))
         for path in WORKFLOWS.glob("rustfs-*-test.yml"):
             text = path.read_text()
             self.assertNotIn("repository: rustfs/auto-testing", text, path.name)
