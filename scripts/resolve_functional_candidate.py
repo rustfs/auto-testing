@@ -240,8 +240,10 @@ def write_chain(chain):
 
 
 def manual_manifest():
+    # The literal schema marker must not participate in the presence checks:
+    # with it inside the dict, any(fields.values()) was always true and the
+    # build-run-only dispatch form could never reach its intended branch.
     fields = {
-        "schema": 2,
         "workflow_sha": os.environ.get("WORKFLOW_SHA", "").strip(),
         "source_ref": os.environ.get("SOURCE_REF", "").strip(),
         "source_sha": os.environ.get("SOURCE_SHA", "").strip(),
@@ -253,6 +255,7 @@ def manual_manifest():
     if any(fields.values()):
         require(all(fields.values()) and run_id and attempt,
                 "manual schema 2 replay requires the full candidate, including build run and attempt")
+        fields = {"schema": 2, **fields}
         fields["build_run_id"] = int(run_id)
         fields["build_run_attempt"] = int(attempt)
         return fields
