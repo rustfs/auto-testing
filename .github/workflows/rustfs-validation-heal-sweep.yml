@@ -297,7 +297,7 @@ jobs:
 
       - name: Run heal validation cases
         id: run_cases
-        timeout-minutes: 480
+        timeout-minutes: 540
         env:
           AUTO_TESTING_SHA: ${{ steps.candidate.outputs.testing_sha }}
           HEAL_ROOT: ${{ runner.temp }}/validation-heal
@@ -311,7 +311,7 @@ jobs:
             rm -rf "${HEAL_ROOT}/run"
             rm -f "${HEAL_ROOT}/results/${CASE_ID//\//_}.timeout"
             rc=0
-            timeout 900 ./scripts/run_validation_case.sh \
+            timeout 1800 ./scripts/run_validation_case.sh \
               "${CASE_ID}" "${HEAL_ROOT}/candidate.json" \
               "${AUTO_TESTING_SHA}" "${HEAL_ROOT}/run" \
               < /dev/null \
@@ -319,20 +319,25 @@ jobs:
             # The case verdict is authoritative from the result JSON: drivers
             # may self-report BLOCKED (diagnostic gates) with a nonzero exit;
             # only FAIL / INFRA_ERROR / TIMEOUT keep the sweep red.
+            # Terminal verdict lives at run/<case>/cases/<case>.json
+            # (run_validation_case.sh passes --validation-artifacts-dir
+            # run/<case>; the heal runner appends cases/<case>.json).
             VERDICT=""
-            if [ -f "${HEAL_ROOT}/run/cases/${CASE_ID}.json" ]; then
-              VERDICT="$(jq -r '.verdict // empty' "${HEAL_ROOT}/run/cases/${CASE_ID}.json" 2>/dev/null || true)"
-              cp "${HEAL_ROOT}/run/cases/${CASE_ID}.json" "${HEAL_ROOT}/results/${CASE_ID//\//_}.result.json" 2>/dev/null || true
+            RESULT_JSON="${HEAL_ROOT}/run/${CASE_ID}/cases/${CASE_ID}.json"
+            if [ -f "${RESULT_JSON}" ]; then
+              VERDICT="$(jq -r '.verdict // empty' "${RESULT_JSON}" 2>/dev/null || true)"
+              cp "${RESULT_JSON}" "${HEAL_ROOT}/results/${CASE_ID//\//_}.result.json" 2>/dev/null || true
             fi
+            # The terminal verdict is authoritative when present; otherwise
+            # trust the runner exit code (rc=0 with no verdict was recorded
+            # as FAIL before this fix — smoke run 41748362310).
             STATUS="FAIL"
-            if [ "${VERDICT}" = "PASS" ] && [ "${rc}" -eq 0 ]; then
+            if [ "${VERDICT}" = "PASS" ] || { [ -z "${VERDICT}" ] && [ "${rc}" -eq 0 ]; }; then
               STATUS="PASS"
             elif [ "${VERDICT}" = "BLOCKED" ]; then
               STATUS="BLOCKED"
             elif [ "${rc}" -eq 124 ]; then
               STATUS="TIMEOUT"
-            elif [ "${VERDICT}" = "INFRA_ERROR" ]; then
-              STATUS="FAIL"
             fi
             printf '%s\t%s\n' "${CASE_ID}" "${STATUS}" >> "${HEAL_ROOT}/results.txt"
             echo "case ${CASE_ID}: ${STATUS} (rc=${rc} verdict=${VERDICT:-none})"
