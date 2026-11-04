@@ -170,7 +170,7 @@ setup_environment() {
     remote_root "${v}" <<EOF || die "install failed on ${v}"
 set -euo pipefail
 pkg_dir="/data/rustfs1"
-pkg_tmp="\${pkg_dir}/.rustfs-table-\${RUN_ID}.deb"
+pkg_tmp="\${pkg_dir}/.rustfs-table-${RUN_ID}.deb"
 mkdir -p "\${pkg_dir}"
 trap 'rm -f "\${pkg_tmp}"' EXIT
 curl --fail --show-error --location --retry 3 --retry-all-errors \

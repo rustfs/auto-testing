@@ -116,7 +116,7 @@ WARP_ROUNDS="${RUSTFS_WARP_ROUNDS:-1}"
 WARP_LOG_FILE="${RUSTFS_WARP_LOG_FILE:-}"
 STORAGE_THRESHOLD=85            # stop writing when usage reaches N% (note suggests 80-85)
 POLL_INTERVAL=30                # status polling interval (seconds)
-WARP_TRANSPORT_FAILURE_PATTERN='502 Bad Gateway|504 Gateway Time-out|HTTP([^0-9]+)?50(2|4)|status([^0-9]+)?50(2|4)|connection (closed|reset|refused)|unexpected EOF|broken pipe|timeout awaiting response headers|context deadline exceeded|i/o timeout|Client\.Timeout exceeded|The service is unavailable|We encountered an internal error|upload error:'
+WARP_TRANSPORT_FAILURE_PATTERN='502 Bad Gateway|504 Gateway Time-out|HTTP([^0-9]+)?50(2|4)|status([^0-9]+)?50(2|4)|connection (closed|reset|refused)|unexpected EOF|broken pipe|timeout awaiting response headers|context deadline exceeded|i/o timeout|Client\.Timeout exceeded|The service is unavailable|We encountered an internal error'
 
 # Timeouts (seconds)
 REBALANCE_TIMEOUT=86400
@@ -899,8 +899,7 @@ monitor_storage() {
   local threshold="${1:-${STORAGE_THRESHOLD}}" warp_pid="${2:-}" usage
   log "monitoring storage usage until ${threshold}% (every ${POLL_INTERVAL}s)"
   while :; do
-    usage="$(storage_usage_percent)"
-    [ -n "${usage}" ] || usage="0"
+    usage="$(storage_usage_percent)" || return 1
     log "current storage usage: ${usage}%"
     awk -v u="${usage}" -v t="${threshold}" 'BEGIN{exit !(u >= t)}' && break
     if [ -n "${warp_pid}" ] && ! kill -0 "${warp_pid}" 2>/dev/null; then

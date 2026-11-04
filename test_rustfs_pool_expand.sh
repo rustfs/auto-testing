@@ -176,6 +176,19 @@ test_warp_must_reach_threshold() {
   fi
 }
 
+test_monitor_propagates_storage_sample_failure() {
+  local status
+  if (
+    storage_usage_percent() { return 1; }
+    monitor_storage 50 999999
+  ) >/dev/null 2>&1; then
+    fail "storage sample failure must fail the monitor"
+  else
+    status=$?
+  fi
+  assert_eq 1 "${status}" "storage sample failure status"
+}
+
 test_stage_readiness_and_exact_pool_count() {
   reset_endpoint_state
   ADMIN_ENDPOINT="http://admin.test:9000"
@@ -275,6 +288,10 @@ test_warp_error_classification() {
   printf '%s\n' 'SlowDown: foreground write concurrency limit reached' > "${warp_log}"
   report_warp_errors "${warp_log}" >/dev/null \
     || fail "application-level SlowDown must not be classified as a proxy failure"
+
+  printf '%s\n' 'warp: <ERROR> upload error: SlowDown: foreground write concurrency limit reached' > "${warp_log}"
+  report_warp_errors "${warp_log}" >/dev/null \
+    || fail "warp-prefixed SlowDown must not be classified as a transport failure"
 
   printf '%s\n' '<title>502 Bad Gateway</title>' > "${warp_log}"
   if report_warp_errors "${warp_log}" >/dev/null 2>&1; then
@@ -462,6 +479,7 @@ test_endpoint_resolution
 test_independent_routing_and_signing
 test_storageinfo_retry_is_sticky
 test_warp_must_reach_threshold
+test_monitor_propagates_storage_sample_failure
 test_stop_skips_an_uninstalled_service
 test_warp_rounds_reach_threshold
 test_stage_readiness_and_exact_pool_count

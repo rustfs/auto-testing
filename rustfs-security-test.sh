@@ -1109,11 +1109,6 @@ run_security_cases() {
 
 main() {
   parse_args "$@"
-  if [ -n "${LOG_FILE}" ]; then
-    command -v tee >/dev/null 2>&1 || die "missing command: tee (required by --log-file)"
-    mkdir -p "$(dirname "${LOG_FILE}")"
-    exec > >(tee -a "${LOG_FILE}") 2>&1
-  fi
   need_cmd ssh "openssh client"
   need_cmd curl "curl"
   need_cmd openssl "openssl"
@@ -1177,6 +1172,27 @@ main() {
   echo "security suite: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
 }
 
-if [ "${RUSTFS_SECURITY_SCRIPT_SOURCE_ONLY:-0}" != 1 ]; then
+run_main() {
+  local log_file="" index
+  local -a args=("$@")
+  for ((index=0; index<${#args[@]}; index++)); do
+    if [ "${args[index]}" = "--log-file" ]; then
+      log_file="${args[index+1]:-}"
+    fi
+  done
+  if [ -n "${log_file}" ]; then
+    command -v tee >/dev/null 2>&1 || die "missing command: tee (required by --log-file)"
+    mkdir -p "$(dirname "${log_file}")"
+    set +e
+    main "$@" 2>&1 | tee -a "${log_file}"
+    local suite_rc=${PIPESTATUS[0]} tee_rc=${PIPESTATUS[1]}
+    set -e
+    [ "${suite_rc}" -eq 0 ] || exit "${suite_rc}"
+    exit "${tee_rc}"
+  fi
   main "$@"
+}
+
+if [ "${RUSTFS_SECURITY_SCRIPT_SOURCE_ONLY:-0}" != 1 ]; then
+  run_main "$@"
 fi
