@@ -540,7 +540,22 @@ run_bounded() {
 run_hard_bounded() {
   local seconds="$1"
   shift
-  timeout --signal=KILL "${seconds}" "$@"
+  python3 - "$seconds" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    status = process.wait(timeout=timeout)
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+    raise SystemExit(137)
+raise SystemExit(status if status >= 0 else 128 - status)
+PY
 }
 
 bounded_safe_excerpt() {
