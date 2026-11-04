@@ -603,17 +603,17 @@ start_and_wait_nodes() {
 
 # Used disk space on a node across all /data/rustfs* mounts (GiB, via df -B1G)
 node_used_gb() {
-  local node="$1" total=0 gb
+  local node="$1" used
   if [ "${DRY_RUN}" -eq 1 ]; then
-    log "DRY-RUN: df -B1G | grep /data/rustfs on ${node}"
+    log "DRY-RUN: df total for /data/rustfs1..4 on ${node}"
     printf '0\n'
     return 0
   fi
-  while IFS= read -r gb; do
-    [ -n "${gb}" ] && total=$((total + gb))
-  done < <(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-    "df -B1G | awk '/\\/data\\/rustfs/ {gsub(/[^0-9]/,\"\",\$3); print \$3+0}'" 2>/dev/null)
-  printf '%s' "${total}"
+  used="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+    "df -B1 --total --output=used /data/rustfs1 /data/rustfs2 /data/rustfs3 /data/rustfs4 2>/dev/null | tail -n 1 | awk '{printf \"%.0f\\n\", \$1 / 1073741824}'" \
+    2>/dev/null)" || return 1
+  [[ "${used}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${used}"
 }
 
 # Read a heal-progress counter. The heal API serializes progress in camelCase
