@@ -67,5 +67,17 @@ aws_run_site2() {
         self.assertNotEqual(self.run_case("list_error").returncode, 0)
 
 
+class JqBatchCompatibilityTests(unittest.TestCase):
+    def test_nwise_batches_without_jq_private_builtin(self):
+        helper = ROOT / "scripts/lib/jq_nwise.jq"
+        result = subprocess.run(
+            ["jq", "-nc", "-L", str(helper.parent),
+             'include "jq_nwise"; [1,2,3,4,5] | nwise(2)'],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "[[1,2],[3,4],[5]]")
+
+
 if __name__ == "__main__":
     unittest.main()

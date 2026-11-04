@@ -76,19 +76,21 @@ RUSTFS_CONSOLE_ENABLE=true
 RUSTFS_OBS_LOGGER_LEVEL=error
 RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
 
-# Benchmark runner (step 5/6): prefer the default Obsidian location, fall back
-# to a rustfs-performance-testing.sh next to this script (e.g. in the repo or
-# on a jumpbox).
-_DEFAULT_BENCH="${HOME}/Documents/Obsidian Vault/rustfs-performance-testing.sh"
+# Benchmark runner (step 5/6): prefer the default Obsidian location when HOME
+# is available, then fall back to a runner next to this script.
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -x "${_DEFAULT_BENCH}" ]; then
+_DEFAULT_BENCH=""
+if [ -n "${HOME:-}" ]; then
+  _DEFAULT_BENCH="${HOME}/Documents/Obsidian Vault/rustfs-performance-testing.sh"
+fi
+if [ -n "${_DEFAULT_BENCH}" ] && [ -x "${_DEFAULT_BENCH}" ]; then
   _BENCH_RESOLVED="${_DEFAULT_BENCH}"
 elif [ -x "${_SCRIPT_DIR}/rustfs-performance-testing.sh" ]; then
   _BENCH_RESOLVED="${_SCRIPT_DIR}/rustfs-performance-testing.sh"
 elif [ -x "${_SCRIPT_DIR}/rustfs_performance_testing.sh" ]; then
   _BENCH_RESOLVED="${_SCRIPT_DIR}/rustfs_performance_testing.sh"
 else
-  _BENCH_RESOLVED="${_DEFAULT_BENCH}"
+  _BENCH_RESOLVED="${_DEFAULT_BENCH:-${_SCRIPT_DIR}/rustfs_performance_testing.sh}"
 fi
 BENCH_SCRIPT="${RUSTFS_BENCH_SCRIPT:-${_BENCH_RESOLVED}}"
 RESULT_DIR="${RUSTFS_RESULT_DIR:-$(pwd)/warp-bench-results-$(date +%Y%m%d-%H%M%S)}"

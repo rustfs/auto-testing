@@ -10,6 +10,9 @@ import tempfile
 import unittest
 
 
+ROOT = Path(__file__).resolve().parent
+
+
 class PerformanceResultTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -166,6 +169,17 @@ class PerformanceResultTests(unittest.TestCase):
                 parsed = subprocess.run(command, cwd=self.root, env=self.env, capture_output=True, text=True)
                 self.assertNotEqual(parsed.returncode, 0)
                 self.assertIn("failed=1", (self.results / "summary.md").read_text())
+
+
+class PerformanceEnvironmentTests(unittest.TestCase):
+    def test_help_does_not_require_home(self):
+        environment = dict(os.environ)
+        environment.pop("HOME", None)
+        result = subprocess.run(
+            ["bash", str(ROOT / "rustfs_performance_test.sh"), "--help"],
+            env=environment, capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
