@@ -132,7 +132,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${SKIP_TOOLS}" = "true" ]; then
-            RUN="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0]')"
+            # Filter client-side: the ?status=success query param does not
+            # match this endpoint reliably (observed returning 0 despite an
+            # existing successful run).
+            RUN="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?per_page=10" \
+              --jq '[.workflow_runs[] | select(.conclusion == "success")][0] // empty')"
+            [ -n "${RUN}" ] || { echo "no successful validation-tools run to reuse"; exit 1; }
           else
             BEFORE="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?per_page=1" --jq '.workflow_runs[0].id')"
             # native/manager builds are pinned to reviewed reference
@@ -149,7 +154,7 @@ jobs:
             RUN=""
             for _ in $(seq 1 60); do
               RUN="$(gh api "repos/rustfs/rustfs/actions/workflows/rustfs-validation-tools.yml/runs?event=workflow_dispatch&per_page=10" \
-                --arg before "${BEFORE}" --jq '[.workflow_runs[] | select(.id > ($before | tonumber))][0] // empty')"
+                --jq "[.workflow_runs[] | select(.id > ${BEFORE})][0] // empty")"
               [ -n "${RUN}" ] && break
               sleep 10
             done
@@ -187,7 +192,7 @@ jobs:
             NAME="rustfs-validation-${KIND}-${TOOL_RUN_ID}-${TOOL_ATTEMPT}"
             DEST="${ROOT}/${KIND}"
             gh api "repos/rustfs/rustfs/actions/runs/${TOOL_RUN_ID}/artifacts?per_page=100" \
-              --arg name "${NAME}" --jq '.artifacts[] | select(.name == $name) | .id' | head -1 > /tmp/artifact-id
+              --jq ".artifacts[] | select(.name == \"${NAME}\") | .id" | head -1 > /tmp/artifact-id
             AID="$(cat /tmp/artifact-id)"
             [ -n "${AID}" ] || { echo "missing artifact ${NAME}"; exit 1; }
             curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
