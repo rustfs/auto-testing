@@ -23,7 +23,8 @@ the root-filesystem disk-check bypass used by ad hoc single-disk deployments.
 
 The tier webhook receiver is configurable with `RUSTFS_RECEIVER_PORT`; choose a
 port that does not conflict with the local package server or another service.
-Scripts without an executable bit can be invoked with `bash <script>`.
+All top-level suite entrypoints are directly executable; `bash <script>` also
+works when a local checkout or transport drops executable modes.
 
 ## Release validation migration
 

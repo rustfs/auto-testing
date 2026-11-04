@@ -5,6 +5,7 @@ on:
     paths:
       - rustfs-table-test.sh
       - rustfs-replication-test.sh
+      - rustfs-security-test.sh
       - rustfs-upgrade-test.sh
       - rustfs_performance_test.sh
       - scripts/check_execution_environment.py
@@ -19,6 +20,7 @@ on:
     paths:
       - rustfs-table-test.sh
       - rustfs-replication-test.sh
+      - rustfs-security-test.sh
       - rustfs-upgrade-test.sh
       - rustfs_performance_test.sh
       - scripts/check_execution_environment.py
@@ -41,12 +43,15 @@ jobs:
         with:
           persist-credentials: false
       - name: Validate shell syntax
-        run: >-
-          bash -n
-          rustfs-table-test.sh
-          rustfs-replication-test.sh
-          rustfs-upgrade-test.sh
-          rustfs_performance_test.sh
+        run: |
+          bash -n \
+            rustfs-table-test.sh \
+            rustfs-replication-test.sh \
+            rustfs-security-test.sh \
+            rustfs-upgrade-test.sh \
+            rustfs_performance_test.sh
+          test -x rustfs-security-test.sh
+          test -x rustfs-upgrade-test.sh
       - name: Test portable execution helpers
         run: >-
           python3 -B -m unittest -v
