@@ -125,7 +125,12 @@ jobs:
 
       - name: Bind functional candidate
         id: chain
-        if: ${{ github.event_name == 'workflow_call' }}
+        # github.event_name is inherited from the caller in reusable
+        # workflows, so it is never 'workflow_call'; gate on the manifest
+        # the chain passes instead (the repository_dispatch nightly chain
+        # skipped binding and every case died with 'candidate manifest
+        # missing' — run 41678727913).
+        if: ${{ inputs.chain_manifest != '' }}
         env:
           CHAIN_MANIFEST: ${{ inputs.chain_manifest }}
         run: |
@@ -387,7 +392,7 @@ jobs:
 
       - name: Record chain evidence
         id: chain_record
-        if: ${{ always() && github.event_name == 'workflow_call' && inputs.chain_manifest != '' && steps.evidence.outcome == 'success' }}
+        if: ${{ always() && inputs.chain_manifest != '' && steps.evidence.outcome == 'success' }}
         env:
           CHAIN_MANIFEST: ${{ inputs.chain_manifest }}
           CHAIN_JOB_STATUS: ${{ job.status }}
