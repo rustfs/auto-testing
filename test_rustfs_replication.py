@@ -78,6 +78,19 @@ class JqBatchCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "[[1,2],[3,4],[5]]")
 
+    def test_nwise_callers_stream_each_delete_batch(self):
+        helper = ROOT / "scripts/lib/jq_nwise.jq"
+        result = subprocess.run(
+            ["jq", "-nc", "-L", str(helper.parent),
+             'include "jq_nwise"; [1,2,3,4,5] | nwise(2)[] | {Objects: .}'],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ['{"Objects":[1,2]}', '{"Objects":[3,4]}', '{"Objects":[5]}'],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

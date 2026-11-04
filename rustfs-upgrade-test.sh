@@ -866,7 +866,7 @@ seed_warp_bucket() {
       assert_aws_ok || die "seed: trim ${bucket} (delete batch failed)"
     done < <(printf '%s' "${keys_json}" \
              | jq -c --argjson k "${keep}" -L "${JQ_LIB}" \
-               'include "jq_nwise"; .[0:(length - $k)] | nwise(1000) | {Objects: [.[] | {Key: .}], Quiet: true}')
+               'include "jq_nwise"; .[0:(length - $k)] | nwise(1000)[] | {Objects: [.[] | {Key: .}], Quiet: true}')
     aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'length(Contents)'
     assert_aws_ok || die "seed: post-trim list ${bucket}"
     remaining="$(printf '%s' "${AWS_OUT}" | tr -d '[:space:]')"

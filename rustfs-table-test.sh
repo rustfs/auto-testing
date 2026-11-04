@@ -151,6 +151,19 @@ remote_root() {
     "if [ \"\$(id -u)\" -eq 0 ]; then bash -s; else sudo -n bash -s; fi"
 }
 
+rustfs_table_config() {
+  cat <<CFG
+RUSTFS_ACCESS_KEY=${ACCESS_KEY}
+RUSTFS_SECRET_KEY=${SECRET_KEY}
+RUSTFS_VOLUMES="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
+RUSTFS_ADDRESS=":9000"
+RUSTFS_CONSOLE_ADDRESS=":9001"
+RUSTFS_CONSOLE_ENABLE=true
+RUSTFS_OBS_LOGGER_LEVEL=error
+RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
+CFG
+}
+
 setup_environment() {
   local v
   for v in "${NODES[@]}"; do
@@ -166,14 +179,7 @@ EOF
     remote_root "$1" <<EOF
 set -e
 cat > /etc/default/rustfs <<'CFG'
-RUSTFS_ACCESS_KEY=${ACCESS_KEY}
-RUSTFS_SECRET_KEY=${SECRET_KEY}
-RUSTFS_VOLUMES=\"http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd\"
-RUSTFS_ADDRESS=\":9000\"
-RUSTFS_CONSOLE_ADDRESS=\":9001\"
-RUSTFS_CONSOLE_ENABLE=true
-RUSTFS_OBS_LOGGER_LEVEL=error
-RUSTFS_OBS_LOG_DIRECTORY=\"/var/log/rustfs/\"
+$(rustfs_table_config)
 CFG
 EOF
   }
