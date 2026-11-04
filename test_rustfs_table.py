@@ -10,6 +10,13 @@ ROOT = Path(__file__).resolve().parent
 
 
 class TableRemotePrivilegeTests(unittest.TestCase):
+    def test_package_download_uses_data_backed_staging_path(self):
+        script = (ROOT / "rustfs-table-test.sh").read_text()
+        self.assertIn('pkg_dir="/data/rustfs1"', script)
+        self.assertIn(".rustfs-table-", script)
+        self.assertIn("${RUN_ID}.deb", script)
+        self.assertIn("--retry-all-errors", script)
+
     def test_generated_config_does_not_escape_quotes(self):
         script = (
             f'source "{ROOT / "rustfs-table-test.sh"}"; '

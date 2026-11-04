@@ -38,7 +38,14 @@ mark_nodes() {
 
 reset_initial() {
   local node
-  for node in "${NODES[@]}"; do service_action stop "${node}"; done
+  for node in "${NODES[@]}"; do
+    if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+        "systemctl cat ${RUSTFS_SERVICE} >/dev/null 2>&1"; then
+      service_action stop "${node}"
+    else
+      log "${node}: ${RUSTFS_SERVICE} is not installed; stop skipped"
+    fi
+  done
   for node in "${NODES[@]}"; do
     run_remote "${node}" <<'REMOTE'
 set -euo pipefail
@@ -81,6 +88,21 @@ disk_probe() {
   done
 }
 
+collect_decommission_logs() {
+  local node="$1" since="$2"
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" "
+    SUDO=''; [ \"\$(id -u)\" -ne 0 ] && SUDO='sudo -n'
+    {
+      \${SUDO} journalctl -u ${RUSTFS_SERVICE} --since $(printf '%q' "${since}") \
+        --no-pager --output=cat -n 5000
+      for log_file in /var/log/rustfs/*.log; do
+        [ -f \"\${log_file}\" ] || continue
+        \${SUDO} tail -n 5000 \"\${log_file}\"
+      done
+    } 2>/dev/null || true
+  "
+}
+
 pool_hook() {
   local action="${1:-}" layout="" phase="" since="" node output0 output1 journal_since
   shift || true
@@ -117,10 +139,8 @@ pool_hook() {
     diagnostic)
       if [ -n "${since}" ]; then
         journal_since="$(python3 -c 'from datetime import datetime,timezone; import sys; value=datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")); assert value.tzinfo is not None; print(value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f UTC"))' "${since}")"
-        output0="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODES[0]}" \
-          "journalctl -u rustfs --since $(printf '%q' "${journal_since}") --no-pager --output=cat -n 2000")"
-        output1="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODES[1]}" \
-          "journalctl -u rustfs --since $(printf '%q' "${journal_since}") --no-pager --output=cat -n 2000")"
+        output0="$(collect_decommission_logs "${NODES[0]}" "${journal_since}")"
+        output1="$(collect_decommission_logs "${NODES[1]}" "${journal_since}")"
         jq -n --arg phase "${phase}" --arg since "${since}" \
           --arg node0 "${NODES[0]}" --arg node1 "${NODES[1]}" \
           --arg output0 "${output0}" --arg output1 "${output1}" \

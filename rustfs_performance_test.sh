@@ -100,6 +100,8 @@ WARP_CONCURRENCY="${RUSTFS_WARP_CONCURRENCY:-64}"
 WARP_DURATION="${RUSTFS_WARP_DURATION:-5m}"
 WARP_GET_OBJECTS="${RUSTFS_WARP_GET_OBJECTS:-2500}"
 WARP_SLEEP="${RUSTFS_WARP_SLEEP:-60}"
+WARP_ROUND_TIMEOUT="${RUSTFS_WARP_ROUND_TIMEOUT:-900}"
+WARP_MAX_CONSECUTIVE_FAILURES="${RUSTFS_WARP_MAX_CONSECUTIVE_FAILURES:-0}"
 # Manual method/size selection (passed through to the benchmark runner; empty = full run)
 WARP_METHODS="${RUSTFS_WARP_METHODS:-}"
 WARP_SIZES="${RUSTFS_WARP_SIZES:-}"
@@ -476,6 +478,8 @@ step5_benchmark() {
   WARP_DURATION="${WARP_DURATION}" \
   WARP_GET_OBJECTS="${WARP_GET_OBJECTS}" \
   WARP_SLEEP_BETWEEN_ROUNDS="${WARP_SLEEP}" \
+  WARP_ROUND_TIMEOUT="${WARP_ROUND_TIMEOUT}" \
+  WARP_MAX_CONSECUTIVE_FAILURES="${WARP_MAX_CONSECUTIVE_FAILURES}" \
   WARP_METHODS="${WARP_METHODS}" \
   WARP_SIZES="${WARP_SIZES}" \
   WARP_RESULT_DIR="${RESULT_DIR}" \
@@ -552,6 +556,9 @@ Options:
   --bench-script PATH       Benchmark runner (default: Obsidian Vault rustfs-performance-testing.sh)
   --result-dir DIR          Benchmark result directory
   --warp-duration DUR       warp duration per round (default 5m)
+  --warp-round-timeout N    hard timeout per round in seconds (default 900)
+  --warp-max-consecutive-failures N
+                            abort after N consecutive failed rounds (default 0 = never)
   --warp-concurrency N      warp concurrency (default 64)
   --ssh-user USER           SSH user (default azureuser)
   --ssh-port PORT           SSH port (default 22)
@@ -617,6 +624,8 @@ main() {
       --bench-script) BENCH_SCRIPT="$1"; shift ;;
       --result-dir) RESULT_DIR="$1"; shift ;;
       --warp-duration) WARP_DURATION="$1"; shift ;;
+      --warp-round-timeout) WARP_ROUND_TIMEOUT="$1"; shift ;;
+      --warp-max-consecutive-failures) WARP_MAX_CONSECUTIVE_FAILURES="$1"; shift ;;
       --warp-concurrency) WARP_CONCURRENCY="$1"; shift ;;
       --ssh-user) SSH_USER="$1"; shift ;;
       --ssh-port) SSH_PORT="$1"; shift ;;

@@ -27,7 +27,8 @@ class MrfCorruptionTests(unittest.TestCase):
         system = data / ".rustfs.sys"; system.mkdir(mode=0o700)
         (system / "format.json").write_bytes(b"format-control")
         bucket = data / "rv-heal-0123456789abcdef"
-        bucket.mkdir(mode=0o755)
+        bucket.mkdir()
+        bucket.chmod(0o755)
         obj = bucket / "objects/0000.bin"; obj.mkdir(parents=True)
         (obj / "xl.meta").write_bytes(b"original-fixture-metadata")
         (state / "owner.json").write_text(json.dumps({"runtimeProfile": "mrf-crash", "bucket": bucket.name}))

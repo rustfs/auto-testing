@@ -168,9 +168,14 @@ setup_environment() {
   local v
   for v in "${NODES[@]}"; do
     remote_root "${v}" <<EOF || die "install failed on ${v}"
-set -e
-curl -fsSL --retry 3 -o /tmp/rustfs-table.deb '${PACKAGE_URL}'
-dpkg -i --force-confold /tmp/rustfs-table.deb >/dev/null
+set -euo pipefail
+pkg_dir="/data/rustfs1"
+pkg_tmp="\${pkg_dir}/.rustfs-table-\${RUN_ID}.deb"
+mkdir -p "\${pkg_dir}"
+trap 'rm -f "\${pkg_tmp}"' EXIT
+curl --fail --show-error --location --retry 3 --retry-all-errors \
+  --connect-timeout 15 --max-time 600 -o "\${pkg_tmp}" '${PACKAGE_URL}'
+dpkg -i --force-confold "\${pkg_tmp}" >/dev/null
 mkdir -p /data/rustfs{1..4}/mnmd
 chown -R rustfs:rustfs /data/rustfs{1..4}/mnmd
 EOF

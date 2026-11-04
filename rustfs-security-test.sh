@@ -39,6 +39,7 @@
 #   RUSTFS_NODES / RUSTFS_SSH_USER          shared test VMs (default vm000..002 / azureuser)
 #   RUSTFS_API_ENDPOINT                     override the topology endpoint
 #   REPORT_FILE                             markdown report path (default /tmp/rustfs-security-report.md)
+#   LOG_FILE                                append suite output to this file
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,6 +105,7 @@ API_REQUEST_TIMEOUT=120
 ADMIN_API_CODE_FILE="${TEST_TMP}/api-code"
 
 REPORT_FILE="${REPORT_FILE:-/tmp/rustfs-security-report.md}"
+LOG_FILE="${LOG_FILE:-}"
 REPORT_SECTIONS_FILE="${TEST_TMP}/report-sections.md"
 RUSTFS_VERSION_INFO=""
 
@@ -1046,6 +1048,7 @@ parse_args() {
       --validation-artifacts-dir) [ "$#" -ge 2 ] || die "--validation-artifacts-dir requires a value"; VALIDATION_ARTIFACTS_DIR="$2"; shift ;;
       --candidate-manifest) [ "$#" -ge 2 ] || die "--candidate-manifest requires a value"; VALIDATION_CANDIDATE_MANIFEST="$2"; shift ;;
       --testing-commit) [ "$#" -ge 2 ] || die "--testing-commit requires a value"; VALIDATION_TESTING_COMMIT="$2"; shift ;;
+      --log-file) [ "$#" -ge 2 ] || die "--log-file requires a value"; LOG_FILE="$2"; shift ;;
       --keep-env) KEEP_ENV=1 ;;
       -y) ASSUME_YES=1 ;;
       --dry-run) DRY_RUN=1 ;;
@@ -1106,6 +1109,11 @@ run_security_cases() {
 
 main() {
   parse_args "$@"
+  if [ -n "${LOG_FILE}" ]; then
+    command -v tee >/dev/null 2>&1 || die "missing command: tee (required by --log-file)"
+    mkdir -p "$(dirname "${LOG_FILE}")"
+    exec > >(tee -a "${LOG_FILE}") 2>&1
+  fi
   need_cmd ssh "openssh client"
   need_cmd curl "curl"
   need_cmd openssl "openssl"

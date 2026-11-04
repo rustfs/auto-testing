@@ -220,6 +220,39 @@ class DispatchContractTests(unittest.TestCase):
     def test_registry_matches_ported_workflows(self):
         check_wiring(load_registry())
 
+    def test_registry_ignores_retired_event_names_in_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "suite.yml").write_text(
+                "name: Suite\n"
+                "# repository_dispatch relay retired\n"
+                "on:\n"
+                "  workflow_dispatch:\n"
+                "jobs:\n"
+                "  suite:\n"
+                "    concurrency:\n"
+                "      group: shared-lock\n"
+                "      cancel-in-progress: false\n"
+                "    steps:\n"
+                "      - run: python3 scripts/functional_chain_evidence.py record --suite suite\n"
+            )
+            registry = {
+                "workflows": [{
+                    "workflow": ".github/workflows/suite.yml",
+                    "name": "Suite",
+                    "events": ["workflow_dispatch"],
+                    "schedule": [],
+                }],
+                "suites": [{
+                    "id": "suite",
+                    "workflow": ".github/workflows/suite.yml",
+                    "resource_lock": "shared-lock",
+                }],
+            }
+            self.assertTrue(check_wiring(registry, root))
+
     def test_workflows_checkout_this_repo_for_the_harness(self):
         chain = (WORKFLOWS / "rustfs-functional-chain.yml").read_text()
         self.assertIn("types: [nightly-candidate-ready]", chain)

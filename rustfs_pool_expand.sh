@@ -110,12 +110,13 @@ WARP_BUCKET="test-10mb"
 WARP_OBJ_SIZE="100MiB"
 WARP_CONCURRENT="${RUSTFS_WARP_CONCURRENT:-32}"
 WARP_DURATION="5m"
+WARP_ROUNDS="${RUSTFS_WARP_ROUNDS:-1}"
 # Warp log path; empty = auto-created unique temp file (the runner user may
 # not be able to write a shared /tmp path owned by another user).
 WARP_LOG_FILE="${RUSTFS_WARP_LOG_FILE:-}"
 STORAGE_THRESHOLD=85            # stop writing when usage reaches N% (note suggests 80-85)
 POLL_INTERVAL=30                # status polling interval (seconds)
-WARP_TRANSPORT_FAILURE_PATTERN='502 Bad Gateway|504 Gateway Time-out|HTTP([^0-9]+)?50(2|4)|status([^0-9]+)?50(2|4)|connection (closed|reset|refused)|unexpected EOF|broken pipe|timeout awaiting response headers|context deadline exceeded|i/o timeout|Client\.Timeout exceeded'
+WARP_TRANSPORT_FAILURE_PATTERN='502 Bad Gateway|504 Gateway Time-out|HTTP([^0-9]+)?50(2|4)|status([^0-9]+)?50(2|4)|connection (closed|reset|refused)|unexpected EOF|broken pipe|timeout awaiting response headers|context deadline exceeded|i/o timeout|Client\.Timeout exceeded|The service is unavailable|We encountered an internal error|upload error:'
 
 # Timeouts (seconds)
 REBALANCE_TIMEOUT=86400
@@ -248,6 +249,8 @@ normalize_http_endpoint() {
 resolve_endpoints() {
   [[ "${WARP_CONCURRENT}" =~ ^[1-9][0-9]*$ ]] \
     || die "warp concurrency must be a positive integer: ${WARP_CONCURRENT}"
+  [[ "${WARP_ROUNDS}" =~ ^[1-9][0-9]*$ ]] \
+    || die "warp rounds must be a positive integer: ${WARP_ROUNDS}"
   [[ "${STORAGEINFO_PROBE_RETRIES}" =~ ^[1-9][0-9]*$ ]] \
     || die "storageinfo probe retries must be a positive integer: ${STORAGEINFO_PROBE_RETRIES}"
   [[ "${STORAGEINFO_PROBE_RETRY_DELAY}" =~ ^[0-9]+$ ]] \
@@ -650,8 +653,14 @@ service_action() {
   local action="$1" node="$2"
   log "${node}: systemctl ${action} ${RUSTFS_SERVICE}"
   if [ "${DRY_RUN}" -eq 1 ]; then return 0; fi
+  local remote_command
+  if [ "${action}" = "stop" ]; then
+    remote_command="if ! systemctl cat ${RUSTFS_SERVICE} >/dev/null 2>&1; then echo '${RUSTFS_SERVICE} is not installed; stop skipped'; exit 0; fi; if [ \"\$(id -u)\" -ne 0 ]; then sudo -n systemctl stop ${RUSTFS_SERVICE}; else systemctl stop ${RUSTFS_SERVICE}; fi"
+  else
+    remote_command="if [ \"\$(id -u)\" -ne 0 ]; then sudo -n systemctl ${action} ${RUSTFS_SERVICE}; else systemctl ${action} ${RUSTFS_SERVICE}; fi"
+  fi
   if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-      "if [ \"\$(id -u)\" -ne 0 ]; then sudo -n systemctl ${action} ${RUSTFS_SERVICE}; else systemctl ${action} ${RUSTFS_SERVICE}; fi"; then
+      "${remote_command}"; then
     if [ "${action}" = "start" ]; then
       diagnose_node_start_failure "${node}"
     fi
@@ -895,7 +904,8 @@ monitor_storage() {
     log "current storage usage: ${usage}%"
     awk -v u="${usage}" -v t="${threshold}" 'BEGIN{exit !(u >= t)}' && break
     if [ -n "${warp_pid}" ] && ! kill -0 "${warp_pid}" 2>/dev/null; then
-      die "warp finished at ${usage}%, below the required storage threshold of ${threshold}%"
+      warn "warp finished at ${usage}%, below the required storage threshold of ${threshold}%"
+      return 3
     fi
     sleep "${POLL_INTERVAL}"
   done
@@ -1282,57 +1292,68 @@ step4_write_data() {
   verify_pools 1
   if [ "${WITH_WARP}" -eq 1 ]; then
     need_cmd warp "warp benchmark tool"
-    confirm "About to run warp writes in the background (bucket=${WARP_BUCKET}, duration=${WARP_DURATION}) and monitor usage up to ${STORAGE_THRESHOLD}%. Continue?"
+    confirm "About to run up to ${WARP_ROUNDS} warp write round(s) against bucket=${WARP_BUCKET} and monitor usage up to ${STORAGE_THRESHOLD}%. Continue?"
     if [ "${DRY_RUN}" -eq 1 ]; then
       log "DRY-RUN: warp put --host $(endpoint_authority "${WARP_ENDPOINT}") --bucket ${WARP_BUCKET} --concurrent ${WARP_CONCURRENT} ... (background)"
-      log "DRY-RUN: monitoring storage usage until ${STORAGE_THRESHOLD}%"
+      log "DRY-RUN: allowing ${WARP_ROUNDS} round(s) to reach ${STORAGE_THRESHOLD}%"
       return 0
     fi
-    local warp_log warp_pid
+    local warp_log warp_pid round monitor_rc target_reached=0 warp_stop_waited
     warp_log="${WARP_LOG_FILE:-$(mktemp "${TMPDIR:-/tmp}/rustfs-warp.XXXXXX.log")}"
-    log "starting warp writes against ${WARP_ENDPOINT} (background), log: ${warp_log}"
-    warp put --host "$(endpoint_authority "${WARP_ENDPOINT}")" \
-      --bucket "${WARP_BUCKET}" \
-      --access-key "${ACCESS_KEY}" \
-      --secret-key "${SECRET_KEY}" \
-      --obj.size "${WARP_OBJ_SIZE}" \
-      --concurrent "${WARP_CONCURRENT}" \
-      --noprefix --duration "${WARP_DURATION}" --noclear >"${warp_log}" 2>&1 &
-    warp_pid=$!
-    ACTIVE_WARP_PID="${warp_pid}"
-    log "warp PID=${warp_pid}"
-    monitor_storage "${STORAGE_THRESHOLD}" "${warp_pid}"
-    # Graceful stop first (SIGINT lets warp finish/abort in-flight multipart
-    # uploads), then SIGTERM/KILL as fallback; see rustfs/backlog#2063.
-    kill -INT "${warp_pid}" 2>/dev/null || true
-    local warp_stop_waited=0
-    while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 60 ]; do
-      sleep 1
-      warp_stop_waited=$((warp_stop_waited + 1))
-    done
-    if kill -0 "${warp_pid}" 2>/dev/null; then
-      warn "warp did not exit after SIGINT; sending SIGTERM"
-      kill -TERM "${warp_pid}" 2>/dev/null || true
+    : >"${warp_log}"
+    for ((round=1; round<=WARP_ROUNDS; round++)); do
+      log "starting warp round ${round}/${WARP_ROUNDS} against ${WARP_ENDPOINT} (background), log: ${warp_log}"
+      warp put --host "$(endpoint_authority "${WARP_ENDPOINT}")" \
+        --bucket "${WARP_BUCKET}" \
+        --access-key "${ACCESS_KEY}" \
+        --secret-key "${SECRET_KEY}" \
+        --obj.size "${WARP_OBJ_SIZE}" \
+        --concurrent "${WARP_CONCURRENT}" \
+        --noprefix --duration "${WARP_DURATION}" --noclear >>"${warp_log}" 2>&1 &
+      warp_pid=$!
+      ACTIVE_WARP_PID="${warp_pid}"
+      log "warp PID=${warp_pid}"
+      if monitor_storage "${STORAGE_THRESHOLD}" "${warp_pid}"; then
+        target_reached=1
+      else
+        monitor_rc=$?
+      fi
+      # Graceful stop first (SIGINT lets warp finish/abort in-flight multipart
+      # uploads), then SIGTERM/KILL as fallback; see rustfs/backlog#2063.
+      kill -INT "${warp_pid}" 2>/dev/null || true
       warp_stop_waited=0
-      while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 30 ]; do
+      while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 60 ]; do
         sleep 1
         warp_stop_waited=$((warp_stop_waited + 1))
       done
-    fi
-    if kill -0 "${warp_pid}" 2>/dev/null; then
-      warn "warp still running; sending SIGKILL"
-      kill -KILL "${warp_pid}" 2>/dev/null || true
-    fi
-    wait "${warp_pid}" 2>/dev/null || true
-    ACTIVE_WARP_PID=""
-    log "warp stopped"
-    local warp_transport_clean=1
-    report_warp_errors "${warp_log}" || warp_transport_clean=0
-    # Safety net: abort any incomplete multipart uploads left in the test
-    # bucket immediately, so no orphan can block the later decommission gate.
-    abort_stale_multipart_uploads "${WARP_BUCKET}"
-    [ "${warp_transport_clean}" -eq 1 ] \
-      || die "warp observed an Nginx 502/504, timeout, or transport failure; see ${warp_log}"
+      if kill -0 "${warp_pid}" 2>/dev/null; then
+        warn "warp did not exit after SIGINT; sending SIGTERM"
+        kill -TERM "${warp_pid}" 2>/dev/null || true
+        warp_stop_waited=0
+        while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 30 ]; do
+          sleep 1
+          warp_stop_waited=$((warp_stop_waited + 1))
+        done
+      fi
+      if kill -0 "${warp_pid}" 2>/dev/null; then
+        warn "warp still running; sending SIGKILL"
+        kill -KILL "${warp_pid}" 2>/dev/null || true
+      fi
+      wait "${warp_pid}" 2>/dev/null || true
+      ACTIVE_WARP_PID=""
+      log "warp round ${round} stopped"
+      abort_stale_multipart_uploads "${WARP_BUCKET}"
+      report_warp_errors "${warp_log}" \
+        || die "warp observed a service or transport failure; see ${warp_log}"
+      [ "${target_reached}" -eq 1 ] && break
+      [ "${monitor_rc:-0}" -eq 3 ] \
+        || die "warp monitor failed unexpectedly (status=${monitor_rc:-unknown})"
+      [ "${round}" -lt "${WARP_ROUNDS}" ] \
+        || die "warp exhausted ${WARP_ROUNDS} round(s) below the required storage threshold of ${STORAGE_THRESHOLD}%"
+      log "storage threshold not reached; continuing with another warp round"
+    done
+    [ "${target_reached}" -eq 1 ] \
+      || die "warp did not reach the required storage threshold of ${STORAGE_THRESHOLD}%"
   else
     cat <<NOTE
 Write data manually (or re-run with --with-warp to automate):
@@ -1626,6 +1647,7 @@ Options:
   --node-endpoints URLS      Space-separated direct endpoints in node order
   --storage-threshold N      Stop writing when usage reaches N% (default 85)
   --warp-duration DUR        warp write duration, e.g. 5m, 20s (default 5m)
+  --warp-rounds N            Sequential warp runs allowed to reach the threshold (default 1)
   --warp-concurrent N        warp concurrent operations (default 32)
   --rebalance-timeout N      Rebalance wait timeout in seconds (default 86400)
   --decommission-timeout N   Decommission wait timeout in seconds (default 86400)
@@ -1738,6 +1760,7 @@ main() {
       --node-endpoints) read -r -a NODE_ENDPOINTS <<<"$1"; shift ;;
       --storage-threshold) STORAGE_THRESHOLD="$1"; shift ;;
       --warp-duration) WARP_DURATION="$1"; shift ;;
+      --warp-rounds) WARP_ROUNDS="$1"; shift ;;
       --warp-concurrent) WARP_CONCURRENT="$1"; shift ;;
       --rebalance-timeout) REBALANCE_TIMEOUT="$1"; shift ;;
       --decommission-timeout) DECOMMISSION_TIMEOUT="$1"; shift ;;

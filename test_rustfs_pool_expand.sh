@@ -295,7 +295,59 @@ test_warp_error_classification() {
   if report_warp_errors "${warp_log}" >/dev/null 2>&1; then
     fail "response-header timeouts must fail warp transport classification"
   fi
+
+  printf '%s\n' 'warp: <ERROR> upload error: The service is unavailable. Please retry.' > "${warp_log}"
+  if report_warp_errors "${warp_log}" >/dev/null 2>&1; then
+    fail "service-unavailable upload errors must fail warp classification"
+  fi
+
+  printf '%s\n' 'warp: <ERROR> upload error: We encountered an internal error, please try again.' > "${warp_log}"
+  if report_warp_errors "${warp_log}" >/dev/null 2>&1; then
+    fail "internal upload errors must fail warp classification"
+  fi
 }
+
+test_stop_skips_an_uninstalled_service() (
+  local fixture="${TEST_TMP}/stop-absent" bin="${TEST_TMP}/stop-absent-bin"
+  mkdir -p "${fixture}" "${bin}"
+  cat > "${bin}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = cat ] && exit 1
+exit 1
+EOF
+  chmod +x "${bin}/systemctl"
+  PATH="${bin}:${PATH}"
+  ssh() {
+    local remote="${*: -1}"
+    bash -c "${remote}"
+  }
+  service_action stop fixture-node
+)
+
+test_warp_rounds_reach_threshold() (
+  reset_endpoint_state
+  WITH_WARP=1
+  DRY_RUN=0
+  WARP_ROUNDS=2
+  WARP_LOG_FILE="${TEST_TMP}/warp-rounds.log"
+  monitor_calls=0
+  verify_stage_readiness() { :; }
+  configure_proxy_stage() { :; }
+  verify_pools() { :; }
+  confirm() { :; }
+  need_cmd() { :; }
+  warp() { :; }
+  abort_stale_multipart_uploads() { :; }
+  report_warp_errors() { :; }
+  monitor_storage() {
+    monitor_calls=$((monitor_calls + 1))
+    if [ "${monitor_calls}" -eq 2 ]; then return 0; fi
+    return 3
+  }
+
+  step4_write_data >/dev/null 2>&1
+  assert_eq 2 "${monitor_calls}" "warp rounds before threshold"
+)
 
 test_package_checksum_before_install() (
   local script_name="$1" download_step="$2" install_step="$3"
@@ -410,6 +462,8 @@ test_endpoint_resolution
 test_independent_routing_and_signing
 test_storageinfo_retry_is_sticky
 test_warp_must_reach_threshold
+test_stop_skips_an_uninstalled_service
+test_warp_rounds_reach_threshold
 test_stage_readiness_and_exact_pool_count
 test_stage_pool_boundaries 3 expand
 test_stage_pool_boundaries 4 expand

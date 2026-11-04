@@ -168,7 +168,10 @@ def check_wiring(registry, root=ROOT):
                 "workflow events or cadence differ from registry: " + item["workflow"])
     for suite in registry["suites"]:
         source = (root / suite["workflow"]).read_text()
-        require("repository_dispatch" not in source and "Continue functional chain" not in source,
+        trigger = re.search(r"^on:\n(.*?)(?=^[^ #\n]|\Z)", source, re.M | re.S)
+        require(trigger is not None, "suite workflow has no event declaration")
+        suite_events = re.findall(r"^  (\w+):", trigger.group(1), re.M)
+        require("repository_dispatch" not in suite_events,
                 "retired functional relay remains wired")
         require("group: " + suite["resource_lock"] in source and "cancel-in-progress: false" in source,
                 "suite resource lock differs from registry")
