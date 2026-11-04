@@ -31,7 +31,7 @@ COMPAT_PATH="${RUSTFS_TABLE_COMPAT_PATH:-/_iceberg}"
 TEST_BUCKET_PREFIX="${RUSTFS_TABLE_TEST_BUCKET:-tblsuite}"
 LOG_FILE="${RUSTFS_TABLE_LOG_FILE:-}"
 SMOKE_SCRIPT="${RUSTFS_TABLE_SMOKE_SCRIPT:-}"   # optional: path to product pyiceberg_smoke.py
-SUDO=(); [ "$(id -u)" -ne 0 ] && SUDO=(sudo -n)
+LOCAL_SUDO=(); [ "$(id -u)" -ne 0 ] && LOCAL_SUDO=(sudo -n)
 DRY_RUN=0
 SKIP_SMOKE=0
 PASS=0; FAIL=0; UNSUPPORTED=0
@@ -146,23 +146,42 @@ rest_body() { sed -n '2,$p' <<<"${REST_OUT}"; }
 
 # ==================== Environment (install + parallel start, shared-fleet style) ====================
 remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 -p "${SSH_PORT}" "${SSH_USER}@${1}" "$2"; }
+remote_root() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -p "${SSH_PORT}" "${SSH_USER}@${1}" \
+    "if [ \"\$(id -u)\" -eq 0 ]; then bash -s; else sudo -n bash -s; fi"
+}
+
+rustfs_table_config() {
+  cat <<CFG
+RUSTFS_ACCESS_KEY=${ACCESS_KEY}
+RUSTFS_SECRET_KEY=${SECRET_KEY}
+RUSTFS_VOLUMES="http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd"
+RUSTFS_ADDRESS=":9000"
+RUSTFS_CONSOLE_ADDRESS=":9001"
+RUSTFS_CONSOLE_ENABLE=true
+RUSTFS_OBS_LOGGER_LEVEL=error
+RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
+CFG
+}
 
 setup_environment() {
   local v
   for v in "${NODES[@]}"; do
-    remote "${v}" "curl -fsSL --retry 3 -o /tmp/rustfs-table.deb '${PACKAGE_URL}' && ${SUDO[*]} dpkg -i --force-confold /tmp/rustfs-table.deb >/dev/null 2>&1 && ${SUDO[*]} mkdir -p /data/rustfs{1..4}/mnmd && ${SUDO[*]} chown -R rustfs:rustfs /data/rustfs{1..4}/mnmd" || die "install failed on ${v}"
+    remote_root "${v}" <<EOF || die "install failed on ${v}"
+set -e
+curl -fsSL --retry 3 -o /tmp/rustfs-table.deb '${PACKAGE_URL}'
+dpkg -i --force-confold /tmp/rustfs-table.deb >/dev/null
+mkdir -p /data/rustfs{1..4}/mnmd
+chown -R rustfs:rustfs /data/rustfs{1..4}/mnmd
+EOF
   done
   write_node_config() {
-    remote "$1" "${SUDO[*]} tee /etc/default/rustfs >/dev/null <<'CFG'
-RUSTFS_ACCESS_KEY=${ACCESS_KEY}
-RUSTFS_SECRET_KEY=${SECRET_KEY}
-RUSTFS_VOLUMES=\"http://rustfs-node{1...4}:9000/data/rustfs{1...4}/mnmd\"
-RUSTFS_ADDRESS=\":9000\"
-RUSTFS_CONSOLE_ADDRESS=\":9001\"
-RUSTFS_CONSOLE_ENABLE=true
-RUSTFS_OBS_LOGGER_LEVEL=error
-RUSTFS_OBS_LOG_DIRECTORY=\"/var/log/rustfs/\"
-CFG"
+    remote_root "$1" <<EOF
+set -e
+cat > /etc/default/rustfs <<'CFG'
+$(rustfs_table_config)
+CFG
+EOF
   }
   local cfg_pids=()
   for v in "${NODES[@]}"; do write_node_config "${v}" & cfg_pids+=("$!"); done
@@ -170,7 +189,13 @@ CFG"
   # process substitution (bash >= 5.1) and would hang forever on tee
   wait "${cfg_pids[@]}"
   local start_pids=()
-  for v in "${NODES[@]}"; do remote "${v}" "${SUDO[*]} systemctl reset-failed rustfs 2>/dev/null; ${SUDO[*]} systemctl start rustfs" & start_pids+=("$!"); done
+  for v in "${NODES[@]}"; do
+    remote_root "${v}" <<'EOF' &
+systemctl reset-failed rustfs 2>/dev/null || true
+systemctl start rustfs
+EOF
+    start_pids+=("$!")
+  done
   wait "${start_pids[@]}"
   local deadline=$(( $(date +%s) + 180 )) i=0 ok
   while [ "$(date +%s)" -lt "${deadline}" ]; do
@@ -193,7 +218,14 @@ CFG"
 teardown_environment() {
   local v
   local clean_pids=()
-  for v in "${NODES[@]}"; do remote "${v}" "${SUDO[*]} systemctl stop rustfs 2>/dev/null; ${SUDO[*]} dpkg -P rustfs >/dev/null 2>&1; ${SUDO[*]} rm -rf /data/rustfs{1..4}/mnmd /etc/default/rustfs" & clean_pids+=("$!"); done
+  for v in "${NODES[@]}"; do
+    remote_root "${v}" <<'EOF' &
+systemctl stop rustfs 2>/dev/null || true
+dpkg -P rustfs >/dev/null 2>&1 || true
+rm -rf /data/rustfs{1..4}/mnmd /etc/default/rustfs
+EOF
+    clean_pids+=("$!")
+  done
   wait "${clean_pids[@]}"
   log "environment torn down"
 }
@@ -218,7 +250,7 @@ test_tbl101() {
   local venv="/tmp/tbl-venv-${RUN_ID}"
   if ! python3 -m venv "${venv}" >/tmp/tbl-venv-err.log 2>&1; then
     echo "tbl101: venv create failed, installing python3-venv: $(head -3 /tmp/tbl-venv-err.log)"
-    ${SUDO[*]} apt-get install -y python3-venv >/dev/null 2>&1 || true
+    "${LOCAL_SUDO[@]}" apt-get install -y python3-venv >/dev/null 2>&1 || true
     python3 -m venv "${venv}" >>/tmp/tbl-venv-err.log 2>&1 \
       || { echo "tbl101: venv create failed twice: $(tail -3 /tmp/tbl-venv-err.log)"; return 2; }
   fi
@@ -369,27 +401,29 @@ test_tbl107() {
 }
 
 # ==================== Main ====================
-TEST_TMP="$(mktemp -d /tmp/rustfs-table-test.XXXXXX)"
-trap 'cleanup_all; rm -rf "${TEST_TMP}"' EXIT
-if [ -n "${LOG_FILE}" ]; then
-  mkdir -p "$(dirname "${LOG_FILE}")"
-  exec > >(tee -a "${LOG_FILE}") 2>&1
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  TEST_TMP="$(mktemp -d /tmp/rustfs-table-test.XXXXXX)"
+  trap 'cleanup_all; rm -rf "${TEST_TMP}"' EXIT
+  if [ -n "${LOG_FILE}" ]; then
+    mkdir -p "$(dirname "${LOG_FILE}")"
+    exec > >(tee -a "${LOG_FILE}") 2>&1
+  fi
+
+  log "S3 Tables (Iceberg REST Catalog) suite"
+  log "endpoint=${API_ENDPOINT} rest=${REST_PATH} bucket-prefix=${TEST_BUCKET_PREFIX}"
+  [ "${DRY_RUN}" -eq 0 ] && setup_environment
+
+  run_test TBL-101 "PyIcebergEndToEnd"            test_tbl101
+  run_test TBL-102 "EnableAndGetTableBucket"      test_tbl102
+  run_test TBL-103 "NamespaceAndTableCrud"        test_tbl103
+  run_test TBL-104 "ReservedPrefixProtection"     test_tbl104
+  run_test TBL-106 "CompatPrefixAndConfig"        test_tbl106
+  run_test TBL-107 "TableBucketListIsolation"     test_tbl107
+  run_test TBL-105 "CommitCasConflict"            test_tbl105
+
+  cleanup_all
+  log "table suite: ${PASS} passed, ${FAIL} failed, ${UNSUPPORTED} unsupported"
+  [ "${FAIL}" -eq 0 ] || printf 'failed: %s\n' "${FAILED_TESTS[*]}"
+  [ "${DRY_RUN}" -eq 0 ] || exit 0
+  [ "${FAIL}" -eq 0 ]
 fi
-
-log "S3 Tables (Iceberg REST Catalog) suite"
-log "endpoint=${API_ENDPOINT} rest=${REST_PATH} bucket-prefix=${TEST_BUCKET_PREFIX}"
-[ "${DRY_RUN}" -eq 0 ] && setup_environment
-
-run_test TBL-101 "PyIcebergEndToEnd"            test_tbl101
-run_test TBL-102 "EnableAndGetTableBucket"      test_tbl102
-run_test TBL-103 "NamespaceAndTableCrud"        test_tbl103
-run_test TBL-104 "ReservedPrefixProtection"     test_tbl104
-run_test TBL-106 "CompatPrefixAndConfig"        test_tbl106
-run_test TBL-107 "TableBucketListIsolation"     test_tbl107
-run_test TBL-105 "CommitCasConflict"            test_tbl105
-
-cleanup_all
-log "table suite: ${PASS} passed, ${FAIL} failed, ${UNSUPPORTED} unsupported"
-[ "${FAIL}" -eq 0 ] || printf 'failed: %s\n' "${FAILED_TESTS[*]}"
-[ "${DRY_RUN}" -eq 0 ] || exit 0
-[ "${FAIL}" -eq 0 ]

@@ -1,6 +1,31 @@
 # auto-testing
 Auto testing scripts
 
+## Portable execution environments
+
+The suite defaults and CI topology remain unchanged. Local fleets can run the
+read-only compatibility preflight before any mutation:
+
+```bash
+python3 scripts/check_execution_environment.py \
+  --command aws --command curl --command jq --command openssl --command ssh \
+  --minimum-bash-major 4 \
+  --check-aws-list-objects \
+  --data-root /data/rustfs --drive-count 4 \
+  --minimum-free-gib 40 --require-distinct-devices \
+  --require-port 18080
+```
+
+The command prints JSON and exits `2` when a requirement is blocked. It does
+not create files, install packages, or change test behavior. A local VM that
+maps separate data disks to `/data/rustfs1` through `/data/rustfs4` can remove
+the root-filesystem disk-check bypass used by ad hoc single-disk deployments.
+
+The tier webhook receiver is configurable with `RUSTFS_RECEIVER_PORT`; choose a
+port that does not conflict with the local package server or another service.
+All top-level suite entrypoints are directly executable; `bash <script>` also
+works when a local checkout or transport drops executable modes.
+
 ## Release validation migration
 
 `validation-cases.json` snapshots all 158 canonical cases from

@@ -1,0 +1,71 @@
+name: Environment Compatibility Tests
+
+on:
+  pull_request:
+    paths:
+      - rustfs-table-test.sh
+      - rustfs-replication-test.sh
+      - rustfs-security-test.sh
+      - rustfs-upgrade-test.sh
+      - rustfs_performance_test.sh
+      - scripts/check_execution_environment.py
+      - scripts/lib/**
+      - test_check_execution_environment.py
+      - test_rustfs_table.py
+      - test_rustfs_performance_testing.py
+      - test_rustfs_replication.py
+      - .github/workflows/environment-compatibility-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - rustfs-table-test.sh
+      - rustfs-replication-test.sh
+      - rustfs-security-test.sh
+      - rustfs-upgrade-test.sh
+      - rustfs_performance_test.sh
+      - scripts/check_execution_environment.py
+      - scripts/lib/**
+      - test_check_execution_environment.py
+      - test_rustfs_table.py
+      - test_rustfs_performance_testing.py
+      - test_rustfs_replication.py
+      - .github/workflows/environment-compatibility-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  environment-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          persist-credentials: false
+      - name: Validate shell syntax
+        run: |
+          for script in \
+            rustfs-table-test.sh \
+            rustfs-replication-test.sh \
+            rustfs-security-test.sh \
+            rustfs-upgrade-test.sh \
+            rustfs_performance_test.sh
+          do
+            bash -n "${script}"
+          done
+          test -x rustfs-security-test.sh
+          test -x rustfs-upgrade-test.sh
+      - name: Test portable execution helpers
+        run: >-
+          python3 -B -m unittest -v
+          test_check_execution_environment.py
+          test_rustfs_table.py
+          test_rustfs_performance_testing.py
+          test_rustfs_replication.py
+      - name: Test missing HOME
+        run: env -u HOME bash test_rustfs_pool_expand.sh
+      - name: Smoke-test environment preflight
+        run: >-
+          python3 scripts/check_execution_environment.py
+          --command bash
+          --minimum-bash-major 4

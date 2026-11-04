@@ -29,6 +29,9 @@
 #
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JQ_LIB="${SCRIPT_DIR}/scripts/lib"
+
 # ==================== Configuration ====================
 
 if [ -n "${RUSTFS_NODES:-}" ]; then
@@ -678,7 +681,7 @@ rm_bucket_force() {
         --delete "${payload}" >/dev/null 2>&1 || true
     done < <(aws --endpoint-url "${url}" --region "${REGION}" s3api list-object-versions \
         --bucket "${b}" --output json 2>/dev/null \
-        | jq -c '[.Versions[]?, .DeleteMarkers[]?] | map({Key, VersionId}) | select(length > 0) | _nwise(1000) | {Objects: ., Quiet: true}')
+        | jq -c -L "${JQ_LIB}" 'include "jq_nwise"; [.Versions[]?, .DeleteMarkers[]?] | map({Key, VersionId}) | select(length > 0) | nwise(1000)[] | {Objects: ., Quiet: true}')
     aws --endpoint-url "${url}" --region "${REGION}" s3api delete-bucket --bucket "${b}" >/dev/null 2>&1 || true
     bucket_exists "${ep}" "${b}" || return 0
     sleep 2

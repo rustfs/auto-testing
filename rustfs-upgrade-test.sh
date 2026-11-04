@@ -42,6 +42,9 @@
 #   RUSTFS_NODES / RUSTFS_SSH_USER          shared test VMs (default vm000..002 / azureuser)
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JQ_LIB="${SCRIPT_DIR}/scripts/lib"
+
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-upgrade.XXXXXX")"
 trap 'rm -rf "${TEST_TMP}"' EXIT
 
@@ -862,8 +865,8 @@ seed_warp_bucket() {
       aws_run s3api delete-objects --bucket "${bucket}" --delete "${payload}"
       assert_aws_ok || die "seed: trim ${bucket} (delete batch failed)"
     done < <(printf '%s' "${keys_json}" \
-             | jq -c --argjson k "${keep}" \
-               '.[0:(length - $k)] | _nwise(1000) | {Objects: [.[] | {Key: .}], Quiet: true}')
+             | jq -c --argjson k "${keep}" -L "${JQ_LIB}" \
+               'include "jq_nwise"; .[0:(length - $k)] | nwise(1000)[] | {Objects: [.[] | {Key: .}], Quiet: true}')
     aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'length(Contents)'
     assert_aws_ok || die "seed: post-trim list ${bucket}"
     remaining="$(printf '%s' "${AWS_OUT}" | tr -d '[:space:]')"
