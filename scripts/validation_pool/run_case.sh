@@ -104,7 +104,7 @@ collect_decommission_logs() {
 }
 
 pool_hook() {
-  local action="${1:-}" layout="" phase="" since="" node output0 output1 journal_since
+  local action="${1:-}" layout="" phase="" since="" node output0_file output1_file journal_since
   shift || true
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -139,12 +139,18 @@ pool_hook() {
     diagnostic)
       if [ -n "${since}" ]; then
         journal_since="$(python3 -c 'from datetime import datetime,timezone; import sys; value=datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")); assert value.tzinfo is not None; print(value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f UTC"))' "${since}")"
-        output0="$(collect_decommission_logs "${NODES[0]}" "${journal_since}")"
-        output1="$(collect_decommission_logs "${NODES[1]}" "${journal_since}")"
+        output0_file="$(mktemp "${TMPDIR:-/tmp}/pool-journal-node0.XXXXXX")"
+        output1_file="$(mktemp "${TMPDIR:-/tmp}/pool-journal-node1.XXXXXX")"
+        if ! collect_decommission_logs "${NODES[0]}" "${journal_since}" > "${output0_file}" \
+            || ! collect_decommission_logs "${NODES[1]}" "${journal_since}" > "${output1_file}"; then
+          rm -f "${output0_file}" "${output1_file}"
+          die "failed to collect decommission journal evidence"
+        fi
         jq -n --arg phase "${phase}" --arg since "${since}" \
           --arg node0 "${NODES[0]}" --arg node1 "${NODES[1]}" \
-          --arg output0 "${output0}" --arg output1 "${output1}" \
+          --rawfile output0 "${output0_file}" --rawfile output1 "${output1_file}" \
           '{environmentId:"lifecycle-a",phase:$phase,mode:"decommission-journal",since:$since,nodes:{($node0):$output0,($node1):$output1}}'
+        rm -f "${output0_file}" "${output1_file}"
       else
         disk_probe metadata "${phase}"
       fi ;;

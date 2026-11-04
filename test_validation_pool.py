@@ -12,6 +12,9 @@ class PoolContractTest(unittest.TestCase):
         script = (Path(__file__).parent / "scripts/validation_pool/run_case.sh").read_text()
         self.assertIn("is not installed; stop skipped", script)
         self.assertIn("/var/log/rustfs/*.log", script)
+        self.assertIn("--rawfile output0", script)
+        self.assertIn("--rawfile output1", script)
+        self.assertNotIn('--arg output0 "${output0}"', script)
 
     def test_catalog_drives_case_selection(self) -> None:
         self.assertEqual(13, len(POOL_CASE_IDS))
