@@ -610,7 +610,7 @@ node_used_gb() {
     return 0
   fi
   used="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
-    "df -B1 --total --output=used /data/rustfs1 /data/rustfs2 /data/rustfs3 /data/rustfs4 2>/dev/null | tail -n 1 | awk '{printf \"%.0f\\n\", \$1 / 1073741824}'" \
+    "df_output=\$(df -B1 --total --output=used /data/rustfs1 /data/rustfs2 /data/rustfs3 /data/rustfs4 2>/dev/null) || exit 1; printf '%s\\n' \"\$df_output\" | awk 'END {printf \"%.0f\\n\", \$1 / 1073741824}'" \
     2>/dev/null)" || return 1
   [[ "${used}" =~ ^[0-9]+$ ]] || return 1
   printf '%s' "${used}"

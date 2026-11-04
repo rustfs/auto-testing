@@ -20,26 +20,37 @@ def shell_function(name):
 class HealNodeUsageTests(unittest.TestCase):
     def test_sums_explicit_bind_mount_usage_and_propagates_probe_failure(self):
         with tempfile.TemporaryDirectory() as directory:
-            calls = Path(directory) / "calls"
+            root = Path(directory)
+            calls = root / "calls"
+            tools = root / "bin"
+            tools.mkdir()
+            fake_df = tools / "df"
+            fake_df.write_text(r'''#!/usr/bin/env bash
+printf 'Used\n'
+printf '1342177280\n1610612736\n2147483648\n268435456\n5368709120\n'
+[ "${FAIL_PROBE:-0}" -eq 0 ]
+''')
+            fake_df.chmod(0o755)
             harness = r'''
 set -Eeuo pipefail
 DRY_RUN=0
 SSH_OPTS=(-o BatchMode=yes)
 SSH_USER=fixture
+PATH="$BIN:$PATH"
 ssh() {
-  printf '%s\n' "$*" > "$CALLS"
-  if [ "${FAIL_PROBE:-0}" -eq 1 ]; then return 255; fi
-  printf '34\n'
+  local remote="${*: -1}"
+  printf '%s\n' "${remote}" > "$CALLS"
+  bash -c "${remote}"
 }
 '''
             function = shell_function("node_used_gb")
             result = subprocess.run(
                 ["bash", "-c", harness + function + '\nnode_used_gb fixture-node'],
-                env={**os.environ, "CALLS": str(calls)},
+                env={**os.environ, "CALLS": str(calls), "BIN": str(tools)},
                 capture_output=True, text=True, timeout=10,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "34")
+            self.assertEqual(result.stdout.strip(), "5")
             remote_command = calls.read_text()
             for drive in range(1, 5):
                 self.assertIn(f"/data/rustfs{drive}", remote_command)
@@ -47,7 +58,7 @@ ssh() {
 
             failed = subprocess.run(
                 ["bash", "-c", harness + function + '\nnode_used_gb fixture-node'],
-                env={**os.environ, "CALLS": str(calls), "FAIL_PROBE": "1"},
+                env={**os.environ, "CALLS": str(calls), "BIN": str(tools), "FAIL_PROBE": "1"},
                 capture_output=True, text=True, timeout=10,
             )
             self.assertNotEqual(failed.returncode, 0)
