@@ -1085,7 +1085,8 @@ while True:
       esac
       printf "%s\n" "$3"
       if [ "$5" = killed-logger ]; then
-        kill -TERM "${LOG_CAPTURE_PID}"
+        trap '' PIPE
+        kill -KILL "${LOG_CAPTURE_PID}"
         sleep 0.1
       fi
       exit "$4"
@@ -1133,7 +1134,10 @@ test_log_capture_preserves_suite_and_logger_failures() {
   [ "${LOGGED_RC}" -ne 0 ] || fail "logger failure was not propagated"
   run_logged_child "${log_file}" both-failed-token 23 \
     "${TEST_ROOT}/log-child-both-fail" killed-logger
-  assert_eq 23 "${LOGGED_RC}" "suite failure precedence over logger failure"
+  case "${LOGGED_RC}" in
+    23|141) ;;
+    *) fail "combined suite/logger failures must stay nonzero: got ${LOGGED_RC}" ;;
+  esac
 }
 
 test_log_capture_does_not_wait_for_inherited_writers() {

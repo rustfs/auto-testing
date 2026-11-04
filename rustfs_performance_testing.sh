@@ -20,6 +20,7 @@
 #   WARP_CONCURRENCY WARP_DURATION WARP_GET_OBJECTS WARP_SLEEP_BETWEEN_ROUNDS
 #   WARP_RESULT_DIR
 #   WARP_METHODS WARP_SIZES   # restrict methods/sizes (comma/space separated); empty = full run
+#   WARP_ROUND_TIMEOUT WARP_MAX_CONSECUTIVE_FAILURES
 
 set -u -o pipefail
 
@@ -31,6 +32,8 @@ CONCURRENCY="${WARP_CONCURRENCY:-64}"
 DURATION="${WARP_DURATION:-5m}"
 GET_OBJECTS="${WARP_GET_OBJECTS:-2500}"
 SLEEP_BETWEEN_ROUNDS="${WARP_SLEEP_BETWEEN_ROUNDS:-60}"
+ROUND_TIMEOUT="${WARP_ROUND_TIMEOUT:-900}"
+MAX_CONSECUTIVE_FAILURES="${WARP_MAX_CONSECUTIVE_FAILURES:-0}"
 RESULT_DIR="${WARP_RESULT_DIR:-$(pwd)/warp-bench-results-$(date +%Y%m%d-%H%M%S)}"
 
 if [ -n "${WARP_SIZES:-}" ] && [ "${WARP_SIZES}" != "all" ] && [ "${WARP_SIZES}" != "ALL" ]; then
@@ -47,6 +50,7 @@ TOTAL_ROUNDS=$(( ${#METHODS[@]} * ${#SIZES[@]} ))
 ROUND=0
 PARSED_ROUNDS=0
 FAILED_ROUNDS=0
+CONSECUTIVE_FAILURES=0
 
 # --parse-only <result-dir>: parse an existing result dir (${method}_${size}.txt) without running
 # Only round files with a successful terminal execution status can be certified.
@@ -231,8 +235,7 @@ for method in "${METHODS[@]}"; do
       extra_args=(--objects "${GET_OBJECTS}")
     fi
 
-    start_epoch=$(date +%s)
-    warp "${method}" \
+    warp_args=("${method}" \
       --host "${HOST}" \
       --access-key "${ACCESS_KEY}" \
       --secret-key "${SECRET_KEY}" \
@@ -241,7 +244,14 @@ for method in "${METHODS[@]}"; do
       --duration "${DURATION}" \
       --obj.size "${size}" \
       ${extra_args[@]+"${extra_args[@]}"} \
-      --no-color 2>&1 | tee "${outfile}"
+      --no-color)
+    start_epoch=$(date +%s)
+    if [[ "${ROUND_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+      timeout --signal=TERM --kill-after=30 "${ROUND_TIMEOUT}" \
+        bash -c 'warp "$@"' bash "${warp_args[@]}" 2>&1 | tee "${outfile}"
+    else
+      warp "${warp_args[@]}" 2>&1 | tee "${outfile}"
+    fi
     round_status=("${PIPESTATUS[@]}")
     rc=${round_status[0]}
     capture_rc=${round_status[1]}
@@ -250,10 +260,17 @@ for method in "${METHODS[@]}"; do
 
     if [[ ${rc} -eq 0 && ${capture_rc} -eq 0 ]] && parse_round "${method}" "${size}" "${outfile}"; then
       PARSED_ROUNDS=$((PARSED_ROUNDS + 1))
+      CONSECUTIVE_FAILURES=0
       log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} elapsed=$((end_epoch - start_epoch))s parsed=ok"
     else
       FAILED_ROUNDS=$((FAILED_ROUNDS + 1))
+      CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
       log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} capture_rc=${capture_rc} elapsed=$((end_epoch - start_epoch))s parsed=failed"
+      if [[ "${MAX_CONSECUTIVE_FAILURES}" =~ ^[1-9][0-9]*$ ]] \
+        && (( CONSECUTIVE_FAILURES >= MAX_CONSECUTIVE_FAILURES )); then
+        log "ABORT consecutive_failures=${CONSECUTIVE_FAILURES} limit=${MAX_CONSECUTIVE_FAILURES}"
+        break 2
+      fi
     fi
 
     if [[ ${ROUND} -lt ${TOTAL_ROUNDS} ]]; then

@@ -142,7 +142,6 @@ finish_log_process_bounded() {
   for ((i=0; i<ticks; i++)); do
     if ! log_capture_job_is_active "${pid}"; then
       if reap_log_process_if_done "${pid}"; then process_status=0; else process_status=$?; fi
-      [ "${process_status}" -lt 124 ] || return 124
       [ "${process_status}" -ne 0 ] || process_status="${stop_status}"
       return "${process_status}"
     fi
@@ -151,7 +150,6 @@ finish_log_process_bounded() {
 
   if ! log_capture_job_is_active "${pid}"; then
     if reap_log_process_if_done "${pid}"; then process_status=0; else process_status=$?; fi
-    [ "${process_status}" -lt 124 ] || return 124
     [ "${process_status}" -ne 0 ] || process_status="${stop_status}"
     return "${process_status}"
   fi
@@ -161,10 +159,9 @@ finish_log_process_bounded() {
     if ! log_capture_job_is_active "${pid}"; then
       # The helper exited on TERM. Harvest the real status: a graceful 0 or
       # stop_status means the log is intact and the escalation was just slow
-      # politeness, not a failure. Hardcoding 124 here turned all-green runs
-      # red (09-21 run 35560597650). Signal deaths (>=128) stay 124.
+      # politeness, not a failure. Keep signal deaths distinct from the
+      # timeout sentinel so a crashed logger cannot be hidden by the suite.
       if reap_log_process_if_done "${pid}"; then process_status=0; else process_status=$?; fi
-      [ "${process_status}" -lt 128 ] || process_status=124
       [ "${process_status}" -ne 0 ] || process_status="${stop_status}"
       return "${process_status}"
     fi
@@ -543,7 +540,22 @@ run_bounded() {
 run_hard_bounded() {
   local seconds="$1"
   shift
-  timeout --signal=KILL "${seconds}" "$@"
+  python3 - "$seconds" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    status = process.wait(timeout=timeout)
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+    raise SystemExit(137)
+raise SystemExit(status if status >= 0 else 128 - status)
+PY
 }
 
 bounded_safe_excerpt() {

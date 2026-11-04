@@ -39,6 +39,7 @@
 #   RUSTFS_NODES / RUSTFS_SSH_USER          shared test VMs (default vm000..002 / azureuser)
 #   RUSTFS_API_ENDPOINT                     override the topology endpoint
 #   REPORT_FILE                             markdown report path (default /tmp/rustfs-security-report.md)
+#   LOG_FILE                                append suite output to this file
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,6 +105,7 @@ API_REQUEST_TIMEOUT=120
 ADMIN_API_CODE_FILE="${TEST_TMP}/api-code"
 
 REPORT_FILE="${REPORT_FILE:-/tmp/rustfs-security-report.md}"
+LOG_FILE="${LOG_FILE:-}"
 REPORT_SECTIONS_FILE="${TEST_TMP}/report-sections.md"
 RUSTFS_VERSION_INFO=""
 
@@ -1046,6 +1048,7 @@ parse_args() {
       --validation-artifacts-dir) [ "$#" -ge 2 ] || die "--validation-artifacts-dir requires a value"; VALIDATION_ARTIFACTS_DIR="$2"; shift ;;
       --candidate-manifest) [ "$#" -ge 2 ] || die "--candidate-manifest requires a value"; VALIDATION_CANDIDATE_MANIFEST="$2"; shift ;;
       --testing-commit) [ "$#" -ge 2 ] || die "--testing-commit requires a value"; VALIDATION_TESTING_COMMIT="$2"; shift ;;
+      --log-file) [ "$#" -ge 2 ] || die "--log-file requires a value"; LOG_FILE="$2"; shift ;;
       --keep-env) KEEP_ENV=1 ;;
       -y) ASSUME_YES=1 ;;
       --dry-run) DRY_RUN=1 ;;
@@ -1169,6 +1172,27 @@ main() {
   echo "security suite: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
 }
 
-if [ "${RUSTFS_SECURITY_SCRIPT_SOURCE_ONLY:-0}" != 1 ]; then
+run_main() {
+  local log_file="" index
+  local -a args=("$@")
+  for ((index=0; index<${#args[@]}; index++)); do
+    if [ "${args[index]}" = "--log-file" ]; then
+      log_file="${args[index+1]:-}"
+    fi
+  done
+  if [ -n "${log_file}" ]; then
+    command -v tee >/dev/null 2>&1 || die "missing command: tee (required by --log-file)"
+    mkdir -p "$(dirname "${log_file}")"
+    set +e
+    main "$@" 2>&1 | tee -a "${log_file}"
+    local suite_rc=${PIPESTATUS[0]} tee_rc=${PIPESTATUS[1]}
+    set -e
+    [ "${suite_rc}" -eq 0 ] || exit "${suite_rc}"
+    exit "${tee_rc}"
+  fi
   main "$@"
+}
+
+if [ "${RUSTFS_SECURITY_SCRIPT_SOURCE_ONLY:-0}" != 1 ]; then
+  run_main "$@"
 fi

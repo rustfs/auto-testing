@@ -269,12 +269,13 @@ class DryRunTest(unittest.TestCase):
             tools = root / "bin"
             tools.mkdir()
             # Deliberately omit curl, aws, ssh, openssl, jq, python3, and git.
-            for command in ("bash", "cat", "dirname", "head", "mktemp", "rm", "sed", "sort"):
+            for command in ("bash", "cat", "dirname", "head", "mkdir", "mktemp", "rm", "sed", "sort", "tee"):
                 (tools / command).symlink_to(shutil.which(command))
             report = root / "report.md"
+            log_file = root / "security.log"
             result = subprocess.run(
                 [str(tools / "bash"), str(Path(__file__).with_name("rustfs-security-test.sh")),
-                 "--dry-run", "--all-topologies", "-y"],
+                 "--dry-run", "--all-topologies", "-y", "--log-file", str(log_file)],
                 env={**os.environ, "PATH": str(tools), "TMPDIR": directory, "REPORT_FILE": str(report),
                      "GITHUB_STEP_SUMMARY": str(root / "summary.md"), "RUSTFS_NODES": "fixture-node",
                      "RUSTFS_ACCESS_KEY": "fixture-root", "RUSTFS_SECRET_KEY": "fixture-secret"},
@@ -284,6 +285,26 @@ class DryRunTest(unittest.TestCase):
             self.assertEqual(result.stdout.count("[DRY-RUN] STS-105"), 3)
             for topology in ("single-single", "single-multi", "multi-multi"):
                 self.assertIn(f"## Topology: {topology}", report.read_text())
+            self.assertEqual(result.stdout, log_file.read_text())
+
+    def test_log_capture_failure_is_propagated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            for command in ("bash", "cat", "dirname", "head", "mkdir", "mktemp", "rm", "sed", "sort"):
+                (tools / command).symlink_to(shutil.which(command))
+            (tools / "tee").write_text("#!/bin/sh\ncat >/dev/null\nexit 1\n")
+            (tools / "tee").chmod(0o755)
+            result = subprocess.run(
+                [str(tools / "bash"), str(Path(__file__).with_name("rustfs-security-test.sh")),
+                 "--dry-run", "--all-topologies", "-y", "--log-file", str(root / "security.log")],
+                env={**os.environ, "PATH": str(tools), "TMPDIR": directory, "REPORT_FILE": str(root / "report.md"),
+                     "GITHUB_STEP_SUMMARY": str(root / "summary.md"), "RUSTFS_NODES": "fixture-node",
+                     "RUSTFS_ACCESS_KEY": "fixture-root", "RUSTFS_SECRET_KEY": "fixture-secret"},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

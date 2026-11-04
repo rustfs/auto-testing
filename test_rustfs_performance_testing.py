@@ -34,6 +34,7 @@ class PerformanceResultTests(unittest.TestCase):
   [[ "$method" == put && "$objects" == 0 || "$method" != put && "$objects" == 1 ]] || return 21
   printf 'diagnostic %s %s\n' "$method" "$size" >&2
   if [[ "$mode" == fail || "$mode" == mixed-failure && "$method" == put ]]; then return 42; fi
+  if [[ "$mode" == hang ]]; then sleep 30; fi
   local sections=() section text
   case "$method" in
     get) sections=(GET);;
@@ -111,6 +112,17 @@ class PerformanceResultTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(len(rows), 4 if mode.startswith("missing-mixed-") else 0)
                 self.assert_diagnostics(6)
+
+    def test_stuck_round_is_hard_timed_out_and_fails_the_run(self):
+        result, rows = self.run_benchmark(
+            "hang", WARP_METHODS="get", WARP_SIZES="1KiB",
+            WARP_ROUND_TIMEOUT="1", WARP_MAX_CONSECUTIVE_FAILURES="1",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(rows, [])
+        master = (self.results / "master.log").read_text()
+        self.assertIn("rc=124", master)
+        self.assertIn("ABORT consecutive_failures=1 limit=1", master)
 
     def test_each_required_single_method_metric_is_checked(self):
         for value in ("1.25 MiB/s", "1280.0", "1.2ms", "1.1ms", "1.5ms", "2.1ms"):

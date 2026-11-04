@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 
 import unittest
+from pathlib import Path
 
 from scripts.validation_pool.case_plan import POOL_CASE_IDS, pool_harness_scored_cases
 from scripts.validation_pool.pool_helpers import active_endpoint_indices, active_fixture_bytes
 
 
 class PoolContractTest(unittest.TestCase):
+    def test_environment_hooks_handle_missing_service_and_file_logs(self) -> None:
+        script = (Path(__file__).parent / "scripts/validation_pool/run_case.sh").read_text()
+        self.assertIn("is not installed; stop skipped", script)
+        self.assertIn("/var/log/rustfs/*.log", script)
+
     def test_catalog_drives_case_selection(self) -> None:
         self.assertEqual(13, len(POOL_CASE_IDS))
         self.assertEqual(("pool.status",), pool_harness_scored_cases(["pool.status"]))
