@@ -239,6 +239,8 @@ suite_exit() {
     VALIDATION_ENV_ACTIVE=0
     env_teardown "${CURRENT_TOPOLOGY}" || exit_code=1
   fi
+  if declare -F mqtt_stop >/dev/null; then mqtt_stop || exit_code=1; fi
+  if declare -F mqtt_broker_stop >/dev/null; then mqtt_broker_stop || exit_code=1; fi
   if finish_log_capture "${exit_code}"; then
     exit_code=0
   else
@@ -289,8 +291,14 @@ NOTIFY_ENDPOINT="http://${HEAL_IP}:${RECEIVER_PORT}/hook"
 AUDIT_ENDPOINT="http://${HEAL_IP}:${RECEIVER_PORT}/audit"
 NOTIFY_TOKEN="notify-token"
 AUDIT_TOKEN="audit-token"
-MQTT_BROKER="tcp://${HEAL_IP}:1883"
+MQTT_PORT="${RUSTFS_MQTT_PORT:-1883}"
+MQTT_MODE="${RUSTFS_TIER_MQTT_MODE:-auto}"
+MQTT_BROKER="tcp://${HEAL_IP}:${MQTT_PORT}"
 MQTT_TOPIC="rustfs/events"
+MQTT_SUB_PID=""
+MQTT_BROKER_OWNED=0
+MQTT_DOCKER=(docker)
+MQTT_CIDFILE=""
 RECEIVER_SCRIPT="${TEST_TMP}/rustfs-receiver.py"
 RECEIVER_PIDFILE="${TEST_TMP}/rustfs-receiver.pid"
 MQTT_PIDFILE="${TEST_TMP}/rustfs-mqtt-sub.pid"
@@ -305,7 +313,7 @@ RUSTFS_USER="rustfs"
 RUSTFS_ADDRESS=":9000"
 RUSTFS_CONSOLE_ADDRESS=":9001"
 RUSTFS_CONSOLE_ENABLE=true
-RUSTFS_OBS_LOGGER_LEVEL=error
+RUSTFS_OBS_LOGGER_LEVEL=warn
 RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
 
 TOPO_SINGLE_SINGLE="single-single"
@@ -591,6 +599,9 @@ init_artifacts() {
   RESULT_LOG_DIR="${ARTIFACTS_DIR}/logs"
   PROVENANCE_FILE="${ARTIFACTS_DIR}/provenance.json"
   RESIDUE_FILE="${ARTIFACTS_DIR}/residue.jsonl"
+  # A persistent receipt lets the caller recover an owned container after
+  # process cancellation or a failed Docker cleanup.
+  MQTT_CIDFILE="${ARTIFACTS_DIR}/mqtt-container-id"
   mkdir -p "${RESULTS_DIR}" "${RESULT_LOG_DIR}"
   if find "${RESULTS_DIR}" -maxdepth 1 -type f -name '*.json' -print -quit | grep -q .; then
     die "artifacts case directory is not empty; use a unique --artifacts-dir: ${RESULTS_DIR}"
@@ -997,20 +1008,149 @@ receiver_stop() {
   sleep 1
 }
 
+mqtt_port_open() {
+  run_bounded 5 python3 - "${HEAL_IP}" "${MQTT_PORT}" <<'PY'
+import socket
+import sys
+
+try:
+    with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+mqtt_prepare() {
+  [ "${DRY_RUN}" -eq 1 ] && return 0
+  case "${MQTT_MODE}" in auto|external) ;; *) die "invalid RUSTFS_TIER_MQTT_MODE: use auto or external" ;; esac
+  [[ "${MQTT_PORT}" =~ ^[0-9]+$ ]] && [ "${MQTT_PORT}" -ge 1 ] && [ "${MQTT_PORT}" -le 65535 ] \
+    || die "RUSTFS_MQTT_PORT must be between 1 and 65535"
+  if ! mqtt_port_open; then
+    [ "${MQTT_MODE}" = auto ] || die "MQTT prerequisite unavailable at ${MQTT_BROKER} (external broker required)"
+    # Only manage a broker on this host. A remote endpoint must be provisioned
+    # by its owner; binding an ephemeral port also handles hostname resolution.
+    run_bounded 5 python3 - "${HEAL_IP}" <<'PY' || die "MQTT broker is unavailable and ${HEAL_IP} is not a local bind address"
+import socket
+import sys
+
+try:
+    with socket.socket() as sock:
+        sock.bind((sys.argv[1], 0))
+except OSError:
+    raise SystemExit(1)
+PY
+    need_cmd docker "Docker (automatic local MQTT broker)"
+    if ! run_bounded 10 docker info >/dev/null 2>&1; then
+      MQTT_DOCKER=(sudo -n docker)
+      run_bounded 10 "${MQTT_DOCKER[@]}" info >/dev/null 2>&1 \
+        || die "MQTT prerequisite requires a working Docker daemon or an existing broker at ${MQTT_BROKER}"
+    fi
+    [ ! -e "${MQTT_CIDFILE}" ] || die "MQTT container receipt already exists: ${MQTT_CIDFILE}"
+    MQTT_BROKER_OWNED=1
+    run_bounded 120 "${MQTT_DOCKER[@]}" run -d --cidfile "${MQTT_CIDFILE}" \
+      --name "rustfs-tier-mqtt-${RUN_TOKEN}" -p "${HEAL_IP}:${MQTT_PORT}:1883" \
+      eclipse-mosquitto:2 sh -c \
+      'printf "listener 1883 0.0.0.0\nallow_anonymous true\n" > /tmp/tier-mosquitto.conf; exec mosquitto -c /tmp/tier-mosquitto.conf' \
+      > "${RESULT_LOG_DIR}/mqtt-broker-start.log" 2>&1 \
+      || die "MQTT broker startup failed; see ${RESULT_LOG_DIR}/mqtt-broker-start.log"
+    local deadline=$((SECONDS + 15))
+    until mqtt_port_open; do
+      [ "${SECONDS}" -lt "${deadline}" ] || die "MQTT broker did not listen at ${MQTT_BROKER}"
+      sleep 0.2
+    done
+  fi
+  mqtt_start
+}
+
+mqtt_broker_stop() {
+  [ "${MQTT_BROKER_OWNED:-0}" -eq 1 ] || return 0
+  local container_id
+  if [ -s "${MQTT_CIDFILE}" ]; then
+    container_id="$(cat "${MQTT_CIDFILE}")"
+    [[ "${container_id}" =~ ^[0-9a-f]{64}$ ]] || { warn "invalid MQTT container receipt; refusing cleanup"; return 1; }
+    run_bounded 10 "${MQTT_DOCKER[@]}" logs --tail 200 "${container_id}" \
+      > "${RESULT_LOG_DIR}/mqtt-broker.log" 2>&1 || true
+    run_bounded 15 "${MQTT_DOCKER[@]}" rm -f "${container_id}" >/dev/null \
+      || { warn "failed to remove owned MQTT container ${container_id}"; return 1; }
+    rm -f -- "${MQTT_CIDFILE}"
+  fi
+  MQTT_BROKER_OWNED=0
+}
+
+mqtt_check_node_access() {
+  [ "${DRY_RUN}" -eq 1 ] && return 0
+  local node command diagnostic="${RESULT_LOG_DIR}/mqtt-network-${CURRENT_TOPOLOGY}.log"
+  printf -v command 'python3 -c %q %q %q' \
+    'import socket,sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3).close()' \
+    "${HEAL_IP}" "${MQTT_PORT}"
+  : > "${diagnostic}"
+  for node in "$@"; do
+    run_bounded 10 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" "${command}" >> "${diagnostic}" 2>&1 \
+      || die "MQTT broker ${MQTT_BROKER} is unreachable from ${node}; see ${diagnostic}"
+  done
+}
+
 mqtt_start() {
   [ "${DRY_RUN}" -eq 1 ] && return 0
   mqtt_stop
-  nohup mosquitto_sub -h "${HEAL_IP}" -p 1883 -t "${MQTT_TOPIC}" -v >> "${MQTT_EVENTS}" 2>/dev/null &
-  echo $! > "${MQTT_PIDFILE}"
-  sleep 2
-  log "mqtt subscriber started (${MQTT_TOPIC})"
+  local probe_topic="rustfs/tier-probe/${RUN_TOKEN}" deadline=$((SECONDS + 15))
+  local diagnostic="${RESULT_LOG_DIR}/mqtt-${CURRENT_TOPOLOGY:-preflight}.log"
+  : > "${MQTT_EVENTS}"
+  : > "${diagnostic}"
+  mosquitto_sub -h "${HEAL_IP}" -p "${MQTT_PORT}" -t "${MQTT_TOPIC}" -t "${probe_topic}" -v \
+    >> "${MQTT_EVENTS}" 2>> "${diagnostic}" &
+  MQTT_SUB_PID=$!
+  echo "${MQTT_SUB_PID}" > "${MQTT_PIDFILE}"
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    if ! kill -0 "${MQTT_SUB_PID}" 2>/dev/null; then
+      die "MQTT subscriber exited before readiness at ${MQTT_BROKER}; see ${diagnostic}"
+    fi
+    run_bounded 2 mosquitto_pub -h "${HEAL_IP}" -p "${MQTT_PORT}" -t "${probe_topic}" -m "${RUN_TOKEN}" \
+      >> "${diagnostic}" 2>&1 || true
+    if grep -Fxq "${probe_topic} ${RUN_TOKEN}" "${MQTT_EVENTS}" && kill -0 "${MQTT_SUB_PID}" 2>/dev/null; then
+      : > "${MQTT_EVENTS}"
+      log "MQTT publish/subscribe readiness passed at ${MQTT_BROKER}"
+      return 0
+    fi
+    sleep 0.2
+  done
+  die "MQTT publish/subscribe readiness timed out at ${MQTT_BROKER}; see ${diagnostic}"
 }
 
 mqtt_stop() {
-  [ -f "${MQTT_PIDFILE}" ] && kill "$(cat "${MQTT_PIDFILE}")" 2>/dev/null || true
-  rm -f "${MQTT_PIDFILE}"
-  pkill -f "mosquitto_sub" 2>/dev/null || true
-  sleep 1
+  if [ -n "${MQTT_SUB_PID:-}" ]; then
+    kill "${MQTT_SUB_PID}" 2>/dev/null || true
+    local deadline=$((SECONDS + 2))
+    while kill -0 "${MQTT_SUB_PID}" 2>/dev/null && [ "${SECONDS}" -lt "${deadline}" ]; do sleep 0.1; done
+    kill -KILL "${MQTT_SUB_PID}" 2>/dev/null || true
+    wait "${MQTT_SUB_PID}" 2>/dev/null || true
+    MQTT_SUB_PID=""
+  fi
+  [ -z "${MQTT_PIDFILE:-}" ] || rm -f -- "${MQTT_PIDFILE}"
+}
+
+capture_module_startup_diagnostics() {
+  local node line index=0 destination
+  for node in "${SOURCE_NODE}" "${TARGET_NODE}"; do
+    index=$((index + 1))
+    destination="${RESULT_LOG_DIR}/module-startup-${CURRENT_TOPOLOGY}-${index}.log"
+    # Capture before teardown deletes the server logs. Keep only notification
+    # startup diagnostics, not configuration or complete service logs.
+    run_bounded 15 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" \
+      "sudo -n sh -c 'tail -n 200 /var/log/rustfs/*.log'" 2>&1 \
+      | while IFS= read -r line; do
+          case "${line}" in
+            *'notification runtime'*|*'notify runtime'*|*'mqtt target state'*|*'initialize target'*|*'initialization failed'*|*'Permission denied'*|*'No such file'*)
+              if printf '%s' "${line}" | grep -qiE 'password|secret|token|authorization|credential|://[^ /]+@'; then
+                printf '<redacted: credential-like content>\n'
+              else
+                bounded_safe_excerpt "${line}" 1024
+                printf '\n'
+              fi ;;
+          esac
+        done > "${destination}" || warn "module startup log collection incomplete for ${node}"
+  done
 }
 
 events_reset() {
@@ -1078,6 +1218,7 @@ resolve_topology() {
 env_setup() {
   local topo="$1" url script
   resolve_topology "${topo}"
+  if [ -z "${VALIDATION_CASE}" ]; then mqtt_check_node_access "${SOURCE_NODE}" "${TARGET_NODE}"; fi
   url="$(resolve_package_url)"
   log "environment setup: topology=${topo} source=${SOURCE_NODE} target=${TARGET_NODE} endpoint=${ENDPOINT}"
   API_ENDPOINT="${ENDPOINT}"
@@ -1152,7 +1293,11 @@ EOF
       [ "${VALIDATION_CASE}" = events.delivery ] && switches='{"notify_enabled":true,"audit_enabled":false}'
       [ "${VALIDATION_CASE}" = audit.request-correlation ] && switches='{"notify_enabled":false,"audit_enabled":true}'
       mbody="$(admin_api PUT /rustfs/admin/v3/module-switches "" "${switches}")"; mcode="$(admin_api_code)"
-      [ "${mcode}" = "200" ] || { echo "enable modules -> HTTP ${mcode}: ${mbody}"; die "failed to enable notify/audit modules"; }
+      if [ "${mcode}" != "200" ]; then
+        capture_module_startup_diagnostics
+        echo "enable modules -> HTTP ${mcode}: ${mbody}"
+        die "failed to enable notify/audit modules; startup diagnostics: ${RESULT_LOG_DIR}/module-startup-${CURRENT_TOPOLOGY}-*.log"
+      fi
       [ "${VALIDATION_CASE}" = audit.request-correlation ] || wait_targets_ready
     fi
     log "rc aliases local/target; warm bucket ${TIER_BUCKET} ready"
@@ -3177,8 +3322,9 @@ main() {
   need_cmd python3 "Python 3 (path canonicalization and receiver)"
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4)"
-  if [ "${VALIDATION_CASE}" != events.delivery ] && [ "${VALIDATION_CASE}" != audit.request-correlation ]; then
+  if [ -z "${VALIDATION_CASE}" ]; then
     need_cmd mosquitto_sub "mosquitto clients"
+    need_cmd mosquitto_pub "mosquitto clients"
   fi
   need_cmd timeout "GNU timeout (bounded CLI/network operations)"
   if [ "${VALIDATION_CASE}" = audit.request-correlation ] && [ "${DRY_RUN}" -eq 0 ]; then
@@ -3192,6 +3338,8 @@ main() {
   log "nodes: ${NODES[*]}  package: $(resolve_package_url)"
   log "rc: path=${RC_BIN} version=${RC_VERSION} sha256=${RC_SHA256:-dry-run} config=${RC_CONFIG_DIR}"
 
+  # Fail dependency preflight before purging packages, data, or server logs.
+  if [ -z "${VALIDATION_CASE}" ]; then mqtt_prepare; fi
   receiver_install
   local overall_fail=0 topo
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do

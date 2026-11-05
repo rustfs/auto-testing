@@ -202,6 +202,10 @@ python3 -B -m unittest -v test_rustfs_security.py test_sensitive_diagnostics.py
 
 ## Tier suite artifacts
 
+The full Tier suite requires `mosquitto_sub` and `mosquitto_pub`. Before changing any RustFS node, it checks MQTT publish/subscribe delivery through `${RUSTFS_HEAL_IP}:1883`. An existing broker is reused. If the endpoint is local and has no listener, the suite starts an isolated `eclipse-mosquitto:2` Docker container and removes only that container on exit, including failed setup. Docker must be available directly or through `sudo -n`. Set `RUSTFS_TIER_MQTT_MODE=external` to require an already running broker without creating one; use `RUSTFS_MQTT_PORT` to override port 1883. Remote brokers must be provisioned separately. Canonical tiering, events, and audit validation cases do not require MQTT.
+
+MQTT startup, subscriber, broker, and VM connectivity diagnostics are stored under the artifact `logs/` directory. A managed container's `mqtt-container-id` receipt remains in the artifact directory until cleanup succeeds; CI uses the same cleanup function to recover that container after cancellation. A failed module-enable request also captures bounded, credential-filtered notification startup logs from the source and target before teardown. The test servers use the `warn` log level so lifecycle failure details are available. Always pass a unique persistent `--artifacts-dir` when investigating a setup failure; the default temporary directory is removed on exit.
+
 `rustfs-tier-test.sh` can persist machine-readable evidence with
 `--artifacts-dir <unique-directory>`. The directory contains one atomic JSON
 result per `(topology, case_id)`, the exact `rc` path/version/SHA-256 and
