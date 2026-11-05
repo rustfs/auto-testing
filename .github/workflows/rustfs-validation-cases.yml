@@ -152,7 +152,11 @@ jobs:
 
       - name: Resolve nightly candidate
         id: resolved
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+        # Same reusable-workflow gotcha as the Bind step above: the
+        # caller's workflow_dispatch leaks through workflow_call, so chain
+        # runs must skip this standalone resolver - with the chain env
+        # half-set it dies in manual_manifest (run 41948811406).
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.chain_manifest == '' }}
         env:
           GH_TOKEN: ${{ secrets.PF_TESTING_GH_TOKEN }}
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
