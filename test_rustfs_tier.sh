@@ -1412,6 +1412,8 @@ if [ "${RUSTFS_TIER_TEST_MODE:-all}" = log-stress ]; then
   exit 0
 fi
 
+python3 -m unittest discover -s "${SCRIPT_DIR}" -p test_rustfs_tier_mqtt.py
+
 test_pre_registration_before_failed_create
 test_cleanup_order_idempotence_and_drain
 test_source_bucket_cleanup_retries_bucket_not_empty_then_succeeds

@@ -216,8 +216,6 @@ jobs:
         timeout-minutes: 5
         run: |
           set -euo pipefail
-          sudo docker rm -f rustfs-test-mqtt >/dev/null 2>&1 || true
-          sudo rm -f /tmp/rustfs-mosquitto.conf
           read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
           SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
           for node in "${NODES[@]}"; do
@@ -233,34 +231,16 @@ jobs:
             '
           done
 
-      - name: Ensure MQTT broker + clients
+      - name: Ensure MQTT clients
         timeout-minutes: 5
         run: |
           set -euo pipefail
-          if ! command -v mosquitto_sub >/dev/null 2>&1; then
+          if ! command -v mosquitto_sub >/dev/null 2>&1 || ! command -v mosquitto_pub >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y mosquitto-clients
           fi
-          command -v docker >/dev/null 2>&1 || { echo 'docker not found on runner'; exit 1; }
-          sudo docker rm -f rustfs-test-mqtt >/dev/null 2>&1 || true
-          cat <<'EOF' | sudo tee /tmp/rustfs-mosquitto.conf >/dev/null
-          listener 1883 0.0.0.0
-          allow_anonymous true
-          EOF
-          sudo docker run -d --name rustfs-test-mqtt -p 1883:1883 \
-            -v /tmp/rustfs-mosquitto.conf:/mosquitto/config/mosquitto.conf:ro \
-            eclipse-mosquitto:2 >/dev/null
-          for _ in {1..10}; do
-            if ss -tln 2>/dev/null | grep -q ':1883'; then
-              break
-            fi
-            sleep 1
-          done
-          ss -tln 2>/dev/null | grep -q ':1883' || {
-            echo 'mosquitto container is not listening on 1883'
-            sudo docker logs rustfs-test-mqtt || true
-            exit 1
-          }
+          # The suite owns broker preparation, readiness, logs, and cleanup so
+          # direct VM invocations exercise the same prerequisite as CI.
 
       - name: Run tier suite
         id: test
@@ -467,8 +447,17 @@ jobs:
         if: ${{ always() && steps.environment.outcome == 'success' }}
         run: |
           set -euo pipefail
-          sudo docker rm -f rustfs-test-mqtt >/dev/null 2>&1 || true
-          sudo rm -f /tmp/rustfs-mosquitto.conf
+          MQTT_CLEANUP_STATUS=0
+          if [ -s "${TIER_ARTIFACTS_DIR}/mqtt-container-id" ]; then
+            # Recover only this run's container if cancellation interrupted
+            # the suite's EXIT handler. Reuse its receipt validation and cleanup.
+            TIER_SOURCE_ONLY=1 source ./rustfs-tier-test.sh
+            MQTT_CIDFILE="${TIER_ARTIFACTS_DIR}/mqtt-container-id"
+            RESULT_LOG_DIR="${TIER_ARTIFACTS_DIR}/logs"
+            MQTT_DOCKER=(sudo -n docker)
+            MQTT_BROKER_OWNED=1
+            mqtt_broker_stop || MQTT_CLEANUP_STATUS=1
+          fi
           read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
           SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
           for node in "${NODES[@]}"; do
@@ -483,6 +472,7 @@ jobs:
               ${SUDO} rm -rf /var/log/rustfs /var/lib/rustfs/kms
             '
           done
+          exit "${MQTT_CLEANUP_STATUS}"
 
       - name: Release environment only after successful cleanup
         if: ${{ always() && steps.environment.outcome == 'success' }}
