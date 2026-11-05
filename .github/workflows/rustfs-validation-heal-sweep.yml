@@ -77,7 +77,10 @@ jobs:
     concurrency:
       group: rustfs-shared-functional-tests-v2
       cancel-in-progress: false
-    timeout-minutes: 600
+    # Observed full-catalog pace is 6-14 h (disk/versions/shards cases run
+    # 5-30 min each); the runner service is occasionally bounced by host
+    # maintenance, so budget generously for a Beijing-night window.
+    timeout-minutes: 990
     steps:
       - name: Checkout chain tooling
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
@@ -293,11 +296,53 @@ jobs:
         timeout-minutes: 5
         env:
           FUNCTIONAL_ENVIRONMENT_RECEIPT: ${{ runner.temp }}/environment-validation-heal.json
-        run: python3 scripts/functional_environment.py enter --suite heal
+          GH_TOKEN: ${{ secrets.PF_TESTING_GH_TOKEN }}
+        run: |
+          set -uo pipefail
+          if ! python3 scripts/functional_environment.py enter --suite heal; then
+            # A cancelled run (e.g. the runner service bounced mid-case)
+            # leaves its quarantine markers behind and blocks every later
+            # admission. When the marker belongs to a run that is no longer
+            # in progress, recover it and retry once.
+            echo "admission failed; checking for stale quarantine"
+            STALE=0
+            for node in ${RUSTFS_NODES}; do
+              MARKER="$(ssh -n -o BatchMode=yes -o ConnectTimeout=10 "${RUSTFS_SSH_USER}@${node}" \
+                'cat ~/.rustfs-functional-environment/active.json 2>/dev/null' || true)"
+              [ -n "${MARKER}" ] || continue
+              # Only functional-fleet markers owned by a CI run are
+              # recoverable. Manual markers (e.g. an authorized performance
+              # baseline) have no run_id and must never be touched.
+              KIND="$(printf '%s' "${MARKER}" | jq -r '.resource_lock // empty')"
+              OWNER="$(printf '%s' "${MARKER}" | jq -r '.run_id // empty')"
+              if [ "${KIND}" != "rustfs-shared-functional-tests-v2" ] || ! [[ "${OWNER}" =~ ^[1-9][0-9]*$ ]]; then
+                echo "node ${node}: manual/foreign quarantine present; not touching"
+                STALE=1
+                continue
+              fi
+              STATE="$(gh api "repos/rustfs/auto-testing/actions/runs/${OWNER}" --jq '.status' 2>/dev/null || echo unknown)"
+              echo "node ${node}: marker owner run ${OWNER} is ${STATE}"
+              if [ "${STATE}" != "in_progress" ] && [ "${STATE}" != "queued" ]; then
+                ssh -n -o BatchMode=yes "${RUSTFS_SSH_USER}@${node}" '
+                  SUDO="sudo -n"
+                  ${SUDO} systemctl stop rustfs 2>/dev/null || true
+                  if ${SUDO} dpkg -l rustfs 2>/dev/null | grep -q "^ii"; then ${SUDO} dpkg -P rustfs >/dev/null 2>&1; fi
+                  for i in 1 2 3 4; do ${SUDO} rm -rf /data/rustfs${i}/mnmd; done
+                  ${SUDO} rm -f /etc/default/rustfs
+                  rm -f ~/.rustfs-functional-environment/active.json
+                ' && echo "node ${node}: recovered" || { echo "node ${node}: recovery failed"; STALE=1; }
+              else
+                echo "node ${node}: owner still active; not touching"
+                STALE=1
+              fi
+            done
+            [ "${STALE}" -eq 0 ] || { echo "live quarantine present; not recovering"; exit 1; }
+            python3 scripts/functional_environment.py enter --suite heal
+          fi
 
       - name: Run heal validation cases
         id: run_cases
-        timeout-minutes: 540
+        timeout-minutes: 900
         env:
           AUTO_TESTING_SHA: ${{ steps.candidate.outputs.testing_sha }}
           HEAL_ROOT: ${{ runner.temp }}/validation-heal
