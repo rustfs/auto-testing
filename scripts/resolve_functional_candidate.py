@@ -125,7 +125,23 @@ def resolve(run_id, attempt, *, allow_validation=False):
     require(path == ".github/workflows/nightly-gnu.yml" and run.get("head_branch") == "main" or validation,
             "candidate must come from nightly-gnu on main or an explicitly allowed validation build")
     require((run.get("head_repository") or {}).get("full_name") == REPOSITORY, "candidate came from another repository")
-    require(run.get("event") in ("schedule", "workflow_dispatch") and run.get("status") == "completed" and run.get("conclusion") == "success", "candidate attempt has not completed successfully")
+    require(run.get("event") in ("schedule", "workflow_dispatch"), "candidate build has an unexpected trigger")
+    # The nightly build dispatches this chain from a late step, seconds
+    # before the run itself reaches completed/success — the chain can win
+    # that race (run 41872426981 lost it by 12 s). Poll briefly instead of
+    # failing instantly.
+    import time
+    for waited in range(0, 601, 15):
+        if run.get("status") == "completed":
+            break
+        if waited:
+            time.sleep(15)
+        try:
+            run = api(f"{endpoint}/attempts/{attempt}")
+        except Exception:
+            run = {}
+        print(f"waiting for build attempt to complete (waited {waited}s, status={run.get('status')})", flush=True)
+    require(run.get("status") == "completed" and run.get("conclusion") == "success", "candidate attempt has not completed successfully")
     if validation:
         require(run.get("event") == "workflow_dispatch", "validation candidate must be manually dispatched")
     name = f"{'validation' if validation else 'nightly'}-candidate-{run_id}-{attempt}"
