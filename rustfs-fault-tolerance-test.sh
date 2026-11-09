@@ -101,8 +101,7 @@ init_artifacts() {
   mkdir -p "${EVIDENCE}"
   RESULT_ROWS="${EVIDENCE}/results.jsonl"
   HARNESS_ERROR_FILE="${EVIDENCE}/harness-errors.txt"
-  : > "${RESULT_ROWS}"
-  : > "${HARNESS_ERROR_FILE}"
+  touch "${RESULT_ROWS}" "${HARNESS_ERROR_FILE}"
 }
 init_artifacts
 
@@ -1061,6 +1060,8 @@ main() {
     [ -n "${PACKAGE_URL}" ] || die "--package-url is required for test runs"
   fi
 
+  : > "${RESULT_ROWS}"
+  : > "${HARNESS_ERROR_FILE}"
   RESULTS_ENABLED=1
   log "evidence: ${EVIDENCE}; results: ${RESULTS_FILE}"
   printf 'FT-REPORT: fault-tolerance suite\n' > "${REPORT_FILE}"

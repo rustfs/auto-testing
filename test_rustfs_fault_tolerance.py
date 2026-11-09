@@ -321,10 +321,10 @@ class FaultToleranceHarnessTests(unittest.TestCase):
             responses.append((200, json.dumps(body)))
         for response in responses:
             with self.subTest(response=response):
-                result = self.await_with_health([response], timeout=0)
+                result = self.await_with_health([response, (200, '{"ready":true}')], timeout=5)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("state=timeout", result.stdout)
-                self.assertNotIn("restored after", result.stdout)
+                self.assertIn("state=ready", result.stdout)
+                self.assertIn("polls=2", result.stdout)
                 self.assertNotIn("settled", result.stdout)
 
     def test_recovery_timeout_cannot_pass_when_the_next_write_succeeds(self) -> None:
@@ -481,6 +481,38 @@ class FaultToleranceHarnessTests(unittest.TestCase):
         self.assertIn('"process_exit_code": 1', result.stdout)
         self.assertIn('"unexpected": 1', result.stdout)
         self.assertIn('"seen": 6', result.stdout)
+
+    def test_cleanup_and_help_do_not_erase_retained_evidence(self) -> None:
+        for option in ("--cleanup", "--help", "--scenario"):
+            with self.subTest(option=option), tempfile.TemporaryDirectory() as output:
+                evidence = Path(output, "evidence")
+                evidence.mkdir()
+                retained = {"results.jsonl": "retained case\n", "harness-errors.txt": "retained error\n",
+                            "results.json": "retained completion\n", "report.md": "retained report\n"}
+                for name, contents in retained.items():
+                    (evidence / name).write_text(contents)
+                command = f'''source {shlex.quote(str(SCRIPT))}
+                    do_cleanup() {{ :; }}
+                    need_cmd() {{ :; }}
+                    scenario_c() {{
+                      for id in "${{EXPECTED_CASES[@]}}"; do record pass "$id" fixture; done
+                    }}
+                    main "$@"
+                '''
+                args = [option] if option != "--scenario" else ["--scenario", "C", "-y", "--package-url", "https://example.invalid/rustfs.deb"]
+                result = subprocess.run(
+                    ["bash", "-c", command, "bash", *args], cwd=ROOT,
+                    env={**os.environ, "TMPDIR": output, "EVIDENCE_DIR": str(evidence)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if option == "--scenario":
+                    self.assertNotIn("retained case", (evidence / "results.jsonl").read_text())
+                    self.assertEqual((evidence / "harness-errors.txt").read_text(), "")
+                    self.assertTrue(json.loads((evidence / "results.json").read_text())["complete"])
+                else:
+                    for name, contents in retained.items():
+                        self.assertEqual((evidence / name).read_text(), contents)
 
     def test_matrix_topologies_are_single_pool_expressions(self) -> None:
         # Space-separated per-node ellipses would make each node its own
