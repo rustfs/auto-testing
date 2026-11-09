@@ -53,10 +53,11 @@ def capture(stream, errors, responses):
             continue
         # Debug continuation lines include canonical requests, signatures and
         # response bodies. Only the CLI's final diagnostic is public evidence.
-        if line.strip().startswith(ERROR_PREFIXES):
+        diagnostic = line.strip().removeprefix("aws: [ERROR]: ")
+        if diagnostic.startswith(ERROR_PREFIXES):
             for secret in secrets:
-                line = line.replace(secret, "[REDACTED]")
-            errors.write(line)
+                diagnostic = diagnostic.replace(secret, "[REDACTED]")
+            errors.write(diagnostic + "\n")
 
 
 if __name__ == "__main__":

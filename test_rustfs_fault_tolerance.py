@@ -356,7 +356,7 @@ class FaultToleranceHarnessTests(unittest.TestCase):
                 "b'canary-response-body ${SECRET_KEY}'" \
                 '2026 - DEBUG - http://example.invalid "PUT /probe HTTP/1.1" 503 100' \
                 "2026 - DEBUG - Response headers: {'x-rustfs-error-cause': 'namespace_lock_timeout', 'x-amz-request-id': 'request-2'}" \
-                "An error occurred (ServiceUnavailable) when calling the PutObject operation: retry ${SECRET_KEY}" >&2
+                "aws: [ERROR]: An error occurred (ServiceUnavailable) when calling the PutObject operation: retry ${SECRET_KEY}" >&2
               return 254
             }
             expect_write D3/write http://example.invalid ok restored
@@ -415,7 +415,7 @@ class FaultToleranceHarnessTests(unittest.TestCase):
 
     def test_s3_pipeline_preserves_client_and_diagnostics_failures(self) -> None:
         result = self.run_bash('''
-            aws() { echo 'Unknown options: --invalid' >&2; return 252; }
+            aws() { echo 'aws: [ERROR]: Unknown options: --invalid' >&2; return 252; }
             s3op invalid http://example.invalid put-object
             echo "client=${S3_RC}/${S3_CODE}"
             aws() { echo '{}' ; }
