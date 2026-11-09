@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import tempfile
 import textwrap
+import threading
 import unittest
 
 
@@ -42,7 +46,7 @@ class FaultToleranceHarnessTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         # A=9, B=12 (B5 covers rustfs#8270), C=6, C2=6, D=6
-        self.assertEqual(result.stdout.splitlines(), ["39", "39"])
+        self.assertEqual([int(line) for line in result.stdout.splitlines()], [39, 39])
 
     def test_all_dry_run_reaches_every_scenario_without_remote_calls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -230,47 +234,253 @@ class FaultToleranceHarnessTests(unittest.TestCase):
             self.assertEqual(lines[probe - 1], f"await {label}", lines)
             self.assertIn("start", lines[:probe])
 
-    def await_with_health(self, responses: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    def await_with_health(self, responses: list[tuple[int, str]], timeout: int = 120) -> subprocess.CompletedProcess[str]:
         return self.run_bash(
             f"""
             RECOVERY_TIMEOUT_SECS={timeout}
-            printf '%s\\n' {" ".join(repr(r) for r in responses)} > "${{TMP}}/bodies"
+            printf '%s\\n' {" ".join(shlex.quote(r) for _, r in responses)} > "${{TMP}}/bodies"
+            printf '%s\\n' {" ".join(str(code) for code, _ in responses)} > "${{TMP}}/codes"
             curl() {{
-              local n; n=$(( $(cat "${{TMP}}/n" 2>/dev/null || echo 0) + 1 ))
+              local n out headers
+              n=$(( $(cat "${{TMP}}/n" 2>/dev/null || echo 0) + 1 ))
               echo "$n" > "${{TMP}}/n"
-              sed -n "${{n}}p" "${{TMP}}/bodies"
+              while [ "$#" -gt 0 ]; do
+                case "$1" in
+                  -o) out="$2"; shift ;;
+                  -D) headers="$2"; shift ;;
+                  http:*) [ "$1" = http://example.invalid/minio/health/cluster ] || return 99 ;;
+                esac
+                shift
+              done
+              sed -n "${{n}}p" "${{TMP}}/bodies" > "$out"
+              printf 'HTTP/1.1 fixture\\n' > "$headers"
+              sed -n "${{n}}p" "${{TMP}}/codes"
+            }}
+            date() {{
+              local t; t=$(cat "${{TMP}}/clock" 2>/dev/null || echo 0)
+              echo "$((t + 1))" > "${{TMP}}/clock"
+              echo "$t"
             }}
             sleep() {{ :; }}
             settle() {{ echo settled; }}
             await_write_quorum C3 http://example.invalid
             echo "polls=$(cat "${{TMP}}/n")"
             echo "evidence=$(cat "${{EVIDENCE}}/recovery-C3.secs" 2>/dev/null || echo none)"
+            echo "state=${{RECOVERY_STATE[C3]}}"
+            cat "${{EVIDENCE}}/recovery-C3/poll-1.code"
             """
         )
 
     def test_await_write_quorum_polls_until_peers_are_readmitted(self) -> None:
-        waiting = '{"details":{"storage":{"writeQuorum":false},"lock":{"ready":true}}}'
-        lock_down = '{"details":{"storage":{"writeQuorum":true},"lock":{"ready":false}}}'
-        ready = '{"details":{"storage":{"writeQuorum":true},"lock":{"ready":true}}}'
-        result = self.await_with_health([waiting, lock_down, ready])
+        ready = {"ready": True, "details": {"storage": {"ready": True, "writeQuorum": True,
+                 "readinessScope": "write_quorum_and_pool_metadata"}, "lock": {"ready": True},
+                 "iam": {"ready": True}, "poolMetadata": {"ready": True}}}
+        responses = []
+        for component in ("storage", "lock", "iam", "poolMetadata"):
+            waiting = json.loads(json.dumps(ready))
+            waiting["details"][component]["ready"] = False
+            responses.append((200, json.dumps(waiting)))
+        responses.append((200, json.dumps(ready)))
+        result = self.await_with_health(responses)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("polls=3", result.stdout)
+        self.assertIn("polls=5", result.stdout)
         self.assertIn("write quorum restored", result.stdout)
         self.assertRegex(result.stdout, r"evidence=\d+")
         self.assertNotIn("settled", result.stdout)
 
     def test_await_write_quorum_timeout_is_recorded_not_fatal(self) -> None:
         waiting = '{"details":{"storage":{"writeQuorum":false}}}'
-        result = self.await_with_health([waiting], timeout=0)
+        result = self.await_with_health([(503, waiting)], timeout=0)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("evidence=timeout", result.stdout)
         self.assertIn("not restored within 0s", result.stderr)
 
-    def test_await_write_quorum_falls_back_to_settle_without_readiness_details(self) -> None:
-        result = self.await_with_health(['{"status":"ok"}'])
+    def test_await_write_quorum_accepts_minimal_cluster_write_response(self) -> None:
+        result = self.await_with_health([(200, '{"ready":true}')])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("settled", result.stdout)
-        self.assertIn("evidence=none", result.stdout)
+        self.assertIn("state=ready", result.stdout)
+        self.assertNotIn("settled", result.stdout)
+
+    def test_await_write_quorum_rejects_a_response_after_the_deadline(self) -> None:
+        result = self.await_with_health([(200, '{"ready":true}')], timeout=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("state=timeout", result.stdout)
+        self.assertNotIn("restored after", result.stdout)
+
+    def test_await_write_quorum_rejects_false_or_misleading_readiness(self) -> None:
+        responses = [
+            (503, '{"ready":true}'), (200, '{"ready":false}'),
+            (200, '{"status":"ok"}'), (200, 'not JSON'), (0, ''),
+            (200, '{"ready":"true"}'), (200, '{"ready":true,"details":{}}'),
+        ]
+        details = {"ready": True, "details": {"storage": {"ready": True},
+                   "iam": {"ready": True}, "lock": {"ready": True}}}
+        for field, value in (("writeQuorum", False), ("readinessScope", "read_quorum")):
+            body = json.loads(json.dumps(details))
+            body["details"]["storage"][field] = value
+            responses.append((200, json.dumps(body)))
+        for response in responses:
+            with self.subTest(response=response):
+                result = self.await_with_health([response], timeout=0)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("state=timeout", result.stdout)
+                self.assertNotIn("restored after", result.stdout)
+                self.assertNotIn("settled", result.stdout)
+
+    def test_recovery_timeout_cannot_pass_when_the_next_write_succeeds(self) -> None:
+        result = self.run_bash(
+            """
+            register_scenarios C
+            RECOVERY_STATE[C3]=timeout
+            s3op() { S3_RC=0; S3_CODE=""; }
+            expect_write C3/write http://example.invalid ok restored
+            jq -r '.verdict + " " + .detail' "${RESULT_ROWS}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UNEXPECTED write restored: got=ok", result.stdout)
+        self.assertIn("recovery-timeout=120s", result.stdout)
+
+    def test_s3_failure_keeps_retry_responses_without_sensitive_debug_output(self) -> None:
+        result = self.run_bash(
+            r'''
+            register_scenarios D
+            aws() {
+              [[ "$*" == *--debug* ]] || return 252
+              printf '%s\n' \
+                "2026 - DEBUG - Making request: Authorization Credential=${ACCESS_KEY} Signature=canary-signature" \
+                "canary-canonical-request" \
+                '2026 - DEBUG - http://example.invalid "PUT /probe HTTP/1.1" 503 100' \
+                "2026 - DEBUG - Response headers: {'x-rustfs-error-cause': 'namespace_lock_timeout', 'x-amz-request-id': 'request-1', 'retry-after': '1', 'Authorization': 'canary-auth'}" \
+                '2026 - DEBUG - Response body:' \
+                "b'canary-response-body ${SECRET_KEY}'" \
+                '2026 - DEBUG - http://example.invalid "PUT /probe HTTP/1.1" 503 100' \
+                "2026 - DEBUG - Response headers: {'x-rustfs-error-cause': 'namespace_lock_timeout', 'x-amz-request-id': 'request-2'}" \
+                "An error occurred (ServiceUnavailable) when calling the PutObject operation: retry ${SECRET_KEY}" >&2
+              return 254
+            }
+            expect_write D3/write http://example.invalid ok restored
+            expect_write D1/write http://example.invalid ok repeated
+            cat "${EVIDENCE}"/*.responses.jsonl "${EVIDENCE}"/*.stderr
+            jq -r '.verdict + " " + .detail' "${RESULT_ROWS}"
+            '''
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("http-status=503 cause=namespace_lock_timeout request-id=request-2", result.stdout)
+        self.assertEqual(result.stdout.count('"http_status": 503'), 4)
+        self.assertIn("UNEXPECTED", result.stdout)
+        self.assertIn("[REDACTED]", result.stdout)
+        for value in ("canary-auth", "canary-signature", "canary-canonical", "canary-response", "rustfs@test"):
+            self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_real_aws_cli_keeps_http_error_diagnostics(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_PUT(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = b'<Error><Code>ServiceUnavailable</Code><Message>Please retry.</Message></Error>'
+                self.send_response(503)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Type", "application/xml")
+                self.send_header("x-rustfs-error-cause", "namespace_lock_timeout")
+                self.send_header("x-amz-request-id", "fixture-request-id")
+                self.send_header("Retry-After", "1")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            result = self.run_bash(f'''
+                export NO_PROXY=127.0.0.1 AWS_MAX_ATTEMPTS=1 AWS_RETRY_MODE=standard
+                register_scenarios D
+                expect_write D3/write http://127.0.0.1:{server.server_port} ok restored
+                cat "${{EVIDENCE}}"/*.responses.jsonl
+                jq -r '.verdict + " " + .detail' "${{RESULT_ROWS}}"
+            ''')
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UNEXPECTED", result.stdout)
+        self.assertIn("http-status=503 cause=namespace_lock_timeout request-id=fixture-request-id", result.stdout)
+        self.assertIn('"retry-after": "1"', result.stdout)
+        self.assertNotIn("rustfs@test", result.stdout + result.stderr)
+
+    def test_s3_pipeline_preserves_client_and_diagnostics_failures(self) -> None:
+        result = self.run_bash('''
+            aws() { echo 'Unknown options: --invalid' >&2; return 252; }
+            s3op invalid http://example.invalid put-object
+            echo "client=${S3_RC}/${S3_CODE}"
+            aws() { echo '{}' ; }
+            s3op valid http://example.invalid put-object
+            echo "success=${S3_RC}/${S3_CODE}"
+            python3() { return 3; }
+            s3op broken http://example.invalid put-object
+            echo "diagnostics=${S3_RC}/${S3_CODE}"
+        ''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("client=252/unknown", result.stdout)
+        self.assertIn("success=0/", result.stdout)
+        self.assertIn("diagnostics=253/unknown", result.stdout)
+
+    def test_explicit_output_preserves_evidence_after_temp_storage_disappears(self) -> None:
+        for destination in ("results", "log", "env"):
+            with self.subTest(destination=destination), tempfile.TemporaryDirectory() as output, tempfile.TemporaryDirectory() as scratch:
+                results = Path(output, "results.json")
+                args = ["--results-file", str(results)] if destination == "results" else ["--log-file", str(Path(output, "suite.log"))]
+                env = {**os.environ, "TMPDIR": scratch}
+                if destination == "env":
+                    env["EVIDENCE_DIR"] = str(Path(output, "explicit-evidence"))
+                result = subprocess.run(
+                    ["bash", "-c", f'''source {shlex.quote(str(SCRIPT))}
+                    need_cmd() {{ :; }}
+                    scenario_c() {{
+                      for id in "${{EXPECTED_CASES[@]}}"; do record pass "$id" fixture; done
+                    }}
+                    main --scenario C -y --package-url https://example.invalid/rustfs.deb "$@"
+                    ''', "bash", *args], cwd=ROOT, env=env, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                shutil.rmtree(scratch)
+                if destination != "results":
+                    results = next(Path(output).rglob("results.json"))
+                payload = json.loads(results.read_text())
+                evidence = Path(payload["evidence_dir"])
+                self.assertTrue(evidence.is_relative_to(output))
+                self.assertTrue((evidence / "results.jsonl").is_file())
+                self.assertTrue((evidence / "harness-errors.txt").is_file())
+                self.assertTrue((evidence / "report.md").is_file())
+                self.assertTrue(payload["complete"])
+                self.assertEqual(payload["counts"]["seen"], 6)
+
+    def test_recovery_timeout_fails_the_suite_after_all_probes_complete(self) -> None:
+        result = self.run_bash('''
+            need_cmd() { :; }
+            scenario_c() {
+              RECOVERY_STATE[C3]=timeout
+              s3op() { S3_RC=0; S3_CODE=""; }
+              for id in "${EXPECTED_CASES[@]}"; do
+                if [ "$id" = C3/write ]; then
+                  expect_write "$id" http://example.invalid ok restored
+                else record pass "$id" fixture; fi
+              done
+            }
+            RESULTS_FILE="${TMP}/results.json"
+            trap 'finalize_results "$?"; cat "${RESULTS_FILE}"' EXIT
+            main --scenario C -y --package-url https://example.invalid/rustfs.deb
+        ''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"complete": true', result.stdout)
+        self.assertIn('"process_exit_code": 1', result.stdout)
+        self.assertIn('"unexpected": 1', result.stdout)
+        self.assertIn('"seen": 6', result.stdout)
 
     def test_matrix_topologies_are_single_pool_expressions(self) -> None:
         # Space-separated per-node ellipses would make each node its own

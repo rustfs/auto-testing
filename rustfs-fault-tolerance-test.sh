@@ -82,14 +82,29 @@ BASELINE_OBJECTS=(ft-small-16k.bin ft-mid-1m.bin ft-big-8m.bin)
 PROBE_PREFIX="ft-probe"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-ft.XXXXXX")"
-EVIDENCE="${EVIDENCE_DIR:-${TMP}/evidence}"
-mkdir -p "${EVIDENCE}"
-REPORT_FILE="${REPORT_FILE:-${TMP}/report.md}"
-RESULTS_FILE="${RESULTS_FILE:-${TMP}/results.json}"
-RESULT_ROWS="${TMP}/results.jsonl"
-HARNESS_ERROR_FILE="${TMP}/harness-errors.txt"
-: > "${RESULT_ROWS}"
-: > "${HARNESS_ERROR_FILE}"
+FT_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPORT_FILE="${REPORT_FILE:-}"
+RESULTS_FILE="${RESULTS_FILE:-}"
+
+init_artifacts() {
+  if [ -n "${EVIDENCE_DIR:-}" ]; then
+    EVIDENCE="${EVIDENCE_DIR}"
+  elif [ -n "${RESULTS_FILE}" ]; then
+    EVIDENCE="${RESULTS_FILE}.evidence/${TMP##*/}"
+  elif [ -n "${LOG_FILE}" ]; then
+    EVIDENCE="${LOG_FILE}.evidence/${TMP##*/}"
+  elif [ -n "${REPORT_FILE}" ]; then
+    EVIDENCE="${REPORT_FILE}.evidence/${TMP##*/}"
+  else
+    EVIDENCE="${TMP}/evidence"
+  fi
+  mkdir -p "${EVIDENCE}"
+  RESULT_ROWS="${EVIDENCE}/results.jsonl"
+  HARNESS_ERROR_FILE="${EVIDENCE}/harness-errors.txt"
+  : > "${RESULT_ROWS}"
+  : > "${HARNESS_ERROR_FILE}"
+}
+init_artifacts
 
 # ---------------------------------------------------------------- helpers ---
 log()  { printf '\033[1;36m[INFO]\033[0m %s\n' "$*"; }
@@ -135,6 +150,7 @@ declare -a SELECTED_SCENARIOS=()
 declare -A EXPECTED_CASE_SET=()
 declare -A SEEN_CASE_SET=()
 declare -A OBJECT_SHA256=()
+declare -A RECOVERY_STATE=()
 
 CASES_A=(A1/read A1/write A2/read A2/write A3/read A3/write A4/read A4/read-a1-probe A4/write)
 CASES_B=(B1/read B1/read-node2 B1/write B2/read B2/read-node2 B2/write B3/read B3/write B4/read B4/read-b1-probe B4/write B5/recovery-traffic)
@@ -187,7 +203,7 @@ record() { # record <verdict> <case-id> <detail>
   else
     SEEN_CASE_SET["${case_id}"]=1
   fi
-  printf 'FT-CASE: %-28s verdict=%-16s %s\n' "${case_id}" "${verdict}" "${detail}" | tee -a "${REPORT_FILE}"
+  printf 'FT-CASE: %-28s verdict=%-16s %s\n' "${case_id}" "${verdict}" "${detail}" | tee -a "${REPORT_FILE:-${EVIDENCE}/report.md}"
   jq -cn --arg case_id "${case_id}" --arg verdict "${verdict}" --arg detail "${detail}" \
     '{case_id:$case_id, verdict:$verdict, detail:$detail}' >> "${RESULT_ROWS}"
   case "${verdict}" in
@@ -200,7 +216,8 @@ record() { # record <verdict> <case-id> <detail>
 write_results() { # write_results <process-exit-code>
   local process_rc="$1" missing_file="${TMP}/missing-cases.txt" expected_file="${TMP}/expected-cases.txt"
   local seen_file="${TMP}/seen-cases.txt" selected_file="${TMP}/selected-scenarios.txt"
-  local result_tmp="${RESULTS_FILE}.tmp" case_id scenario
+  local results_file="${RESULTS_FILE:-${EVIDENCE}/results.json}" case_id scenario
+  local result_tmp="${results_file}.tmp"
   : > "${missing_file}"
   : > "${expected_file}"
   : > "${seen_file}"
@@ -215,7 +232,7 @@ write_results() { # write_results <process-exit-code>
   if [ "${SUITE_FINISHED}" -eq 1 ] && [ ! -s "${missing_file}" ] && [ "${HARNESS_ERRORS}" -eq 0 ]; then
     RESULT_COMPLETE=1
   fi
-  mkdir -p "$(dirname "${RESULTS_FILE}")"
+  mkdir -p "$(dirname "${results_file}")"
   jq -n \
     --argjson complete "$([ "${RESULT_COMPLETE}" -eq 1 ] && printf true || printf false)" \
     --argjson process_exit_code "${process_rc}" \
@@ -223,13 +240,14 @@ write_results() { # write_results <process-exit-code>
     --argjson known_divergence "${KNOWN_DIVERGENCE}" \
     --argjson harness_error_count "${HARNESS_ERRORS}" \
     --arg auto_testing_sha "${AUTO_TESTING_SHA:-unknown}" \
+    --arg evidence_dir "${EVIDENCE}" \
     --slurpfile cases "${RESULT_ROWS}" \
     --rawfile selected "${selected_file}" \
     --rawfile expected "${expected_file}" \
     --rawfile seen "${seen_file}" \
     --rawfile missing "${missing_file}" \
     --rawfile harness_errors "${HARNESS_ERROR_FILE}" \
-    '{schema_version:1, auto_testing_sha:$auto_testing_sha,
+    '{schema_version:1, auto_testing_sha:$auto_testing_sha, evidence_dir:$evidence_dir,
       selected_scenarios:($selected|split("\n")|map(select(length>0))),
       complete:$complete, process_exit_code:$process_exit_code,
       expected_cases:($expected|split("\n")|map(select(length>0))),
@@ -240,7 +258,7 @@ write_results() { # write_results <process-exit-code>
               seen:($seen|split("\n")|map(select(length>0))|length),
               unexpected:$unexpected, known_divergence:$known_divergence,
               harness_errors:$harness_error_count}, cases:$cases}' > "${result_tmp}"
-  mv "${result_tmp}" "${RESULTS_FILE}"
+  mv "${result_tmp}" "${results_file}"
 }
 
 finalize_results() {
@@ -254,25 +272,39 @@ trap 'finalize_results "$?"' EXIT
 # aws s3 helper: s3op <operation-id> <endpoint> <s3api args...> -> S3_RC, S3_CODE
 S3_RC=0
 S3_CODE=""
+S3_DIAGNOSTIC=""
+S3_OPERATION_SEQ=0
 s3op() {
-  local operation="$1" ep="$2" safe_operation out err
+  local operation="$1" ep="$2" safe_operation out err responses status=()
   shift 2
-  safe_operation="${operation//\//_}"
+  S3_OPERATION_SEQ=$((S3_OPERATION_SEQ + 1))
+  safe_operation="${operation//\//_}-${S3_OPERATION_SEQ}"
   out="${EVIDENCE}/s3-${safe_operation}.stdout"
   err="${EVIDENCE}/s3-${safe_operation}.stderr"
+  responses="${EVIDENCE}/s3-${safe_operation}.responses.jsonl"
+  S3_DIAGNOSTIC=""
   if [ "${DRY_RUN}" -eq 1 ]; then log "DRY-RUN: aws s3api $* @ ${ep}"; S3_RC=0; S3_CODE=""; return 0; fi
   if AWS_EC2_METADATA_DISABLED=true \
      AWS_ACCESS_KEY_ID="${ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${SECRET_KEY}" AWS_DEFAULT_REGION="${REGION}" \
-     aws s3api "$@" --endpoint-url "${ep}" --output json >"${out}" 2>"${err}"; then
+     aws --debug s3api "$@" --endpoint-url "${ep}" --output json 2>&1 >"${out}" \
+       | python3 "${FT_SCRIPT_DIR}/scripts/ft_s3_diagnostics.py" "${err}" "${responses}"; then
     S3_RC=0; S3_CODE=""
   else
-    S3_RC=$?
+    status=("${PIPESTATUS[@]}")
+    S3_RC="${status[0]}"
+    if [ "${status[1]}" -ne 0 ]; then
+      S3_RC=253; S3_CODE="unknown"
+      return 0
+    fi
     # extraction must never kill the suite: with no match the grep pipeline
     # is empty and pipefail would exit 1 under set -e (observed: the first
     # degraded-mode aws failure aborted the whole suite with zero FT-CASEs)
     S3_CODE="$(grep -oE '\(([^)]+)\) when calling' "${err}" | head -1 | sed 's/ when calling//' | tr -d '()' || true)"
     [ -n "${S3_CODE}" ] || S3_CODE="unknown"
   fi
+  S3_DIAGNOSTIC="$(tail -1 "${responses}" | jq -r '
+    "http-status=\(.http_status // "unknown") cause=\(.headers["x-rustfs-error-cause"] // "unknown") request-id=\(.headers["x-amz-request-id"] // "unknown")"
+  ' 2>/dev/null || true)"
 }
 
 s3_harness_failed() {
@@ -293,9 +325,9 @@ export AWS_DEFAULT_REGION="${REGION}"
 capture_health() { # capture_health <label> <endpoint-base>
   local label="$1" ep="$2" path out code
   [ "${DRY_RUN}" -eq 1 ] && return 0
-  for path in "health" "health/ready" "minio/health/live"; do
+  for path in "health" "health/ready" "minio/health/live" "minio/health/cluster"; do
     out="${EVIDENCE}/health-${label//\//_}-${path//\//_}"
-    code="$(curl -s -o "${out}.body" -w '%{http_code}' --max-time 10 "${ep}/${path}" 2>/dev/null || echo 000)"
+    if code="$(curl -sS --noproxy '*' -o "${out}.body" -D "${out}.headers" -w '%{http_code}' --max-time 10 "${ep}/${path}" 2>"${out}.stderr")"; then :; else code=000; fi
     printf '%s\n' "${code}" > "${out}.code"
   done
   log "health snapshot [${label}] saved"
@@ -312,38 +344,51 @@ settle() {
 # sees RUSTFS_DRIVE_RETURNING_SUCCESS_THRESHOLD (3) consecutive probes spaced
 # RUSTFS_DRIVE_RETURNING_PROBE_INTERVAL_SECS (2s) apart. Probing inside that
 # window measures the hysteresis, not the EC contract (rustfs/backlog#2618).
-# A timeout is not fatal: the probes that follow report the non-convergence,
-# and the elapsed time lands in the evidence directory either way.
+# Node readiness admits reads with shared locks. Only cluster write readiness
+# checks write quorum, exclusive-lock quorum and the pool-metadata writer.
+# Keep executing after a timeout, but fail the phase's write verdict even if
+# the following request succeeds; convergence outside the deadline is a failure.
 await_write_quorum() { # await_write_quorum <label> <endpoint-base>
-  local label="$1" ep="$2" started now state
+  local label="$1" ep="$2" started now state code poll=0 snapshot
   local out="${EVIDENCE}/recovery-${label//\//_}.secs"
+  local snapshots="${EVIDENCE}/recovery-${label//\//_}"
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: ${label} waits for write quorum @ ${ep}"
     return 0
   fi
+  mkdir -p "${snapshots}"
   started="$(date +%s)"
   while :; do
-    state="$(curl -s --max-time 5 "${ep}/health/ready" 2>/dev/null | jq -r '
-      if (.details.storage.writeQuorum | type) != "boolean" then "absent"
-      elif .details.storage.writeQuorum and (.details.lock.ready != false) then "ready"
-      else "waiting" end' 2>/dev/null || true)"
+    poll=$((poll + 1))
+    snapshot="${snapshots}/poll-${poll}"
+    if code="$(curl -sS --noproxy '*' --max-time 5 -o "${snapshot}.body" -D "${snapshot}.headers" -w '%{http_code}' \
+      "${ep}/minio/health/cluster" 2>"${snapshot}.stderr")"; then :; else code=000; fi
+    printf '%s\n' "${code}" > "${snapshot}.code"
+    state=waiting
+    if [ "${code}" = 200 ] && jq -e '
+      .ready == true and
+      (if has("details") then
+        .details.storage.ready == true and .details.iam.ready == true and .details.lock.ready == true and
+        (.details.storage | if has("writeQuorum") then .writeQuorum == true else true end) and
+        (.details.storage | if has("readinessScope") then .readinessScope == "write_quorum_and_pool_metadata" else true end) and
+        (.details | if has("poolMetadata") then .poolMetadata.ready == true else true end)
+      else true end)
+    ' "${snapshot}.body" >/dev/null 2>&1; then state=ready; fi
+    RECOVERY_STATE["${label}"]="${state}"
     now="$(date +%s)"
     case "${state}" in
       ready)
-        printf '%s\n' "$((now - started))" > "${out}"
-        log "[${label}] write quorum restored after $((now - started))s"
-        return 0
-        ;;
-      absent)
-        # Builds without readiness details: keep the historical settle.
-        warn "[${label}] /health/ready has no storage.writeQuorum; settling instead"
-        settle
-        return 0
+        if [ "$((now - started))" -le "${RECOVERY_TIMEOUT_SECS}" ]; then
+          printf '%s\n' "$((now - started))" > "${out}"
+          log "[${label}] write quorum restored after $((now - started))s"
+          return 0
+        fi
         ;;
     esac
     if [ "$((now - started))" -ge "${RECOVERY_TIMEOUT_SECS}" ]; then
       printf 'timeout\n' > "${out}"
-      warn "[${label}] write quorum not restored within ${RECOVERY_TIMEOUT_SECS}s (last state: ${state:-unreachable})"
+      RECOVERY_STATE["${label}"]=timeout
+      warn "[${label}] write quorum not restored within ${RECOVERY_TIMEOUT_SECS}s (HTTP ${code}, state=${state}); evidence: ${snapshots}"
       return 0
     fi
     sleep 1
@@ -390,7 +435,7 @@ sustained_recovery_traffic() { # sustained_recovery_traffic <case-id> <endpoint>
       return 0
     fi
     if [ "${S3_RC}" -ne 0 ]; then
-      record "UNEXPECTED" "${case_id}" "write round ${i}: aws-cli-rc=${S3_RC} code=${S3_CODE}"
+      record "UNEXPECTED" "${case_id}" "write round ${i}: aws-cli-rc=${S3_RC} code=${S3_CODE} ${S3_DIAGNOSTIC}"
       return 0
     fi
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${ep}/health/ready" 2>/dev/null || echo 000)"
@@ -430,7 +475,7 @@ expect_read() { # expect_read <case-id> <endpoint> <ok|fail> <key>
       return 0
     fi
   else
-    got="fail"; detail="aws-cli-rc=${S3_RC} code=${S3_CODE}"
+    got="fail"; detail="aws-cli-rc=${S3_RC} code=${S3_CODE} ${S3_DIAGNOSTIC}"
   fi
   if [ "${got}" = "ok" ] && [ "${expect}" = "ok" ]; then
     verdict="pass"
@@ -466,9 +511,12 @@ expect_write() { # expect_write <case-id> <endpoint> <ok|fail> <key>
     got="ok"; detail=""
     OBJECT_SHA256["${key}"]="$(sha256sum "${probe}" | awk '{print $1}')"
   else
-    got="fail"; detail="aws-cli-rc=${S3_RC} code=${S3_CODE}"
+    got="fail"; detail="aws-cli-rc=${S3_RC} code=${S3_CODE} ${S3_DIAGNOSTIC}"
   fi
-  if [ "${got}" = "ok" ] && [ "${expect}" = "ok" ]; then
+  if [ "${RECOVERY_STATE[${case_id%/write}]:-}" = timeout ]; then
+    verdict="UNEXPECTED"
+    detail+=" recovery-timeout=${RECOVERY_TIMEOUT_SECS}s"
+  elif [ "${got}" = "ok" ] && [ "${expect}" = "ok" ]; then
     verdict="pass"
   elif [ "${got}" = "fail" ] && [ "${expect}" = "fail" ] && s3_availability_failed; then
     verdict="pass"
@@ -993,6 +1041,10 @@ main() {
       *)             die "unknown option: ${opt}" ;;
     esac
   done
+  init_artifacts
+  REPORT_FILE="${REPORT_FILE:-${EVIDENCE}/report.md}"
+  RESULTS_FILE="${RESULTS_FILE:-${EVIDENCE}/results.json}"
+  mkdir -p "$(dirname "${REPORT_FILE}")"
   if [ -n "${LOG_FILE}" ]; then
     mkdir -p "$(dirname "${LOG_FILE}")"
     exec > >(tee -a "${LOG_FILE}") 2>&1
@@ -1004,11 +1056,13 @@ main() {
   need_cmd curl "HTTP client"
   need_cmd jq "JSON processor"
   need_cmd aws "AWS CLI (s3api)"
+  need_cmd python3 "S3 response diagnostics"
   if [ "${all}" -eq 1 ] || [ -n "${scenario}" ]; then
     [ -n "${PACKAGE_URL}" ] || die "--package-url is required for test runs"
   fi
 
   RESULTS_ENABLED=1
+  log "evidence: ${EVIDENCE}; results: ${RESULTS_FILE}"
   printf 'FT-REPORT: fault-tolerance suite\n' > "${REPORT_FILE}"
   if [ "${all}" -eq 1 ]; then
     # E must be registered, not just executed: unregistered verdicts land in
