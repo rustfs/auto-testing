@@ -53,6 +53,10 @@ class PerformanceResultTests(unittest.TestCase):
     printf '%s\n' "${text//"$omit"/}"
   done
   [[ "$mode" != failure-with-metrics ]] || return 42
+  if [[ "$mode" == errors-with-success ]]; then
+    printf '%s\n' 'warp: <ERROR> upload error: The service is unavailable. Please retry.'
+  fi
+  if [[ "$mode" == hang-after-report ]]; then sleep 30; fi
 }
 ''')
         self.calls = self.root / "calls"
@@ -124,6 +128,33 @@ class PerformanceResultTests(unittest.TestCase):
         self.assertIn("rc=124", master)
         self.assertIn("ABORT consecutive_failures=1 limit=1", master)
 
+    def round_evidence(self, filename="rounds.tsv"):
+        with (self.results / filename).open() as stream:
+            return list(csv.DictReader(stream, delimiter="\t"))
+
+    def test_zero_exit_with_service_errors_retains_metrics_but_is_not_a_pass(self):
+        result, rows = self.run_benchmark("errors-with-success", WARP_METHODS="get", WARP_SIZES="1KiB")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(rows, [])
+        evidence = self.round_evidence()[0]
+        self.assertEqual(evidence["warp_exit"], "0")
+        self.assertEqual(evidence["verdict"], "FAIL")
+        self.assertEqual(evidence["reason"], "logged_errors")
+        self.assertEqual(evidence["error_lines"], "1")
+        self.assertIn("Average:", (self.results / "get_1KiB.txt").read_text())
+
+    def test_timeout_before_and_after_report_preserve_distinct_evidence(self):
+        for mode, reason in (("hang", "timeout_before_report"), ("hang-after-report", "timeout_after_report")):
+            with self.subTest(mode=mode):
+                result, rows = self.run_benchmark(mode, WARP_METHODS="get", WARP_SIZES="1KiB,4KiB",
+                                                  WARP_ROUND_TIMEOUT="1", WARP_MAX_CONSECUTIVE_FAILURES="1")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(rows, [])
+                evidence = self.round_evidence()
+                self.assertEqual(evidence[0]["reason"], reason)
+                self.assertEqual(evidence[0]["warp_exit"], "124")
+                self.assertEqual(evidence[1]["verdict"], "NOT_RUN")
+
     def test_each_required_single_method_metric_is_checked(self):
         for value in ("1.25 MiB/s", "1280.0", "1.2ms", "1.1ms", "1.5ms", "2.1ms"):
             with self.subTest(missing=value):
@@ -155,13 +186,76 @@ class PerformanceResultTests(unittest.TestCase):
     def test_parse_only_rejects_missing_or_incomplete_selected_results(self):
         result, _ = self.run_benchmark()
         self.assertEqual(result.returncode, 0, result.stderr)
+        original = {path.name: path.read_bytes() for path in self.results.iterdir()}
+        calls = self.calls.read_bytes()
         command = ["bash", str(self.script), "--parse-only", str(self.results)]
         parsed = subprocess.run(command, cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        self.assertEqual(original, {name: (self.results / name).read_bytes() for name in original})
+        self.assertEqual(self.calls.read_bytes(), calls)
+        self.assertEqual(len(self.round_evidence("rounds.reparsed.tsv")), 6)
+        self.assertIn("parsed=6", (self.results / "summary.reparsed.md").read_text())
         (self.results / "get_1KiB.txt").unlink()
         parsed = subprocess.run(command, cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertNotEqual(parsed.returncode, 0)
-        self.assertIn("failed=1", (self.results / "summary.md").read_text())
+        self.assertIn("failed=1", (self.results / "summary.reparsed.md").read_text())
+
+    def test_parse_only_preserves_aborted_execution_and_writes_separate_evidence(self):
+        result, _ = self.run_benchmark("fail", WARP_MAX_CONSECUTIVE_FAILURES="1")
+        self.assertNotEqual(result.returncode, 0)
+        execution = self.round_evidence()
+        self.assertEqual(execution[0]["warp_exit"], "42")
+        self.assertTrue(execution[0]["elapsed_seconds"].isdigit())
+        self.assertEqual(execution[1]["verdict"], "NOT_RUN")
+        self.assertEqual(execution[1]["reason"], "aborted")
+        original = {path.name: path.read_bytes() for path in self.results.iterdir()}
+        calls = self.calls.read_bytes()
+
+        parsed = subprocess.run(["bash", str(self.script), "--parse-only", str(self.results)],
+                                cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(parsed.returncode, 0)
+        self.assertEqual(original, {name: (self.results / name).read_bytes() for name in original})
+        self.assertEqual(self.calls.read_bytes(), calls)
+        reparsed = self.round_evidence("rounds.reparsed.tsv")
+        self.assertEqual(len(reparsed), 6)
+        self.assertEqual(reparsed[0]["warp_exit"], "42")
+        self.assertEqual(reparsed[0]["elapsed_seconds"], "unknown")
+        self.assertEqual(reparsed[1]["reason"], "missing_output")
+        self.assertIn("failed=6", (self.results / "summary.reparsed.md").read_text())
+        self.assertIn("PARSE_FAILED", (self.results / "master.reparsed.log").read_text())
+        with (self.results / "summary.reparsed.tsv").open() as stream:
+            self.assertEqual(list(csv.DictReader(stream, delimiter="\t")), [])
+
+    def test_analysis_without_original_summary_uses_reparsed_report_and_propagates_failure(self):
+        for mode, expected in (("success", 0), ("failure-with-metrics", 1)):
+            with self.subTest(mode=mode):
+                self.run_benchmark(mode)
+                (self.results / "summary.md").unlink()
+                original = {path.name: path.read_bytes() for path in self.results.iterdir()
+                            if ".reparsed." not in path.name}
+                calls = self.calls.read_bytes()
+                environment = {**self.env, "RUSTFS_RESULT_DIR": str(self.results),
+                               "RUSTFS_BENCH_SCRIPT": str(self.script),
+                               "RUSTFS_PERF_SCRIPT_SOURCE_ONLY": "1",
+                               "RUSTFS_WARP_METHODS": self.env["WARP_METHODS"],
+                               "RUSTFS_WARP_SIZES": self.env["WARP_SIZES"]}
+                environment.pop("WARP_METHODS")
+                environment.pop("WARP_SIZES")
+                parsed = subprocess.run(
+                    ["bash", "-c", 'source "$1"; step6_analyze', "bash",
+                     str(ROOT / "rustfs_performance_test.sh")],
+                    cwd=self.root, env=environment,
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(parsed.returncode, expected, parsed.stdout + parsed.stderr)
+                self.assertFalse((self.results / "summary.md").exists())
+                self.assertEqual(original, {name: (self.results / name).read_bytes() for name in original})
+                self.assertEqual(self.calls.read_bytes(), calls)
+                if expected == 0:
+                    self.assertIn("step 6 complete", parsed.stdout)
+                else:
+                    self.assertNotIn("step 6 complete", parsed.stdout)
+                self.assertTrue((self.results / "summary.reparsed.md").is_file())
 
     def test_parse_only_cannot_certify_failed_or_unverified_metrics(self):
         result, rows = self.run_benchmark("failure-with-metrics")
@@ -170,7 +264,7 @@ class PerformanceResultTests(unittest.TestCase):
         command = ["bash", str(self.script), "--parse-only", str(self.results)]
         parsed = subprocess.run(command, cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertNotEqual(parsed.returncode, 0)
-        self.assertIn("failed=6", (self.results / "summary.md").read_text())
+        self.assertIn("failed=6", (self.results / "summary.reparsed.md").read_text())
         result, _ = self.run_benchmark()
         self.assertEqual(result.returncode, 0, result.stderr)
         output = self.results / "get_1KiB.txt"
@@ -180,7 +274,7 @@ class PerformanceResultTests(unittest.TestCase):
                 output.write_text(original.replace("RustFS round status: warp=0 capture=0\n", terminal))
                 parsed = subprocess.run(command, cwd=self.root, env=self.env, capture_output=True, text=True)
                 self.assertNotEqual(parsed.returncode, 0)
-                self.assertIn("failed=1", (self.results / "summary.md").read_text())
+                self.assertIn("failed=1", (self.results / "summary.reparsed.md").read_text())
 
 
 class PerformanceEnvironmentTests(unittest.TestCase):

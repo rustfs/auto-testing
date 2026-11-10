@@ -34,6 +34,7 @@
 #     order when expanding.
 #
 set -Eeuo pipefail
+POOL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ==================== Configuration (adjust to your environment) ====================
 
@@ -107,7 +108,7 @@ RUSTFS_OBS_LOG_DIRECTORY="/var/log/rustfs/"
 
 # Data writing & monitoring (step 4)
 WARP_BUCKET="test-10mb"
-WARP_OBJ_SIZE="100MiB"
+WARP_OBJ_SIZE="${RUSTFS_WARP_OBJ_SIZE:-100MiB}"
 WARP_CONCURRENT="${RUSTFS_WARP_CONCURRENT:-32}"
 WARP_DURATION="5m"
 WARP_ROUNDS="${RUSTFS_WARP_ROUNDS:-1}"
@@ -116,6 +117,14 @@ WARP_ROUNDS="${RUSTFS_WARP_ROUNDS:-1}"
 WARP_LOG_FILE="${RUSTFS_WARP_LOG_FILE:-}"
 STORAGE_THRESHOLD=85            # stop writing when usage reaches N% (note suggests 80-85)
 POLL_INTERVAL=30                # status polling interval (seconds)
+CAPACITY_POLL_INTERVAL="${RUSTFS_CAPACITY_POLL_INTERVAL:-2}"
+CAPACITY_SAMPLE_TIMEOUT="${RUSTFS_CAPACITY_SAMPLE_TIMEOUT:-3}"
+CAPACITY_MIN_FREE_BYTES="${RUSTFS_CAPACITY_MIN_FREE_BYTES:-536870912}"
+CAPACITY_MAX_DISK_PERCENT="${RUSTFS_CAPACITY_MAX_DISK_PERCENT:-95}"
+WARP_STOP_GRACE="${RUSTFS_WARP_STOP_GRACE:-5}"
+CAPACITY_PREVIOUS_SAMPLE=""
+CAPACITY_LOG_FILE=""
+CAPACITY_EMERGENCY=0
 WARP_TRANSPORT_FAILURE_PATTERN='502 Bad Gateway|504 Gateway Time-out|HTTP([^0-9]+)?50(2|4)|status([^0-9]+)?50(2|4)|connection (closed|reset|refused)|unexpected EOF|broken pipe|timeout awaiting response headers|context deadline exceeded|i/o timeout|Client\.Timeout exceeded|The service is unavailable|We encountered an internal error'
 
 # Timeouts (seconds)
@@ -247,6 +256,10 @@ normalize_http_endpoint() {
 }
 
 resolve_endpoints() {
+  local capacity_value
+  for capacity_value in "${CAPACITY_POLL_INTERVAL}" "${CAPACITY_SAMPLE_TIMEOUT}" "${CAPACITY_MIN_FREE_BYTES}" "${WARP_STOP_GRACE}"; do
+    [[ "${capacity_value}" =~ ^[1-9][0-9]*$ ]] || die "capacity bounds must be positive integers: ${capacity_value}"
+  done
   [[ "${WARP_CONCURRENT}" =~ ^[1-9][0-9]*$ ]] \
     || die "warp concurrency must be a positive integer: ${WARP_CONCURRENT}"
   [[ "${WARP_ROUNDS}" =~ ^[1-9][0-9]*$ ]] \
@@ -282,6 +295,7 @@ cleanup_runtime() {
     kill "${ACTIVE_WARP_PID}" 2>/dev/null || true
   fi
   rm -f "${ADMIN_API_CODE_FILE}" "${ADMIN_API_TIMING_FILE}" \
+    "${ADMIN_API_CODE_FILE}.headers" "${PROXY_API_CODE_FILE}.headers" \
     "${PROXY_API_CODE_FILE}" "${PROXY_API_TIMING_FILE}" \
     "${ADMIN_ANOMALY_FILE}" "${PROXY_ANOMALY_FILE}"
 }
@@ -349,11 +363,12 @@ api_request() {
   local amz_date date_stamp host_port
   local canonical_headers signed_headers canonical_request string_to_sign
   local scope k_date k_region k_service k_signing signature auth
-  local url tmp metrics code connect_time starttransfer_time total_time curl_exit=0
+  local url tmp header_tmp metrics code connect_time starttransfer_time total_time curl_exit=0
 
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: API ${method} ${endpoint}${path}${query:+?${query}}"
     printf '200' > "${code_file}"
+    : > "${code_file}.headers"
     printf 'http=200 connect=0 ttfb=0 total=0 curl_exit=0' > "${timing_file}"
     return 0
   fi
@@ -391,7 +406,8 @@ $(sha256_hex "${canonical_request}")"
 
   url="${endpoint}${path}${query:+?${query}}"
   tmp="$(mktemp)"
-  if metrics="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" \
+  header_tmp="$(mktemp)"
+  if metrics="$(curl -sS --max-time "${API_REQUEST_TIMEOUT}" -o "${tmp}" -D "${header_tmp}" \
     -w $'%{http_code}\t%{time_connect}\t%{time_starttransfer}\t%{time_total}' \
     -H "Host: ${host_port}" \
     -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
@@ -408,11 +424,15 @@ $(sha256_hex "${canonical_request}")"
   fi
   code="${code:-000}"
   printf '%s' "${code}" > "${code_file}"
+  # Only retain diagnostic response headers. Never publish Authorization,
+  # cookies or the full AWS debug stream to collect an error cause.
+  awk 'tolower($0) ~ /^(http\/|x-rustfs-error-cause:|x-amz-request-id:|x-amz-id-2:|retry-after:)/ {sub(/\r$/, ""); print}' \
+    "${header_tmp}" > "${code_file}.headers"
   printf 'http=%s connect=%s ttfb=%s total=%s curl_exit=%s' \
     "${code}" "${connect_time:-unknown}" "${starttransfer_time:-unknown}" \
     "${total_time:-unknown}" "${curl_exit}" > "${timing_file}"
   cat "${tmp}"
-  rm -f "${tmp}"
+  rm -f "${tmp}" "${header_tmp}"
 }
 
 admin_api() {
@@ -430,6 +450,10 @@ admin_api_code() {
 
 admin_api_timing() {
   cat "${ADMIN_API_TIMING_FILE}"
+}
+
+admin_api_headers() {
+  [ ! -f "${ADMIN_API_CODE_FILE}.headers" ] || cat "${ADMIN_API_CODE_FILE}.headers"
 }
 
 proxy_api_code() {
@@ -869,44 +893,71 @@ assert_no_endpoint_anomalies() {
     || die "endpoint anomalies occurred; retries preserved diagnostics but do not qualify as a clean pass"
 }
 
-# Cluster storage usage percentage from the admin API (aggregate across disks)
-storage_usage_percent() {
+# Storage sampling while a writer is active must be bounded: no long proxy
+# probe or retry loop can delay the capacity stop decision.
+storage_capacity_sample() {
   local body sample_time
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: GET ${ADMIN_ENDPOINT}/rustfs/admin/v3/storageinfo (storage usage)"
-    printf '0\n'
+    printf '{"usage_percent":0}\n'
     return 0
   fi
   sample_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '\033[1;36m[PROBE]\033[0m %s storageinfo sample direct=%s proxy=%s\n' \
     "${sample_time}" "${ADMIN_ENDPOINT}" "${PROXY_ENDPOINT:-disabled}" >&2
-  body="$(storageinfo_with_retry admin)" \
-    || die "direct storageinfo API remained unavailable at ${ADMIN_ENDPOINT}"
-  probe_proxy_storageinfo
-  if ! printf '%s' "${body}" | jq -e '(.info.disks // .disks // []) | length' >/dev/null 2>&1; then
-    printf '\033[1;31m[ERROR]\033[0m storageinfo response unexpected (expected JSON with .info.disks or .disks):\n%s\n' "${body}" >&2
-    die "storageinfo response could not be parsed"
+  body="$(API_REQUEST_TIMEOUT="${CAPACITY_SAMPLE_TIMEOUT}" STORAGEINFO_PROBE_RETRIES=1 storageinfo_with_retry admin)" \
+    || return 1
+  printf '%s' "${body}" | python3 "${POOL_SCRIPT_DIR}/scripts/storage_capacity.py" sample
+}
+
+storage_usage_percent() {
+  storage_capacity_sample | jq -r '.usage_percent'
+}
+
+assess_capacity() {
+  local sample="$1" threshold="$2" assessment
+  assessment="$(printf '%s' "${sample}" | python3 "${POOL_SCRIPT_DIR}/scripts/storage_capacity.py" assess \
+    --previous "${CAPACITY_PREVIOUS_SAMPLE}" --threshold "${threshold}" \
+    --max-disk-percent "${CAPACITY_MAX_DISK_PERCENT}" --min-free-bytes "${CAPACITY_MIN_FREE_BYTES}" \
+    --object-size "${WARP_OBJ_SIZE}" --concurrent "${WARP_CONCURRENT}" \
+    --poll-seconds "${CAPACITY_POLL_INTERVAL}" --stop-seconds "$((WARP_STOP_GRACE + 3))" \
+    --sample-timeout "${CAPACITY_SAMPLE_TIMEOUT}")" || return 1
+  [ -z "${CAPACITY_LOG_FILE}" ] || printf '%s\n' "${assessment}" >> "${CAPACITY_LOG_FILE}"
+  printf '%s' "${assessment}"
+}
+
+check_capacity_before_write() {
+  local assessment
+  CAPACITY_PREVIOUS_SAMPLE="$(storage_capacity_sample)" || return 1
+  assessment="$(assess_capacity "${CAPACITY_PREVIOUS_SAMPLE}" "${STORAGE_THRESHOLD}")" || return 1
+  if [ "$(printf '%s' "${assessment}" | jq -r '.action')" = capacity_guard ]; then
+    warn "[ENVIRONMENT-CAPACITY] refusing to start warp: ${assessment}"
+    return 4
   fi
-  printf '%s' "${body}" | jq -r '
-    ([.info.disks // .disks // [] | .[] | select(.state != "offline" and .totalspace > 0) | .usedspace] | add // 0) as $used
-    | ([.info.disks // .disks // [] | .[] | select(.state != "offline" and .totalspace > 0) | .totalspace] | add // 0) as $total
-    | if $total > 0 then ($used / $total * 100) else 0 end
-  '
 }
 
 # Poll storage usage until it reaches the threshold
 monitor_storage() {
-  local threshold="${1:-${STORAGE_THRESHOLD}}" warp_pid="${2:-}" usage
-  log "monitoring storage usage until ${threshold}% (every ${POLL_INTERVAL}s)"
+  local threshold="${1:-${STORAGE_THRESHOLD}}" warp_pid="${2:-}" sample assessment action usage
+  log "monitoring storage usage until ${threshold}% (every ${CAPACITY_POLL_INTERVAL}s, with per-disk reserves)"
   while :; do
-    usage="$(storage_usage_percent)" || return 1
-    log "current storage usage: ${usage}%"
-    awk -v u="${usage}" -v t="${threshold}" 'BEGIN{exit !(u >= t)}' && break
+    sample="$(storage_capacity_sample)" || return 1
+    assessment="$(assess_capacity "${sample}" "${threshold}")" || return 1
+    CAPACITY_PREVIOUS_SAMPLE="${sample}"
+    usage="$(printf '%s' "${assessment}" | jq -r '.usage_percent')"
+    action="$(printf '%s' "${assessment}" | jq -r '.action')"
+    log "capacity sample: ${assessment}"
+    if [ "${action}" = capacity_guard ]; then
+      [ "$(printf '%s' "${assessment}" | jq -r '.emergency')" != true ] || CAPACITY_EMERGENCY=1
+      warn "[ENVIRONMENT-CAPACITY] stopping before a disk exhausts its reserved space"
+      return 4
+    fi
+    [ "${action}" != target_reached ] || break
     if [ -n "${warp_pid}" ] && ! kill -0 "${warp_pid}" 2>/dev/null; then
       warn "warp finished at ${usage}%, below the required storage threshold of ${threshold}%"
       return 3
     fi
-    sleep "${POLL_INTERVAL}"
+    sleep "${CAPACITY_POLL_INTERVAL}"
   done
   log "storage usage reached ${usage}%, stopping writes"
 }
@@ -1175,6 +1226,7 @@ preflight() {
   fi
   if [ "${WITH_WARP}" -eq 1 ]; then
     need_cmd warp "warp benchmark tool"
+    need_cmd python3 "capacity monitor"
   fi
   log "preflight OK"
 }
@@ -1291,6 +1343,7 @@ step4_write_data() {
   verify_pools 1
   if [ "${WITH_WARP}" -eq 1 ]; then
     need_cmd warp "warp benchmark tool"
+    need_cmd python3 "capacity monitor"
     confirm "About to run up to ${WARP_ROUNDS} warp write round(s) against bucket=${WARP_BUCKET} and monitor usage up to ${STORAGE_THRESHOLD}%. Continue?"
     if [ "${DRY_RUN}" -eq 1 ]; then
       log "DRY-RUN: warp put --host $(endpoint_authority "${WARP_ENDPOINT}") --bucket ${WARP_BUCKET} --concurrent ${WARP_CONCURRENT} ... (background)"
@@ -1300,7 +1353,11 @@ step4_write_data() {
     local warp_log warp_pid round monitor_rc target_reached=0 warp_stop_waited
     warp_log="${WARP_LOG_FILE:-$(mktemp "${TMPDIR:-/tmp}/rustfs-warp.XXXXXX.log")}"
     : >"${warp_log}"
+    CAPACITY_LOG_FILE="${warp_log}.capacity.jsonl"
+    probe_proxy_storageinfo
     for ((round=1; round<=WARP_ROUNDS; round++)); do
+      CAPACITY_EMERGENCY=0
+      check_capacity_before_write || die "[ENVIRONMENT-CAPACITY] capacity admission failed; see ${CAPACITY_LOG_FILE}"
       log "starting warp round ${round}/${WARP_ROUNDS} against ${WARP_ENDPOINT} (background), log: ${warp_log}"
       warp put --host "$(endpoint_authority "${WARP_ENDPOINT}")" \
         --bucket "${WARP_BUCKET}" \
@@ -1319,9 +1376,13 @@ step4_write_data() {
       fi
       # Graceful stop first (SIGINT lets warp finish/abort in-flight multipart
       # uploads), then SIGTERM/KILL as fallback; see rustfs/backlog#2063.
-      kill -INT "${warp_pid}" 2>/dev/null || true
+      if [ "${CAPACITY_EMERGENCY}" -eq 1 ] || [ "${monitor_rc:-0}" -eq 1 ]; then
+        kill -TERM "${warp_pid}" 2>/dev/null || true
+      else
+        kill -INT "${warp_pid}" 2>/dev/null || true
+      fi
       warp_stop_waited=0
-      while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 60 ]; do
+      while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt "${WARP_STOP_GRACE}" ]; do
         sleep 1
         warp_stop_waited=$((warp_stop_waited + 1))
       done
@@ -1329,7 +1390,7 @@ step4_write_data() {
         warn "warp did not exit after SIGINT; sending SIGTERM"
         kill -TERM "${warp_pid}" 2>/dev/null || true
         warp_stop_waited=0
-        while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 30 ]; do
+        while kill -0 "${warp_pid}" 2>/dev/null && [ "${warp_stop_waited}" -lt 3 ]; do
           sleep 1
           warp_stop_waited=$((warp_stop_waited + 1))
         done
@@ -1344,6 +1405,9 @@ step4_write_data() {
       abort_stale_multipart_uploads "${WARP_BUCKET}"
       report_warp_errors "${warp_log}" \
         || die "warp observed a service or transport failure; see ${warp_log}"
+      probe_proxy_storageinfo
+      [ "${monitor_rc:-0}" -ne 4 ] \
+        || die "[ENVIRONMENT-CAPACITY] workload stopped for disk safety; target was not certified (see ${CAPACITY_LOG_FILE})"
       [ "${target_reached}" -eq 1 ] && break
       [ "${monitor_rc:-0}" -eq 3 ] \
         || die "warp monitor failed unexpectedly (status=${monitor_rc:-unknown})"
@@ -1441,7 +1505,7 @@ abort_stale_multipart_uploads() {
     [ -n "${marker_id}" ] && q="${q}&upload-id-marker=${marker_id}"
     body="$(admin_api GET "/${bucket}" "${q}")"
     code="$(admin_api_code)"
-    [ "${code}" = "200" ] || die "list multipart uploads failed (HTTP ${code}): ${body}"
+    [ "${code}" = "200" ] || die "list multipart uploads failed (HTTP ${code}; $(admin_api_headers)): ${body}"
     loops=$((loops + 1))
     [ "${loops}" -gt 100 ] && die "multipart upload listing did not terminate (pagination loop)"
     # Split the one-line XML into one <Upload>...</Upload> block per line.
@@ -1465,7 +1529,7 @@ abort_stale_multipart_uploads() {
   # Confirm the bucket has no incomplete uploads left before decommission.
   body="$(admin_api GET "/${bucket}" "uploads")"
   code="$(admin_api_code)"
-  [ "${code}" = "200" ] || die "re-list multipart uploads failed (HTTP ${code}): ${body}"
+  [ "${code}" = "200" ] || die "re-list multipart uploads failed (HTTP ${code}; $(admin_api_headers)): ${body}"
   if printf '%s' "${body}" | grep -q '<Upload>'; then
     die "multipart upload cleanup incomplete: ${bucket} still has incomplete uploads"
   fi
@@ -1652,6 +1716,9 @@ Options:
   --decommission-timeout N   Decommission wait timeout in seconds (default 86400)
   --service-timeout N        Service start wait timeout in seconds (default 300)
   --poll-interval N          Status polling interval in seconds (default 30)
+  --capacity-poll-interval N Capacity sample interval in seconds (default 2)
+  --capacity-min-free-bytes N Minimum reserved bytes on every disk (default 536870912)
+  --capacity-max-disk-percent N Per-disk emergency stop limit (default 95)
   --log-file FILE            Append all output to FILE
   --dry-run                  Preview commands without executing them
   -y, --yes                  Skip all confirmation prompts
@@ -1765,6 +1832,9 @@ main() {
       --decommission-timeout) DECOMMISSION_TIMEOUT="$1"; shift ;;
       --service-timeout) SERVICE_TIMEOUT="$1"; shift ;;
       --poll-interval) POLL_INTERVAL="$1"; shift ;;
+      --capacity-poll-interval) CAPACITY_POLL_INTERVAL="$1"; shift ;;
+      --capacity-min-free-bytes) CAPACITY_MIN_FREE_BYTES="$1"; shift ;;
+      --capacity-max-disk-percent) CAPACITY_MAX_DISK_PERCENT="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
       --dry-run) DRY_RUN=1 ;;
       -y|--yes) ASSUME_YES=1 ;;

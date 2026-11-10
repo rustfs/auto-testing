@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from case_plan import POOL_CASE_IDS as CASE_IDS, pool_harness_scored_cases
-from pool_helpers import active_endpoint_indices, active_fixture_bytes
+from pool_helpers import active_endpoint_indices, active_fixture_bytes, active_rebalance_fixture_bytes
 from pool_status import (
     PoolStatusError,
     assert_pool_parity,
@@ -49,6 +49,7 @@ from pool_status import (
     validate_pool_inventory,
 )
 from rc_binary import resolve_rc_binary
+from scripts.storage_capacity import sample as capacity_sample
 
 try:
     import boto3
@@ -1179,6 +1180,14 @@ class PoolHarness:
             document = json.loads(body)
             try:
                 matched = predicates[state](document, operation_id)
+                if state == "active" and not allow_fast_completion and not matched:
+                    pools = rebalance_entries(document, operation_id)
+                    if all(str(pool["status"]).lower() in {"completed", "none"} for pool in pools):
+                        self.save_json(case_id, f"rebalance-{artifact_label}-window-ended.json", document)
+                        raise AssertionError(
+                            "rebalance completed before the required active window; "
+                            "increase the active fixture or reduce probe overhead"
+                        )
             except PoolStatusError:
                 self.save_json(
                     case_id,
@@ -1206,12 +1215,17 @@ class PoolHarness:
                 operationId=operation_id,
                 evidence="terminal status carried nonzero movement progress",
             )
-        self.rebalance_status(
+        verified = self.rebalance_status(
             case_id,
             operation_id,
             f"rebalance-{artifact_label}-parity",
             allow_stopped=state == "stopped",
         )
+        if state == "active" and not allow_fast_completion and not rebalance_active(
+            verified, operation_id, require_progress=True
+        ):
+            self.save_json(case_id, f"rebalance-{artifact_label}-window-ended.json", verified)
+            raise AssertionError("rebalance active window ended during rc/Admin parity checks")
         if state in {"complete", "stopped"}:
             inventory, _ = self.pool_snapshot(
                 case_id,
@@ -1518,9 +1532,31 @@ class PoolHarness:
         self.census(case_id, "after-rebalance")
         self.assert_inventory(case_id, self.client, bucket, inventory, "after-rebalance")
 
+    def rebalance_fixture_size(self, case_id: str) -> int:
+        size = active_rebalance_fixture_bytes(
+            self.args.fixture_bytes, self.args.active_rebalance_fixture_bytes
+        )
+        # The strict active oracle needs published movement before stop/live I/O.
+        # Reserve room for an EC ratio up to 2 and metadata; refuse an oversized
+        # fixture before writing it instead of filling the environment's disks.
+        document = self.admin_json(case_id, "rebalance-fixture-capacity", "storageinfo")
+        current = capacity_sample(document)
+        logical_bytes = (self.args.fixture_objects - 3) * size + 4098
+        required_free = logical_bytes * 2 / current["disk_count"] + 1024**3
+        self.save_json(case_id, "rebalance-fixture-budget.json", {
+            "fixtureBytes": size, "logicalBytes": logical_bytes,
+            "requiredFreePerDisk": required_free, "capacity": current,
+        })
+        if current["min_free_bytes"] < required_free:
+            raise RuntimeError(
+                "[ENVIRONMENT-CAPACITY] insufficient per-disk space for the active "
+                "rebalance fixture; reduce fixture count/size or prepare more capacity"
+            )
+        return size
+
     def case_expansion_restart_persistence(self, case_id: str) -> None:
         bucket, inventory = self.seed_and_expand(
-            case_id, size=active_fixture_bytes(self.args.fixture_bytes)
+            case_id, size=self.rebalance_fixture_size(case_id)
         )
         before, _ = self.pool_snapshot(case_id, "before-restart", 2)
         operation_id = self.start_rebalance(case_id)
@@ -1577,7 +1613,7 @@ class PoolHarness:
 
     def case_rebalance_stop_resume(self, case_id: str) -> None:
         bucket, inventory = self.seed_and_expand(
-            case_id, size=active_fixture_bytes(self.args.fixture_bytes)
+            case_id, size=self.rebalance_fixture_size(case_id)
         )
         first_id = self.start_rebalance(case_id)
         self.wait_rebalance(case_id, first_id, "active")
@@ -1700,7 +1736,7 @@ class PoolHarness:
 
     def case_rebalance_live_io(self, case_id: str) -> None:
         bucket, inventory = self.seed_and_expand(
-            case_id, size=active_fixture_bytes(self.args.fixture_bytes)
+            case_id, size=self.rebalance_fixture_size(case_id)
         )
         operation_id = self.start_rebalance(case_id)
         self.wait_rebalance(case_id, operation_id, "active")
@@ -1708,6 +1744,9 @@ class PoolHarness:
         status, _, body = self.signed_request(
             self.args.endpoint, "GET", f"{ADMIN_PREFIX}/rebalance/status"
         )
+        self.save_json(case_id, "rebalance-live-after-io.json", {
+            "httpStatus": status, "body": body.decode(errors="replace")
+        })
         if status != 200 or not rebalance_active(json.loads(body), operation_id, require_progress=True):
             raise AssertionError("rebalance did not remain active across the live-I/O window")
         self.wait_rebalance(case_id, operation_id, "complete")
@@ -2276,11 +2315,12 @@ class PoolHarness:
         self.census(case_id, "after-retired-config-removal")
 
     def case_operation_guards(self, case_id: str) -> None:
+        fixture_size = self.rebalance_fixture_size(case_id)
         bucket = self.create_bucket(case_id)
         inventory = self.put_inventory(
             case_id,
             bucket,
-            size=active_fixture_bytes(self.args.fixture_bytes),
+            size=fixture_size,
         )
         self.run_rc(
             case_id,
@@ -2620,6 +2660,9 @@ class PoolHarness:
             "fixtureObjects": self.args.fixture_objects,
             "fixtureBytes": self.args.fixture_bytes,
             "activeFixtureBytes": active_fixture_bytes(self.args.fixture_bytes),
+            "activeRebalanceFixtureBytes": active_rebalance_fixture_bytes(
+                self.args.fixture_bytes, self.args.active_rebalance_fixture_bytes
+            ),
             "liveObjects": self.args.live_objects,
             "boto3Version": boto3.__version__,
             "botocoreVersion": botocore.__version__,
@@ -2754,6 +2797,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval", type=float, default=0.5)
     parser.add_argument("--fixture-objects", type=int, default=128)
     parser.add_argument("--fixture-bytes", type=int, default=1024 * 1024)
+    parser.add_argument("--active-rebalance-fixture-bytes", type=int,
+                        default=int(os.environ.get("RUSTFS_ACTIVE_REBALANCE_FIXTURE_BYTES", 128 * 1024**2)))
     parser.add_argument("--live-objects", type=int, default=16)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--rc-bin", default="rc")
@@ -2787,6 +2832,7 @@ def parse_args() -> argparse.Namespace:
         or args.poll_interval <= 0
         or args.fixture_objects < 4
         or args.fixture_bytes < 1
+        or args.active_rebalance_fixture_bytes < 32 * 1024**2
         or args.live_objects < 1
         or args.workers < 1
     ):

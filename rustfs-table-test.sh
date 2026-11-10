@@ -246,11 +246,8 @@ cleanup_all() {
 # ==================== TBL-101: PyIceberg end-to-end (product smoke) ====================
 test_tbl101() {
   if [ "${SKIP_SMOKE}" -eq 1 ]; then echo "smoke skipped by flag"; return 2; fi
-  if [ "${SKIP_SMOKE}" -eq 1 ]; then echo "tbl101: smoke skipped by flag"; return 2; fi
-  if [ -z "${SMOKE_SCRIPT}" ] || [ ! -f "${SMOKE_SCRIPT}" ]; then
-    echo "tbl101: smoke script not found: '${SMOKE_SCRIPT:-<empty>}' (cwd=$(pwd), SKIP_SMOKE=${SKIP_SMOKE})"
-    return 2
-  fi
+  python3 "${SCRIPT_DIR}/scripts/prepare_table_smoke.py" check --smoke-script "${SMOKE_SCRIPT}" \
+    || return 1
   echo "tbl101: smoke script ok, creating venv"
   local venv="/tmp/tbl-venv-${RUN_ID}"
   if ! python3 -m venv "${venv}" >/tmp/tbl-venv-err.log 2>&1; then

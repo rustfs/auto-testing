@@ -22,6 +22,10 @@ on:
         required: false
         type: boolean
         default: false
+      source_ref:
+        description: 'RustFS source ref matching the standalone candidate (defaults to release tag or main)'
+        required: false
+        type: string
 
 concurrency:
   group: rustfs-shared-functional-tests-v2
@@ -80,6 +84,26 @@ jobs:
           aws --version
           python3 --version
 
+      - name: Checkout matching Table smoke sources
+        if: ${{ !inputs.skip_smoke }}
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
+        with:
+          repository: rustfs/rustfs
+          ref: ${{ steps.chain.outputs.source_sha || inputs.source_ref || inputs.rustfs_version || 'main' }}
+          path: .rustfs-table-source
+          sparse-checkout: scripts/table-catalog
+          persist-credentials: false
+
+      - name: Prepare complete Table smoke module tree
+        if: ${{ !inputs.skip_smoke }}
+        env:
+          EXPECTED_SOURCE_SHA: ${{ steps.chain.outputs.source_sha }}
+        run: >-
+          python3 scripts/prepare_table_smoke.py prepare
+          --source-root "${GITHUB_WORKSPACE}/.rustfs-table-source"
+          --destination "${FUNCTIONAL_ARTIFACTS_DIR}/table-catalog"
+          --expected-sha "${EXPECTED_SOURCE_SHA}"
+
       - name: Admit clean shared environment
         id: environment
         timeout-minutes: 5
@@ -123,7 +147,7 @@ jobs:
           chmod +x rustfs-table-test.sh
           PACKAGE_URL='${{ steps.chain_package.outputs.package_url || inputs.package_url }}'
           RUSTFS_VERSION='${{ inputs.rustfs_version }}'
-          SMOKE_PATH="${GITHUB_WORKSPACE:-$PWD}/scripts/table-catalog/pyiceberg_smoke.py"
+          SMOKE_PATH="${FUNCTIONAL_ARTIFACTS_DIR}/table-catalog/pyiceberg_smoke.py"
           ARGS=(-y --smoke-script "${SMOKE_PATH}")
           if [ '${{ inputs.skip_smoke }}' = 'true' ]; then
             ARGS+=(--skip-smoke)
@@ -284,6 +308,7 @@ jobs:
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/report.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/cases.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/suite.log
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/table-catalog/source-manifest.json
           if-no-files-found: error
           retention-days: 30
 

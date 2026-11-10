@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "as_of": "2026-10-28",
+  "as_of": "2026-11-10",
   "source_commit": "524eb5b32c3236497fdd8a9271df0494fa3d9974",
   "source_sha256": "463fdd02dee43e42fef4f3aacf7506709ce87af535e1a53d91c521bc2e361cad",
-  "reviewed_testing_commit": "f0744d198769feecb2cb038ab96b507a1784d44d",
+  "reviewed_testing_commit": "50baebb79f52b3b817f41c45db551588a4b28bd7",
   "scope": "Test implementation migration and candidate live acceptance are independent. This review does not rewrite original results, change migration_status semantics or relax the canonical gate. Environment procedures remain disabled by default under the accepted delivery scope.",
-  "evidence_basis": "20261026-canonical-migration-ledger-7094.json plus later G01/G02 attempts and source review on 2026-10-28; historical result bytes and audit reports remain in the separate evidence store.",
+  "evidence_basis": "20261026-canonical-migration-ledger-7094.json plus later G01/G02 attempts and source review on 2026-10-28; historical result bytes and audit reports remain in the separate evidence store. 2026-11-10: 对 Rebalance 活动夹具、容量准入、Started 非零进度与提前完成诊断进行限定复核；本次本地回归不新增产品 live acceptance。",
   "reviewed_files": {
     "scripts/run_validation_case.sh": "ac51328ff860074f285999236a07ec8d2274d56607dc7c6c6389747fd7a0c498",
     "scripts/validation_heal/authority.py": "8f2225f184427674de1f45aff4c4976c812f9d70fd4bc927ce460726a4ff74a0",
@@ -68,7 +68,7 @@
     "scripts/validation_heal/version_race_runner.py": "5dd244ae2aa816907d3711a6a7c9bf3dac76265c76967f7803437195894ff0e0",
     "scripts/validation_heal/versions.py": "fa77397a58b0db4499114c0e30a766ef67f997d1c88f22fcfe02752820b5eea0",
     "scripts/validation_pool/case_plan.py": "277777e040501c8a79e7104471f411b054d901afb920d18f3e222d3a0b7b03bc",
-    "scripts/validation_pool/pool_behavior.py": "203bc3a2b7e85fb95482dd33efc937cff9f1f7e23f8ac2aa0b9ad2f40aff4632",
+    "scripts/validation_pool/pool_behavior.py": "3850809ca92e809656abf15e89bee28f8baea6b539dbefafe19e79d43afea375",
     "scripts/validation_pool/run_case.sh": "e846559a26ccc45b0bba1fbba272ba8a921ea78079948b7f6f2ef6efa60bc25d",
     "test_validation_heal.py": "6e4e25d2437a49db1af0b3020bb3a2509496b21cb3c27216a6b0322aea9bfbdc",
     "test_validation_heal_authority.py": "a4334246aa9572be05a3d6881779df1e2495d9706d3a9289ba9437ac866a688a",
@@ -107,7 +107,9 @@
     "test_validation_heal_race_native.py": "850c9683ac918834d22b002ec2f5a8c0d7fd2b74266461e4912776dfceb0d93d",
     "test_validation_heal_schema.py": "5df440df29e7085d48590665129f87b0791f9fa8c7f64c8c0432000bc2002606",
     "test_validation_heal_unformatted.py": "58bc43f3f0905c8c4b7d0f8e656d25f0a17e197b5a2dfb66a88b6af9747883a7",
-    "test_validation_pool.py": "e0c894b9df84be1cafe03d2fa6cf011d44cb1810f25e5543e9eb17c0188d6e18"
+    "test_validation_pool.py": "c9653c3f30babb493eb532b188d55371f96b147941890681448d74c6df03449f",
+    "scripts/validation_pool/pool_helpers.py": "0022d0f60c0928411dc85c9fa2a2176f50c0a36b930e45d78d369429cf03c6fd",
+    "scripts/storage_capacity.py": "01fe5315c8e842fe5c53bf1d1fe530f0c866f25be6a98afd39a5c2d2b91910b7"
   },
   "cases": [
     {
@@ -145,9 +147,13 @@
     {
       "case_id": "pool.expansion-restart-persistence",
       "implementation": "implemented",
-      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 复核：独立 Rebalance 活动夹具在写入前检查容量；Started 与非零进度、操作后仍 active、终态迁移和对象完整性断言保持严格。提前 Completed 报告活动窗口不足；历史 accepted runs 仅保留原产物的验收含义。",
       "references": [
-        "scripts/run_validation_case.sh"
+        "scripts/run_validation_case.sh",
+        "scripts/validation_pool/pool_behavior.py",
+        "scripts/validation_pool/pool_helpers.py",
+        "scripts/storage_capacity.py",
+        "test_validation_pool.py"
       ],
       "gaps": [],
       "live": {
@@ -161,9 +167,13 @@
     {
       "case_id": "pool.rebalance-stop-resume",
       "implementation": "implemented",
-      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 复核：独立 Rebalance 活动夹具在写入前检查容量；Started 与非零进度、操作后仍 active、终态迁移和对象完整性断言保持严格。提前 Completed 报告活动窗口不足；历史 accepted runs 仅保留原产物的验收含义。",
       "references": [
-        "scripts/run_validation_case.sh"
+        "scripts/run_validation_case.sh",
+        "scripts/validation_pool/pool_behavior.py",
+        "scripts/validation_pool/pool_helpers.py",
+        "scripts/storage_capacity.py",
+        "test_validation_pool.py"
       ],
       "gaps": [],
       "live": {
@@ -177,9 +187,13 @@
     {
       "case_id": "pool.rebalance-live-io",
       "implementation": "implemented",
-      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 复核：独立 Rebalance 活动夹具在写入前检查容量；Started 与非零进度、操作后仍 active、终态迁移和对象完整性断言保持严格。提前 Completed 报告活动窗口不足；历史 accepted runs 仅保留原产物的验收含义。",
       "references": [
-        "scripts/run_validation_case.sh"
+        "scripts/run_validation_case.sh",
+        "scripts/validation_pool/pool_behavior.py",
+        "scripts/validation_pool/pool_helpers.py",
+        "scripts/storage_capacity.py",
+        "test_validation_pool.py"
       ],
       "gaps": [],
       "live": {
@@ -314,9 +328,13 @@
     {
       "case_id": "pool.operation-guards",
       "implementation": "implemented",
-      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance.",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 复核：独立 Rebalance 活动夹具在写入前检查容量；Started 与非零进度、操作后仍 active、终态迁移和对象完整性断言保持严格。提前 Completed 报告活动窗口不足；历史 accepted runs 仅保留原产物的验收含义。",
       "references": [
-        "scripts/run_validation_case.sh"
+        "scripts/run_validation_case.sh",
+        "scripts/validation_pool/pool_behavior.py",
+        "scripts/validation_pool/pool_helpers.py",
+        "scripts/storage_capacity.py",
+        "test_validation_pool.py"
       ],
       "gaps": [],
       "live": {
