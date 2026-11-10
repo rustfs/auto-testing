@@ -322,6 +322,11 @@ jobs:
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/master.log
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/summary.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/summary.tsv
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/rounds.tsv
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/master.reparsed.log
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/summary.reparsed.md
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/summary.reparsed.tsv
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/rounds.reparsed.tsv
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/get_*.txt
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/put_*.txt
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/mixed_*.txt

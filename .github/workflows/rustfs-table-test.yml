@@ -308,6 +308,7 @@ jobs:
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/report.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/cases.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/suite.log
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/table-catalog/source-manifest.json
           if-no-files-found: error
           retention-days: 30
 

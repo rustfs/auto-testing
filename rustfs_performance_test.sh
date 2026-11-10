@@ -488,6 +488,7 @@ step5_benchmark() {
 }
 
 step6_analyze() {
+  local summary="${RESULT_DIR}/summary.md"
   log "step 6: analyze results from ${RESULT_DIR}"
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: bash ${BENCH_SCRIPT} --parse-only ${RESULT_DIR}"
@@ -496,14 +497,17 @@ step6_analyze() {
   if [ ! -d "${RESULT_DIR}" ]; then
     die "result directory not found: ${RESULT_DIR}"
   fi
-  if [ -f "${RESULT_DIR}/summary.md" ]; then
-    log "summary already generated: ${RESULT_DIR}/summary.md"
+  if [ -f "${summary}" ]; then
+    log "summary already generated: ${summary}"
   else
     log "generating summary with --parse-only"
+    WARP_METHODS="${WARP_METHODS}" \
+    WARP_SIZES="${WARP_SIZES}" \
     bash "${BENCH_SCRIPT}" --parse-only "${RESULT_DIR}"
+    summary="${RESULT_DIR}/summary.reparsed.md"
   fi
-  log "----- summary.md -----"
-  cat "${RESULT_DIR}/summary.md"
+  log "----- ${summary} -----"
+  cat "${summary}"
   log "step 6 complete"
 }
 

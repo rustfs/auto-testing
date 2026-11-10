@@ -22,6 +22,8 @@ python3 scripts/prepare_table_smoke.py prepare \
 
 `--destination` 必须是新目录，避免混入旧版本模块。链式 workflow 使用 manifest 的 source SHA；独立 workflow 可通过 `source_ref` 指定与产物匹配的源码。未指定时使用 release tag 或当次 checkout 的 main，并在 `source-manifest.json` 保留实际 SHA。
 
+Table workflow 将 `table-catalog/source-manifest.json` 与报告、用例表和日志一起上传，保留实际 smoke 源码 SHA 与文件哈希，供 runner 临时目录清理后追溯。
+
 ## 容量配置
 
 Rebalance 源用例明确要求活动阶段已有非零迁移进度。上一轮每对象 32 MiB 的任务在首次周期保存进度前完成，因此不能通过。专用活动夹具默认改为每对象 128 MiB（默认 128 对象，其中 3 个边界对象更小），通过 `RUSTFS_ACTIVE_REBALANCE_FIXTURE_BYTES` / `--active-rebalance-fixture-bytes` 配置，并记录在 run manifest。写入前按 EC 占用上界与每盘至少 1 GiB 的剩余余量检查容量。其他 Decommission 活动夹具保留原大小；更快的机器仍可能需要增加夹具，窗口不足时用例失败而不是放松断言。
@@ -37,5 +39,7 @@ MPU 列表错误会保留 HTTP status、`x-rustfs-error-cause`、request ID 与 
 ## 结果边界
 
 性能轮次总超时仍覆盖准备、负载和收尾。`timeout_before_report` / `timeout_after_report` 仅说明是否出现 Warp Report，不能推断 Warp 内部卡在具体阶段。不要把扩池发生的磁盘满用来解释此前的性能超时。
+
+`--parse-only` 输出独立的 `rounds.reparsed.tsv`、`summary.reparsed.tsv`、`summary.reparsed.md` 与 `master.reparsed.log`，保留原执行台账、摘要及日志。重解析无法恢复耗时和原始运行配置；应以原 `rounds.tsv` 中的 `NOT_RUN / aborted` 及耗时为执行证据。性能 workflow 同时上传原执行台账与重解析产物。步骤 6 缺少原摘要时展示重解析摘要，重解析失败仍返回非零。
 
 复测需保留产品源码 SHA、CI 产物身份、二进制 SHA-256、测试提交 SHA、实际配置和完整逐条结果。VM 写操作及最终恢复使用同一个共享锁；恢复后核对四节点、24 个数据挂载与对象校验。

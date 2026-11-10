@@ -54,14 +54,19 @@ CONSECUTIVE_FAILURES=0
 
 # --parse-only <result-dir>: parse an existing result dir (${method}_${size}.txt) without running
 # Only round files with a successful terminal execution status can be certified.
+OUTPUT_TAG=""
 if [[ "${1:-}" == "--parse-only" && -n "${2:-}" ]]; then
   RESULT_DIR="$2"
 fi
+if [[ "${1:-}" == "--parse-only" ]]; then
+  # Reanalysis must not rewrite the execution's abort states, timings or reports.
+  OUTPUT_TAG=".reparsed"
+fi
 
-LOG_FILE="${RESULT_DIR}/master.log"
-SUMMARY_TSV="${RESULT_DIR}/summary.tsv"
-SUMMARY_MD="${RESULT_DIR}/summary.md"
-ROUNDS_TSV="${RESULT_DIR}/rounds.tsv"
+LOG_FILE="${RESULT_DIR}/master${OUTPUT_TAG}.log"
+SUMMARY_TSV="${RESULT_DIR}/summary${OUTPUT_TAG}.tsv"
+SUMMARY_MD="${RESULT_DIR}/summary${OUTPUT_TAG}.md"
+ROUNDS_TSV="${RESULT_DIR}/rounds${OUTPUT_TAG}.tsv"
 PARSE_FAILURE_REASON=""
 
 if [[ "${1:-}" != "--parse-only" ]] && ! command -v warp >/dev/null 2>&1; then
@@ -197,6 +202,9 @@ gen_summary_md() {
     echo "- Concurrency: ${CONCURRENCY}; duration: ${DURATION}; sleep: ${SLEEP_BETWEEN_ROUNDS}s; GET objects: ${GET_OBJECTS}"
     echo "- Methods: ${METHODS[*]-}; sizes: ${SIZES[*]-}"
     echo "- Rounds: selected=${TOTAL_ROUNDS}; parsed=${PARSED_ROUNDS}; failed=${FAILED_ROUNDS}"
+    if [[ -n "${OUTPUT_TAG}" ]]; then
+      echo "- Reparsed raw outputs: elapsed time is unknown; configuration above is from this parser invocation. See the original rounds.tsv, master.log and summary files for execution evidence."
+    fi
     echo "- Timeout covers preparation, workload and teardown. Report presence only distinguishes timeout before/after a report; it does not prove the internal phase."
     echo ""
     echo "## Every selected round"
