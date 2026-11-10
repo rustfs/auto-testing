@@ -5,12 +5,14 @@ on:
     paths:
       - rustfs-fault-tolerance-test.sh
       - test_rustfs_fault_tolerance.py
+      - scripts/ft_s3_diagnostics.py
       - .github/workflows/fault-tolerance-script-tests.yml
   push:
     branches: [main]
     paths:
       - rustfs-fault-tolerance-test.sh
       - test_rustfs_fault_tolerance.py
+      - scripts/ft_s3_diagnostics.py
       - .github/workflows/fault-tolerance-script-tests.yml
 
 permissions:

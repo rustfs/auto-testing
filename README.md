@@ -96,14 +96,7 @@ python3 scripts/validation_report.py \
   --output /absolute/path/new-artifacts-dir/report.md
 ```
 
-The legacy S3 topology suite also checks historical regressions: fresh bucket
-creation timestamps (`S3C-103`), preservation of object bytes after rejected
-bucket deletion (`S3C-104`), multipart completion Location and ETag agreement
-with HEAD/GET (`S3C-301`), and V1/V2 listing and downloads of user keys named
-`xl.meta` (`S3C-401`). `S3C-1407` rejects deletion of buckets containing only
-historical versions or only a delete marker, verifies historical bytes, and
-explicitly removes its versions during cleanup. These cases run through the
-existing topology suite; `--validation-case` does not select legacy case IDs.
+The legacy S3 topology suite also checks historical regressions: fresh bucket creation timestamps (`S3C-103`), preservation of object bytes after rejected bucket deletion (`S3C-104`), multipart completion Location and ETag agreement with HEAD/GET (`S3C-301`), and V1/V2 listing, ordering and downloads of ordinary user keys, including `xl.meta.txt` and `nested/xl.meta.txt` (`S3C-401`). Exact storage-sidecar path segments are reserved for new writes: `S3C-212` checks `InvalidArgument` with the reserved-filename reason for PUT, COPY destinations and multipart initiation, including nested and case-insensitive names, and verifies that rejected writes leave no objects or uploads and preserve the COPY source. Testing previously stored legacy keys named exactly `xl.meta` requires a separate fixture created by an older version; new PUTs cannot seed that fixture. `S3C-1407` rejects deletion of buckets containing only historical versions or only a delete marker, verifies historical bytes, and explicitly removes its versions during cleanup. These cases run through the existing topology suite; `--validation-case` does not select legacy case IDs.
 
 Run `python3 -m unittest test_rustfs_s3_regressions.py` to exercise the assertions
 with mutated responses without a cluster. This validates the test oracles and
@@ -164,18 +157,11 @@ audit have local executor tests but still need live verification.
 
 ## Fault-tolerance suite
 
-`rustfs-fault-tolerance-test.sh` writes a machine-readable completion result
-with `--results-file`. A complete `--all` run contains 38 unique probe results;
-AWS CLI/parser failures, duplicate probes, missing probes, and incomplete runs
-are harness failures rather than RustFS product verdicts.
+`rustfs-fault-tolerance-test.sh` writes a machine-readable completion result with `--results-file`. AWS CLI/parser failures, duplicate probes, missing probes, and incomplete runs are harness failures rather than RustFS product verdicts; the result contains the expected and seen case inventories.
 
-Recovery phases poll the probe endpoint's `/health/ready` until
-`details.storage.writeQuorum` is true before probing, so they assert the EC
-contract rather than the peer drive re-admission window. The wait is bounded by
-`FT_RECOVERY_TIMEOUT_SECS` (default 120); the elapsed seconds (or `timeout`)
-land in `evidence/recovery-<phase>.secs`. The matrix sweep (`--matrix`,
-`--matrix-topo`) runs every topology as a single pool and applies each EC level
-through `RUSTFS_STORAGE_CLASS_STANDARD`.
+Recovery phases poll the probe endpoint's `/minio/health/cluster` and require HTTP 200 and `ready: true`; when detailed fields are present, storage, IAM, exclusive-lock quorum and pool metadata must also report ready. `/health/ready` admits reads and is insufficient for this write gate. Minimal cluster-write payloads remain supported. The wait uses `FT_RECOVERY_TIMEOUT_SECS` (default 120); elapsed seconds or `timeout` land in `evidence/recovery-<phase>.secs`, with each poll's body, headers, HTTP status and curl diagnostic in `evidence/recovery-<phase>/`. A timeout fails the phase's write verdict even if the next PUT succeeds, while the remaining probes still execute. The cluster probe does not prove a real object lock can be acquired: subsequent S3 requests still assert actual read/write behavior, and a 503 remains a failure. The matrix sweep (`--matrix`, `--matrix-topo`) runs every topology as a single pool and applies each EC level through `RUSTFS_STORAGE_CLASS_STANDARD`.
+
+`EVIDENCE_DIR` selects the evidence directory explicitly. Otherwise, an explicit `--results-file`, `RESULTS_FILE`, `--log-file`, or `REPORT_FILE` keeps a unique evidence directory beside that output instead of under temporary storage. The result JSON includes `evidence_dir`; case rows, harness errors and the default report are retained there. Without an explicit output path, artifacts remain under the temporary directory. Each S3 invocation saves stdout, a filtered CLI diagnostic and all retry response records, including HTTP status, `x-rustfs-error-cause`, `x-amz-request-id` and numeric `retry-after`. AWS debug requests, signatures, credentials, response bodies and other headers are discarded rather than saved. This does not add requests or change the CLI retry policy.
 
 ```bash
 bash -n rustfs-fault-tolerance-test.sh

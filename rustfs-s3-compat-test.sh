@@ -900,6 +900,7 @@ run_all_tests() {
   run_test S3C-209 "CopyObject"              test_s3c209
   run_test S3C-210 "SpecialCharKey"          test_s3c210
   run_test S3C-211 "ServerSideMove"          test_s3c211
+  run_test S3C-212 "ReservedStorageNames"    test_s3c212
   run_test S3C-301 "MultipartFullFlow"       test_s3c301
   run_test S3C-302 "UploadPartCopy"          test_s3c302
   run_test S3C-303 "ListPartsAndUploads"     test_s3c303
@@ -1357,6 +1358,49 @@ test_s3c211() {
   rm_bucket "s3c211-b1"
 }
 
+test_s3c212() {
+  local bucket="s3c212-b" key name method case_rc=0 cleanup_rc=0
+  local keys=(XL.META nested/Xl.MeTa/child)
+  for name in xl.meta xl.meta.bkp delete-prepared delete-quorum-committed; do
+    keys+=("${name}" "nested/${name}")
+  done
+  new_bucket "${bucket}" || return 1
+  printf 'source must survive reserved destination rejection\n' > "${TEST_TMP}/s3c212-source"
+  (
+    aws_run s3api put-object --bucket "${bucket}" --key source --body "${TEST_TMP}/s3c212-source"
+    assert_aws_ok || exit 1
+    for key in "${keys[@]}"; do
+      for method in put-object copy-object create-multipart-upload; do
+        case "${method}" in
+          put-object) aws_run s3api "${method}" --bucket "${bucket}" --key "${key}" --body "${TEST_TMP}/s3c212-source" ;;
+          copy-object) aws_run s3api "${method}" --bucket "${bucket}" --key "${key}" --copy-source "${bucket}/source" ;;
+          create-multipart-upload) aws_run s3api "${method}" --bucket "${bucket}" --key "${key}" ;;
+        esac
+        assert_aws_fails_with 'InvalidArgument' "${method} ${key}" || exit 1
+        printf '%s' "${AWS_OUT}" | grep -q 'Object key contains a reserved storage filename' \
+          || { echo "${method} ${key}: wrong rejection reason: ${AWS_OUT}"; exit 1; }
+      done
+    done
+    aws_run s3api list-objects-v2 --bucket "${bucket}"
+    assert_aws_ok || exit 1
+    printf '%s' "${AWS_OUT}" | jq -e '[.Contents[]?.Key] == ["source"]' >/dev/null \
+      || { echo "reserved write created an object: ${AWS_OUT}"; exit 1; }
+    aws_run s3api list-multipart-uploads --bucket "${bucket}"
+    assert_aws_ok || exit 1
+    printf '%s' "${AWS_OUT}" | jq -e '(.Uploads // [] | length) == 0' >/dev/null \
+      || { echo "reserved write created an upload: ${AWS_OUT}"; exit 1; }
+    aws_run s3api get-object --bucket "${bucket}" --key source "${TEST_TMP}/s3c212-download"
+    assert_aws_ok || exit 1
+    cmp -s "${TEST_TMP}/s3c212-source" "${TEST_TMP}/s3c212-download" \
+      || { echo "reserved destination rejection damaged source"; exit 1; }
+  ) || case_rc=$?
+  aws_run s3api delete-object --bucket "${bucket}" --key source
+  assert_aws_ok || cleanup_rc=1
+  aws_run s3api delete-bucket --bucket "${bucket}"
+  assert_aws_ok || cleanup_rc=1
+  [ "${case_rc}" -eq 0 ] && [ "${cleanup_rc}" -eq 0 ]
+}
+
 # ---------- 3. Multipart ----------
 
 test_s3c301() {
@@ -1507,7 +1551,9 @@ test_s3c401() {
     aws_run s3api put-object --bucket "s3c401-b1" --key "obj-${i}" --body "${TEST_TMP}/s3c401-source"
     assert_aws_ok || return 1
   done
-  for key in xl.meta nested/xl.meta; do
+  # Exact sidecar path segments are reserved for new writes. Near-miss names
+  # remain ordinary user keys and must not be filtered by listing.
+  for key in xl.meta.txt nested/xl.meta.txt; do
     aws_run s3api put-object --bucket "s3c401-b1" --key "${key}" --body "${TEST_TMP}/s3c401-source"
     assert_aws_ok || return 1
   done
@@ -1515,16 +1561,16 @@ test_s3c401() {
     aws_run s3api "${method}" --bucket "s3c401-b1"
     assert_aws_ok || return 1
     printf '%s' "${AWS_OUT}" | jq -e '
-      [.Contents[]?.Key] == ["nested/xl.meta","obj-a","obj-b","obj-c","obj-d","obj-e","xl.meta"]
+      [.Contents[]?.Key] == ["nested/xl.meta.txt","obj-a","obj-b","obj-c","obj-d","obj-e","xl.meta.txt"]
     ' >/dev/null || { echo "${method} omitted or misordered user keys: ${AWS_OUT}"; return 1; }
   done
-  for key in xl.meta nested/xl.meta; do
+  for key in xl.meta.txt nested/xl.meta.txt; do
     aws_run s3api get-object --bucket "s3c401-b1" --key "${key}" "${TEST_TMP}/s3c401-download"
     assert_aws_ok || return 1
     cmp -s "${TEST_TMP}/s3c401-source" "${TEST_TMP}/s3c401-download" \
       || { echo "user key ${key} content mismatch"; return 1; }
   done
-  for key in obj-a obj-b obj-c obj-d obj-e xl.meta nested/xl.meta; do
+  for key in obj-a obj-b obj-c obj-d obj-e xl.meta.txt nested/xl.meta.txt; do
     aws_run s3api delete-object --bucket "s3c401-b1" --key "${key}"
     assert_aws_ok || return 1
   done
