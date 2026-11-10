@@ -4,12 +4,20 @@ on:
   pull_request:
     paths:
       - rustfs_performance_testing.sh
+      - rustfs_performance_test.sh
+      - scripts/performance_s3.py
+      - scripts/performance_delete_probe.py
+      - test_performance_s3.py
       - test_rustfs_performance_testing.py
       - .github/workflows/performance-script-tests.yml
   push:
     branches: [main]
     paths:
       - rustfs_performance_testing.sh
+      - rustfs_performance_test.sh
+      - scripts/performance_s3.py
+      - scripts/performance_delete_probe.py
+      - test_performance_s3.py
       - test_rustfs_performance_testing.py
       - .github/workflows/performance-script-tests.yml
 
@@ -25,6 +33,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Validate shell syntax
-        run: bash -n rustfs_performance_testing.sh
+        run: |
+          bash -n rustfs_performance_testing.sh
+          bash -n rustfs_performance_test.sh
+      - name: Install S3 test client
+        run: python3 -m pip install 'boto3>=1.35,<2'
       - name: Test benchmark result contracts without a server
-        run: python3 test_rustfs_performance_testing.py
+        run: python3 -B -m unittest -v test_rustfs_performance_testing.py test_performance_s3.py

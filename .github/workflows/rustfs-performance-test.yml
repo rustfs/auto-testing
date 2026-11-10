@@ -155,6 +155,8 @@ jobs:
           uname -a
           jq --version
           warp --version || true
+          python3 -c 'import boto3; from botocore.config import Config'
+          command -v timeout
           df -h /data | tail -1
 
       - name: Admit clean shared environment
@@ -330,6 +332,11 @@ jobs:
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/get_*.txt
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/put_*.txt
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/mixed_*.txt
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/*.benchdata*
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/*.prepare.log
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/*.cleanup.log
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/*.s3.json
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/*.s3-events.jsonl
           if-no-files-found: error
 
       - name: Reset test environment (after)

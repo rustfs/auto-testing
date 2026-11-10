@@ -2,11 +2,13 @@
 """Benchmark result contracts exercised with a local fake warp executable."""
 
 import csv
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -21,20 +23,26 @@ class PerformanceResultTests(unittest.TestCase):
         self.results = self.root / "results"
         self.shims = self.root / "fake-tools.sh"
         self.shims.write_text(r'''warp() {
-  local method="$1" size="" objects=0 mode="${FAKE_WARP_MODE:-success}" omit="${FAKE_WARP_OMIT:-}"
+  local method="$1" size="" bucket="" noclear=0 objects=0 mode="${FAKE_WARP_MODE:-success}" omit="${FAKE_WARP_OMIT:-}"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --obj.size) size="$2"; shift;;
       --objects) objects=1; shift;;
+      --bucket) bucket="$2"; shift;;
+      --noclear) noclear=1;;
+      --access-key|--secret-key) return 22;;
     esac
     shift
   done
   printf '%s %s\n' "$method" "$size" >> "$FAKE_WARP_CALLS"
+  printf '%s\n' "$bucket" >> "$FAKE_WARP_BUCKETS"
+  [[ "$noclear" == 1 ]] || return 23
   [[ "$method" == put && "$objects" == 0 || "$method" != put && "$objects" == 1 ]] || return 21
   printf 'diagnostic %s %s\n' "$method" "$size" >&2
   if [[ "$mode" == fail || "$mode" == mixed-failure && "$method" == put ]]; then return 42; fi
   if [[ "$mode" == hang ]]; then sleep 30; fi
+  if [[ "$mode" == brief-hang ]]; then sleep 1; fi
   local sections=() section text
   case "$method" in
     get) sections=(GET);;
@@ -59,11 +67,44 @@ class PerformanceResultTests(unittest.TestCase):
   if [[ "$mode" == hang-after-report ]]; then sleep 30; fi
 }
 ''')
+        # The real helper runs here, but its S3 client cannot reach a network.
+        (self.root / "boto3.py").write_text('''import os
+class Client:
+    def __init__(self):
+        self.keys = ["leftover"] if os.environ.get("FAKE_S3_MODE") == "cleanup-recovered" else []
+        self.deletes = 0
+    def create_bucket(self, **kw):
+        if os.environ.get("FAKE_S3_MODE") == "setup-failure": raise RuntimeError("blocked")
+        return {"ResponseMetadata": {"HTTPStatusCode": 200, "RetryAttempts": 0}}
+    def list_objects_v2(self, **kw):
+        return {"Contents": [{"Key": key} for key in self.keys], "IsTruncated": False, "ResponseMetadata": {"HTTPStatusCode": 200}}
+    def delete_objects(self, **kw):
+        self.deletes += 1
+        if self.deletes == 1:
+            return {"Errors": [{"Key": "leftover", "Code": "ServiceUnavailable"}], "ResponseMetadata": {"HTTPStatusCode": 200}}
+        self.keys = []
+        return {"Deleted": [{"Key": "leftover"}], "ResponseMetadata": {"HTTPStatusCode": 200}}
+    def list_multipart_uploads(self, **kw):
+        return {"Uploads": [], "ResponseMetadata": {"HTTPStatusCode": 200}}
+    def delete_bucket(self, **kw):
+        if os.environ.get("FAKE_S3_MODE") == "cleanup-failure": raise RuntimeError("blocked")
+        return {"ResponseMetadata": {"HTTPStatusCode": 204}}
+def client(*args, **kwargs): return Client()
+''')
+        (self.root / "botocore").mkdir()
+        (self.root / "botocore" / "__init__.py").write_text("")
+        (self.root / "botocore" / "config.py").write_text(
+            "class Config:\n    def __init__(self, **kwargs): pass\n")
         self.calls = self.root / "calls"
-        self.env = dict(os.environ, BASH_ENV=str(self.shims), FAKE_WARP_CALLS=str(self.calls), WARP_RESULT_DIR=str(self.results), WARP_HOST="127.0.0.1:1", WARP_ACCESS_KEY="test-access", WARP_SECRET_KEY="test-secret", WARP_METHODS="get,put,mixed", WARP_SIZES="1KiB,4KiB", WARP_SLEEP_BETWEEN_ROUNDS="0", WARP_DURATION="1s")
+        self.buckets = self.root / "buckets"
+        self.env = dict(os.environ, BASH_ENV=str(self.shims), PYTHONPATH=str(self.root), FAKE_WARP_BUCKETS=str(self.buckets), FAKE_WARP_CALLS=str(self.calls), WARP_RESULT_DIR=str(self.results), WARP_HOST="127.0.0.1:1", WARP_ACCESS_KEY="test-access", WARP_SECRET_KEY="test-secret", WARP_METHODS="get,put,mixed", WARP_SIZES="1KiB,4KiB", WARP_SLEEP_BETWEEN_ROUNDS="0", WARP_DURATION="1s")
         self.script = Path(__file__).with_name("rustfs_performance_testing.sh")
 
     def run_benchmark(self, mode="success", **overrides):
+        if self.results.exists():
+            shutil.rmtree(self.results)
+        self.calls.unlink(missing_ok=True)
+        self.buckets.unlink(missing_ok=True)
         result = subprocess.run(["bash", str(self.script)], cwd=self.root, env=dict(self.env, FAKE_WARP_MODE=mode, **overrides), capture_output=True, text=True)
         with (self.results / "summary.tsv").open() as stream:
             rows = list(csv.DictReader(stream, delimiter="\t"))
@@ -83,6 +124,12 @@ class PerformanceResultTests(unittest.TestCase):
         self.assertEqual(len(rows), 6)
         self.assert_diagnostics(6)
         self.assertIn("parsed=6", (self.results / "master.log").read_text())
+        buckets = self.buckets.read_text().splitlines()
+        self.assertEqual(len(set(buckets)), 6)
+        self.assertTrue(all(bucket.startswith("warp-benchmark-bucket-") for bucket in buckets))
+        self.assertTrue(all(row["cleanup"] == "PASS" and row["remaining_objects"] == "0"
+                            for row in self.round_evidence()))
+        self.assertNotIn("test-secret", "".join(path.read_text() for path in self.results.iterdir()))
 
     def test_all_failed_rounds_return_failure_after_collecting_every_round(self):
         result, rows = self.run_benchmark("fail")
@@ -142,6 +189,95 @@ class PerformanceResultTests(unittest.TestCase):
         self.assertEqual(evidence["reason"], "logged_errors")
         self.assertEqual(evidence["error_lines"], "1")
         self.assertIn("Average:", (self.results / "get_1KiB.txt").read_text())
+
+    def test_incomplete_cleanup_aborts_without_certifying_or_reusing_the_bucket(self):
+        result, rows = self.run_benchmark(FAKE_S3_MODE="cleanup-failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(rows, [])
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        evidence = self.round_evidence()
+        self.assertEqual(evidence[0]["cleanup"], "FAIL")
+        self.assertEqual(evidence[0]["reason"], "cleanup_unverified")
+        self.assertTrue(all(row["verdict"] == "NOT_RUN" and row["reason"] == "cleanup_incomplete"
+                            for row in evidence[1:]))
+
+    def test_setup_failure_never_runs_warp(self):
+        result, rows = self.run_benchmark(FAKE_S3_MODE="setup-failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(rows, [])
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.round_evidence()[0]["reason"], "setup_failed")
+
+    def test_recovered_cleanup_errors_still_fail_but_do_not_abort_the_matrix(self):
+        result, rows = self.run_benchmark(FAKE_S3_MODE="cleanup-recovered")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(rows, [])
+        self.assertEqual(len(self.calls.read_text().splitlines()), 6)
+        for row in self.round_evidence():
+            self.assertEqual(row["verdict"], "FAIL")
+            self.assertEqual(row["reason"], "cleanup_errors")
+            self.assertEqual(row["cleanup"], "PASS")
+            self.assertEqual(row["remaining_objects"], "0")
+            self.assertEqual(row["cleanup_error_entries"], "1")
+            self.assertEqual(row["cleanup_http_503_attempts"], "0")
+
+    def test_legacy_output_keeps_unknown_cleanup_status_when_reparsed(self):
+        self.run_benchmark(WARP_METHODS="get", WARP_SIZES="1KiB")
+        output = self.results / "get_1KiB.txt"
+        output.write_text(output.read_text().replace("RustFS lifecycle schema: 1\n", ""))
+        (self.results / "get_1KiB.s3.json").unlink()
+        result = subprocess.run(["bash", str(self.script), "--parse-only", str(self.results)],
+                                env={**self.env, "WARP_METHODS": "get", "WARP_SIZES": "1KiB"},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.round_evidence("rounds.reparsed.tsv")[0]["cleanup"], "unknown")
+
+    def test_term_after_bucket_creation_runs_exit_cleanup_and_cannot_be_certified(self):
+        process = subprocess.Popen(["bash", str(self.script)], env={**self.env,
+                                   "FAKE_WARP_MODE": "brief-hang", "WARP_METHODS": "get", "WARP_SIZES": "1KiB"},
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not self.calls.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(self.calls.exists())
+            process.terminate()
+            output, errors = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 143, output + errors)
+            receipt = json.loads((self.results / "get_1KiB.s3.json").read_text())
+            self.assertEqual(receipt["cleanup"], "PASS")
+            self.assertEqual(receipt["remaining_objects"], 0)
+            self.assertIn("RECOVERY cleanup_on_exit", output)
+            self.assertNotIn("RustFS round status: warp=0 capture=0", (self.results / "get_1KiB.txt").read_text())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+    def test_reparse_requires_the_new_cleanup_receipt_and_preserves_original_files(self):
+        self.run_benchmark(WARP_METHODS="get", WARP_SIZES="1KiB")
+        state = self.results / "get_1KiB.s3.json"
+        for mutation in ("errors", "missing", "residue"):
+            with self.subTest(mutation=mutation):
+                document = json.loads(state.read_text()) if state.exists() else original
+                original = dict(document)
+                if mutation == "missing":
+                    state.unlink()
+                else:
+                    document["cleanup_error_entries" if mutation == "errors" else "remaining_objects"] = 1
+                    state.write_text(json.dumps(document))
+                parsed = subprocess.run(["bash", str(self.script), "--parse-only", str(self.results)],
+                                        env={**self.env, "WARP_METHODS": "get", "WARP_SIZES": "1KiB"},
+                                        capture_output=True, text=True)
+                self.assertNotEqual(parsed.returncode, 0)
+                state.write_text(json.dumps(original))
+
+    def test_a_new_execution_cannot_overwrite_an_existing_report(self):
+        self.run_benchmark(WARP_METHODS="get", WARP_SIZES="1KiB")
+        original = {path.name: path.read_bytes() for path in self.results.iterdir()}
+        result = subprocess.run(["bash", str(self.script)], env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(original, {name: (self.results / name).read_bytes() for name in original})
 
     def test_timeout_before_and_after_report_preserve_distinct_evidence(self):
         for mode, reason in (("hang", "timeout_before_report"), ("hang-after-report", "timeout_after_report")):

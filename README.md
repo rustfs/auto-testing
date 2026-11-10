@@ -26,6 +26,59 @@ port that does not conflict with the local package server or another service.
 All top-level suite entrypoints are directly executable; `bash <script>` also
 works when a local checkout or transport drops executable modes.
 
+## Performance benchmark lifecycle
+
+`rustfs_performance_testing.sh` needs Warp, GNU `timeout`, Python 3 and boto3
+(`python3 -m pip install 'boto3>=1.35,<2'`). It creates a different bucket for
+every selected round; `WARP_BUCKET` is now a name prefix. Warp runs with
+`--noclear`, and the harness owns preparation and cleanup. Credentials are
+passed through environment variables instead of Warp command-line arguments.
+
+`WARP_ROUND_TIMEOUT` (default 900 seconds) bounds Warp's fixture preparation
+and measured workload. `WARP_CLEANUP_TIMEOUT` (default 180 seconds) reserves a
+separate cleanup budget; `WARP_CLEANUP_ATTEMPTS` (default 3) bounds retries of
+retryable delete failures. The deployment wrapper exposes these as
+`RUSTFS_WARP_CLEANUP_TIMEOUT` and `RUSTFS_WARP_CLEANUP_ATTEMPTS`. Ordinary
+Warp failures and timeouts still run cleanup. An interrupted shell makes a
+best-effort cleanup attempt on exit; SIGKILL cannot run that handler. Keep
+the receipt if recovery is interrupted or incomplete.
+
+Each round retains its original `.txt`, native `.benchdata*`, `.prepare.log`,
+`.cleanup.log`, `.s3.json` receipt and `.s3-events.jsonl`. The events record
+HTTP status, request id, SDK retry count, RustFS error cause when supplied,
+and per-key delete errors. HTTP 200 with `DeleteResult/Errors` is a failure
+even though the HTTP request succeeded. `cleanup_http_503_attempts` counts
+HTTP 503 responses; `cleanup_error_entries` counts affected key failure
+entries across attempts, including keys affected by a failed request. These
+are different quantities. The event's `error_origin` distinguishes server
+per-key responses from request/protocol failures. The helper disables SDK
+retries; Warp's native measured-operation results do not prove that its SDK
+never retried an HTTP attempt.
+
+The round stays FAIL if cleanup retries encountered any error, even when
+cleanup ultimately succeeds with zero residue. Incomplete cleanup stops the
+matrix and marks later rounds NOT_RUN. `summary.tsv` contains only certified
+rounds, while `rounds.tsv` and `summary.md` include every selected round and
+its cleanup verdict. A new execution refuses to overwrite an existing
+`master.log`. `--parse-only` writes separate `.reparsed.*` reports; old outputs
+without a lifecycle marker remain readable, with unknown cleanup status.
+
+```bash
+python3 -B -m unittest -v test_rustfs_performance_testing.py test_performance_s3.py
+```
+
+These tests validate harness behavior, including real boto3 parsing against
+a local HTTP stub. They do not claim live RustFS coverage.
+
+For a separate bulk-delete investigation, `scripts/performance_delete_probe.py`
+compares batches of 1, 32, 128, 500 and 1000 objects at idle and under 32 GET
+workers. Supply each endpoint with `--endpoint http://node:9000` and a fresh
+`--result-dir`. It uses the same environment credentials as Warp and records
+each one-shot delete verdict before any recovery retry, UTC timestamps,
+per-key failures, request ids, GET results and residue before/after cleanup.
+Cleanup runs in `finally`; an incomplete cleanup aborts the remaining cases.
+The caller must hold the environment's test lock throughout this probe.
+
 ## Release validation migration
 
 `validation-cases.json` snapshots all 158 canonical cases from
