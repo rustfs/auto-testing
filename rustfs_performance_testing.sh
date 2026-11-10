@@ -61,6 +61,8 @@ fi
 LOG_FILE="${RESULT_DIR}/master.log"
 SUMMARY_TSV="${RESULT_DIR}/summary.tsv"
 SUMMARY_MD="${RESULT_DIR}/summary.md"
+ROUNDS_TSV="${RESULT_DIR}/rounds.tsv"
+PARSE_FAILURE_REASON=""
 
 if [[ "${1:-}" != "--parse-only" ]] && ! command -v warp >/dev/null 2>&1; then
   echo "error: warp command not found; install MinIO warp first" >&2
@@ -72,6 +74,32 @@ log() {
 }
 
 # ---- Result parsing ----
+
+round_error_lines() {
+  awk '
+    { line = tolower($0)
+      if (line ~ /<error>|serviceunavailable|the service is unavailable|errors:[[:space:]]*[1-9][0-9]*/) count++ }
+    END { print count + 0 }
+  ' "$1"
+}
+
+record_round() {
+  local method="$1" size="$2" file="$3" verdict="$4" reason="$5" warp_rc="$6" capture_rc="$7" elapsed="$8"
+  local reported=0 errors=0
+  if [[ "${verdict}" != NOT_RUN && -f "${file}" ]]; then
+    grep -q '^Report: ' "${file}" && reported=1
+    errors=$(round_error_lines "${file}")
+  fi
+  if [[ "${warp_rc}" == 124 ]]; then
+    reason=timeout_before_report
+    [[ "${reported}" == 0 ]] || reason=timeout_after_report
+  elif [[ "${warp_rc}" == 137 ]]; then
+    reason=killed_before_report
+    [[ "${reported}" == 0 ]] || reason=killed_after_report
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${method}" "${size}" "${verdict}" "${reason}" "${warp_rc}" "${capture_rc}" "${elapsed}" "${reported}" "${errors}" >> "${ROUNDS_TSV}"
+}
 
 # Extract the raw Average / Reqs / TTFB lines of a section (GET/PUT/Total etc.)
 section_lines() {
@@ -107,8 +135,15 @@ field() {
 # Parse one round's output and append a row to summary.tsv
 parse_round() {
   local method="$1" size="$2" file="$3"
+  PARSE_FAILURE_REASON=""
   if [[ "$(tail -n 1 "$file")" != "RustFS round status: warp=0 capture=0" ]]; then
+    PARSE_FAILURE_REASON=missing_or_failed_round_status
     log "PARSE_FAILED method=${method} size=${size} reason=missing_or_failed_round_status file=${file}"
+    return 1
+  fi
+  if [[ "$(round_error_lines "$file")" -gt 0 ]]; then
+    PARSE_FAILURE_REASON=logged_errors
+    log "PARSE_FAILED method=${method} size=${size} reason=logged_errors file=${file} (metrics retained in raw output)"
     return 1
   fi
   local line
@@ -145,6 +180,7 @@ parse_round() {
     { last = $1 == "mixed" ? 6 : 8
       for (i = 3; i <= last; i++) if ($i !~ /[^[:space:]]/) exit 1 }
   '; then
+    PARSE_FAILURE_REASON=missing_required_metrics
     log "PARSE_FAILED method=${method} size=${size} reason=missing_required_metrics file=${file}"
     return 1
   fi
@@ -161,6 +197,13 @@ gen_summary_md() {
     echo "- Concurrency: ${CONCURRENCY}; duration: ${DURATION}; sleep: ${SLEEP_BETWEEN_ROUNDS}s; GET objects: ${GET_OBJECTS}"
     echo "- Methods: ${METHODS[*]-}; sizes: ${SIZES[*]-}"
     echo "- Rounds: selected=${TOTAL_ROUNDS}; parsed=${PARSED_ROUNDS}; failed=${FAILED_ROUNDS}"
+    echo "- Timeout covers preparation, workload and teardown. Report presence only distinguishes timeout before/after a report; it does not prove the internal phase."
+    echo ""
+    echo "## Every selected round"
+    echo ""
+    echo "| Method | Size | Verdict | Reason | Warp exit | Capture exit | Elapsed seconds | Report present | Error lines |"
+    echo "|---|---|---|---|---|---|---|---|---|"
+    awk -F '\t' 'NR > 1 { printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9 }' "${ROUNDS_TSV}"
     echo ""
   } > "${SUMMARY_MD}"
 
@@ -196,6 +239,7 @@ gen_summary_md() {
 mkdir -p "${RESULT_DIR}" || exit 1
 log "CONFIG host=${HOST} bucket=${BUCKET} concurrency=${CONCURRENCY} duration=${DURATION} get_objects=${GET_OBJECTS} sleep_between_rounds=${SLEEP_BETWEEN_ROUNDS}s" || exit 1
 printf 'method\tsize\tthroughput\tobj_per_s\treq_avg\treq_p50\treq_p90\treq_p99\tttfb_avg\tttfb_p99\tttfb_worst\n' > "${SUMMARY_TSV}" || exit 1
+printf 'method\tsize\tverdict\treason\twarp_exit\tcapture_exit\telapsed_seconds\treport_present\terror_lines\n' > "${ROUNDS_TSV}" || exit 1
 
 if [[ ${TOTAL_ROUNDS} -eq 0 ]]; then
   log "NO_ROUNDS_SELECTED"
@@ -207,11 +251,21 @@ if [[ "${1:-}" == "--parse-only" ]]; then
   for method in "${METHODS[@]}"; do
     for size in "${SIZES[@]}"; do
       outfile="${RESULT_DIR}/${method}_${size}.txt"
+      PARSE_FAILURE_REASON=missing_output
+      warp_rc=unknown; capture_rc=unknown
+      if [[ -s "${outfile}" ]]; then
+        terminal=$(tail -n 1 "${outfile}")
+        if [[ "${terminal}" =~ ^RustFS\ round\ status:\ warp=([0-9]+)\ capture=([0-9]+)$ ]]; then
+          warp_rc=${BASH_REMATCH[1]}; capture_rc=${BASH_REMATCH[2]}
+        fi
+      fi
       if [[ -s "${outfile}" ]] && parse_round "${method}" "${size}" "${outfile}"; then
         PARSED_ROUNDS=$((PARSED_ROUNDS + 1))
+        record_round "${method}" "${size}" "${outfile}" PASS clean "${warp_rc}" "${capture_rc}" unknown
       else
         FAILED_ROUNDS=$((FAILED_ROUNDS + 1))
         log "PARSE_FAILED method=${method} size=${size} file=${outfile}"
+        record_round "${method}" "${size}" "${outfile}" FAIL "${PARSE_FAILURE_REASON}" "${warp_rc}" "${capture_rc}" unknown
       fi
     done
   done
@@ -257,15 +311,19 @@ for method in "${METHODS[@]}"; do
     capture_rc=${round_status[1]}
     end_epoch=$(date +%s)
     printf '\nRustFS round status: warp=%s capture=%s\n' "${rc}" "${capture_rc}" >> "${outfile}" || capture_rc=1
+    PARSE_FAILURE_REASON=warp_exit
+    [[ ${capture_rc} -eq 0 ]] || PARSE_FAILURE_REASON=output_capture
 
     if [[ ${rc} -eq 0 && ${capture_rc} -eq 0 ]] && parse_round "${method}" "${size}" "${outfile}"; then
       PARSED_ROUNDS=$((PARSED_ROUNDS + 1))
       CONSECUTIVE_FAILURES=0
       log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} elapsed=$((end_epoch - start_epoch))s parsed=ok"
+      record_round "${method}" "${size}" "${outfile}" PASS clean "${rc}" "${capture_rc}" "$((end_epoch - start_epoch))"
     else
       FAILED_ROUNDS=$((FAILED_ROUNDS + 1))
       CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
       log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} capture_rc=${capture_rc} elapsed=$((end_epoch - start_epoch))s parsed=failed"
+      record_round "${method}" "${size}" "${outfile}" FAIL "${PARSE_FAILURE_REASON}" "${rc}" "${capture_rc}" "$((end_epoch - start_epoch))"
       if [[ "${MAX_CONSECUTIVE_FAILURES}" =~ ^[1-9][0-9]*$ ]] \
         && (( CONSECUTIVE_FAILURES >= MAX_CONSECUTIVE_FAILURES )); then
         log "ABORT consecutive_failures=${CONSECUTIVE_FAILURES} limit=${MAX_CONSECUTIVE_FAILURES}"
@@ -276,6 +334,16 @@ for method in "${METHODS[@]}"; do
     if [[ ${ROUND} -lt ${TOTAL_ROUNDS} ]]; then
       log "SLEEP ${SLEEP_BETWEEN_ROUNDS}s before next round"
       sleep "${SLEEP_BETWEEN_ROUNDS}"
+    fi
+  done
+done
+
+# An early abort leaves explicit unexecuted rows rather than shortening the
+# selected matrix silently. Raw metrics from failed rounds remain diagnostic.
+for method in "${METHODS[@]}"; do
+  for size in "${SIZES[@]}"; do
+    if ! awk -F '\t' -v m="${method}" -v s="${size}" 'NR>1 && $1==m && $2==s {found=1} END {exit !found}' "${ROUNDS_TSV}"; then
+      record_round "${method}" "${size}" "" NOT_RUN aborted unknown unknown 0
     fi
   done
 done

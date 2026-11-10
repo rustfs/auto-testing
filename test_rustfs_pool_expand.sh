@@ -70,12 +70,13 @@ MOCK_STATUS_FILE="${TEST_TMP}/curl-statuses"
 MOCK_CALL_FILE="${TEST_TMP}/curl-calls"
 
 curl() {
-  local output_file="" write_format="" method="GET" url="" host_header="" arg status body
+  local output_file="" header_file="" write_format="" method="GET" url="" host_header="" arg status body
   while [ "$#" -gt 0 ]; do
     arg="$1"
     shift
     case "${arg}" in
       -o) output_file="$1"; shift ;;
+      -D) header_file="$1"; shift ;;
       -w) write_format="$1"; shift ;;
       -X) method="$1"; shift ;;
       -H)
@@ -100,6 +101,10 @@ curl() {
   fi
   if [ -n "${output_file}" ]; then
     printf '%s' "${body}" > "${output_file}"
+  fi
+  if [ -n "${header_file}" ]; then
+    printf '%s\r\n' "HTTP/1.1 ${status}" 'x-rustfs-error-cause: namespace_lock_timeout' \
+      'x-amz-request-id: request-test' 'retry-after: 1' 'Set-Cookie: secret-cookie' > "${header_file}"
   fi
   if [ -n "${write_format}" ]; then
     if [[ "${write_format}" == *time_connect* ]]; then
@@ -169,7 +174,7 @@ test_storageinfo_retry_is_sticky() {
 
 test_warp_must_reach_threshold() {
   if (
-    storage_usage_percent() { printf '10\n'; }
+    storage_capacity_sample() { printf '{"sample_time":1,"disk_count":1,"total_bytes":107374182400,"used_bytes":10737418240,"usage_percent":10,"max_disk_percent":10,"min_free_bytes":96636764160}\n'; }
     monitor_storage 50 999999
   ) >/dev/null 2>&1; then
     fail "warp completion below the storage threshold must fail"
@@ -179,7 +184,7 @@ test_warp_must_reach_threshold() {
 test_monitor_propagates_storage_sample_failure() {
   local status
   if (
-    storage_usage_percent() { return 1; }
+    storage_capacity_sample() { return 1; }
     monitor_storage 50 999999
   ) >/dev/null 2>&1; then
     fail "storage sample failure must fail the monitor"
@@ -188,6 +193,38 @@ test_monitor_propagates_storage_sample_failure() {
   fi
   assert_eq 1 "${status}" "storage sample failure status"
 }
+
+test_monitor_rejects_an_unsafe_disk_even_when_average_is_low() (
+  local status=0
+  storage_capacity_sample() { printf '{"sample_time":1,"disk_count":4,"total_bytes":40000000000,"used_bytes":12000000000,"usage_percent":30,"max_disk_percent":99.9,"min_free_bytes":200704}\n'; }
+  monitor_storage 85 999999 >/dev/null 2>&1 || status=$?
+  assert_eq 4 "${status}" "capacity guard must not certify the storage target"
+  assert_eq 1 "${CAPACITY_EMERGENCY}" "near-full disk needs urgent writer stop"
+)
+
+test_active_capacity_sampling_does_not_retry_a_failed_api() (
+  reset_endpoint_state
+  resolve_endpoints
+  set_mock_statuses 503 200
+  if storage_capacity_sample >/dev/null 2>&1; then
+    fail "failed capacity probe must stop the writer rather than continue retries"
+  fi
+  assert_eq 1 "$(wc -l < "${MOCK_CALL_FILE}" | tr -d ' ')" "bounded active capacity sampling"
+)
+
+test_mpu_failure_keeps_cause_and_request_id_without_sensitive_headers() (
+  reset_endpoint_state
+  resolve_endpoints
+  set_mock_statuses 503
+  if (abort_stale_multipart_uploads fixture-bucket) >"${TEST_TMP}/mpu-error.log" 2>&1; then
+    fail "MPU 503 must fail cleanup"
+  fi
+  grep -q 'namespace_lock_timeout' "${TEST_TMP}/mpu-error.log" || fail "MPU error cause missing"
+  grep -q 'request-test' "${TEST_TMP}/mpu-error.log" || fail "MPU request ID missing"
+  if grep -q 'secret-cookie' "${TEST_TMP}/mpu-error.log"; then
+    fail "response cookies must not be published"
+  fi
+)
 
 test_stage_readiness_and_exact_pool_count() {
   reset_endpoint_state
@@ -356,6 +393,7 @@ test_warp_rounds_reach_threshold() (
   warp() { :; }
   abort_stale_multipart_uploads() { :; }
   report_warp_errors() { :; }
+  check_capacity_before_write() { :; }
   monitor_storage() {
     monitor_calls=$((monitor_calls + 1))
     if [ "${monitor_calls}" -eq 2 ]; then return 0; fi
@@ -364,6 +402,30 @@ test_warp_rounds_reach_threshold() (
 
   step4_write_data >/dev/null 2>&1
   assert_eq 2 "${monitor_calls}" "warp rounds before threshold"
+)
+
+test_capacity_guard_stops_writer_and_cleans_mpu_but_fails_step() (
+  reset_endpoint_state
+  WITH_WARP=1
+  DRY_RUN=0
+  WARP_LOG_FILE="${TEST_TMP}/guard-warp.log"
+  WARP_STOP_GRACE=1
+  verify_stage_readiness() { :; }
+  configure_proxy_stage() { :; }
+  verify_pools() { :; }
+  confirm() { :; }
+  need_cmd() { :; }
+  check_capacity_before_write() { :; }
+  warp() { exec sleep 30; }
+  abort_stale_multipart_uploads() { touch "${TEST_TMP}/guard-mpu-cleaned"; }
+  report_warp_errors() { :; }
+  monitor_storage() { CAPACITY_EMERGENCY=1; return 4; }
+  if (step4_write_data) >"${TEST_TMP}/guard-step.log" 2>&1; then
+    fail "capacity guard must fail the fill step"
+  fi
+  [ -f "${TEST_TMP}/guard-mpu-cleaned" ] || fail "capacity stop must retain MPU cleanup"
+  grep -q 'ENVIRONMENT-CAPACITY.*target was not certified' "${TEST_TMP}/guard-step.log" \
+    || fail "capacity stop must be reported separately from target reached"
 )
 
 test_package_checksum_before_install() (
@@ -480,8 +542,12 @@ test_independent_routing_and_signing
 test_storageinfo_retry_is_sticky
 test_warp_must_reach_threshold
 test_monitor_propagates_storage_sample_failure
+test_monitor_rejects_an_unsafe_disk_even_when_average_is_low
+test_active_capacity_sampling_does_not_retry_a_failed_api
+test_mpu_failure_keeps_cause_and_request_id_without_sensitive_headers
 test_stop_skips_an_uninstalled_service
 test_warp_rounds_reach_threshold
+test_capacity_guard_stops_writer_and_cleans_mpu_but_fails_step
 test_stage_readiness_and_exact_pool_count
 test_stage_pool_boundaries 3 expand
 test_stage_pool_boundaries 4 expand

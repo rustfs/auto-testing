@@ -14,6 +14,7 @@ on:
       - scripts/validation_ilm/**
       - test_validation_pool.py
       - scripts/validation_pool/**
+      - scripts/storage_capacity.py
       - rustfs_pool_expand.sh
       - test_validation_replication.py
       - test_rustfs_replication.py
@@ -88,6 +89,7 @@ on:
       - scripts/validation_ilm/**
       - test_validation_pool.py
       - scripts/validation_pool/**
+      - scripts/storage_capacity.py
       - rustfs_pool_expand.sh
       - test_validation_replication.py
       - test_rustfs_replication.py
@@ -164,9 +166,9 @@ jobs:
       - run: python3 -B scripts/validation_migration_review.py --require-complete
       - run: python3 -B -m unittest -v test_validation_migration.py
       - run: python3 -B -m unittest -v test_validation_ilm.py
+      - run: python3 -m pip install -r scripts/validation_ilm/requirements.txt
       - run: python3 -B -m unittest -v test_validation_pool.py
       - run: python3 -B -m unittest -v test_validation_replication.py test_rustfs_replication.py
-      - run: python3 -m pip install -r scripts/validation_ilm/requirements.txt
       - name: Install network namespace test dependency
         run: |
           if ! command -v nft >/dev/null; then

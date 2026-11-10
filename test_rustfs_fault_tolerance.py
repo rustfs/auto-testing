@@ -535,7 +535,7 @@ class FaultToleranceHarnessTests(unittest.TestCase):
     def test_matrix_applies_parity_and_product_write_quorum(self) -> None:
         result = self.run_bash(
             """
-            install_and_start() { echo "env=$2"; }
+            install_and_start() { echo "env=$2 participants=$3"; }
             seed_baseline() { :; }
             stop_node() { :; }
             start_nodes() { :; }
@@ -561,6 +561,37 @@ class FaultToleranceHarnessTests(unittest.TestCase):
         self.assertIn("M-4x2EC4-n2/read=ok", out)
         self.assertIn("M-4x2EC4-n2/write=fail", out)
         self.assertIn("M-4x2EC3-n2/read=fail", out)
+        self.assertIn("participants=4", out)
+
+    def test_install_starts_only_the_topology_participants(self) -> None:
+        for count in (1, 2, 3, 4):
+            with self.subTest(count=count):
+                result = self.run_bash(f'''
+                    calls="${{TMP}}/starts"
+                    PACKAGE_URL=https://example.invalid/rustfs.deb
+                    remote_all() {{ :; }}
+                    run_remote() {{
+                      case "$2" in *systemctl*) printf '%s|%s\\n' "$1" "$2" >> "${{calls}}";; esac
+                    }}
+                    ssh() {{ cat >/dev/null; }}
+                    curl() {{ :; }}
+                    install_and_start "$(matrix_volumes_expr {count} 2)" 'RUSTFS_STORAGE_CLASS_STANDARD="EC:1"' {count}
+                    cat "${{calls}}"
+                ''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                starts = [line.split("|")[0] for line in result.stdout.splitlines() if "|sudo -n systemctl start --no-block" in line]
+                self.assertEqual(sorted(starts), [f"vm00{i}" for i in range(count)])
+                self.assertEqual(result.stdout.count("systemctl is-active --quiet"), count)
+
+    def test_invalid_participant_count_is_rejected_before_mutation(self) -> None:
+        result = self.run_bash('''
+            PACKAGE_URL=https://example.invalid/rustfs.deb
+            remote_all() { echo UNEXPECTED_MUTATION; }
+            install_and_start "$VOLUMES_4X4" "" 5
+        ''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid topology participant", result.stderr)
+        self.assertNotIn("UNEXPECTED_MUTATION", result.stdout)
 
     def test_fault_injection_reaches_mount_lease_and_recovery_is_nonblocking(self) -> None:
         result = self.run_bash(

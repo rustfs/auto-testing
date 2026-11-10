@@ -551,8 +551,20 @@ seed_baseline() { # seed_baseline <endpoint>
 }
 
 # cluster lifecycle ----------------------------------------------------------
-install_and_start() { # install_and_start <volumes> [extra env line]
-  local volumes="$1" extra_env="${2:-}" node
+install_and_start() { # install_and_start <volumes> [extra env line] [participant count]
+  local volumes="$1" extra_env="${2:-}" count="${3:-}" node
+  local participants=()
+  if [ -z "${count}" ] && [ "${volumes}" = "${VOLUMES_SNMD}" ]; then
+    participants=("${SNMD_NODE}")
+  else
+    if [ -z "${count}" ]; then
+      count=${#NODES[@]}
+      [ "${volumes}" != "${VOLUMES_3X4}" ] || count=3
+    fi
+    [[ "${count}" =~ ^[1-9][0-9]*$ ]] && [ "${count}" -le "${#NODES[@]}" ] \
+      || die "invalid topology participant count: ${count}"
+    participants=("${NODES[@]:0:count}")
+  fi
   [ -n "${PACKAGE_URL}" ] || die "--package-url is required for test runs"
   log "installing package on ${NODES[*]}"
   remote_all "set -e; sudo -n systemctl stop ${RUSTFS_SERVICE} 2>/dev/null || true; sudo -n dpkg --configure -a 2>/dev/null || true; curl -fsSL --retry 3 -o /tmp/rustfs-ft.deb '${PACKAGE_URL}' && sudo -n env DEBIAN_FRONTEND=noninteractive dpkg -i --force-confdef --force-confnew /tmp/rustfs-ft.deb && sudo -n systemctl daemon-reload"
@@ -573,27 +585,8 @@ install_and_start() { # install_and_start <volumes> [extra env line]
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" "sudo -n tee ${RUSTFS_CONFIG_FILE} >/dev/null" < "${TMP}/envfile"
     run_remote "${node}" 'sudo -n mkdir -p /data/rustfs{1..4}/mnmd && for i in 1 2 3 4; do sudo -n chown rustfs:rustfs "/data/rustfs${i}" "/data/rustfs${i}/mnmd"; done 2>/dev/null || true'
   done
-  if [ "${volumes}" = "${VOLUMES_SNMD}" ]; then
-    log "single-node topology: starting ${RUSTFS_SERVICE} on ${SNMD_NODE} only"
-    if run_remote "${SNMD_NODE}" "sudo -n systemctl start ${RUSTFS_SERVICE}"; then
-      :
-    else
-      dump_service_diagnostics "${SNMD_NODE}"
-      die "start failed on ${SNMD_NODE}"
-    fi
-  else
-    log "starting ${RUSTFS_SERVICE} on ${NODES[*]}"
-    local start_pids=() start_i=0 start_pid start_fail=0
-    for node in "${NODES[@]}"; do
-      run_remote "${node}" "sudo -n systemctl start ${RUSTFS_SERVICE}" &
-      start_pids[${start_i}]=$!; start_i=$((start_i+1))
-    done
-    for start_pid in "${start_pids[@]}"; do wait "${start_pid}" || start_fail=1; done
-    if [ "${start_fail}" -ne 0 ]; then
-      dump_service_diagnostics "${NODES[@]}"
-      die "cluster start failed on one or more nodes"
-    fi
-  fi
+  log "topology participants: ${participants[*]}"
+  start_nodes "${participants[@]}"
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: skipping cluster readiness polling"
     return 0
@@ -953,7 +946,7 @@ matrix_run_case() { # <topo-key> <nodes> <drives-per> <parity>
   done
   mc+=("${tag}-rec/read" "${tag}-rec/write")
   register_expected_cases "${mc[@]}"
-  install_and_start "$(matrix_volumes_expr "${nodes}" "${per}")" "RUSTFS_STORAGE_CLASS_STANDARD=\"EC:${parity}\""
+  install_and_start "$(matrix_volumes_expr "${nodes}" "${per}")" "RUSTFS_STORAGE_CLASS_STANDARD=\"EC:${parity}\"" "${nodes}"
   seed_baseline "${EP1}"
 
   # full capacity

@@ -9,6 +9,10 @@ on:
       - rustfs-upgrade-test.sh
       - rustfs_performance_test.sh
       - scripts/check_execution_environment.py
+      - scripts/check_shell_syntax.py
+      - scripts/prepare_table_smoke.py
+      - test_check_shell_syntax.py
+      - .github/workflows/rustfs-table-test.yml
       - scripts/lib/**
       - test_check_execution_environment.py
       - test_rustfs_table.py
@@ -24,6 +28,10 @@ on:
       - rustfs-upgrade-test.sh
       - rustfs_performance_test.sh
       - scripts/check_execution_environment.py
+      - scripts/check_shell_syntax.py
+      - scripts/prepare_table_smoke.py
+      - test_check_shell_syntax.py
+      - .github/workflows/rustfs-table-test.yml
       - scripts/lib/**
       - test_check_execution_environment.py
       - test_rustfs_table.py
@@ -44,21 +52,14 @@ jobs:
           persist-credentials: false
       - name: Validate shell syntax
         run: |
-          for script in \
-            rustfs-table-test.sh \
-            rustfs-replication-test.sh \
-            rustfs-security-test.sh \
-            rustfs-upgrade-test.sh \
-            rustfs_performance_test.sh
-          do
-            bash -n "${script}"
-          done
+          python3 -B scripts/check_shell_syntax.py --report "${RUNNER_TEMP}/shell-syntax.json"
           test -x rustfs-security-test.sh
           test -x rustfs-upgrade-test.sh
       - name: Test portable execution helpers
         run: >-
           python3 -B -m unittest -v
           test_check_execution_environment.py
+          test_check_shell_syntax.py
           test_rustfs_table.py
           test_rustfs_performance_testing.py
           test_rustfs_replication.py

@@ -53,6 +53,10 @@ class PerformanceResultTests(unittest.TestCase):
     printf '%s\n' "${text//"$omit"/}"
   done
   [[ "$mode" != failure-with-metrics ]] || return 42
+  if [[ "$mode" == errors-with-success ]]; then
+    printf '%s\n' 'warp: <ERROR> upload error: The service is unavailable. Please retry.'
+  fi
+  if [[ "$mode" == hang-after-report ]]; then sleep 30; fi
 }
 ''')
         self.calls = self.root / "calls"
@@ -123,6 +127,33 @@ class PerformanceResultTests(unittest.TestCase):
         master = (self.results / "master.log").read_text()
         self.assertIn("rc=124", master)
         self.assertIn("ABORT consecutive_failures=1 limit=1", master)
+
+    def round_evidence(self):
+        with (self.results / "rounds.tsv").open() as stream:
+            return list(csv.DictReader(stream, delimiter="\t"))
+
+    def test_zero_exit_with_service_errors_retains_metrics_but_is_not_a_pass(self):
+        result, rows = self.run_benchmark("errors-with-success", WARP_METHODS="get", WARP_SIZES="1KiB")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(rows, [])
+        evidence = self.round_evidence()[0]
+        self.assertEqual(evidence["warp_exit"], "0")
+        self.assertEqual(evidence["verdict"], "FAIL")
+        self.assertEqual(evidence["reason"], "logged_errors")
+        self.assertEqual(evidence["error_lines"], "1")
+        self.assertIn("Average:", (self.results / "get_1KiB.txt").read_text())
+
+    def test_timeout_before_and_after_report_preserve_distinct_evidence(self):
+        for mode, reason in (("hang", "timeout_before_report"), ("hang-after-report", "timeout_after_report")):
+            with self.subTest(mode=mode):
+                result, rows = self.run_benchmark(mode, WARP_METHODS="get", WARP_SIZES="1KiB,4KiB",
+                                                  WARP_ROUND_TIMEOUT="1", WARP_MAX_CONSECUTIVE_FAILURES="1")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(rows, [])
+                evidence = self.round_evidence()
+                self.assertEqual(evidence[0]["reason"], reason)
+                self.assertEqual(evidence[0]["warp_exit"], "124")
+                self.assertEqual(evidence[1]["verdict"], "NOT_RUN")
 
     def test_each_required_single_method_metric_is_checked(self):
         for value in ("1.25 MiB/s", "1280.0", "1.2ms", "1.1ms", "1.5ms", "2.1ms"):

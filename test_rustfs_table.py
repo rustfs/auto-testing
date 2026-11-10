@@ -2,8 +2,13 @@
 """Check that table-suite privileged commands are decided on the remote host."""
 
 from pathlib import Path
+import json
+import os
 import subprocess
+import tempfile
 import unittest
+
+from scripts.prepare_table_smoke import prepare, validate
 
 
 ROOT = Path(__file__).resolve().parent
@@ -45,6 +50,57 @@ class TableRemotePrivilegeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('if [ "$(id -u)" -eq 0 ]', result.stdout)
         self.assertIn("sudo -n bash -s", result.stdout)
+
+
+class TableSmokePreparationTests(unittest.TestCase):
+    def test_complete_product_tree_is_staged_and_bound_to_its_sha(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            tree = source / "scripts/table-catalog"
+            tree.mkdir(parents=True)
+            (tree / "pyiceberg_smoke.py").write_text("import engine_compatibility\nimport failure_coverage\n")
+            (tree / "engine_compatibility.py").write_text("VALUE = 1\n")
+            (tree / "failure_coverage.py").write_text("VALUE = 2\n")
+            (tree / "README.md").write_text("Supporting source documentation\n")
+            for command in (["init", "-q"], ["add", "."],
+                            ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]):
+                subprocess.run(["git", "-C", str(source), *command], check=True, capture_output=True)
+            sha = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+            destination = root / "staged"
+            entry = prepare(source, destination, sha)
+            self.assertEqual(len(validate(entry)), 3)
+            self.assertTrue((destination / "README.md").is_file())
+            manifest = json.loads((destination / "source-manifest.json").read_text())
+            self.assertEqual(manifest["source_sha"], sha)
+            self.assertEqual(len(manifest["files"]), 4)
+            with self.assertRaises(ValueError):
+                prepare(source, root / "wrong", "f" * 40)
+            self.assertFalse((root / "wrong").exists())
+            (tree / "engine_compatibility.py").write_text("VALUE = 99\n")
+            with self.assertRaisesRegex(ValueError, "uncommitted"):
+                prepare(source, root / "dirty", sha)
+            self.assertFalse((root / "dirty").exists())
+
+    def test_missing_module_fails_before_venv_or_s3_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = root / "pyiceberg_smoke.py"
+            entry.write_text("import engine_compatibility\n")
+            command = f'''source "{ROOT / 'rustfs-table-test.sh'}"
+SMOKE_SCRIPT="$SMOKE_FIXTURE"
+python3() {{
+  if [ "${{1:-}}" = -m ]; then echo "unexpected-venv"; return 99; fi
+  command python3 "$@"
+}}
+test_tbl101
+'''
+            result = subprocess.run(["bash", "-c", command], capture_output=True, text=True,
+                                    env={**os.environ, "SMOKE_FIXTURE": str(entry)}, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("[HARNESS-ERROR]", result.stderr)
+            self.assertIn("engine_compatibility.py", result.stderr)
+            self.assertNotIn("unexpected-venv", result.stdout)
 
 
 if __name__ == "__main__":

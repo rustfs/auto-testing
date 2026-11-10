@@ -7,6 +7,8 @@ on:
       - rustfs_pool_expand.sh
       - rustfs_performance_test.sh
       - test_rustfs_pool_expand.sh
+      - scripts/storage_capacity.py
+      - test_storage_capacity.py
       - .github/workflows/package-install-tests.yml
   push:
     branches: [main]
@@ -15,6 +17,8 @@ on:
       - rustfs_pool_expand.sh
       - rustfs_performance_test.sh
       - test_rustfs_pool_expand.sh
+      - scripts/storage_capacity.py
+      - test_storage_capacity.py
       - .github/workflows/package-install-tests.yml
 
 permissions:
@@ -35,3 +39,5 @@ jobs:
           done
       - name: Test package installation without a server
         run: bash test_rustfs_pool_expand.sh
+      - name: Test capacity stop decisions
+        run: python3 -B -m unittest -v test_storage_capacity.py
