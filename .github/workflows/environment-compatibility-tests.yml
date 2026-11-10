@@ -8,6 +8,10 @@ on:
       - rustfs-security-test.sh
       - rustfs-upgrade-test.sh
       - rustfs_performance_test.sh
+      - rustfs_performance_testing.sh
+      - scripts/performance_s3.py
+      - scripts/performance_delete_probe.py
+      - test_performance_s3.py
       - scripts/check_execution_environment.py
       - scripts/check_shell_syntax.py
       - scripts/prepare_table_smoke.py
@@ -27,6 +31,10 @@ on:
       - rustfs-security-test.sh
       - rustfs-upgrade-test.sh
       - rustfs_performance_test.sh
+      - rustfs_performance_testing.sh
+      - scripts/performance_s3.py
+      - scripts/performance_delete_probe.py
+      - test_performance_s3.py
       - scripts/check_execution_environment.py
       - scripts/check_shell_syntax.py
       - scripts/prepare_table_smoke.py
@@ -55,6 +63,8 @@ jobs:
           python3 -B scripts/check_shell_syntax.py --report "${RUNNER_TEMP}/shell-syntax.json"
           test -x rustfs-security-test.sh
           test -x rustfs-upgrade-test.sh
+      - name: Install S3 test client
+        run: python3 -m pip install 'boto3>=1.35,<2'
       - name: Test portable execution helpers
         run: >-
           python3 -B -m unittest -v
@@ -62,6 +72,7 @@ jobs:
           test_check_shell_syntax.py
           test_rustfs_table.py
           test_rustfs_performance_testing.py
+          test_performance_s3.py
           test_rustfs_replication.py
       - name: Test missing HOME
         run: env -u HOME bash test_rustfs_pool_expand.sh

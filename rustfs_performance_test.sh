@@ -96,6 +96,8 @@ BENCH_SCRIPT="${RUSTFS_BENCH_SCRIPT:-${_BENCH_RESOLVED}}"
 RESULT_DIR="${RUSTFS_RESULT_DIR:-$(pwd)/warp-bench-results-$(date +%Y%m%d-%H%M%S)}"
 WARP_HOST="${RUSTFS_WARP_HOST:-rustfs-node1:9000,rustfs-node2:9000,rustfs-node3:9000,rustfs-node4:9000}"
 WARP_BUCKET="${RUSTFS_WARP_BUCKET:-warp-benchmark-bucket}"
+WARP_CLEANUP_TIMEOUT="${RUSTFS_WARP_CLEANUP_TIMEOUT:-180}"
+WARP_CLEANUP_ATTEMPTS="${RUSTFS_WARP_CLEANUP_ATTEMPTS:-3}"
 WARP_CONCURRENCY="${RUSTFS_WARP_CONCURRENCY:-64}"
 WARP_DURATION="${RUSTFS_WARP_DURATION:-5m}"
 WARP_GET_OBJECTS="${RUSTFS_WARP_GET_OBJECTS:-2500}"
@@ -265,6 +267,15 @@ preflight() {
   need_cmd ssh "openssh client"
   need_cmd curl "http client"
   need_cmd warp "warp benchmark tool (for step 5)"
+  local step
+  for step in "${SELECTED_STEPS[@]}"; do
+    if [[ "${step}" == 5 && "${DRY_RUN}" -eq 0 ]]; then
+      need_cmd python3 "verified benchmark cleanup"
+      need_cmd timeout "bounded benchmark cleanup"
+      python3 -c 'import boto3; from botocore.config import Config' \
+        || die "Python 3 with boto3 is required for verified benchmark cleanup"
+    fi
+  done
   if [ ! -x "${BENCH_SCRIPT}" ]; then
     die "benchmark script not found or not executable: ${BENCH_SCRIPT}"
   fi
@@ -480,6 +491,8 @@ step5_benchmark() {
   WARP_SLEEP_BETWEEN_ROUNDS="${WARP_SLEEP}" \
   WARP_ROUND_TIMEOUT="${WARP_ROUND_TIMEOUT}" \
   WARP_MAX_CONSECUTIVE_FAILURES="${WARP_MAX_CONSECUTIVE_FAILURES}" \
+  WARP_CLEANUP_TIMEOUT="${WARP_CLEANUP_TIMEOUT}" \
+  WARP_CLEANUP_ATTEMPTS="${WARP_CLEANUP_ATTEMPTS}" \
   WARP_METHODS="${WARP_METHODS}" \
   WARP_SIZES="${WARP_SIZES}" \
   WARP_RESULT_DIR="${RESULT_DIR}" \

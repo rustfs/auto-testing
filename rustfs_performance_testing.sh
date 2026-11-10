@@ -11,7 +11,7 @@
 #   5) Result parsing: after each round, parse the warp output into
 #      summary.tsv (machine-readable) and summary.md (Markdown tables)
 #
-# Requirements: warp >= v1.6 (MinIO warp), bash, awk/sed/grep
+# Requirements: warp >= v1.6 (MinIO warp), bash, Python 3 + boto3, awk/sed/grep
 # Note: warp v1.6.1's put does not support --objects; handled automatically
 #       (the flag is only passed for get/mixed)
 #
@@ -21,6 +21,7 @@
 #   WARP_RESULT_DIR
 #   WARP_METHODS WARP_SIZES   # restrict methods/sizes (comma/space separated); empty = full run
 #   WARP_ROUND_TIMEOUT WARP_MAX_CONSECUTIVE_FAILURES
+#   WARP_CLEANUP_TIMEOUT WARP_CLEANUP_ATTEMPTS
 
 set -u -o pipefail
 
@@ -34,7 +35,15 @@ GET_OBJECTS="${WARP_GET_OBJECTS:-2500}"
 SLEEP_BETWEEN_ROUNDS="${WARP_SLEEP_BETWEEN_ROUNDS:-60}"
 ROUND_TIMEOUT="${WARP_ROUND_TIMEOUT:-900}"
 MAX_CONSECUTIVE_FAILURES="${WARP_MAX_CONSECUTIVE_FAILURES:-0}"
+CLEANUP_TIMEOUT="${WARP_CLEANUP_TIMEOUT:-180}"
+CLEANUP_ATTEMPTS="${WARP_CLEANUP_ATTEMPTS:-3}"
 RESULT_DIR="${WARP_RESULT_DIR:-$(pwd)/warp-bench-results-$(date +%Y%m%d-%H%M%S)}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+S3_HELPER="${SCRIPT_DIR}/scripts/performance_s3.py"
+S3_ENDPOINT="${HOST%%,*}"
+[[ "${S3_ENDPOINT}" == *://* ]] || S3_ENDPOINT="http://${S3_ENDPOINT}"
+export WARP_ACCESS_KEY="${ACCESS_KEY}" WARP_SECRET_KEY="${SECRET_KEY}"
+umask 077
 
 if [ -n "${WARP_SIZES:-}" ] && [ "${WARP_SIZES}" != "all" ] && [ "${WARP_SIZES}" != "ALL" ]; then
   read -r -a SIZES <<<"${WARP_SIZES//,/ }"
@@ -51,6 +60,7 @@ ROUND=0
 PARSED_ROUNDS=0
 FAILED_ROUNDS=0
 CONSECUTIVE_FAILURES=0
+ABORT_REASON=aborted
 
 # --parse-only <result-dir>: parse an existing result dir (${method}_${size}.txt) without running
 # Only round files with a successful terminal execution status can be certified.
@@ -72,6 +82,24 @@ PARSE_FAILURE_REASON=""
 if [[ "${1:-}" != "--parse-only" ]] && ! command -v warp >/dev/null 2>&1; then
   echo "error: warp command not found; install MinIO warp first" >&2
   exit 1
+fi
+if [[ "${1:-}" != "--parse-only" ]]; then
+  if ! python3 -c 'import boto3; from botocore.config import Config' >/dev/null 2>&1; then
+    echo "error: Python 3 with boto3 is required for verified benchmark cleanup" >&2
+    exit 1
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "error: GNU timeout is required for bounded benchmark and cleanup phases" >&2
+    exit 1
+  fi
+  if [[ ! "${CLEANUP_TIMEOUT}" =~ ^[1-9][0-9]*$ || ! "${CLEANUP_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: cleanup timeout and attempts must be positive integers" >&2
+    exit 1
+  fi
+  if [[ -f "${LOG_FILE}" ]]; then
+    echo "error: result directory already contains an execution; use a fresh directory or --parse-only" >&2
+    exit 1
+  fi
 fi
 
 log() {
@@ -102,8 +130,12 @@ record_round() {
     reason=killed_before_report
     [[ "${reported}" == 0 ]] || reason=killed_after_report
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${method}" "${size}" "${verdict}" "${reason}" "${warp_rc}" "${capture_rc}" "${elapsed}" "${reported}" "${errors}" >> "${ROUNDS_TSV}"
+  local lifecycle=$'unknown\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown'
+  if [[ -f "${RESULT_DIR}/${method}_${size}.s3.json" ]]; then
+    lifecycle=$(python3 "${S3_HELPER}" fields --state "${RESULT_DIR}/${method}_${size}.s3.json" 2>/dev/null) || lifecycle=$'unknown\tunknown\tFAIL\tunknown\tunknown\tunknown\tunknown\tunknown'
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${method}" "${size}" "${verdict}" "${reason}" "${warp_rc}" "${capture_rc}" "${elapsed}" "${reported}" "${errors}" "${lifecycle}" >> "${ROUNDS_TSV}"
 }
 
 # Extract the raw Average / Reqs / TTFB lines of a section (GET/PUT/Total etc.)
@@ -150,6 +182,19 @@ parse_round() {
     PARSE_FAILURE_REASON=logged_errors
     log "PARSE_FAILED method=${method} size=${size} reason=logged_errors file=${file} (metrics retained in raw output)"
     return 1
+  fi
+  if grep -q '^RustFS lifecycle schema: 1$' "$file"; then
+    local lifecycle bucket prepare cleanup cleanup_errors remaining http_503 request_failures had_cleanup_errors
+    lifecycle=$(python3 "${S3_HELPER}" fields --state "${RESULT_DIR}/${method}_${size}.s3.json" 2>/dev/null) || lifecycle=""
+    IFS=$'\t' read -r bucket prepare cleanup cleanup_errors remaining http_503 request_failures had_cleanup_errors <<< "${lifecycle}"
+    if [[ "${prepare}" != PASS || "${cleanup}" != PASS || "${remaining}" != 0 ]]; then
+      PARSE_FAILURE_REASON=cleanup_unverified
+      return 1
+    fi
+    if [[ "${cleanup_errors}" != 0 || "${http_503}" != 0 || "${request_failures}" != 0 || "${had_cleanup_errors}" != False ]]; then
+      PARSE_FAILURE_REASON=cleanup_errors
+      return 1
+    fi
   fi
   local line
   if [[ "${method}" == "mixed" ]]; then
@@ -205,13 +250,15 @@ gen_summary_md() {
     if [[ -n "${OUTPUT_TAG}" ]]; then
       echo "- Reparsed raw outputs: elapsed time is unknown; configuration above is from this parser invocation. See the original rounds.tsv, master.log and summary files for execution evidence."
     fi
-    echo "- Timeout covers preparation, workload and teardown. Report presence only distinguishes timeout before/after a report; it does not prove the internal phase."
+    echo "- Each round owns a fresh bucket. The Warp phase includes its fixture preparation and workload; native benchdata records the measured workload. Setup and verified cleanup have separate logs."
+    echo "- Warp timeout: ${ROUND_TIMEOUT}s; cleanup has a separate ${CLEANUP_TIMEOUT}s recovery budget. Report presence alone does not identify the internal Warp phase."
+    echo "- Any cleanup error keeps the round failed even when retries remove the residue. An incomplete cleanup aborts the remaining matrix. Legacy results without a lifecycle receipt have unknown cleanup status."
     echo ""
     echo "## Every selected round"
     echo ""
-    echo "| Method | Size | Verdict | Reason | Warp exit | Capture exit | Elapsed seconds | Report present | Error lines |"
-    echo "|---|---|---|---|---|---|---|---|---|"
-    awk -F '\t' 'NR > 1 { printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9 }' "${ROUNDS_TSV}"
+    echo "| Method | Size | Verdict | Reason | Warp exit | Capture exit | Elapsed seconds | Report present | Warp error lines | Bucket | Setup | Cleanup | Delete key failure entries | Remaining objects | Cleanup HTTP 503 attempts | Cleanup request failures | Cleanup had errors |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    awk -F '\t' 'NR > 1 { printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17 }' "${ROUNDS_TSV}"
     echo ""
   } > "${SUMMARY_MD}"
 
@@ -247,7 +294,7 @@ gen_summary_md() {
 mkdir -p "${RESULT_DIR}" || exit 1
 log "CONFIG host=${HOST} bucket=${BUCKET} concurrency=${CONCURRENCY} duration=${DURATION} get_objects=${GET_OBJECTS} sleep_between_rounds=${SLEEP_BETWEEN_ROUNDS}s" || exit 1
 printf 'method\tsize\tthroughput\tobj_per_s\treq_avg\treq_p50\treq_p90\treq_p99\tttfb_avg\tttfb_p99\tttfb_worst\n' > "${SUMMARY_TSV}" || exit 1
-printf 'method\tsize\tverdict\treason\twarp_exit\tcapture_exit\telapsed_seconds\treport_present\terror_lines\n' > "${ROUNDS_TSV}" || exit 1
+printf 'method\tsize\tverdict\treason\twarp_exit\tcapture_exit\telapsed_seconds\treport_present\terror_lines\tbucket\tprepare\tcleanup\tcleanup_error_entries\tremaining_objects\tcleanup_http_503_attempts\tcleanup_request_failures\tcleanup_had_errors\n' > "${ROUNDS_TSV}" || exit 1
 
 if [[ ${TOTAL_ROUNDS} -eq 0 ]]; then
   log "NO_ROUNDS_SELECTED"
@@ -285,10 +332,32 @@ if [[ "${1:-}" == "--parse-only" ]]; then
   exit $?
 fi
 
+active_state=""
+active_events=""
+run_cleanup() {
+  timeout --signal=TERM --kill-after=5 "${CLEANUP_TIMEOUT}" python3 "${S3_HELPER}" cleanup --endpoint "${S3_ENDPOINT}" \
+    --state "${active_state}" --events "${active_events}" --budget "${CLEANUP_TIMEOUT}" \
+    --attempts "${CLEANUP_ATTEMPTS}" > "${active_state%.s3.json}.cleanup.log" 2>&1
+}
+cleanup_on_exit() {
+  local exit_status=$?
+  trap - EXIT INT TERM
+  if [[ -n "${active_state}" ]]; then
+    log "RECOVERY cleanup_on_exit receipt=${active_state}"
+    run_cleanup || log "RECOVERY_FAILED receipt=${active_state}"
+  fi
+  exit "${exit_status}"
+}
+trap cleanup_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 for method in "${METHODS[@]}"; do
   for size in "${SIZES[@]}"; do
     ROUND=$((ROUND + 1))
     outfile="${RESULT_DIR}/${method}_${size}.txt"
+    state_file="${RESULT_DIR}/${method}_${size}.s3.json"
+    events_file="${RESULT_DIR}/${method}_${size}.s3-events.jsonl"
 
     log "START round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} concurrency=${CONCURRENCY} duration=${DURATION}"
 
@@ -297,17 +366,30 @@ for method in "${METHODS[@]}"; do
       extra_args=(--objects "${GET_OBJECTS}")
     fi
 
+    start_epoch=$(date +%s)
+    log "PHASE round=${ROUND} stage=setup"
+    active_state="${state_file}"
+    active_events="${events_file}"
+    if ! timeout --signal=TERM --kill-after=5 30 python3 "${S3_HELPER}" prepare --endpoint "${S3_ENDPOINT}" --prefix "${BUCKET}" \
+      --state "${state_file}" --events "${events_file}" --budget 30 > "${RESULT_DIR}/${method}_${size}.prepare.log" 2>&1; then
+      FAILED_ROUNDS=$((FAILED_ROUNDS + 1))
+      record_round "${method}" "${size}" "" FAIL setup_failed 125 0 "$(( $(date +%s) - start_epoch ))"
+      ABORT_REASON=setup_failed
+      log "ABORT round=${ROUND} reason=setup_failed"
+      break 2
+    fi
+    round_bucket=$(python3 "${S3_HELPER}" bucket --state "${state_file}") || exit 1
     warp_args=("${method}" \
       --host "${HOST}" \
-      --access-key "${ACCESS_KEY}" \
-      --secret-key "${SECRET_KEY}" \
-      --bucket "${BUCKET}" \
+      --bucket "${round_bucket}" \
+      --noclear \
+      --benchdata "${RESULT_DIR}/${method}_${size}.benchdata" \
       --concurrent "${CONCURRENCY}" \
       --duration "${DURATION}" \
       --obj.size "${size}" \
       ${extra_args[@]+"${extra_args[@]}"} \
       --no-color)
-    start_epoch=$(date +%s)
+    log "PHASE round=${ROUND} stage=warp bucket=${round_bucket}"
     if [[ "${ROUND_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
       timeout --signal=TERM --kill-after=30 "${ROUND_TIMEOUT}" \
         bash -c 'warp "$@"' bash "${warp_args[@]}" 2>&1 | tee "${outfile}"
@@ -317,12 +399,17 @@ for method in "${METHODS[@]}"; do
     round_status=("${PIPESTATUS[@]}")
     rc=${round_status[0]}
     capture_rc=${round_status[1]}
+    log "PHASE round=${ROUND} stage=cleanup bucket=${round_bucket}"
+    cleanup_rc=0
+    run_cleanup || cleanup_rc=$?
+    active_state=""
     end_epoch=$(date +%s)
-    printf '\nRustFS round status: warp=%s capture=%s\n' "${rc}" "${capture_rc}" >> "${outfile}" || capture_rc=1
+    printf '\nRustFS lifecycle schema: 1\nRustFS round status: warp=%s capture=%s\n' "${rc}" "${capture_rc}" >> "${outfile}" || capture_rc=1
     PARSE_FAILURE_REASON=warp_exit
     [[ ${capture_rc} -eq 0 ]] || PARSE_FAILURE_REASON=output_capture
+    [[ ${cleanup_rc} -eq 0 ]] || PARSE_FAILURE_REASON=cleanup_unverified
 
-    if [[ ${rc} -eq 0 && ${capture_rc} -eq 0 ]] && parse_round "${method}" "${size}" "${outfile}"; then
+    if [[ ${rc} -eq 0 && ${capture_rc} -eq 0 && ${cleanup_rc} -eq 0 ]] && parse_round "${method}" "${size}" "${outfile}"; then
       PARSED_ROUNDS=$((PARSED_ROUNDS + 1))
       CONSECUTIVE_FAILURES=0
       log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} elapsed=$((end_epoch - start_epoch))s parsed=ok"
@@ -332,6 +419,11 @@ for method in "${METHODS[@]}"; do
       CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
       log "END round=${ROUND}/${TOTAL_ROUNDS} method=${method} size=${size} rc=${rc} capture_rc=${capture_rc} elapsed=$((end_epoch - start_epoch))s parsed=failed"
       record_round "${method}" "${size}" "${outfile}" FAIL "${PARSE_FAILURE_REASON}" "${rc}" "${capture_rc}" "$((end_epoch - start_epoch))"
+      if [[ ${cleanup_rc} -ne 0 ]]; then
+        log "ABORT round=${ROUND} reason=cleanup_incomplete receipt=${state_file}"
+        ABORT_REASON=cleanup_incomplete
+        break 2
+      fi
       if [[ "${MAX_CONSECUTIVE_FAILURES}" =~ ^[1-9][0-9]*$ ]] \
         && (( CONSECUTIVE_FAILURES >= MAX_CONSECUTIVE_FAILURES )); then
         log "ABORT consecutive_failures=${CONSECUTIVE_FAILURES} limit=${MAX_CONSECUTIVE_FAILURES}"
@@ -351,7 +443,7 @@ done
 for method in "${METHODS[@]}"; do
   for size in "${SIZES[@]}"; do
     if ! awk -F '\t' -v m="${method}" -v s="${size}" 'NR>1 && $1==m && $2==s {found=1} END {exit !found}' "${ROUNDS_TSV}"; then
-      record_round "${method}" "${size}" "" NOT_RUN aborted unknown unknown 0
+      record_round "${method}" "${size}" "" NOT_RUN "${ABORT_REASON}" unknown unknown 0
     fi
   done
 done
