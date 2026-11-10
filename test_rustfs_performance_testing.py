@@ -69,12 +69,19 @@ class PerformanceResultTests(unittest.TestCase):
 ''')
         # The real helper runs here, but its S3 client cannot reach a network.
         (self.root / "boto3.py").write_text('''import os
+import time
+from pathlib import Path
 class Client:
     def __init__(self):
         self.keys = ["leftover"] if os.environ.get("FAKE_S3_MODE") == "cleanup-recovered" else []
         self.deletes = 0
     def create_bucket(self, **kw):
         if os.environ.get("FAKE_S3_MODE") == "setup-failure": raise RuntimeError("blocked")
+        if os.environ.get("FAKE_S3_MODE") == "setup-wait":
+            Path(os.environ["FAKE_S3_SETUP_STARTED"]).touch()
+            deadline = time.monotonic() + 5
+            while not Path(os.environ["FAKE_S3_SETUP_RELEASE"]).exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
         return {"ResponseMetadata": {"HTTPStatusCode": 200, "RetryAttempts": 0}}
     def list_objects_v2(self, **kw):
         return {"Contents": [{"Key": key} for key in self.keys], "IsTruncated": False, "ResponseMetadata": {"HTTPStatusCode": 200}}
@@ -254,17 +261,51 @@ def client(*args, **kwargs): return Client()
                 process.kill()
                 process.communicate()
 
+    def test_term_during_preparation_cleans_the_bucket_before_warp_can_start(self):
+        started, release = self.root / "setup-started", self.root / "setup-release"
+        process = subprocess.Popen(["bash", str(self.script)], env={**self.env,
+                                   "FAKE_S3_MODE": "setup-wait", "WARP_METHODS": "get", "WARP_SIZES": "1KiB",
+                                   "FAKE_S3_SETUP_STARTED": str(started), "FAKE_S3_SETUP_RELEASE": str(release)},
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not started.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(started.exists())
+            process.terminate()
+            release.touch()
+            output, errors = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 143, output + errors)
+            self.assertFalse(self.calls.exists())
+            receipt = json.loads((self.results / "get_1KiB.s3.json").read_text())
+            self.assertEqual(receipt["prepare"], "PASS")
+            self.assertEqual(receipt["cleanup"], "PASS")
+            self.assertEqual(receipt["remaining_objects"], 0)
+            self.assertIn("RECOVERY cleanup_on_exit", output)
+        finally:
+            release.touch()
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
     def test_reparse_requires_the_new_cleanup_receipt_and_preserves_original_files(self):
         self.run_benchmark(WARP_METHODS="get", WARP_SIZES="1KiB")
         state = self.results / "get_1KiB.s3.json"
-        for mutation in ("errors", "missing", "residue"):
+        for mutation in ("errors", "missing", "residue", "history", "legacy-history", "interrupted", "invalid-history"):
             with self.subTest(mutation=mutation):
                 document = json.loads(state.read_text()) if state.exists() else original
                 original = dict(document)
                 if mutation == "missing":
                     state.unlink()
                 else:
-                    document["cleanup_error_entries" if mutation == "errors" else "remaining_objects"] = 1
+                    changes = {"errors": {"cleanup_error_entries": 1}, "residue": {"remaining_objects": 1},
+                               "history": {"cleanup_had_errors": True},
+                               "legacy-history": {"cleanup_error_code": "InvalidListResponse"},
+                               "interrupted": {"cleanup_in_progress": True},
+                               "invalid-history": {"cleanup_had_errors": "False"}}
+                    document.update(changes[mutation])
+                    if mutation == "legacy-history":
+                        document.pop("cleanup_had_errors", None)
                     state.write_text(json.dumps(document))
                 parsed = subprocess.run(["bash", str(self.script), "--parse-only", str(self.results)],
                                         env={**self.env, "WARP_METHODS": "get", "WARP_SIZES": "1KiB"},

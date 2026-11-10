@@ -4,6 +4,8 @@
 from collections import deque
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -175,6 +177,57 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(second["cleanup"], "PASS")
         self.assertEqual(second["cleanup_error_entries"], 1)
 
+    def test_sigkill_during_second_attempt_preserves_first_attempt_errors_on_disk(self):
+        script = '''import os, signal, sys
+from pathlib import Path
+from scripts.performance_s3 import Session, cleanup
+class Client:
+    calls = 0
+    def list_objects_v2(self, **kwargs):
+        return {"Contents": [{"Key": "a"}], "IsTruncated": False}
+    def delete_objects(self, **kwargs):
+        self.calls += 1
+        if self.calls == 2:
+            os.kill(os.getpid(), signal.SIGKILL)
+        return {"Errors": [{"Key": "a", "Code": "ServiceUnavailable"}],
+                "ResponseMetadata": {"HTTPStatusCode": 200}}
+client = Client()
+cleanup(Session("http://example.invalid", Path(sys.argv[2]), 30, lambda _: client), Path(sys.argv[1]))
+'''
+        process = subprocess.run([sys.executable, "-B", "-c", script, str(self.state), str(self.events)],
+                                 cwd=Path(__file__).resolve().parent, capture_output=True, text=True, timeout=10)
+        self.assertEqual(process.returncode, -9, process.stderr)
+        interrupted = json.loads(self.state.read_text())
+        self.assertEqual(interrupted["cleanup_error_entries"], 1)
+        self.assertTrue(interrupted["cleanup_had_errors"])
+        self.assertTrue(interrupted["cleanup_in_progress"])
+        self.fake.keys = {"a"}
+        recovered = cleanup(self.session, self.state)
+        self.assertEqual(recovered["cleanup"], "PASS")
+        self.assertEqual(recovered["cleanup_error_entries"], 1)
+        self.assertTrue(recovered["cleanup_had_errors"])
+        self.assertFalse(recovered["cleanup_in_progress"])
+
+    def test_deadline_and_invalid_list_failures_remain_sticky_after_successful_recovery(self):
+        for failure in ("deadline", "invalid-list"):
+            with self.subTest(failure=failure):
+                save(self.state, self.document)
+                failed_session = Session(self.session.endpoint, self.events, 30, lambda _: FakeS3())
+                if failure == "deadline":
+                    failed_session.deadline = time.monotonic() - 1
+                else:
+                    fake = FakeS3()
+                    fake.list_objects_v2 = lambda **_: {"Contents": [{}]}
+                    failed_session.factory = lambda _: fake
+                failed = cleanup(failed_session, self.state)
+                self.assertTrue(failed["cleanup_had_errors"])
+                recovered = cleanup(self.session, self.state)
+                self.assertEqual(recovered["cleanup"], "PASS")
+                self.assertEqual(recovered["remaining_objects"], 0)
+                self.assertTrue(recovered["cleanup_had_errors"])
+                for counter in ("cleanup_error_entries", "cleanup_request_failures", "cleanup_http_503_attempts"):
+                    self.assertEqual(recovered[counter], 0)
+
     def test_remaining_count_uses_validated_pagination_and_bounded_sample(self):
         self.fake.keys = {f"key-{i:04}" for i in range(2500)}
         count, sample = remaining_objects(self.session, self.bucket)
@@ -229,6 +282,29 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "FAIL")
         self.assertEqual(result["cleanup"], "PASS")
         self.assertTrue(self.fake.bucket_deleted)
+
+    def test_successful_probe_is_failed_when_cleanup_raises(self):
+        from scripts.performance_delete_probe import run_case
+        with patch("scripts.performance_delete_probe.Session", side_effect=lambda endpoint, events, budget:
+                   Session(endpoint, events, budget, lambda _: self.fake)), \
+             patch("scripts.performance_delete_probe.cleanup", side_effect=OSError("unwritable receipt")):
+            result = run_case([self.session.endpoint], self.session.endpoint, 1, False, self.root)
+        self.assertEqual(result["delete_error_entries"], 0)
+        self.assertEqual(result["remaining_objects_before_cleanup"], 0)
+        self.assertEqual(result["cleanup"], "FAIL")
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(json.loads((self.root / "result.json").read_text())["verdict"], "FAIL")
+
+    def test_successful_probe_is_failed_when_cleanup_reports_prior_errors(self):
+        from scripts.performance_delete_probe import run_case
+        with patch("scripts.performance_delete_probe.Session", side_effect=lambda endpoint, events, budget:
+                   Session(endpoint, events, budget, lambda _: self.fake)), \
+             patch("scripts.performance_delete_probe.cleanup", return_value={"cleanup": "PASS", "remaining_objects": 0,
+                                                                           "cleanup_had_errors": True}):
+            result = run_case([self.session.endpoint], self.session.endpoint, 1, False, self.root)
+        self.assertEqual(result["delete_error_entries"], 0)
+        self.assertEqual(result["cleanup"], "PASS")
+        self.assertEqual(result["verdict"], "FAIL")
 
 
 class HttpDeleteTests(unittest.TestCase):

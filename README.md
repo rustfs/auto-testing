@@ -59,7 +59,14 @@ The round stays FAIL if cleanup retries encountered any error, even when
 cleanup ultimately succeeds with zero residue. Incomplete cleanup stops the
 matrix and marks later rounds NOT_RUN. `summary.tsv` contains only certified
 rounds, while `rounds.tsv` and `summary.md` include every selected round and
-its cleanup verdict. A new execution refuses to overwrite an existing
+its cleanup verdict. Delete error counters are saved after every attempt,
+before backoff or the next request. The sticky `cleanup_had_errors` field
+also retains deadline, malformed-response and interrupted-cleanup failures;
+successful recovery cannot clear it or certify the original round. Cleanup
+receipts carry `cleanup_in_progress` so recovery detects a process killed
+before its final checkpoint. Older receipts with a historical error code
+remain failed even if their final cleanup status is PASS.
+A new execution refuses to overwrite an existing
 `master.log`. `--parse-only` writes separate `.reparsed.*` reports; old outputs
 without a lifecycle marker remain readable, with unknown cleanup status.
 

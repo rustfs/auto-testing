@@ -130,9 +130,9 @@ record_round() {
     reason=killed_before_report
     [[ "${reported}" == 0 ]] || reason=killed_after_report
   fi
-  local lifecycle=$'unknown\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown'
+  local lifecycle=$'unknown\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown\tunknown'
   if [[ -f "${RESULT_DIR}/${method}_${size}.s3.json" ]]; then
-    lifecycle=$(python3 "${S3_HELPER}" fields --state "${RESULT_DIR}/${method}_${size}.s3.json" 2>/dev/null) || lifecycle=$'unknown\tunknown\tFAIL\tunknown\tunknown\tunknown\tunknown'
+    lifecycle=$(python3 "${S3_HELPER}" fields --state "${RESULT_DIR}/${method}_${size}.s3.json" 2>/dev/null) || lifecycle=$'unknown\tunknown\tFAIL\tunknown\tunknown\tunknown\tunknown\tunknown'
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${method}" "${size}" "${verdict}" "${reason}" "${warp_rc}" "${capture_rc}" "${elapsed}" "${reported}" "${errors}" "${lifecycle}" >> "${ROUNDS_TSV}"
@@ -184,14 +184,14 @@ parse_round() {
     return 1
   fi
   if grep -q '^RustFS lifecycle schema: 1$' "$file"; then
-    local lifecycle bucket prepare cleanup cleanup_errors remaining http_503 request_failures
+    local lifecycle bucket prepare cleanup cleanup_errors remaining http_503 request_failures had_cleanup_errors
     lifecycle=$(python3 "${S3_HELPER}" fields --state "${RESULT_DIR}/${method}_${size}.s3.json" 2>/dev/null) || lifecycle=""
-    IFS=$'\t' read -r bucket prepare cleanup cleanup_errors remaining http_503 request_failures <<< "${lifecycle}"
+    IFS=$'\t' read -r bucket prepare cleanup cleanup_errors remaining http_503 request_failures had_cleanup_errors <<< "${lifecycle}"
     if [[ "${prepare}" != PASS || "${cleanup}" != PASS || "${remaining}" != 0 ]]; then
       PARSE_FAILURE_REASON=cleanup_unverified
       return 1
     fi
-    if [[ "${cleanup_errors}" != 0 || "${http_503}" != 0 || "${request_failures}" != 0 ]]; then
+    if [[ "${cleanup_errors}" != 0 || "${http_503}" != 0 || "${request_failures}" != 0 || "${had_cleanup_errors}" != False ]]; then
       PARSE_FAILURE_REASON=cleanup_errors
       return 1
     fi
@@ -256,9 +256,9 @@ gen_summary_md() {
     echo ""
     echo "## Every selected round"
     echo ""
-    echo "| Method | Size | Verdict | Reason | Warp exit | Capture exit | Elapsed seconds | Report present | Warp error lines | Bucket | Setup | Cleanup | Delete key failure entries | Remaining objects | Cleanup HTTP 503 attempts | Cleanup request failures |"
-    echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
-    awk -F '\t' 'NR > 1 { printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16 }' "${ROUNDS_TSV}"
+    echo "| Method | Size | Verdict | Reason | Warp exit | Capture exit | Elapsed seconds | Report present | Warp error lines | Bucket | Setup | Cleanup | Delete key failure entries | Remaining objects | Cleanup HTTP 503 attempts | Cleanup request failures | Cleanup had errors |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    awk -F '\t' 'NR > 1 { printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17 }' "${ROUNDS_TSV}"
     echo ""
   } > "${SUMMARY_MD}"
 
@@ -294,7 +294,7 @@ gen_summary_md() {
 mkdir -p "${RESULT_DIR}" || exit 1
 log "CONFIG host=${HOST} bucket=${BUCKET} concurrency=${CONCURRENCY} duration=${DURATION} get_objects=${GET_OBJECTS} sleep_between_rounds=${SLEEP_BETWEEN_ROUNDS}s" || exit 1
 printf 'method\tsize\tthroughput\tobj_per_s\treq_avg\treq_p50\treq_p90\treq_p99\tttfb_avg\tttfb_p99\tttfb_worst\n' > "${SUMMARY_TSV}" || exit 1
-printf 'method\tsize\tverdict\treason\twarp_exit\tcapture_exit\telapsed_seconds\treport_present\terror_lines\tbucket\tprepare\tcleanup\tcleanup_error_entries\tremaining_objects\tcleanup_http_503_attempts\tcleanup_request_failures\n' > "${ROUNDS_TSV}" || exit 1
+printf 'method\tsize\tverdict\treason\twarp_exit\tcapture_exit\telapsed_seconds\treport_present\terror_lines\tbucket\tprepare\tcleanup\tcleanup_error_entries\tremaining_objects\tcleanup_http_503_attempts\tcleanup_request_failures\tcleanup_had_errors\n' > "${ROUNDS_TSV}" || exit 1
 
 if [[ ${TOTAL_ROUNDS} -eq 0 ]]; then
   log "NO_ROUNDS_SELECTED"
@@ -368,6 +368,8 @@ for method in "${METHODS[@]}"; do
 
     start_epoch=$(date +%s)
     log "PHASE round=${ROUND} stage=setup"
+    active_state="${state_file}"
+    active_events="${events_file}"
     if ! timeout --signal=TERM --kill-after=5 30 python3 "${S3_HELPER}" prepare --endpoint "${S3_ENDPOINT}" --prefix "${BUCKET}" \
       --state "${state_file}" --events "${events_file}" --budget 30 > "${RESULT_DIR}/${method}_${size}.prepare.log" 2>&1; then
       FAILED_ROUNDS=$((FAILED_ROUNDS + 1))
@@ -376,8 +378,6 @@ for method in "${METHODS[@]}"; do
       log "ABORT round=${ROUND} reason=setup_failed"
       break 2
     fi
-    active_state="${state_file}"
-    active_events="${events_file}"
     round_bucket=$(python3 "${S3_HELPER}" bucket --state "${state_file}") || exit 1
     warp_args=("${method}" \
       --host "${HOST}" \

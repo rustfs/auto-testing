@@ -125,7 +125,7 @@ def page_keys(response):
     return keys
 
 
-def delete_batch(session, bucket, keys, attempts):
+def delete_batch(session, bucket, keys, attempts, on_attempt=None):
     if (not 1 <= len(keys) <= 1000 or any(not isinstance(key, str) for key in keys)
             or len(set(keys)) != len(keys) or attempts < 1):
         raise ValueError("delete batch requires 1..1000 distinct keys and positive attempts")
@@ -151,6 +151,9 @@ def delete_batch(session, bucket, keys, attempts):
             origin = "request_or_protocol_failure"
             errors = [{"Key": key, "Code": exc.code} for key in pending]
         error_entries += len(errors)
+        if on_attempt:
+            # Persist before logging, backoff or the next possibly interrupted RPC.
+            on_attempt(len(errors))
         session.emit(kind="delete_batch", bucket=bucket, attempt=attempt,
                      requested=len(pending), error_entries=len(errors), errors=errors,
                      error_origin=origin)
@@ -208,6 +211,14 @@ def read_state(state):
             or len(document["bucket"]) > 63
             or (document.get("prepare") == "PASS" and document.get("created") is not True)):
         raise ValueError("invalid benchmark bucket receipt")
+    if any(type(document.get(key, False)) is not bool
+           for key in ("cleanup_had_errors", "cleanup_in_progress")):
+        raise ValueError("invalid cleanup history in benchmark bucket receipt")
+    # Older receipts may carry a historical error code even after successful recovery.
+    document["cleanup_had_errors"] = bool(document.get("cleanup_had_errors")
+                                           or document.get("cleanup_error_code")
+                                           or document.get("cleanup_in_progress")
+                                           or document.get("cleanup") == "FAIL")
     return document
 
 
@@ -220,22 +231,26 @@ def cleanup(session, state, attempts=3):
         return document
     previous_http_503 = document.get("cleanup_http_503_attempts", 0)
     previous_failures = document.get("cleanup_request_failures", 0)
-    document.update(cleanup="FAIL", remaining_objects=None,
+    initial_http_503, initial_failures = session.http_503, session.request_failures
+    document.update(cleanup="FAIL", cleanup_in_progress=True, remaining_objects=None,
                     cleanup_error_entries=document.get("cleanup_error_entries", 0))
     save(state, document)
     started = time.monotonic()
+
+    def checkpoint(errors=0):
+        document["cleanup_error_entries"] += errors
+        document["cleanup_had_errors"] |= bool(errors)
+        document["cleanup_http_503_attempts"] = previous_http_503 + session.http_503 - initial_http_503
+        document["cleanup_request_failures"] = previous_failures + session.request_failures - initial_failures
+        save(state, document)
+
     try:
         while True:
             response = session.call("list_objects_v2", Bucket=bucket, MaxKeys=1000)
             keys = page_keys(response)
             if not keys:
                 break
-            pending, errors = delete_batch(session, bucket, keys, attempts)
-            document["cleanup_error_entries"] += errors
-            document["cleanup_http_503_attempts"] = previous_http_503 + session.http_503
-            document["cleanup_request_failures"] = previous_failures + session.request_failures
-            # Checkpoint errors before any later list or deadline can fail.
-            save(state, document)
+            pending, _ = delete_batch(session, bucket, keys, attempts, on_attempt=checkpoint)
             if pending:
                 break
         count, sample = remaining_objects(session, bucket)
@@ -247,10 +262,10 @@ def cleanup(session, state, attempts=3):
     except RequestFailure as exc:
         document["cleanup_error_code"] = exc.code
     finally:
-        document["cleanup_http_503_attempts"] = previous_http_503 + session.http_503
-        document["cleanup_request_failures"] = previous_failures + session.request_failures
+        document["cleanup_had_errors"] |= document["cleanup"] != "PASS"
+        document["cleanup_in_progress"] = False
         document["cleanup_seconds"] = round(time.monotonic() - started, 3)
-        save(state, document)
+        checkpoint()
     return document
 
 
@@ -272,7 +287,7 @@ def main():
             print("\t".join(str(document.get(key, "unknown")) for key in
                             ("bucket", "prepare", "cleanup", "cleanup_error_entries",
                              "remaining_objects", "cleanup_http_503_attempts",
-                             "cleanup_request_failures")))
+                             "cleanup_request_failures", "cleanup_had_errors")))
         return 0
     if not math.isfinite(args.budget) or args.budget <= 0 or args.attempts < 1 or not args.endpoint or not args.events:
         parser.error("positive budget/attempts, endpoint and events are required")

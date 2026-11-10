@@ -120,11 +120,14 @@ def run_case(endpoints, endpoint, count, loaded, result_dir, workers=32, object_
                 result.update(cleanup=document["cleanup"],
                               remaining_objects_after_cleanup=document.get("remaining_objects"),
                               cleanup_error_entries=document.get("cleanup_error_entries", 0),
-                              cleanup_http_503_attempts=document.get("cleanup_http_503_attempts", 0))
-                if document["cleanup"] != "PASS" or document.get("cleanup_error_entries", 0):
+                              cleanup_http_503_attempts=document.get("cleanup_http_503_attempts", 0),
+                              cleanup_had_errors=document.get("cleanup_had_errors", False))
+                if (document["cleanup"] != "PASS" or document.get("cleanup_error_entries", 0)
+                        or document.get("cleanup_had_errors", False)):
                     result["verdict"] = "FAIL"
             except Exception as exc:
-                result.update(cleanup="FAIL", cleanup_error_code=getattr(exc, "code", type(exc).__name__))
+                result.update(verdict="FAIL", cleanup="FAIL",
+                              cleanup_error_code=getattr(exc, "code", type(exc).__name__))
         result["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save(result_dir / "result.json", result)
     return result
