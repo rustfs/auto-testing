@@ -29,9 +29,9 @@ REPO = "rustfs/backlog"
 CASE_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 # Case rows in cases.md as produced by scripts/functional_case_report.py:
 # | S3C-101 | CreateBucket (topology:single-single) | PASS |
-TABLE_ROW_RE = re.compile(r"^\|\s*([A-Z][A-Z0-9]*-[0-9]+)\s*\|(.+)\|\s*(PASS|FAIL|UNSUPPORTED|RUNNING|SKIP)\s*\|")
+TABLE_ROW_RE = re.compile(r"^\|\s*([A-Z][A-Z0-9]*-[0-9]+)\s*\|(.+)\|\s*(PASS|FAIL|UNSUPPORTED|RUNNING|NOT_RUN|SKIP)\s*\|")
 # Suite-log verdict lines: [FAIL] STOR-115 InlineEncryption / [PASS] KMS-317 ...
-LOG_VERDICT_RE = re.compile(r"^\[(PASS|FAIL|UNSUPPORTED)\]\s+([A-Z][A-Z0-9]*-[0-9]+)\b")
+LOG_VERDICT_RE = re.compile(r"^\[(PASS|FAIL|UNSUPPORTED|NOT_RUN)\]\s+([A-Z][A-Z0-9]*-[0-9]+)\b")
 # Fault-tolerance suite verdicts: FT-CASE: <case> verdict=pass|known-divergence|UNEXPECTED
 FT_VERDICT_RE = re.compile(r"^FT-CASE:\s+(\S+)\s+verdict=(\S+)")
 # Heal suite step lines carry no case IDs: [HEAL-STEP] 5 start cluster heal PASS
@@ -167,6 +167,8 @@ def classify(outcome: str, cases: dict, log: Path | None) -> tuple[str, str]:
         return "env", "no case results were recorded"
     fail = [c for c, v in cases.items() if "FAIL" in v["statuses"]]
     pas = [c for c, v in cases.items() if "PASS" in v["statuses"] and "FAIL" not in v["statuses"]]
+    if not fail and any("NOT_RUN" in value["statuses"] for value in cases.values()):
+        return "env", "upgrade matrix incomplete; cases were not executed"
     if not pas and len(fail) >= 3:
         return "env", f"wholesale failure (0 passed, {len(fail)} failed)"
     if log and log.exists():

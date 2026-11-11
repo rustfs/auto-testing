@@ -46,7 +46,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JQ_LIB="${SCRIPT_DIR}/scripts/lib"
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rustfs-upgrade.XXXXXX")"
-trap 'rm -rf "${TEST_TMP}"' EXIT
+trap 'upgrade_exit "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+ARTIFACTS_DIR="${RUSTFS_UPGRADE_ARTIFACTS_DIR:-}"
+UPGRADE_PYTHON="${RUSTFS_UPGRADE_PYTHON:-python3}"
+GROUP_ACTIVE=0
+ARTIFACTS_READY=0
+GROUP_INDEX=0
+UPGRADE_GROUPS=()
+CURRENT_DONE=" "
+CURRENT_STARTED=" "
+CURRENT_PHASE=PREPARE
+CURRENT_RESULT=""
+DIAGNOSTICS_DONE=0
+DELETE_BATCH=0
 
 # ==================== Configuration ====================
 NODES=(vm000 vm001 vm002 vm003)
@@ -461,6 +475,9 @@ vault_stop() {
   [ "${DRY_RUN}" -eq 1 ] && { log "DRY-RUN: remove vault container on ${HEAL_HOST}"; return 0; }
   log "stopping and removing vault container ${VAULT_CONTAINER} on ${HEAL_HOST}"
   heal_run docker rm -f "${VAULT_CONTAINER}" >/dev/null 2>&1 || true
+  local remaining
+  remaining="$(heal_run docker ps -aq --filter "name=^/${VAULT_CONTAINER}$")" || return 1
+  [ -z "${remaining}" ] || { warn "vault container removal failed"; return 1; }
   # rm through heal_run: vault creates core/sys/logical with restrictive
   # modes inside the data dir, so the runner user cannot remove them
   # directly (rm exits 1 under set -e and kills the suite mid-loop).
@@ -627,9 +644,128 @@ upgrade_in_place() {
 }
 
 env_teardown() {
-  local topo="$1"
+  local topo="$1" fail=0
   log "environment teardown: ${topo} (kms=${KMS_BACKEND})"
-  for node in "${NODES[@]}"; do cleanup_node "${node}"; done
+  for node in "${NODES[@]}"; do cleanup_node "${node}" || fail=1; done
+  return "${fail}"
+}
+
+# Evidence is written synchronously; report generation never races tee.
+evidence_line() {
+  printf '%s\n' "$*"
+  if [ "${ARTIFACTS_READY}" -eq 1 ]; then printf '%s\n' "$*" >> "${ARTIFACTS_DIR}/events.log"; fi
+}
+
+collect_upgrade_diagnostics() {
+  [ "${DIAGNOSTICS_DONE}" -eq 0 ] || return 0
+  DIAGNOSTICS_DONE=1
+  [ "${DRY_RUN}" -eq 0 ] || return 0
+  local node fail=0 nodes=()
+  local warp_log
+  for warp_log in "${TEST_TMP}"/warp-put-*.log; do
+    [ -f "${warp_log}" ] || continue
+    sanitize_upgrade_log "${warp_log}" "${GROUP_DIR}/$(basename "${warp_log}")" || fail=1
+  done
+  read -r -a nodes <<<"$(topology_nodes "${CURRENT_TOPO}")"
+  for node in "${nodes[@]}"; do
+    # Only inspect the current suite's log directory, before its teardown.
+    if ! timeout 35 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${node}" 'bash -s' >"${TEST_TMP}/diagnostic.log" 2>&1 <<'UPG_DIAGNOSTICS'
+set -euo pipefail
+SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo -n"
+${SUDO} python3 - <<'UPG_PY'
+import json, pathlib, subprocess
+budget = 16 * 1024 * 1024
+logs = []
+for path in sorted(pathlib.Path('/var/log/rustfs').rglob('*')):
+    if not path.is_file() or path.is_symlink():
+        continue
+    size = path.stat().st_size
+    take = min(size, 4 * 1024 * 1024, budget)
+    with path.open('rb') as stream:
+        stream.seek(max(0, size - take))
+        content = stream.read(take).decode('utf-8', errors='replace')
+    logs.append({'path': str(path), 'truncated': take < size, 'content': content})
+    budget -= take
+    if budget <= 0:
+        break
+result = subprocess.run(['journalctl', '-u', 'rustfs', '-n', '1500', '--no-pager'],
+                        capture_output=True, text=True, timeout=15)
+print(json.dumps({'file_logs': logs, 'journal_exit': result.returncode,
+                  'journal': result.stdout, 'journal_error': result.stderr}, indent=2))
+raise SystemExit(0 if result.returncode == 0 else 1)
+UPG_PY
+UPG_DIAGNOSTICS
+    then fail=1; fi
+    sanitize_upgrade_log "${TEST_TMP}/diagnostic.log" "${GROUP_DIR}/diagnostics-${node}.log" || fail=1
+  done
+  return "${fail}"
+}
+
+sanitize_upgrade_log() {
+  UPGRADE_REDACT_VAULT_TOKEN="${VAULT_TOKEN}" UPGRADE_REDACT_MASTER_KEY="${KMS_LOCAL_MASTER_KEY}" \
+  UPGRADE_REDACT_ACCESS_KEY="${ACCESS_KEY}" UPGRADE_REDACT_SECRET_KEY="${SECRET_KEY}" \
+  UPGRADE_REDACT_BACKUP_KEK="${KMS_BACKUP_KEK}" \
+    "${UPGRADE_PYTHON}" "${SCRIPT_DIR}/scripts/upgrade_evidence.py" sanitize \
+    --input "$1" --output "$2" --golden "${GOLDEN_FILE}"
+}
+
+finish_upgrade_group() {
+  local fail=0 cleanup=RETAINED diagnostics=PASS
+  collect_upgrade_diagnostics || { fail=1; diagnostics=FAIL; }
+  if [ "${KEEP_ENV}" -eq 0 ]; then
+    cleanup=PASS
+    env_teardown "${CURRENT_TOPO}" || { fail=1; cleanup=FAIL; }
+    if [ "${KMS_BACKEND}" = vault-kv2 ]; then vault_stop || { fail=1; cleanup=FAIL; }; fi
+  fi
+  if [ "${CURRENT_RESULT}" = PASS ]; then
+    if [ "${cleanup}" = FAIL ]; then CURRENT_RESULT=CLEANUP_FAILED
+    elif [ "${diagnostics}" = FAIL ]; then CURRENT_RESULT=DIAGNOSTICS_FAILED; fi
+  fi
+  evidence_line "[UPG-CLEANUP] ${CURRENT_TOPO} ${KMS_BACKEND} ${cleanup}"
+  evidence_line "[UPG-DIAGNOSTICS] ${CURRENT_TOPO} ${KMS_BACKEND} ${diagnostics}"
+  evidence_line "[UPG-STATE] ${CURRENT_TOPO} ${KMS_BACKEND} ${OLD_VERSION_ACTUAL:-unknown} ${NEW_VERSION_ACTUAL:-unknown} ${CURRENT_RESULT}"
+  GROUP_ACTIVE=0
+  return "${fail}"
+}
+
+emit_unrun_cases() {
+  local i
+  for i in "${!UPGRADE_IDS[@]}"; do
+    if [[ "${CURRENT_DONE}" != *" ${UPGRADE_IDS[i]} "* ]]; then
+      if [[ "${CURRENT_STARTED}" != *" ${UPGRADE_IDS[i]} "* ]]; then
+        evidence_line "--- ${UPGRADE_IDS[i]} ${UPGRADE_NAMES[i]} ---"
+      fi
+      evidence_line "[NOT_RUN] ${UPGRADE_IDS[i]} ${UPGRADE_NAMES[i]}"
+    fi
+  done
+}
+
+upgrade_exit() {
+  local rc="$1" index group topo backend
+  trap - EXIT INT TERM
+  set +e
+  if [ "${ARTIFACTS_READY}" -eq 1 ]; then
+    if [ "${GROUP_ACTIVE}" -eq 1 ]; then
+      if [ "${rc}" -eq 130 ] || [ "${rc}" -eq 143 ]; then CURRENT_RESULT=INTERRUPTED; fi
+      [ -n "${CURRENT_RESULT}" ] || CURRENT_RESULT="${CURRENT_PHASE}_FAILED"
+      emit_unrun_cases
+      finish_upgrade_group || rc=1
+      GROUP_INDEX=$((GROUP_INDEX+1))
+    fi
+    for ((index=GROUP_INDEX; index<${#UPGRADE_GROUPS[@]}; index++)); do
+      group="${UPGRADE_GROUPS[index]}"; topo="${group%/*}"; backend="${group#*/}"
+      evidence_line "[INFO] == topology: ${topo}  kms-backend: ${backend} =="
+      CURRENT_DONE=" "
+      CURRENT_STARTED=" "
+      emit_unrun_cases
+      evidence_line "[UPG-STATE] ${topo} ${backend} unknown unknown NOT_RUN"
+    done
+    "${UPGRADE_PYTHON}" "${SCRIPT_DIR}/scripts/functional_case_report.py" \
+      "${ARTIFACTS_DIR}/events.log" "${ARTIFACTS_DIR}/cases.md" "${ARTIFACTS_DIR}/matrix.md" \
+      --json "${ARTIFACTS_DIR}/results.json" || rc=1
+  fi
+  rm -rf "${TEST_TMP}"
+  exit "${rc}"
 }
 
 # ==================== Admin API (SigV4, optional JSON body) ====================
@@ -834,10 +970,23 @@ seed_warp_bucket() {
   # that exact count as golden state; verification lists and compares counts.
   local bucket="$1" size="$2" duration="$3" keep="$4"
   new_bucket "${bucket}" || die "seed: ${bucket}"
-  log "seeding ${bucket} via warp (obj.size=${size}, duration=${duration}, keep=${keep})"
+  log "seeding ${bucket} (obj.size=${size}, keep=${keep})"
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: warp put skipped"
     golden_set "warp:${bucket}" "0"
+    return 0
+  fi
+  # A time-driven 100MiB run filled nearly 18GiB just to retain 200MiB.
+  # Seed the two large objects directly; keep Warp-generated small objects.
+  if [ "${size}" = 100MiB ]; then
+    local i
+    make_test_file "${TEST_TMP}/large-seed.bin" 104857600
+    for ((i=1; i<=keep; i++)); do
+      aws_run s3api put-object --bucket "${bucket}" --key "seed-${i}" --body "${TEST_TMP}/large-seed.bin"
+      assert_aws_ok || die "seed: ${bucket}/seed-${i} put failed"
+    done
+    golden_set "warp:${bucket}" "${keep}"
+    log "seeded ${bucket}: ${keep} bounded objects of ${size}"
     return 0
   fi
   warp put --host "${ENDPOINT#http://}" \
@@ -860,13 +1009,30 @@ seed_warp_bucket() {
   if [ "${written}" -gt "${keep}" ]; then
     # Trim to <keep> objects: delete the extras in batches of 1000 (the S3
     # delete-objects limit). jq builds one compact JSON payload per batch.
+    # Check payload generation explicitly; process substitution hides jq failures.
+    printf '%s' "${keys_json}" \
+      | jq -c --argjson k "${keep}" -L "${JQ_LIB}" \
+        'include "jq_nwise"; .[0:(length - $k)] | nwise(1000)[] | {Objects: [.[] | {Key: .}], Quiet: true}' \
+      >"${TEST_TMP}/delete-payloads.jsonl" || die "seed: ${bucket}: delete payload generation failed"
     while IFS= read -r payload; do
       [ -n "${payload}" ] || continue
-      aws_run s3api delete-objects --bucket "${bucket}" --delete "${payload}"
-      assert_aws_ok || die "seed: trim ${bucket} (delete batch failed)"
-    done < <(printf '%s' "${keys_json}" \
-             | jq -c --argjson k "${keep}" -L "${JQ_LIB}" \
-               'include "jq_nwise"; .[0:(length - $k)] | nwise(1000)[] | {Objects: [.[] | {Key: .}], Quiet: true}')
+      DELETE_BATCH=$((DELETE_BATCH+1))
+      printf '%s' "${payload}" >"${TEST_TMP}/delete-request.json"
+      local delete_rc=0
+      AWS_MAX_ATTEMPTS=1 AWS_RETRY_MODE=standard aws --debug --endpoint-url "${ENDPOINT}" --region "${REGION}" \
+        --cli-connect-timeout 5 --cli-read-timeout 60 s3api delete-objects --bucket "${bucket}" \
+        --delete "file://${TEST_TMP}/delete-request.json" --output json \
+        >"${TEST_TMP}/delete-response.json" 2>"${TEST_TMP}/delete-debug.log" || delete_rc=$?
+      UPGRADE_REDACT_ACCESS_KEY="${ACCESS_KEY}" UPGRADE_REDACT_SECRET_KEY="${SECRET_KEY}" \
+      UPGRADE_REDACT_VAULT_TOKEN="${VAULT_TOKEN}" UPGRADE_REDACT_MASTER_KEY="${KMS_LOCAL_MASTER_KEY}" \
+      UPGRADE_REDACT_BACKUP_KEK="${KMS_BACKUP_KEK}" \
+      "${UPGRADE_PYTHON}" "${SCRIPT_DIR}/scripts/upgrade_evidence.py" validate-delete \
+        --request "${TEST_TMP}/delete-request.json" --response "${TEST_TMP}/delete-response.json" \
+        --debug "${TEST_TMP}/delete-debug.log" --exit-code "${delete_rc}" \
+        --output "${GROUP_DIR}/delete-${bucket}-${DELETE_BATCH}.json" \
+        || die "seed: trim ${bucket} (delete batch failed)"
+      rm -f "${TEST_TMP}/delete-debug.log"
+    done < "${TEST_TMP}/delete-payloads.jsonl"
     aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'length(Contents)'
     assert_aws_ok || die "seed: post-trim list ${bucket}"
     remaining="$(printf '%s' "${AWS_OUT}" | tr -d '[:space:]')"
@@ -878,6 +1044,23 @@ seed_warp_bucket() {
     golden_set "warp:${bucket}" "${written}"
     log "seeded ${bucket}: ${written} objects of ${size} bytes (warp wrote fewer than keep=${keep}, kept all)"
   fi
+}
+
+capture_seed_manifest() {
+  [ "${DRY_RUN}" -eq 0 ] || return 0
+  local bucket="$1" encoded key
+  aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'Contents[].Key' --output json
+  assert_aws_ok || die "seed: manifest list ${bucket}"
+  printf '%s' "${AWS_OUT}" >"${TEST_TMP}/seed-keys.json"
+  jq -r '.[] | @base64' "${TEST_TMP}/seed-keys.json" >"${TEST_TMP}/seed-keys.txt" || die "seed: invalid key list"
+  while IFS= read -r encoded; do
+    key="$(printf '%s' "${encoded}" | base64 -d)"
+    aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${TEST_TMP}/seed-download.bin"
+    assert_aws_ok || die "seed: manifest read ${bucket}"
+    "${UPGRADE_PYTHON}" "${SCRIPT_DIR}/scripts/upgrade_evidence.py" seed-record \
+      --manifest "${GROUP_DIR}/seed-${bucket}.json" --key "${key}" --body "${TEST_TMP}/seed-download.bin" \
+      || die "seed: manifest ${bucket}"
+  done < "${TEST_TMP}/seed-keys.txt"
 }
 
 # ==================== Golden seed (on OLD version) ====================
@@ -970,6 +1153,7 @@ seed_golden() {
   seed_warp_bucket "upg-warp-1kib"  1KiB   2s 5
   seed_warp_bucket "upg-warp-1mib"  1MiB   2s 5
   seed_warp_bucket "upg-warp-100mib" 100MiB 30s 2
+  for bucket in upg-warp-1kib upg-warp-1mib upg-warp-100mib; do capture_seed_manifest "${bucket}"; done
 
   # UPG-105 SSE-S3.
   make_test_file "${TEST_TMP}/sse3.bin" 65536
@@ -1037,19 +1221,25 @@ seed_golden() {
 # ==================== Verification cases (on NEW version) ====================
 
 run_test() {
-  local id="$1" name="$2" fn="$3" out
+  local id="$1" name="$2" fn="$3" case_failed=0
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     return 0
   fi
-  printf '\n--- %s %s ---\n' "${id}" "${name}"
+  CURRENT_STARTED="${CURRENT_STARTED}${id} "
+  evidence_line "--- ${id} ${name} ---"
   if "${fn}" > "${TEST_TMP}/${id}.out" 2>&1; then
-    PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
+    PASS=$((PASS+1)); evidence_line "[PASS] ${id} ${name}"
   else
+    case_failed=1
     FAIL=$((FAIL+1)); FAILED_TESTS+=("${id} ${name}")
-    printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
-    cp "${TEST_TMP}/${id}.out" "${TEST_TMP}/${id}.out.detail" 2>/dev/null || true
-    sed 's/^/      | /' "${TEST_TMP}/${id}.out" | tail -50
+    evidence_line "[FAIL] ${id} ${name}"
+  fi
+  CURRENT_DONE="${CURRENT_DONE}${id} "
+  sanitize_upgrade_log "${TEST_TMP}/${id}.out" "${GROUP_DIR}/${id}.log" \
+    || { CURRENT_RESULT=DIAGNOSTICS_FAILED; die "case diagnostics failed: ${id}"; }
+  if [ "${case_failed}" -eq 1 ]; then
+    sed 's/^/      | /' "${GROUP_DIR}/${id}.log" | tail -50
   fi
 }
 
@@ -1216,12 +1406,16 @@ verify_warp_bucket() {
   # Sample-read every object: full-body GET + ETag comparison between HEAD
   # and GET. Keys come from one JSON listing (jq emits one per line, with a
   # trailing newline), so the iteration cannot drop the last key.
-  local keys_json key etag_head etag_get i=0
+  local keys_json encoded i=0
   aws_run s3api list-objects-v2 --bucket "${bucket}" --query 'Contents[].Key' --output json
   assert_aws_ok || { echo "${bucket}: key listing failed after upgrade"; return 1; }
   keys_json="${AWS_OUT}"
-  while IFS= read -r key; do
-    [ -n "${key}" ] || continue
+  printf '%s' "${keys_json}" >"${TEST_TMP}/verify-keys.json"
+  "${UPGRADE_PYTHON}" "${SCRIPT_DIR}/scripts/upgrade_evidence.py" check-seed \
+    --manifest "${GROUP_DIR}/seed-${bucket}.json" --keys-file "${TEST_TMP}/verify-keys.json" || return 1
+  jq -r '.[] | @base64' "${TEST_TMP}/verify-keys.json" >"${TEST_TMP}/verify-keys.txt" || return 1
+  while IFS= read -r encoded; do
+    key="$(printf '%s' "${encoded}" | base64 -d)" || return 1
     aws_run s3api head-object --bucket "${bucket}" --key "${key}"
     assert_aws_ok || { echo "${bucket}/${key}: HEAD failed after upgrade"; return 1; }
     etag_head="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
@@ -1230,8 +1424,10 @@ verify_warp_bucket() {
     etag_get="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
     [ "${etag_head}" = "${etag_get}" ] \
       || { echo "${bucket}/${key}: ETag mismatch HEAD=${etag_head} GET=${etag_get}"; return 1; }
+    "${UPGRADE_PYTHON}" "${SCRIPT_DIR}/scripts/upgrade_evidence.py" check-body \
+      --manifest "${GROUP_DIR}/seed-${bucket}.json" --key "${key}" --body "${TEST_TMP}/warp-dl.bin" || return 1
     i=$((i+1))
-  done < <(printf '%s' "${keys_json}" | jq -r '.[]')
+  done < "${TEST_TMP}/verify-keys.txt"
   log "${bucket}: ${i} objects readable after upgrade (count=${listed})"
 }
 
@@ -1244,6 +1440,15 @@ verify_warp_100mib() { verify_warp_bucket "upg-warp-100mib"; }
 
 PASS=0; FAIL=0
 FAILED_TESTS=()
+UPGRADE_IDS=(UPG-101 UPG-102 UPG-103 UPG-104 UPG-105 UPG-106 UPG-107 UPG-201 UPG-202 UPG-203 UPG-301 UPG-302 UPG-303 UPG-401 UPG-402 UPG-108 UPG-109 UPG-110)
+UPGRADE_NAMES=("plain object preserved" "versioned object preserved" "multipart object preserved" "large object preserved"
+  "SSE-S3 object preserved" "SSE-KMS object + key preserved" "encryption-context object" "IAM user + policy survive"
+  "service account survives" "STS credential behavior" "node config persisted" "KMS config + keys persisted"
+  "bucket default encryption" "post-upgrade S3 CRUD smoke" "post-upgrade SSE-KMS write"
+  "warp 1KiB objects readable" "warp 1MiB objects readable" "bounded 100MiB objects readable")
+UPGRADE_FUNCTIONS=(verify_plain verify_versioned verify_multipart verify_large verify_sse_s3 verify_sse_kms verify_context
+  verify_identity_user verify_identity_sa verify_identity_sts verify_config_persisted verify_kms_config
+  verify_bucket_default_encryption verify_smoke_crud verify_smoke_kms_write verify_warp_1kib verify_warp_1mib verify_warp_100mib)
 
 emit_topo_result() {
   # Machine-readable line for the workflow report generator:
@@ -1265,24 +1470,8 @@ assert_rc_ok() {
 }
 
 run_verify_cases() {
-  run_test UPG-101 "plain object preserved"          verify_plain
-  run_test UPG-102 "versioned object preserved"      verify_versioned
-  run_test UPG-103 "multipart object preserved"      verify_multipart
-  run_test UPG-104 "large object preserved"          verify_large
-  run_test UPG-105 "SSE-S3 object preserved"         verify_sse_s3
-  run_test UPG-106 "SSE-KMS object + key preserved"  verify_sse_kms
-  run_test UPG-107 "encryption-context object"       verify_context
-  run_test UPG-201 "IAM user + policy survive"       verify_identity_user
-  run_test UPG-202 "service account survives"        verify_identity_sa
-  run_test UPG-203 "STS credential behavior"         verify_identity_sts
-  run_test UPG-301 "node config persisted"           verify_config_persisted
-  run_test UPG-302 "KMS config + keys persisted"     verify_kms_config
-  run_test UPG-303 "bucket default encryption"       verify_bucket_default_encryption
-  run_test UPG-401 "post-upgrade S3 CRUD smoke"      verify_smoke_crud
-  run_test UPG-402 "post-upgrade SSE-KMS write"      verify_smoke_kms_write
-  run_test UPG-108 "warp 1KiB objects readable"      verify_warp_1kib
-  run_test UPG-109 "warp 1MiB objects readable"      verify_warp_1mib
-  run_test UPG-110 "warp 100MiB objects readable"    verify_warp_100mib
+  local i
+  for i in "${!UPGRADE_IDS[@]}"; do run_test "${UPGRADE_IDS[i]}" "${UPGRADE_NAMES[i]}" "${UPGRADE_FUNCTIONS[i]}"; done
 }
 
 results_summary() {
@@ -1333,6 +1522,7 @@ Usage:
   --keep-env                Do not tear down the environment after the last run
   --ssh-user <user>         SSH user for the test nodes (default: azureuser)
   --log-file <path>         Tee output to a log file
+  --artifacts-dir <path>    New directory for seed/delete, phase and cleanup evidence
   --dry-run                 Preview commands without executing them
   -y, --yes                 Skip confirmation prompts
   -h, --help                Show this help
@@ -1357,6 +1547,7 @@ main() {
       --keep-env) KEEP_ENV=1 ;;
       --ssh-user) SSH_USER="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
+      --artifacts-dir) ARTIFACTS_DIR="$1"; shift ;;
       --dry-run) DRY_RUN=1 ;;
       -y|--yes) ASSUME_YES=1 ;;
       -h|--help) usage; exit 0 ;;
@@ -1390,32 +1581,74 @@ main() {
   need_cmd jq "JSON processor"
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4)"
+  need_cmd "${UPGRADE_PYTHON}" "Python for upgrade evidence"
+  need_cmd timeout "bounded diagnostics"
   log "nodes: ${NODES[*]}  from: $(resolve_from_url)  to: $(resolve_to_url)"
   log "backends: ${BACKENDS[*]}  topologies: ${SELECTED_TOPOLOGIES[*]}"
 
   confirm "Run upgrade compatibility suite (${SELECTED_TOPOLOGIES[*]}, ${BACKENDS[*]})?"
 
+  local group_topo group_backend
+  for group_backend in "${BACKENDS[@]}"; do
+    case "${group_backend}" in local|vault-kv2) ;; *) die "unknown KMS backend: ${group_backend}" ;; esac
+    for group_topo in "${SELECTED_TOPOLOGIES[@]}"; do
+      case "${group_topo}" in single-single|single-multi|multi-multi) ;; *) die "unknown topology: ${group_topo}" ;; esac
+      if [[ " ${UPGRADE_GROUPS[*]} " = *" ${group_topo}/${group_backend} "* ]]; then
+        die "duplicate upgrade group: ${group_topo}/${group_backend}"
+      fi
+      UPGRADE_GROUPS+=("${group_topo}/${group_backend}")
+    done
+  done
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    local preview_group
+    for preview_group in "${UPGRADE_GROUPS[@]}"; do
+      log "DRY-RUN: ${preview_group}: prepare old -> seed -> upgrade -> verify -> diagnostics -> cleanup"
+      run_verify_cases
+    done
+    log "DRY-RUN: no environment or S3 commands executed"
+    return 0
+  fi
+  if [ "${DRY_RUN}" -eq 0 ]; then
+    ARTIFACTS_DIR="${ARTIFACTS_DIR:-${LOG_FILE:-${PWD}/rustfs-upgrade-$(date -u +%Y%m%d-%H%M%S)}.artifacts}"
+    umask 077
+    mkdir -p "$(dirname "${ARTIFACTS_DIR}")"
+    mkdir "${ARTIFACTS_DIR}" || die "artifacts directory must be new: ${ARTIFACTS_DIR}"
+    : >"${ARTIFACTS_DIR}/events.log"
+    ARTIFACTS_READY=1
+  fi
+
   local overall_fail=0 topo backend
   for backend in "${BACKENDS[@]}"; do
     KMS_BACKEND="${backend}"
     for topo in "${SELECTED_TOPOLOGIES[@]}"; do
-      log "== topology: ${topo}  kms-backend: ${KMS_BACKEND} =="
+      CURRENT_TOPO="${topo}"; CURRENT_PHASE=PREPARE; CURRENT_RESULT=""
+      CURRENT_DONE=" "; CURRENT_STARTED=" "; DIAGNOSTICS_DONE=0
+      OLD_VERSION_ACTUAL=unknown; NEW_VERSION_ACTUAL=unknown
+      rm -f "${TEST_TMP}"/warp-put-*.log
+      GROUP_DIR="${ARTIFACTS_DIR}/${topo}-${backend}"
+      if [ "${ARTIFACTS_READY}" -eq 1 ]; then mkdir "${GROUP_DIR}"; GROUP_ACTIVE=1; fi
+      evidence_line "[INFO] == topology: ${topo}  kms-backend: ${KMS_BACKEND} =="
       if [ "${KMS_BACKEND}" = "vault-kv2" ]; then
         vault_stop
         vault_start
       fi
       env_setup_old "${topo}"
       seed_golden
+      CURRENT_PHASE=UPGRADE
       upgrade_in_place "${topo}"
+      CURRENT_PHASE=VERIFY
       PASS=0; FAIL=0; FAILED_TESTS=()
       run_verify_cases
       results_summary
       record_topology_result "${topo}/${KMS_BACKEND}"
       emit_topo_result "${topo}" "${KMS_BACKEND}"
-      if [ "${KEEP_ENV}" -eq 0 ]; then
-        env_teardown "${topo}"
-        if [ "${KMS_BACKEND}" = "vault-kv2" ]; then vault_stop; fi
-      fi
+      CURRENT_RESULT=PASS
+      if [ "${FAIL}" -gt 0 ]; then CURRENT_RESULT=VERIFY_FAILED; fi
+      CURRENT_PHASE=CLEANUP
+      local cleanup_failed=0
+      finish_upgrade_group || cleanup_failed=1
+      GROUP_INDEX=$((GROUP_INDEX+1))
+      [ "${cleanup_failed}" -eq 0 ] || die "upgrade diagnostics or cleanup failed"
       if [ "${FAIL}" -gt 0 ]; then overall_fail=1; fi
     done
   done

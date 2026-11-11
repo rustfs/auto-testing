@@ -1,0 +1,46 @@
+name: Upgrade Script Tests
+
+on:
+  pull_request:
+    paths:
+      - rustfs-upgrade-test.sh
+      - scripts/upgrade_evidence.py
+      - scripts/functional_case_report.py
+      - scripts/issue_manager.py
+      - scripts/lib/**
+      - test_rustfs_upgrade.py
+      - .github/workflows/rustfs-upgrade-test.yml
+      - .github/workflows/upgrade-script-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - rustfs-upgrade-test.sh
+      - scripts/upgrade_evidence.py
+      - scripts/functional_case_report.py
+      - scripts/issue_manager.py
+      - scripts/lib/**
+      - test_rustfs_upgrade.py
+      - .github/workflows/rustfs-upgrade-test.yml
+      - .github/workflows/upgrade-script-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-script-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install protocol fixture client
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/upgrade-tests"
+          "${RUNNER_TEMP}/upgrade-tests/bin/pip" install awscli==1.45.19
+          echo "${RUNNER_TEMP}/upgrade-tests/bin" >> "${GITHUB_PATH}"
+          command -v jq
+      - name: Validate upgrade suite and evidence handling
+        run: |
+          bash -n rustfs-upgrade-test.sh
+          python3 -B -m unittest -v test_rustfs_upgrade.py test_sensitive_diagnostics.py test_issue_manager.py
