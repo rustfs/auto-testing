@@ -262,6 +262,8 @@ The security suite runs STS-106 through STS-112 for [rustfs/rustfs#9279](https:/
 
 Startup cases run the installed candidate binary on the topology's first node in separate loopback processes, with fresh temporary volumes and disposable credentials. They leave the topology's system service and credentials unchanged. The helper requires Python 3 and curl with `--aws-sigv4` support on that node. Keep `scripts/sts_root_regression.py` with the suite when copying the runner.
 
+The SSH runner keeps a heartbeat channel open after sending the helper source. Channel EOF or five seconds without a heartbeat requests remote cancellation without depending on a PTY or SIGHUP. Cancellation is checked between bounded requests; teardown completes its wait, forced termination if necessary, and private-directory removal before returning exit status 130. Repeated cancellation cannot interrupt teardown.
+
 The assertions target the intended fix: older versions that accept short root credentials fail these startup cases, even if their STS request returns HTTP 200 or 403. If invalid credentials reach readiness, the report records the STS HTTP status and error code (including the reported `500 InternalError`) before failing. Unrelated startup errors, timeouts, malformed responses, and unusable credentials also fail. Only credential byte lengths and structured outcomes are printed; secret keys, session tokens, and raw server logs are never included.
 
 Run the same matrix against a local candidate binary, or check only the signed Query flow against a running endpoint:

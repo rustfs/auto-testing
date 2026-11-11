@@ -9,12 +9,15 @@ import json
 import os
 from pathlib import Path
 import re
+import select
+import shlex
 import shutil
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 
@@ -34,6 +37,22 @@ CASES = {
     "secret-7": ("STS-108", "root", "root123", "secret"),
     "access-2": ("STS-109", "ab", "rootroot", "access"),
 }
+SSH_HEARTBEAT_TIMEOUT = 5
+_cancel_requested = False
+
+# Read exactly the source frame; leave subsequent heartbeat bytes on fd 0.
+# Python's normal `-` mode consumes stdin through EOF before executing it.
+REMOTE_BOOTSTRAP = """import os, sys
+remaining = int(sys.argv.pop(1))
+chunks = []
+while remaining:
+    chunk = os.read(0, min(remaining, 65536))
+    if not chunk:
+        raise SystemExit(1)
+    chunks.append(chunk)
+    remaining -= len(chunk)
+exec(compile(b''.join(chunks), '<sts-root-probe>', 'exec'))
+"""
 
 
 class RegressionFailure(Exception):
@@ -45,6 +64,35 @@ def require(condition: bool, message: str) -> None:
         raise RegressionFailure(message)
 
 
+def request_cancellation(*_args) -> None:
+    # Signal handlers only record cancellation. Raising asynchronously can
+    # interrupt child registration or the cleanup's wait/SIGKILL/rmtree path.
+    global _cancel_requested
+    _cancel_requested = True
+
+
+def check_cancellation() -> None:
+    if _cancel_requested:
+        raise KeyboardInterrupt
+
+
+def watch_connection() -> None:
+    deadline = time.monotonic() + SSH_HEARTBEAT_TIMEOUT
+    try:
+        while not _cancel_requested:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([0], [], [], min(remaining, 0.2))
+            if ready:
+                if not os.read(0, 4096):
+                    break
+                deadline = time.monotonic() + SSH_HEARTBEAT_TIMEOUT
+    except OSError:
+        pass
+    request_cancellation()
+
+
 def config_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace(
         "\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"'
@@ -52,6 +100,7 @@ def config_quote(value: str) -> str:
 
 def http(endpoint: str, access: str = "", secret: str = "", token: str = "",
          *, path: str = "/", body: str | None = None, timeout: float = 10) -> tuple[int, bytes]:
+    check_cancellation()
     # curl's signer reproduces the report's aws:amz:us-east-1:s3 scope. Keep
     # credentials in stdin, not argv, and never dump its raw response on failure.
     config = ""
@@ -74,6 +123,7 @@ def http(endpoint: str, access: str = "", secret: str = "", token: str = "",
                                        timeout=timeout + 5)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RegressionFailure("curl could not complete the request") from exc
+        check_cancellation()
         require(completed.returncode == 0, f"curl transport failed (exit {completed.returncode})")
         require(bool(re.fullmatch(r"[1-5][0-9]{2}", completed.stdout)), "curl did not return an HTTP status")
         require(output.is_file() and output.stat().st_size <= 2 * 1024 * 1024,
@@ -134,11 +184,15 @@ def check_assume_role(endpoint: str, access: str, secret: str, observation: dict
 def credential_rejection(log: str, field: str) -> bool:
     # An unrelated bind/configuration error or a crash must not pass a negative
     # startup case. Accept spelling differences across the CLI and config layer.
-    key = re.compile(rf"{field}[_ -]?key", re.IGNORECASE)
-    invalid = re.compile(r"invalid|error|too short|at least|minimum", re.IGNORECASE)
+    key = rf"(?:root[ _-]*|RUSTFS_)?{field}[_ -]?key"
+    invalid = re.compile(
+        rf"\binvalid[ _-]*{key}(?:[ _-]*length)?\b"
+        rf"|\b{key}(?:\s+length)?(?:\s+is)?\s*[:=-]?\s*(?:invalid|rejected|too short)\b"
+        rf"|\b(?:error|fatal)\s*:\s*[\"']?{key}\b[^\n]*\b(?:at least|minimum)\b", re.IGNORECASE)
     length = re.compile(r"length|bytes?|too short|at least|minimum", re.IGNORECASE)
-    return any(key.search(line) and invalid.search(line) and length.search(line)
-               and not re.search(r"\bwarn(?:ing)?\b", line, re.IGNORECASE) for line in log.splitlines())
+    return any(invalid.search(line) and length.search(line)
+               and not re.search(r"\b(?:info|debug|trace|warn(?:ing)?)\b", line, re.IGNORECASE)
+               for line in log.splitlines())
 
 
 def stop_process(process: subprocess.Popen) -> None:
@@ -154,7 +208,42 @@ def stop_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+def run_ssh_probe(target: str, options: list[str], binary: str, case: str, timeout: float) -> int:
+    source = Path(__file__).read_bytes()
+    remote = shlex.join(["python3", "-c", REMOTE_BOOTSTRAP, str(len(source)), "--watch-stdin",
+                         "--rustfs-bin", binary, "--case", case, "--startup-timeout", str(timeout)])
+    command = ["ssh", "-T", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=2",
+               "-o", "ServerAliveCountMax=3", *options, "--", target, remote]
+    check_cancellation()
+    transport = subprocess.Popen(command, stdin=subprocess.PIPE, start_new_session=True)
+    try:
+        transport.stdin.write(source)
+        transport.stdin.flush()
+        while transport.poll() is None:
+            check_cancellation()
+            try:
+                transport.stdin.write(b"\n")
+                transport.stdin.flush()
+            except BrokenPipeError:
+                break
+            time.sleep(0.2)
+        return transport.wait(timeout=30)
+    finally:
+        # Closing stdin triggers the remote watchdog even without a PTY or
+        # SIGHUP. Give it time to finish an in-flight request and teardown.
+        try:
+            transport.stdin.close()
+        except BrokenPipeError:
+            pass
+        try:
+            transport.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            stop_process(transport)
+        check_cancellation()
+
+
 def check_startup(binary: str, name: str, timeout: float, observation: dict) -> None:
+    check_cancellation()
     case_id, access, secret, invalid_field = CASES[name]
     observation.update(case_id=case_id, access_key_bytes=len(access.encode()), secret_key_bytes=len(secret.encode()),
                        expected="startup-rejected" if invalid_field else "usable-sts-session")
@@ -177,10 +266,11 @@ def check_startup(binary: str, name: str, timeout: float, observation: dict) -> 
         }
         log_path = directory / "server.log"
         with log_path.open("wb") as log:
-            process = subprocess.Popen([binary], cwd=directory, env=environment, stdout=log, stderr=log,
+            process = subprocess.Popen([binary], cwd=directory, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                        start_new_session=True)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            check_cancellation()
             code = process.poll()
             if code is not None:
                 observation["server_exit_code"] = code
@@ -225,6 +315,7 @@ def check_startup(binary: str, name: str, timeout: float, observation: dict) -> 
             observation["cleanup_reason"] = "could not stop the isolated process or remove its private data"
             if primary_error is None:
                 raise RegressionFailure(observation["cleanup_reason"]) from exc
+        check_cancellation()
 
 
 def main() -> int:
@@ -234,11 +325,28 @@ def main() -> int:
     target.add_argument("--rustfs-bin", help="start disposable loopback instances of this candidate binary")
     parser.add_argument("--case", choices=["all", *CASES], default="all")
     parser.add_argument("--startup-timeout", type=float, default=60)
+    parser.add_argument("--ssh-target", help="run the candidate on this SSH destination with connection supervision")
+    parser.add_argument("--ssh-option", action="append", default=[], help="one SSH argument (use --ssh-option=-o for flags)")
+    parser.add_argument("--watch-stdin", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.startup_timeout <= 0:
         parser.error("--startup-timeout must be positive")
     if args.endpoint and args.case != "all":
         parser.error("--case requires --rustfs-bin")
+    if args.endpoint and (args.ssh_target or args.watch_stdin):
+        parser.error("connection supervision requires --rustfs-bin")
+    if args.ssh_option and not args.ssh_target:
+        parser.error("--ssh-option requires --ssh-target")
+    if args.ssh_target and args.watch_stdin:
+        parser.error("--ssh-target and --watch-stdin are mutually exclusive")
+    if args.ssh_target:
+        try:
+            return run_ssh_probe(args.ssh_target, args.ssh_option, args.rustfs_bin, args.case, args.startup_timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            print("SSH probe transport failed", file=sys.stderr)
+            return 1
+    if args.watch_stdin:
+        threading.Thread(target=watch_connection, daemon=True).start()
     cases = ["configured-root"] if args.endpoint else list(CASES) if args.case == "all" else [args.case]
     failed = False
     for name in cases:
@@ -259,6 +367,7 @@ def main() -> int:
             observation["verdict"] = "FAIL"
             observation["reason"] = str(exc) if isinstance(exc, RegressionFailure) else "could not execute or clean up the probe"
             failed = True
+        check_cancellation()
         print(json.dumps(observation, sort_keys=True), flush=True)
     return 1 if failed else 0
 
@@ -266,11 +375,8 @@ def main() -> int:
 if __name__ == "__main__":
     # A runner cancellation still tears down the child process and its private
     # data. No system service, shared volume, or unrelated process is touched.
-    def interrupted(_signum, _frame):
-        raise KeyboardInterrupt
-
-    for interrupt_signal in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(interrupt_signal, interrupted)
+    for interrupt_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(interrupt_signal, request_cancellation)
     try:
         sys.exit(main())
     except KeyboardInterrupt:

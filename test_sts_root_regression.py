@@ -188,6 +188,7 @@ class StartupTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.receipt = self.root / "receipt.json"
+        self.shutdown_marker = self.root / "shutting-down"
 
     def binary(self, mode, diagnostic=""):
         binary = self.root / "fake-rustfs"
@@ -201,15 +202,21 @@ from pathlib import Path
 import signal
 import sys
 import time
-Path({str(self.receipt)!r}).write_text(json.dumps({{"pid": os.getpid(), "cwd": os.getcwd(), "env": dict(os.environ)}}))
 mode = {mode!r}
+if mode in ("slow-cleanup", "cancelled-slow-cleanup"):
+    def defer_shutdown(*args):
+        Path({str(self.shutdown_marker)!r}).write_text("SIGTERM received")
+    signal.signal(signal.SIGTERM, defer_shutdown)
+Path({str(self.receipt)!r}).write_text(json.dumps({{"pid": os.getpid(), "cwd": os.getcwd(), "env": dict(os.environ)}}))
 if mode in ("exit-0", "exit-1", "crash"):
     print({diagnostic!r}, flush=True)
     if mode == "crash":
         os.kill(os.getpid(), signal.SIGKILL)
     sys.exit(0 if mode == "exit-0" else 1)
-if mode == "timeout":
+if mode in ("timeout", "cancelled-slow-cleanup"):
     time.sleep(600)
+if mode == "slow-start":
+    time.sleep({probe.SSH_HEARTBEAT_TIMEOUT + 1})
 class Handler(BaseHTTPRequestHandler):
     def reply(self, status, body):
         self.send_response(status)
@@ -241,10 +248,61 @@ HTTPServer((host, int(port)), Handler).serve_forever()
 
     def assert_cleaned(self):
         receipt = json.loads(self.receipt.read_text())
-        self.assertFalse(Path(receipt["cwd"]).exists(), receipt)
+        self.assertFalse(Path(receipt["cwd"]).exists(), f"private directory was not removed: {receipt['cwd']}")
         with self.assertRaises(ProcessLookupError):
             os.kill(receipt["pid"], 0)
         return receipt
+
+    def wait_receipt(self):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                return json.loads(self.receipt.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(0.02)
+        self.fail("child did not start")
+
+    def rescue_fixture(self):
+        # A failing cleanup regression test must not itself leave its fixture
+        # running. Only this test's recorded, isolated process group is owned.
+        if not self.receipt.exists():
+            return
+        receipt = json.loads(self.receipt.read_text())
+        if Path(receipt["cwd"]).exists():
+            try:
+                os.killpg(receipt["pid"], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            shutil.rmtree(receipt["cwd"])
+
+    def remote_runner(self, binary):
+        source = Path(probe.__file__).read_bytes()
+        runner = subprocess.Popen([sys.executable, "-c", probe.REMOTE_BOOTSTRAP, str(len(source)), "--watch-stdin",
+                                   "--rustfs-bin", binary, "--case", "secret-8"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        runner.stdin.write(source)
+        runner.stdin.write(b"\n")
+        runner.stdin.flush()
+        return runner
+
+    def ssh_fixture(self, binary):
+        transport = self.root / "ssh"
+        transport.write_text(f'''#!{sys.executable}
+import json
+import os
+from pathlib import Path
+import shlex
+import sys
+assert not os.isatty(0), "fixture must exercise non-PTY transport"
+Path({str(self.root / 'ssh-args.json')!r}).write_text(json.dumps(sys.argv[1:]))
+command = shlex.split(sys.argv[-1])
+assert command[0] == "python3"
+command[0] = sys.executable
+command[command.index("--rustfs-bin") + 1] = {binary!r}
+os.execv(command[0], command)
+''')
+        transport.chmod(0o755)
+        return {**os.environ, "PATH": str(self.root) + os.pathsep + os.environ["PATH"]}
 
     def test_exact_short_secret_and_access_boundaries_require_length_errors(self):
         for case, field, access_bytes, secret_bytes in (("secret-4", "secret", 4, 4),
@@ -259,9 +317,25 @@ HTTPServer((host, int(port)), Handler).serve_forever()
                 self.assertEqual(observation["cleanup"], "PASS")
                 self.assert_cleaned()
 
+    def test_rejection_diagnostic_identifies_the_invalid_credential(self):
+        for field in ("access", "secret"):
+            with self.subTest(field=field):
+                for diagnostic in (f"Error: invalid {field} key length", f"Invalid{field.title()}KeyLength",
+                                   f"root {field} key is too short", f"Error: RUSTFS_{field.upper()}_KEY must be at least 8 bytes"):
+                    self.assertTrue(probe.credential_rejection(diagnostic, field), diagnostic)
+                other = "secret" if field == "access" else "access"
+                for diagnostic in (f"Error: permission denied reading {field} key length configuration",
+                                   f"INFO: invalid {field} key length\nError: permission denied",
+                                   f"Error: invalid {other} key length\n{field} key minimum length is 8 bytes"):
+                    self.assertFalse(probe.credential_rejection(diagnostic, field), diagnostic)
+
     def test_unrelated_startup_errors_clean_exit_crashes_and_timeouts_fail(self):
         scenarios = [("exit-1", "Error: Address already in use"),
                      ("exit-1", "WARNING: secret key minimum length is 8 bytes\nError: permission denied"),
+                     ("exit-1", "INFO: secret key minimum length is 8 bytes\nError: permission denied"),
+                     ("exit-1", "DEBUG: secret key must be at least 8 bytes\nError: permission denied"),
+                     ("exit-1", "TRACE: secret key minimum length is 8 bytes\nError: permission denied"),
+                     ("exit-1", "secret key minimum length is 8 bytes\nError: permission denied"),
                      ("exit-1", "Error: invalid access key length"),
                      ("exit-0", "Error: invalid secret key length"),
                      ("crash", "Error: invalid secret key length"), ("timeout", "")]
@@ -269,9 +343,115 @@ HTTPServer((host, int(port)), Handler).serve_forever()
             with self.subTest(mode=mode, diagnostic=diagnostic):
                 observation = {}
                 with self.assertRaises(probe.RegressionFailure):
-                    probe.check_startup(self.binary(mode, diagnostic), "secret-4", 0.7, observation)
+                    probe.check_startup(self.binary(mode, diagnostic), "secret-4", 0.7 if mode == "timeout" else 3, observation)
                 self.assertEqual(observation["cleanup"], "PASS")
                 self.assert_cleaned()
+
+    def test_cancellation_during_cleanup_waits_for_forced_shutdown_and_removal(self):
+        for mode in ("slow-cleanup", "cancelled-slow-cleanup"):
+            with self.subTest(mode=mode):
+                self.receipt.unlink(missing_ok=True)
+                self.shutdown_marker.unlink(missing_ok=True)
+                runner = subprocess.Popen([sys.executable, str(Path(probe.__file__).resolve()), "--rustfs-bin", self.binary(mode),
+                                           "--case", "secret-8"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    self.wait_receipt()
+                    if mode == "cancelled-slow-cleanup":
+                        runner.send_signal(signal.SIGTERM)
+                    deadline = time.monotonic() + 5
+                    while not self.shutdown_marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue(self.shutdown_marker.exists(), "cleanup did not send SIGTERM to the child")
+                    # This second cancellation arrives while stop_process is
+                    # waiting on a child that ignores its first SIGTERM.
+                    runner.send_signal(signal.SIGINT)
+                    runner.send_signal(signal.SIGHUP)
+                    stdout, stderr = runner.communicate(timeout=12)
+                    self.assertEqual(runner.returncode, 130, stdout + stderr)
+                    self.assertNotIn("PASS", stdout)
+                    self.assert_cleaned()
+                finally:
+                    if runner.poll() is None:
+                        runner.kill()
+                        runner.communicate(timeout=5)
+                    self.rescue_fixture()
+
+    def test_channel_eof_cleans_the_remote_child_without_a_signal(self):
+        runner = self.remote_runner(self.binary("timeout"))
+        try:
+            self.wait_receipt()
+            # No signal is sent to either remote process. This is the stdin
+            # closure delivered by a non-PTY SSH channel disconnect.
+            runner.stdin.close()
+            runner.stdin = None
+            stdout, stderr = runner.communicate(timeout=5)
+            self.assertEqual(runner.returncode, 130, (stdout + stderr).decode())
+            self.assertNotIn(b"PASS", stdout)
+            self.assert_cleaned()
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.communicate(timeout=5)
+            self.rescue_fixture()
+
+    def test_stalled_heartbeat_cleans_up_even_while_the_channel_is_open(self):
+        runner = self.remote_runner(self.binary("timeout"))
+        try:
+            self.wait_receipt()
+            # wait(), unlike communicate(), leaves the channel open. No EOF
+            # or SIGHUP can account for the watchdog's cancellation here.
+            self.assertEqual(runner.wait(timeout=probe.SSH_HEARTBEAT_TIMEOUT + 5), 130)
+            stdout, stderr = runner.communicate(timeout=5)
+            self.assertNotIn(b"PASS", stdout, stderr.decode())
+            self.assert_cleaned()
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.communicate(timeout=5)
+            self.rescue_fixture()
+
+    def test_suite_ssh_entrypoint_keeps_heartbeats_and_preserves_the_remote_verdict(self):
+        environment = self.ssh_fixture(self.binary("slow-start"))
+        script = Path(probe.__file__).parent.parent / "rustfs-security-test.sh"
+        function = re.search(r"(?ms)^sts_root_startup_case\(\) \{.*?^\}", script.read_text()).group(0)
+        command = function + '''
+SSH_OPTS=(-o BatchMode=yes -p 2222)
+SSH_USER=fixture
+NODES=(node-first node-other)
+sts_root_startup_case minimum
+'''
+        result = subprocess.run(["bash", "-Eeu", "-o", "pipefail", "-c", command],
+                                env={**environment, "SCRIPT_DIR": str(script.parent)},
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        observation = json.loads(result.stdout)
+        self.assertEqual(observation["case_id"], "STS-110")
+        self.assertEqual(observation["verdict"], "PASS")
+        arguments = json.loads((self.root / "ssh-args.json").read_text())
+        self.assertIn("-T", arguments)
+        self.assertIn("BatchMode=yes", arguments)
+        self.assertEqual(arguments[arguments.index("-p") + 1], "2222")
+        self.assertEqual(arguments[-2], "fixture@node-first")
+        self.assertIn("/usr/bin/rustfs", arguments[-1])
+        self.assert_cleaned()
+
+    def test_local_cancellation_closes_the_supervised_channel_and_waits_for_remote_cleanup(self):
+        environment = self.ssh_fixture(self.binary("timeout"))
+        runner = subprocess.Popen([sys.executable, str(Path(probe.__file__).resolve()), "--ssh-target", "fixture@node",
+                                   "--rustfs-bin", "/usr/bin/rustfs", "--case", "secret-8"],
+                                  env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.wait_receipt()
+            runner.send_signal(signal.SIGTERM)
+            stdout, stderr = runner.communicate(timeout=10)
+            self.assertEqual(runner.returncode, 130, stdout + stderr)
+            self.assertNotIn("PASS", stdout)
+            self.assert_cleaned()
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.communicate(timeout=5)
+            self.rescue_fixture()
 
     def test_accepting_short_credentials_fails_even_with_200_or_403_and_preserves_500(self):
         for mode, status in (("success", 200), ("sts-403", 403), ("sts-500", 500)):

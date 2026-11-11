@@ -928,9 +928,11 @@ sts_root_startup_case() {
   # The installed candidate runs on loopback with private temporary data and
   # credentials. The helper always stops its own process; systemd and the
   # topology's root credentials/data are never changed for these cases.
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODES[0]}" \
-    "python3 - --rustfs-bin /usr/bin/rustfs --case $1" \
-    < "${SCRIPT_DIR}/scripts/sts_root_regression.py"
+  local option options=()
+  for option in "${SSH_OPTS[@]}"; do options+=("--ssh-option=${option}"); done
+  python3 "${SCRIPT_DIR}/scripts/sts_root_regression.py" \
+    --ssh-target "${SSH_USER}@${NODES[0]}" "${options[@]}" \
+    --rustfs-bin /usr/bin/rustfs --case "$1"
 }
 
 case_sts_107_short_root_secret() {
