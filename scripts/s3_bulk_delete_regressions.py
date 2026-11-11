@@ -49,9 +49,14 @@ def credentials():
 
 
 class Requests(Session):
+    read_timeout = 10
+
     def __init__(self, endpoint, events, budget, phase, factory=None):
         super().__init__(endpoint, events, budget, factory)
         self.phase = phase
+        self.window = None
+        self.worker = None
+        self.pending_read = None
 
     def client(self, remaining):
         import boto3
@@ -62,12 +67,45 @@ class Requests(Session):
             region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
             aws_access_key_id=access, aws_secret_access_key=secret, aws_session_token=token,
             config=Config(s3={"addressing_style": "path"}, proxies={},
-                          connect_timeout=min(3, remaining), read_timeout=min(10, remaining),
+                          connect_timeout=min(3, remaining), read_timeout=min(self.read_timeout, remaining),
                           retries={"total_max_attempts": 1}),
         )
 
     def emit(self, **record):
         super().emit(phase=self.phase, **record)
+
+    def invoke(self, operation, **arguments):
+        if self.window is None:
+            return super().invoke(operation, **arguments)
+        # Measure SDK calls after client construction and before response
+        # logging. A streamed GET stays active until read_exact consumes it.
+        if self.phase == "delete":
+            self.window.begin_delete(self.deadline)
+            try:
+                return super().invoke(operation, **arguments)
+            finally:
+                self.window.finish_delete()
+        started = self.window.begin_request(self.worker)
+        try:
+            response = super().invoke(operation, **arguments)
+        except BaseException:
+            self.finish_load_request(started, False)
+            raise
+        if operation == "get_object":
+            self.pending_read = started
+        else:
+            self.finish_load_request(started, True)
+        return response
+
+    def finish_load_request(self, started, success):
+        overlap = self.window.finish_request(self.worker, started, success)
+        if overlap is not None:
+            self.emit(kind="load_overlap", worker=self.worker, success=success, **overlap)
+
+    def finish_read(self, success):
+        if self.pending_read is not None:
+            started, self.pending_read = self.pending_read, None
+            self.finish_load_request(started, success)
 
     def call(self, operation, **arguments):
         started = time.monotonic()
@@ -95,10 +133,13 @@ def delete_once(session, bucket, objects):
     versioned = all("VersionId" in obj for obj in objects)
     identity = lambda row: (row["Key"], row.get("VersionId")) if versioned else row["Key"]
     # Count request entries, including duplicate keys; they are not unique objects.
-    require(Counter(map(identity, rows)) == Counter(map(identity, objects)), "IncompleteDeleteResponse")
+    complete = Counter(map(identity, rows)) == Counter(map(identity, objects))
     retained = [{k: row[k] for k in ("Key", "VersionId", "Code") if k in row} for row in errors]
+    acknowledgments = [{k: row[k] for k in ("Key", "VersionId") if k in row} for row in deleted]
     session.emit(kind="delete_response", requested_entries=len(objects),
-                 distinct_keys=len({obj["Key"] for obj in objects}), errors=retained)
+                 distinct_keys=len({obj["Key"] for obj in objects}), errors=retained,
+                 deleted=acknowledgments, complete=complete)
+    require(complete, "IncompleteDeleteResponse")
     return retained
 
 
@@ -141,12 +182,18 @@ def read_exact(session, bucket, key, payload, version=None):
     if version is not None:
         arguments["VersionId"] = version
     response = session.call("get_object", **arguments)
-    body = response["Body"]
+    body, success = None, False
     try:
+        body = response["Body"]
         actual = body.read(len(payload) + 1)
+        require(actual == payload, "ReadIntegrityMismatch")
+        success = True
     finally:
-        body.close()
-    require(actual == payload, "ReadIntegrityMismatch")
+        try:
+            session.finish_read(success)
+        finally:
+            if body is not None:
+                body.close()
     session.emit(kind="read_integrity", key=key, version_id=version,
                  sha256=hashlib.sha256(actual).hexdigest())
 
@@ -203,7 +250,60 @@ def cleanup_bucket(session, state, result):
         result["remaining_objects"] = receipt.get("remaining_objects")
 
 
-def load_worker(session, bucket, key, write, stop, ready, release, rounds):
+class LoadWindow:
+    """Measure client operation overlap, excluding warmup and scheduling gaps."""
+
+    def __init__(self, workers):
+        self.condition = threading.Condition()
+        self.workers = workers
+        self.active = set()
+        self.finished_workers = 0
+        self.started = None
+        self.finished = None
+        self.results = [{"post_warmup_requests": 0, "overlapping_requests": 0, "overlapping_successes": 0}
+                        for _ in range(workers)]
+
+    def begin_request(self, worker):
+        with self.condition:
+            started = time.monotonic()
+            self.active.add(worker)
+            self.results[worker]["post_warmup_requests"] += 1
+            self.condition.notify_all()
+            return started
+
+    def finish_request(self, worker, started, success):
+        finished = time.monotonic()
+        with self.condition:
+            self.active.remove(worker)
+            if self.started is None:
+                return None
+            overlap = min(finished, self.finished if self.finished is not None else finished) - max(started, self.started)
+            if overlap > 0:
+                span = {"started_monotonic": started, "finished_monotonic": finished, "overlap_seconds": overlap}
+                self.results[worker]["overlapping_requests"] += 1
+                self.results[worker]["overlapping_successes"] += int(success)
+                self.results[worker].setdefault("first_overlap", {**span, "success": success})
+                return span
+        return None
+
+    def finish_worker(self):
+        with self.condition:
+            self.finished_workers += 1
+            self.condition.notify_all()
+
+    def begin_delete(self, deadline):
+        with self.condition:
+            self.condition.wait_for(lambda: self.active or self.finished_workers == self.workers,
+                                    timeout=max(0, deadline - time.monotonic()))
+            require(self.active and time.monotonic() < deadline, "LoadNotActive")
+            self.started = time.monotonic()
+
+    def finish_delete(self):
+        with self.condition:
+            self.finished = time.monotonic()
+
+
+def load_worker(session, bucket, key, write, stop, ready, release, rounds, window, worker):
     result = {"successes": 0, "failures": 0, "first_success": False,
               "started_at": now(), "error_codes": []}
     try:
@@ -211,6 +311,8 @@ def load_worker(session, bucket, key, write, stop, ready, release, rounds):
             if stop.is_set() or time.monotonic() >= session.deadline:
                 break
             try:
+                if index:
+                    session.window, session.worker = window, worker
                 if write:
                     session.call("put_object", Bucket=bucket, Key=key, Body=PAYLOAD)
                 else:
@@ -225,9 +327,18 @@ def load_worker(session, bucket, key, write, stop, ready, release, rounds):
                 if len(result["error_codes"]) < 5:
                     result["error_codes"].append(getattr(exc, "code", type(exc).__name__))
                 break
-            stop.wait(0.01)
+            finally:
+                # Covers malformed responses or diagnostics failures before
+                # read_exact can close a successfully opened response body.
+                session.finish_read(False)
+            # Start post-warmup activity immediately after release. A warmup
+            # success does not establish that any load overlapped the delete.
+            if index:
+                stop.wait(0.01)
     finally:
         result["finished_at"] = now()
+        result.update(window.results[worker])
+        window.finish_worker()
     return result
 
 
@@ -241,6 +352,7 @@ def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=Non
     save(directory / "result.json", result)
     phase, phase_started = "prepare", time.monotonic()
     stop, release = threading.Event(), threading.Event()
+    window = LoadWindow(workers)
     futures, pool = [], None
     deadlines = {}
     def session(endpoint, phase_name, budget):
@@ -252,7 +364,8 @@ def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=Non
         result["phases"].append({"phase": phase, "seconds": round(time.monotonic() - phase_started, 3)})
         phase, phase_started = name, time.monotonic()
     def failed(exc, failure_phase):
-        result["primary_verdict"] = "FAIL"
+        if failure_phase != "recovery":
+            result["primary_verdict"] = "FAIL"
         result.setdefault("failure_phase", failure_phase)
         result.setdefault("error_code", getattr(exc, "code", type(exc).__name__))
         result.setdefault("failures", []).append({"phase": failure_phase,
@@ -297,7 +410,7 @@ def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=Non
                 futures.append(pool.submit(load_worker, session(endpoint, "load", load_budget), bucket,
                                            keys[0] if case_id == "S3C-1307" else CONTROL,
                                            case_id == "S3C-1307", stop, event, release,
-                                           32 if case_id == "S3C-1307" else 4096))
+                                           32 if case_id == "S3C-1307" else 4096, window, index))
             deadline = time.monotonic() + min(10, load_budget)
             for event, future in zip(ready, futures):
                 while not event.is_set() and not future.done() and time.monotonic() < deadline:
@@ -305,9 +418,11 @@ def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=Non
             require(all(event.is_set() and not future.done() for event, future in zip(ready, futures)),
                     "LoadNotReady")
         transition("delete")
-        release.set()
         deletion = session(endpoints[0], phase, request_budget)
+        if loaded:
+            deletion.window = window
         result.update(primary_verdict="PASS", requested_entries=len(objects), distinct_keys=len(keys))
+        release.set()
         try:
             errors = delete_once(deletion, bucket, objects)
             result.update(delete_error_entries=len(errors), delete_errors=errors)
@@ -320,6 +435,14 @@ def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=Non
             pool.shutdown(wait=True)
             pool = None
         result["load"] = [future.result() for future in futures]
+        if loaded:
+            result["load_overlap"] = {
+                "delete_started_monotonic": window.started, "delete_finished_monotonic": window.finished,
+                "successful_requests": sum(row["overlapping_successes"] for row in result["load"]),
+                "successful_workers": sum(row["overlapping_successes"] > 0 for row in result["load"]),
+            }
+            if not result["load_overlap"]["successful_requests"]:
+                failed(RequestFailure("LoadDidNotOverlapDelete"), "load")
         if any(row["failures"] or not row["first_success"] for row in result["load"]):
             failed(RequestFailure("LoadRequestFailed"), "load")
         transition("verify")
@@ -343,7 +466,7 @@ def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=Non
                 for key, version in history.items():
                     read_exact(check, bucket, key, PAYLOAD, version)
             require(len(set(hot_views)) <= 1, "ReplicaViewMismatch")
-        except RequestFailure as exc:
+        except Exception as exc:
             failed(exc, phase)
         if case_id == "S3C-1307":
             transition("recovery")

@@ -10,8 +10,9 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import xml.etree.ElementTree as ET
 
 from scripts import s3_bulk_delete_regressions as probe
@@ -34,6 +35,29 @@ class VersionedS3:
         self.cleanup_failures = 0
         self.after_delete = False
         self.lock = threading.RLock()
+        self.load_counts = Counter()
+        self.bulk_entered = threading.Event()
+        self.load_active = 0
+        self.observed_overlap = False
+
+    def load_request(self):
+        if threading.current_thread() is threading.main_thread():
+            return
+        with self.lock:
+            worker = threading.get_ident()
+            self.load_counts[worker] += 1
+            warmed = self.load_counts[worker] > 1
+        # A successful fixture supplies real post-warmup operations held open
+        # until delete_objects enters, rather than relying on scheduler luck.
+        if warmed:
+            with self.lock:
+                self.load_active += 1
+            try:
+                if not self.bulk_entered.wait(2):
+                    raise S3Error("FixtureDeleteNotStarted", 500)
+            finally:
+                with self.lock:
+                    self.load_active -= 1
 
     def append(self, key, body, marker=False):
         self.counter += 1
@@ -54,6 +78,7 @@ class VersionedS3:
         return {}
 
     def put_object(self, **kwargs):
+        self.load_request()
         with self.lock:
             self.calls.append(("put", kwargs["Key"]))
             version = self.append(kwargs["Key"], kwargs["Body"])
@@ -62,6 +87,7 @@ class VersionedS3:
             return {} if self.status == "off" else {"VersionId": version}
 
     def get_object(self, **kwargs):
+        self.load_request()
         with self.lock:
             rows = self.versions.get(kwargs["Key"], [])
             if "VersionId" in kwargs:
@@ -71,6 +97,14 @@ class VersionedS3:
             body = rows[-1][1]
             if self.mutation == "corrupt" and kwargs["Key"] == probe.CONTROL:
                 body = b"torn-payload"
+            if self.after_delete and kwargs["Key"] == probe.CONTROL and self.mutation in ("read-timeout", "incomplete-read"):
+                from botocore.exceptions import IncompleteReadError, ReadTimeoutError
+                error = (ReadTimeoutError(endpoint_url="http://node.invalid") if self.mutation == "read-timeout"
+                         else IncompleteReadError(actual_bytes=1, expected_bytes=len(body)))
+                self.mutation = None
+                stream = io.BytesIO(body)
+                stream.read = Mock(side_effect=error)
+                return {"Body": stream}
             return {"Body": io.BytesIO(body)}
 
     def head_object(self, **kwargs):
@@ -98,6 +132,10 @@ class VersionedS3:
             return result
 
     def delete_objects(self, **kwargs):
+        if "VersionId" not in kwargs["Delete"]["Objects"][0]:
+            with self.lock:
+                self.observed_overlap |= self.load_active > 0
+            self.bulk_entered.set()
         with self.lock:
             objects = kwargs["Delete"]["Objects"]
             self.calls.append(("delete", objects))
@@ -108,7 +146,7 @@ class VersionedS3:
                 raise S3Error("ServiceUnavailable")
             if not explicit and self.mutation == "interrupt":
                 raise KeyboardInterrupt()
-            failed = self.mutation == "object-error" and not explicit
+            failed = self.mutation in ("object-error", "incomplete-object-error") and not explicit
             if explicit and self.mutation in ("cleanup-retry", "cleanup-blocked"):
                 failed = self.mutation == "cleanup-blocked" or self.cleanup_failures == 0
                 self.cleanup_failures += 1
@@ -129,7 +167,7 @@ class VersionedS3:
                 else:
                     self.append(key, b"", marker=True)
                 response["Deleted"].append(dict(obj))
-            if not explicit and self.mutation == "missing-ack":
+            if not explicit and self.mutation in ("missing-ack", "incomplete-object-error"):
                 response["Deleted"].pop()
             return response
 
@@ -168,6 +206,16 @@ class BulkDeleteTests(unittest.TestCase):
                     self.assertTrue(any(row.get("kind") == "operation_time" and row["phase"] == "delete" for row in events))
                     if case_id == "S3C-1307":
                         self.assertEqual(result["recovery"], "PASS")
+                    if case_id in ("S3C-1306", "S3C-1307"):
+                        self.assertTrue(fake.observed_overlap)
+                        self.assertGreater(result["load_overlap"]["successful_requests"], 0)
+                        overlapping = [row for row in events if row.get("kind") == "load_overlap" and row["success"]]
+                        self.assertTrue(overlapping)
+                        interval = result["load_overlap"]
+                        for row in overlapping:
+                            self.assertLess(row["started_monotonic"], interval["delete_finished_monotonic"])
+                            self.assertGreater(row["finished_monotonic"], interval["delete_started_monotonic"])
+                            self.assertGreater(row["overlap_seconds"], 0)
                     if case_id == "S3C-214":
                         batches = [row for operation, row in fake.calls if operation == "delete"]
                         self.assertEqual(Counter(row["Key"] for row in batches[0])["target/0000"], 16)
@@ -193,6 +241,138 @@ class BulkDeleteTests(unittest.TestCase):
         self.assertEqual(response["request_id"], "failed-request")
         self.assertEqual(response["sdk_retries"], 0)
         self.assertEqual(result["cleanup"], "PASS")
+
+    def test_incomplete_mixed_response_keeps_per_object_error_evidence(self):
+        result, _, events = self.run_probe(mutation="incomplete-object-error")
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["error_code"], "IncompleteDeleteResponse")
+        self.assertEqual(result["service_unavailable_entries"], 1)
+        self.assertEqual(result["http_503_responses"], 0)
+        response = next(row for row in events if row.get("kind") == "delete_response" and row["phase"] == "delete")
+        self.assertEqual(response["errors"], [{"Key": "target/0000", "Code": "ServiceUnavailable"}])
+        self.assertEqual(response["deleted"], [{"Key": "target/0001"}])
+        self.assertFalse(response["complete"])
+        self.assertEqual(result["cleanup"], "PASS")
+
+    def test_load_client_is_reused_until_its_read_timeout_exceeds_remaining_budget(self):
+        factory = Mock(side_effect=lambda remaining: Mock(put_object=Mock(return_value={})))
+        with patch.object(probe.time, "monotonic", return_value=0) as clock:
+            requests = probe.Requests("http://node.invalid", self.root / "reuse-events", 30, "load", factory)
+            for instant in (0, 1, 19, 20):
+                clock.return_value = instant
+                requests.call("put_object", Bucket="owned", Key="hot", Body=b"payload")
+            self.assertEqual(factory.call_count, 1)
+            original = requests.s3
+            clock.return_value = 21
+            requests.call("put_object", Bucket="owned", Key="hot", Body=b"payload")
+            self.assertIsNot(requests.s3, original)
+            self.assertEqual(factory.call_args.args, (9,))
+
+    def test_loaded_case_with_only_warmup_cannot_pass(self):
+        worker = probe.load_worker
+        def warmup_only(*args):
+            arguments = list(args)
+            arguments[7] = 1
+            return worker(*arguments)
+        for case_id in ("S3C-1306", "S3C-1307"):
+            with self.subTest(case_id=case_id), patch.object(probe, "load_worker", warmup_only):
+                result, fake, _ = self.run_probe(case_id=case_id)
+                self.assertEqual(result["verdict"], "FAIL")
+                self.assertEqual(result["error_code"], "LoadNotActive")
+                self.assertFalse(fake.observed_overlap)
+                self.assertEqual(result["load_overlap"]["successful_requests"], 0)
+                self.assertTrue(all(row["successes"] == 1 and row["post_warmup_requests"] == 0 for row in result["load"]))
+                self.assertEqual(result["cleanup"], "PASS")
+
+    def test_completed_post_warmup_requests_cannot_substitute_for_overlap(self):
+        # Reproduce a scheduling gap before the actual delete invocation:
+        # every load request has already returned when deletion begins.
+        original = probe.LoadWindow.begin_delete
+        def after_workers(window, deadline):
+            with window.condition:
+                finished = window.condition.wait_for(lambda: window.finished_workers == window.workers, timeout=2)
+            self.assertTrue(finished)
+            original(window, deadline)
+        worker = probe.load_worker
+        def two_rounds(*args):
+            arguments = list(args)
+            arguments[7] = 2
+            return worker(*arguments)
+        for case_id in ("S3C-1306", "S3C-1307"):
+            with self.subTest(case_id=case_id), patch.object(probe, "load_worker", two_rounds), \
+                    patch.object(probe.LoadWindow, "begin_delete", after_workers), \
+                    patch.object(VersionedS3, "load_request", lambda _self: None):
+                result, _, _ = self.run_probe(case_id=case_id)
+                self.assertEqual(result["verdict"], "FAIL")
+                self.assertEqual(result["load_overlap"]["successful_requests"], 0)
+                self.assertTrue(all(row["post_warmup_requests"] == 1 for row in result["load"]))
+                self.assertEqual(result["cleanup"], "PASS")
+
+    def test_recorded_overlap_uses_intersection_not_total_request_duration(self):
+        for started, finished, expected in ((1, 4, 2), (3, 6, 2), (0, 1, 0), (5, 7, 0)):
+            with self.subTest(started=started, finished=finished):
+                window = probe.LoadWindow(1)
+                window.started, window.finished = 2, 5
+                with patch.object(probe.time, "monotonic", return_value=started):
+                    entered = window.begin_request(0)
+                with patch.object(probe.time, "monotonic", return_value=finished):
+                    overlap = window.finish_request(0, entered, True)
+                self.assertEqual(overlap["overlap_seconds"] if overlap else 0, expected)
+
+    def test_stream_remains_active_until_body_is_consumed_and_closed(self):
+        fake = VersionedS3()
+        fake.put_object(Key=probe.CONTROL, Body=probe.PAYLOAD)
+        window = probe.LoadWindow(1)
+        requests = probe.Requests("http://node.invalid", self.root / "stream-events", 30, "load", lambda _: fake)
+        requests.window, requests.worker = window, 0
+        body = io.BytesIO(probe.PAYLOAD)
+        read = body.read
+        def during_read(size):
+            self.assertIn(0, window.active)
+            window.begin_delete(time.monotonic() + 1)
+            window.finish_delete()
+            return read(size)
+        body.read = during_read
+        with patch.object(fake, "get_object", return_value={"Body": body}):
+            probe.read_exact(requests, "owned", probe.CONTROL, probe.PAYLOAD)
+        self.assertTrue(body.closed)
+        self.assertFalse(window.active)
+        self.assertEqual(window.results[0]["overlapping_successes"], 1)
+
+    def test_overlap_diagnostic_failure_still_closes_the_stream(self):
+        body = io.BytesIO(probe.PAYLOAD)
+        requests = probe.Requests("http://node.invalid", self.root / "close-events", 30, "load")
+        with patch.object(requests, "call", return_value={"Body": body}), \
+                patch.object(requests, "finish_read", side_effect=OSError("fixture evidence failure")):
+            with self.assertRaises(OSError):
+                probe.read_exact(requests, "owned", probe.CONTROL, probe.PAYLOAD)
+        self.assertTrue(body.closed)
+
+    def test_recovery_failure_does_not_change_a_passed_primary_verdict(self):
+        original = probe.Requests.call
+        def fail_recovery(requests, operation, **arguments):
+            if requests.phase == "recovery" and operation == "put_object":
+                raise probe.RequestFailure("RecoveryFixtureFailure")
+            return original(requests, operation, **arguments)
+        with patch.object(probe.Requests, "call", fail_recovery):
+            result, _, _ = self.run_probe(case_id="S3C-1307")
+        self.assertEqual(result["primary_verdict"], "PASS")
+        self.assertEqual(result["recovery"], "FAIL")
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["failure_phase"], "recovery")
+        self.assertEqual(result["cleanup"], "PASS")
+
+    def test_streamed_verification_failures_still_run_same_key_recovery(self):
+        for mutation, code in (("read-timeout", "ReadTimeoutError"), ("incomplete-read", "IncompleteReadError")):
+            with self.subTest(mutation=mutation):
+                result, _, events = self.run_probe(case_id="S3C-1307", mutation=mutation)
+                self.assertEqual(result["failure_phase"], "verify")
+                self.assertEqual(result["error_code"], code)
+                self.assertEqual(result["primary_verdict"], "FAIL")
+                self.assertEqual(result["verdict"], "FAIL")
+                self.assertEqual(result["recovery"], "PASS")
+                self.assertTrue(any(row.get("kind") == "s3_request" and row["phase"] == "recovery" for row in events))
+                self.assertEqual(result["cleanup"], "PASS")
 
     def test_real_s3_responses_keep_entry_counts_and_disable_transport_retries(self):
         calls = []
