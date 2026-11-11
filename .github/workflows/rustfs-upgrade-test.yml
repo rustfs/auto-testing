@@ -74,7 +74,7 @@ defaults:
 env:
   RUSTFS_ACCESS_KEY: ${{ secrets.RUSTFS_ACCESS_KEY }}
   RUSTFS_SECRET_KEY: ${{ secrets.RUSTFS_SECRET_KEY }}
-  RUSTFS_NODES: ${{ secrets.RUSTFS_NODES || vars.RUSTFS_NODES }}
+  RUSTFS_NODES: ${{ secrets.RUSTFS_NODES || vars.RUSTFS_NODES || 'vm000 vm001 vm002 vm003' }}
   RUSTFS_SSH_USER: ${{ secrets.RUSTFS_SSH_USER || vars.RUSTFS_SSH_USER }}
   RUSTFS_NIGHTLY_PACKAGE_URL: ${{ vars.RUSTFS_NIGHTLY_PACKAGE_URL || 'https://dl.rustfs.com/artifacts/rustfs/packages/nightly/rustfs-nightly-latest.deb' }}
   PF_TESTING_GH_TOKEN: ${{ secrets.PF_TESTING_GH_TOKEN }}
@@ -133,7 +133,7 @@ jobs:
         if: ${{ inputs.cleanup_before != 'false' || github.event_name != 'workflow_dispatch' }}
         run: |
           set -euo pipefail
-          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
+          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002 vm003}"
           SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
           for node in "${NODES[@]}"; do
             ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${SSH_USER}@${node}" '
@@ -415,7 +415,7 @@ jobs:
         if: ${{ always() && (inputs.cleanup_after != 'false' || github.event_name != 'workflow_dispatch') && steps.environment.outcome == 'success' }}
         run: |
           set -euo pipefail
-          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
+          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002 vm003}"
           SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
           for node in "${NODES[@]}"; do
             ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${SSH_USER}@${node}" '
@@ -436,7 +436,14 @@ jobs:
         env:
           FUNCTIONAL_ENVIRONMENT_RECEIPT: ${{ runner.temp }}/environment-upgrade.json
           CLEANUP_OUTCOME: ${{ steps.environment_cleanup.outcome }}
-        run: python3 scripts/functional_environment.py finish --suite upgrade --cleanup-outcome "$CLEANUP_OUTCOME"
+        run: |
+          # The outer node cleanup cannot prove Vault cleanup or that the
+          # interrupted suite cleaned every resource it touched.
+          if ! python3 scripts/upgrade_evidence.py check-cleanup \
+            --state-file "${FUNCTIONAL_ARTIFACTS_DIR}/upgrade/fleet-cleanup.state"; then
+            CLEANUP_OUTCOME=failure
+          fi
+          python3 scripts/functional_environment.py finish --suite upgrade --cleanup-outcome "$CLEANUP_OUTCOME"
 
       - name: Retain environment ownership and cleanup receipt
         if: ${{ always() }}

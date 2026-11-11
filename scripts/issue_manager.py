@@ -167,8 +167,8 @@ def classify(outcome: str, cases: dict, log: Path | None) -> tuple[str, str]:
         return "env", "no case results were recorded"
     fail = [c for c, v in cases.items() if "FAIL" in v["statuses"]]
     pas = [c for c, v in cases.items() if "PASS" in v["statuses"] and "FAIL" not in v["statuses"]]
-    if not fail and any("NOT_RUN" in value["statuses"] for value in cases.values()):
-        return "env", "upgrade matrix incomplete; cases were not executed"
+    if not fail:
+        return "env", "suite failed without failing case IDs; preparation, diagnostics or cleanup incomplete"
     if not pas and len(fail) >= 3:
         return "env", f"wholesale failure (0 passed, {len(fail)} failed)"
     if log and log.exists():

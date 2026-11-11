@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
+SENSITIVE_FIELD = r"(?:authorization|(?:secret|access)[ _-]?(?:access[ _-]?)?key(?:[ _-]?id)?|(?:session[ _-]?|vault[ _-]?|root[ _-]?)?token|password|client[ _-]?secret|master[ _-]?key)"
+
 
 def redact(text: str, golden: Path | None = None) -> str:
     values = [value for key, value in os.environ.items()
@@ -24,9 +26,10 @@ def redact(text: str, golden: Path | None = None) -> str:
     for value in sorted(set(values), key=len, reverse=True):
         if value:
             text = text.replace(value, "[REDACTED]")
-    return re.sub(r"(?im)^.*(?:authorization|secret[ _-]?(?:access[ _-]?)?key|"
-                  r"session[ _-]?token|password|client[ _-]?secret|vault[ _-]?token|"
-                  r"master[ _-]?key)\s*[=:].*$", "[REDACTED SENSITIVE LINE]", text)
+    # Node logs arrive as strings, including JSON embedded in journal lines
+    # and JSON-escaped quotes. Unknown credentials cannot rely on golden/env.
+    return re.sub(r"(?im)^.*\b" + SENSITIVE_FIELD + r"(?:\\?[\"'])?\s*[=:].*$",
+                  "[REDACTED SENSITIVE LINE]", text)
 
 
 def write_json(path: Path, value) -> None:
@@ -136,9 +139,17 @@ def check_body(manifest: Path, key: str, body: Path):
         raise ValueError("seed content changed")
 
 
+def check_cleanup(state_file: Path):
+    # A missing or interrupted receipt must never authorize fleet release.
+    if state_file.read_text().strip() not in ("PASS", "NOT_TOUCHED"):
+        raise ValueError("upgrade cleanup incomplete; fleet remains quarantined")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    cleanup = commands.add_parser("check-cleanup")
+    cleanup.add_argument("--state-file", type=Path, required=True)
     delete = commands.add_parser("validate-delete")
     for name in ("request", "response", "debug", "output"):
         delete.add_argument("--" + name, type=Path, required=True)
@@ -162,7 +173,9 @@ def main():
     try:
         if args.command == "validate-delete":
             return 0 if validate_delete(args.request, args.response, args.debug, args.exit_code, args.output) else 1
-        if args.command == "sanitize":
+        if args.command == "check-cleanup":
+            check_cleanup(args.state_file)
+        elif args.command == "sanitize":
             raw = args.input.read_text(errors="replace")
             try:
                 raw = json.dumps(safe_value(json.loads(raw), args.golden), ensure_ascii=False, indent=2)

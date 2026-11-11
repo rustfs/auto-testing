@@ -58,6 +58,12 @@ class ResolutionTests(unittest.TestCase):
         for outcome in ("cancelled", "skipped"):
             self.assertEqual(manager.classify(outcome, {}, None)[0], "noop")
 
+    def test_failed_run_with_only_passing_cases_is_harness_failure(self):
+        for statuses in ({"PASS"}, {"PASS", "NOT_RUN"}, {"RUNNING"}):
+            with self.subTest(statuses=statuses):
+                cases = {"UPG-101": {"statuses": statuses}}
+                self.assertEqual(manager.classify("failure", cases, None)[0], "env")
+
 
 if __name__ == "__main__":
     unittest.main()

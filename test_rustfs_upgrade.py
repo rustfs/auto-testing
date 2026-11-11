@@ -130,8 +130,17 @@ docker() { echo 'unexpected Docker' >&2; exit 90; }
 rc() { echo 'unexpected rc' >&2; exit 90; }
 aws() { echo 'unexpected aws' >&2; exit 90; }
 warp() { echo 'unexpected warp' >&2; exit 90; }
-need_cmd() { :; }
-vault_stop() { printf 'vault-stop\n' >> "$TEST_TRACE"; }
+need_cmd() {
+  if [ "$TEST_MODE" = preflight ] && [ "$1" = aws ]; then die 'fixture missing AWS CLI'; fi
+  if [ "$TEST_MODE" = preflight-python ] && [ "$1" = "$UPGRADE_PYTHON" ]; then
+    UPGRADE_PYTHON=fixture-nonexistent-python
+    die 'fixture missing Python'
+  fi
+}
+vault_stop() {
+  printf 'vault-stop\n' >> "$TEST_TRACE"
+  if [ "$TEST_MODE" = vault-cleanup ] && [ "$CURRENT_PHASE" = CLEANUP ]; then return 1; fi
+}
 vault_start() { :; }
 env_setup_old() { OLD_VERSION_ACTUAL=old; }
 seed_golden() {
@@ -236,12 +245,134 @@ main --all-topologies -y --artifacts-dir "$TEST_ARTIFACTS" "$@"
         self.assertEqual(trace, "")
         self.assertEqual((self.directory / "artifacts/results.json").read_text(), old_report)
 
+    def test_preflight_records_the_plan_without_touching_environment(self):
+        for mode in ("preflight", "preflight-python"):
+            with self.subTest(mode=mode):
+                shutil.rmtree(self.directory / "artifacts", ignore_errors=True)
+                result, data, trace = self.lifecycle(mode)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(trace, "")
+                artifacts = self.directory / "artifacts"
+                self.assertEqual(len((artifacts / "plan.tsv").read_text().splitlines()), 6)
+                self.assertEqual((artifacts / "fleet-cleanup.state").read_text().strip(), "NOT_TOUCHED")
+                log = (artifacts / "events.log").read_text()
+                self.assertEqual(log.count("[NOT_RUN]"), 108)
+                self.assertIn("PREPARE_FAILED", log)
+                if mode == "preflight-python":
+                    self.assertIsNone(data)
+                    self.assertFalse(report.generate_report(artifacts / "events.log", artifacts / "cases.md",
+                                                           artifacts / "matrix.md", artifacts / "results.json"))
+                    data = json.loads((artifacts / "results.json").read_text())
+                self.assertEqual(data["counts"]["NOT_RUN"], 108)
+
+    def test_cleanup_receipt_blocks_release_for_nodes_and_vault(self):
+        for mode in ("pass", "cleanup", "vault-cleanup"):
+            with self.subTest(mode=mode):
+                shutil.rmtree(self.directory / "artifacts", ignore_errors=True)
+                _, _, _ = self.lifecycle(mode)
+                path = self.directory / "artifacts/fleet-cleanup.state"
+                if mode == "pass":
+                    evidence.check_cleanup(path)
+                else:
+                    self.assertEqual(path.read_text().strip(), "FAIL")
+                    with self.assertRaises(ValueError):
+                        evidence.check_cleanup(path)
+        for state in ("PENDING", "RETAINED", "", "garbage"):
+            path.write_text(state)
+            with self.assertRaises(ValueError):
+                evidence.check_cleanup(path)
+        path.unlink()
+        with self.assertRaises(OSError):
+            evidence.check_cleanup(path)
+
+    def test_workflow_release_gate_leaves_fleet_quarantined(self):
+        workflow = (ROOT / ".github/workflows/rustfs-upgrade-test.yml").read_text()
+        gate = workflow.split("      - name: Release environment only after successful cleanup", 1)[1].split("      - name:", 1)[0]
+        block = gate.split("        run: |\n", 1)[1]
+        command = "\n".join(line[10:] for line in block.splitlines())
+        state = self.directory / "upgrade/fleet-cleanup.state"
+        state.parent.mkdir()
+        # Execute the actual workflow gate through the real transition function
+        # with node operations replaced by an in-memory quarantine fixture.
+        script = self.directory / "python3"
+        script.write_text(f'''#!{sys.executable}
+import json,os,sys
+from pathlib import Path
+sys.path.insert(0, {str(ROOT / 'scripts')!r})
+import functional_environment as fleet
+if sys.argv[1].endswith('functional_environment.py'):
+    calls=[]
+    try:
+        fleet.transition('finish','upgrade',os.environ,sys.argv[-1],execute=lambda *args:calls.append(args))
+    except ValueError:
+        Path(os.environ['TEST_GATE_CALLS']).write_text(json.dumps(calls))
+        raise SystemExit(1)
+    Path(os.environ['TEST_GATE_CALLS']).write_text(json.dumps(calls))
+else:
+    os.execv(sys.executable,[sys.executable,*sys.argv[1:]])
+''')
+        script.chmod(0o755)
+        for clean in ("PASS", "FAIL", "PENDING", None):
+            if clean is None:
+                state.unlink()
+            else:
+                state.write_text(clean)
+            result = self.bash(command, PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
+                               FUNCTIONAL_ARTIFACTS_DIR=str(self.directory), CLEANUP_OUTCOME="success",
+                               GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1", RUSTFS_NODES="vm000 vm001 vm002 vm003",
+                               FUNCTIONAL_ENVIRONMENT_RECEIPT=str(self.directory / "ownership.json"),
+                               TEST_GATE_CALLS=str(self.directory / "calls.json"))
+            receipt = json.loads((self.directory / "ownership.json").read_text())
+            calls = json.loads((self.directory / "calls.json").read_text())
+            if clean == "PASS":
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(receipt["state"], "clean")
+                self.assertEqual(receipt["completed_nodes"], ["vm000", "vm001", "vm002", "vm003"])
+            else:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(receipt["state"], "quarantined")
+                self.assertEqual(calls, [])
+
     def test_report_legacy_context_and_missing_cleanup_evidence(self):
         log, cases, matrix = (self.directory / name for name in ("log", "cases.md", "matrix.md"))
         log.write_text("[INFO] == topology: single kms-backend: local ==\n--- UPG-101 case ---\n[PASS] UPG-101\n[UPG-TOPO] single local old new PASS=1 FAIL=0\n")
         self.assertTrue(report.generate_report(log, cases, matrix))
         log.write_text(log.read_text() + "[UPG-STATE] single local old new PASS\n")
         self.assertFalse(report.generate_report(log, cases, matrix))
+
+    def test_truncated_or_duplicate_matrix_never_reports_success(self):
+        artifacts = self.directory / "artifacts"
+        _, data, _ = self.lifecycle()
+        log = artifacts / "events.log"
+        original = log.read_text()
+        second = original.index("[INFO] == topology: single-multi")
+        last_state = original.rindex("[UPG-STATE]")
+        mutations = {
+            "later prepare": original[:second],
+            "last cleanup": original[:last_state],
+            "all missing states": "\n".join(line for line in original.splitlines() if not line.startswith("[UPG-STATE]")),
+            "missing diagnostic": "\n".join(line for line in original.splitlines() if not line.startswith("[UPG-DIAGNOSTICS]")),
+            "missing cleanup": "\n".join(line for line in original.splitlines() if not line.startswith("[UPG-CLEANUP]")),
+            "duplicate group": original + "[UPG-STATE] single-single local old new PASS\n",
+            "duplicate case": original + "--- UPG-101 duplicate ---\n[PASS] UPG-101\n",
+            "truncated plan": original[:original.index("[UPG-PLAN-END]")],
+        }
+        for label, text in mutations.items():
+            with self.subTest(label=label):
+                log.write_text(text)
+                self.assertFalse(report.generate_report(log, artifacts / "cases.md", artifacts / "matrix.md",
+                                                       artifacts / "results.json"))
+                data = json.loads((artifacts / "results.json").read_text())
+                self.assertEqual(data["status"], "FAIL")
+                self.assertGreaterEqual(len(data["cases"]), 108)
+        log.write_text(original)
+        self.assertTrue(report.generate_report(log, artifacts / "cases.md", artifacts / "matrix.md"))
+        # With no sidecar, only a completely bounded embedded plan is usable.
+        standalone = self.directory / "standalone.log"
+        standalone.write_text(original)
+        self.assertTrue(report.generate_report(standalone, artifacts / "cases.md", artifacts / "matrix.md"))
+        standalone.write_text(original.replace("[UPG-PLAN-END] 6", ""))
+        self.assertFalse(report.generate_report(standalone, artifacts / "cases.md", artifacts / "matrix.md"))
 
     def test_diagnostics_archive_is_sanitized_even_when_ssh_fails(self):
         golden = self.directory / "golden.tsv"
@@ -258,6 +389,7 @@ KMS_BACKUP_KEK="$UPGRADE_TEST_TOKEN"
 ACCESS_KEY=fixture-access
 SECRET_KEY="$UPGRADE_TEST_TOKEN"
 DIAGNOSTICS_DONE=0
+DIAGNOSTICS_STATUS=NOT_RUN
 DRY_RUN=0
 CURRENT_TOPO=multi-multi
 SSH_OPTS=()
@@ -279,6 +411,64 @@ collect_upgrade_diagnostics
             for secret in (CANARY, "sa-access-canary", "sa-secret-canary"):
                 self.assertNotIn(secret, text)
             self.assertIn("REDACTED", text)
+
+    def test_unknown_quoted_credentials_and_generic_tokens_are_redacted(self):
+        unknown = "UNKNOWN_NEW_CREDENTIAL_CANARY"
+        for key in ("secretKey", "secret_key", "SecretAccessKey", "token", "root_token", "sessionToken",
+                    "vaultToken", "password", "masterKey", "accessKeyId", "Authorization"):
+            for line in (f'journal prefix {{"{key}":"{unknown}"}}',
+                         f'journal prefix {{\\"{key}\\":\\"{unknown}\\"}}',
+                         f'{key}={unknown}', f"'{key}': '{unknown}'"):
+                with self.subTest(key=key, line=line):
+                    self.assertNotIn(unknown, evidence.redact(line))
+        raw = self.directory / "raw.log"
+        safe = self.directory / "safe.log"
+        raw.write_text(json.dumps({"journal": f'prefix {{"token":"{unknown}"}}',
+                                   "file_logs": [{"content": f'{{"secretKey":"{unknown}"}}'}]}))
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/upgrade_evidence.py"), "sanitize",
+                                 "--input", str(raw), "--output", str(safe)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(unknown, safe.read_text())
+
+    def test_interrupted_diagnostics_do_not_become_pass_on_exit_reentry(self):
+        source = SOURCE.removesuffix('main "$@"\n')
+        body = source + r'''
+SCRIPT_DIR="$TEST_ROOT"
+UPGRADE_PYTHON="$TEST_PYTHON"
+ARTIFACTS_DIR="$TEST_DIRECTORY/artifacts"
+mkdir "$ARTIFACTS_DIR"
+GROUP_DIR="$ARTIFACTS_DIR/current"
+mkdir "$GROUP_DIR"
+ARTIFACTS_READY=1
+: > "$ARTIFACTS_DIR/events.log"
+UPGRADE_GROUPS=(multi-multi/local)
+GROUP_ACTIVE=1
+CURRENT_TOPO=multi-multi
+KMS_BACKEND=local
+CURRENT_PHASE=CLEANUP
+CURRENT_RESULT=PASS
+DIAGNOSTICS_DONE=0
+DIAGNOSTICS_STATUS=NOT_RUN
+topology_nodes() { echo 'node1 node2'; }
+timeout() { shift; "$@"; }
+ssh() {
+  cat > /dev/null
+  printf 'first-node\n' >> "$TEST_DIRECTORY/trace"
+  kill -TERM "$$"
+}
+env_teardown() { printf 'cleanup\n' >> "$TEST_DIRECTORY/trace"; }
+record_upgrade_cleanup PENDING
+finish_upgrade_group
+'''
+        result = self.bash(body, TEST_DIRECTORY=str(self.directory), TEST_ROOT=str(ROOT), TEST_PYTHON=sys.executable,
+                           TMPDIR=str(self.directory))
+        self.assertNotEqual(result.returncode, 0)
+        log = (self.directory / "artifacts/events.log").read_text()
+        self.assertIn("[UPG-DIAGNOSTICS] multi-multi local FAIL", log)
+        self.assertNotIn("[UPG-DIAGNOSTICS] multi-multi local PASS", log)
+        self.assertIn("INTERRUPTED", log)
+        self.assertEqual((self.directory / "trace").read_text(), "first-node\ncleanup\n")
+        self.assertFalse(list(self.directory.glob("rustfs-upgrade.*")))
 
     def test_real_seed_verifier_compares_baseline_beyond_etags(self):
         body = "set -Eeuo pipefail\n" + "\n".join(function(name) for name in ("capture_seed_manifest", "verify_warp_bucket", "assert_aws_ok")) + r'''
@@ -318,12 +508,15 @@ if verify_warp_bucket fixture; then exit 92; fi
         self.assertIn("content changed", result.stdout)
 
     def test_dry_run_skips_every_environment_boundary(self):
-        result, data, trace = self.lifecycle(extra=("--dry-run",))
+        log = self.directory / "prior.log"
+        log.write_text("prior test evidence\n")
+        result, data, trace = self.lifecycle(extra=("--dry-run", "--log-file", str(log)))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsNone(data)
         self.assertEqual(trace, "")
         self.assertEqual(result.stdout.count("[DRY-RUN] UPG-"), 108)
         self.assertNotIn("[PASS]", result.stdout)
+        self.assertEqual(log.read_text(), "prior test evidence\n")
 
 
 @unittest.skipUnless(shutil.which("aws") and shutil.which("jq"), "real AWS CLI and jq required")

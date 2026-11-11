@@ -9,6 +9,8 @@ on:
       - scripts/issue_manager.py
       - scripts/lib/**
       - test_rustfs_upgrade.py
+      - test_issue_manager.py
+      - scripts/functional_environment.py
       - .github/workflows/rustfs-upgrade-test.yml
       - .github/workflows/upgrade-script-tests.yml
   push:
@@ -20,6 +22,8 @@ on:
       - scripts/issue_manager.py
       - scripts/lib/**
       - test_rustfs_upgrade.py
+      - test_issue_manager.py
+      - scripts/functional_environment.py
       - .github/workflows/rustfs-upgrade-test.yml
       - .github/workflows/upgrade-script-tests.yml
 

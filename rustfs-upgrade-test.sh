@@ -39,7 +39,7 @@
 #
 # Environment:
 #   RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY   admin credentials
-#   RUSTFS_NODES / RUSTFS_SSH_USER          shared test VMs (default vm000..002 / azureuser)
+#   RUSTFS_NODES / RUSTFS_SSH_USER          shared test VMs (default vm000..003 / azureuser)
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,10 +60,11 @@ CURRENT_STARTED=" "
 CURRENT_PHASE=PREPARE
 CURRENT_RESULT=""
 DIAGNOSTICS_DONE=0
+DIAGNOSTICS_STATUS=NOT_RUN
 DELETE_BATCH=0
 
 # ==================== Configuration ====================
-NODES=(vm000 vm001 vm002 vm003)
+read -r -a NODES <<<"${RUSTFS_NODES:-vm000 vm001 vm002 vm003}"
 SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
 SSH_PORT="${RUSTFS_SSH_PORT:-22}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "${SSH_PORT}")
@@ -262,6 +263,10 @@ cleanup_node() {
     printf 'if ${SUDO} dpkg -l %s 2>/dev/null | grep -q "^ii"; then ${SUDO} dpkg -P %s; fi\n' "${RUSTFS_PACKAGE_NAME}" "${RUSTFS_PACKAGE_NAME}"
     printf 'for i in 1 2 3 4; do ${SUDO} rm -rf /data/rustfs${i}/mnmd; done\n'
     printf '${SUDO} rm -rf /var/log/rustfs /var/lib/rustfs/kms /var/lib/rustfs/kms-backup\n'
+    printf 'if ${SUDO} systemctl is-active --quiet rustfs; then exit 1; fi\n'
+    printf 'if ${SUDO} dpkg -l rustfs 2>/dev/null | grep -q "^ii"; then exit 1; fi\n'
+    printf 'for i in 1 2 3 4; do [ ! -e /data/rustfs${i}/mnmd ] || exit 1; done\n'
+    printf 'for p in /var/log/rustfs /var/lib/rustfs/kms /var/lib/rustfs/kms-backup; do [ ! -e "$p" ] || exit 1; done\n'
   } | run_remote "${node}"
 }
 
@@ -482,9 +487,10 @@ vault_stop() {
   # modes inside the data dir, so the runner user cannot remove them
   # directly (rm exits 1 under set -e and kills the suite mid-loop).
   if vault_local; then
-    heal_run rm -rf "${VAULT_DATA_DIR}" "${VAULT_CONFIG_DIR}"
+    heal_run rm -rf "${VAULT_DATA_DIR}" "${VAULT_CONFIG_DIR}" || return 1
+    heal_run bash -c '[ ! -e "$1" ] && [ ! -e "$2" ]' -- "${VAULT_DATA_DIR}" "${VAULT_CONFIG_DIR}"
   else
-    vault_remote_bash "rm -rf '${VAULT_DATA_DIR}' '${VAULT_CONFIG_DIR}'"
+    vault_remote_bash "rm -rf '${VAULT_DATA_DIR}' '${VAULT_CONFIG_DIR}' && [ ! -e '${VAULT_DATA_DIR}' ] && [ ! -e '${VAULT_CONFIG_DIR}' ]"
   fi
 }
 
@@ -658,7 +664,12 @@ evidence_line() {
 
 collect_upgrade_diagnostics() {
   [ "${DIAGNOSTICS_DONE}" -eq 0 ] || return 0
-  DIAGNOSTICS_DONE=1
+  if [ "${DIAGNOSTICS_STATUS}" != NOT_RUN ]; then
+    # Re-entry after interruption must preserve an incomplete/failed archive.
+    DIAGNOSTICS_STATUS=FAIL
+    return 1
+  fi
+  DIAGNOSTICS_STATUS=RUNNING
   [ "${DRY_RUN}" -eq 0 ] || return 0
   local node fail=0 nodes=()
   local warp_log
@@ -698,7 +709,15 @@ UPG_DIAGNOSTICS
     then fail=1; fi
     sanitize_upgrade_log "${TEST_TMP}/diagnostic.log" "${GROUP_DIR}/diagnostics-${node}.log" || fail=1
   done
-  return "${fail}"
+  if [ "${fail}" -ne 0 ]; then DIAGNOSTICS_STATUS=FAIL; return 1; fi
+  DIAGNOSTICS_STATUS=PASS
+  DIAGNOSTICS_DONE=1
+  return 0
+}
+
+record_upgrade_cleanup() {
+  printf '%s\n' "$1" >"${ARTIFACTS_DIR}/fleet-cleanup.state.tmp" && \
+    mv "${ARTIFACTS_DIR}/fleet-cleanup.state.tmp" "${ARTIFACTS_DIR}/fleet-cleanup.state"
 }
 
 sanitize_upgrade_log() {
@@ -724,6 +743,7 @@ finish_upgrade_group() {
   evidence_line "[UPG-CLEANUP] ${CURRENT_TOPO} ${KMS_BACKEND} ${cleanup}"
   evidence_line "[UPG-DIAGNOSTICS] ${CURRENT_TOPO} ${KMS_BACKEND} ${diagnostics}"
   evidence_line "[UPG-STATE] ${CURRENT_TOPO} ${KMS_BACKEND} ${OLD_VERSION_ACTUAL:-unknown} ${NEW_VERSION_ACTUAL:-unknown} ${CURRENT_RESULT}"
+  record_upgrade_cleanup "${cleanup}" || fail=1
   GROUP_ACTIVE=0
   return "${fail}"
 }
@@ -758,7 +778,11 @@ upgrade_exit() {
       CURRENT_DONE=" "
       CURRENT_STARTED=" "
       emit_unrun_cases
-      evidence_line "[UPG-STATE] ${topo} ${backend} unknown unknown NOT_RUN"
+      evidence_line "[UPG-CLEANUP] ${topo} ${backend} NOT_TOUCHED"
+      evidence_line "[UPG-DIAGNOSTICS] ${topo} ${backend} NOT_RUN"
+      local unrun_state=NOT_RUN
+      if [ "${index}" -eq 0 ] && [ "${rc}" -ne 0 ]; then unrun_state=PREPARE_FAILED; fi
+      evidence_line "[UPG-STATE] ${topo} ${backend} unknown unknown ${unrun_state}"
     done
     "${UPGRADE_PYTHON}" "${SCRIPT_DIR}/scripts/functional_case_report.py" \
       "${ARTIFACTS_DIR}/events.log" "${ARTIFACTS_DIR}/cases.md" "${ARTIFACTS_DIR}/matrix.md" \
@@ -1554,7 +1578,7 @@ main() {
       *) die "unknown option: ${opt} (see --help)" ;;
     esac
   done
-  if [ -n "${LOG_FILE:-}" ]; then
+  if [ "${DRY_RUN}" -eq 0 ] && [ -n "${LOG_FILE:-}" ]; then
     mkdir -p "$(dirname "${LOG_FILE}")"
     if ! touch "${LOG_FILE}" 2>/dev/null; then
       LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/rustfs-upgrade.XXXXXX.log")"
@@ -1568,23 +1592,6 @@ main() {
   [ "${#SELECTED_TOPOLOGIES[@]}" -gt 0 ] || die "no topology selected (--all-topologies / --topology)"
   IFS=',' read -r -a BACKENDS <<<"${backends_arg}"
   [ "${#BACKENDS[@]}" -gt 0 ] || die "no backends selected (--backends local,vault-kv2)"
-
-  local _p
-  for _p in /root/.local/bin /home/*/.local/bin /usr/local/bin; do
-    if [ -d "${_p}" ] && [[ ":${PATH}:" != *":${_p}:"* ]]; then PATH="${_p}:${PATH}"; fi
-  done
-  export PATH
-  need_cmd ssh "SSH client"
-  need_cmd rc "RustFS client CLI"
-  need_cmd aws "AWS CLI (s3api channel)"
-  need_cmd warp "warp benchmark tool (mixed-size data seeding)"
-  need_cmd jq "JSON processor"
-  need_cmd curl "HTTP client"
-  need_cmd openssl "OpenSSL (SigV4)"
-  need_cmd "${UPGRADE_PYTHON}" "Python for upgrade evidence"
-  need_cmd timeout "bounded diagnostics"
-  log "nodes: ${NODES[*]}  from: $(resolve_from_url)  to: $(resolve_to_url)"
-  log "backends: ${BACKENDS[*]}  topologies: ${SELECTED_TOPOLOGIES[*]}"
 
   confirm "Run upgrade compatibility suite (${SELECTED_TOPOLOGIES[*]}, ${BACKENDS[*]})?"
 
@@ -1614,19 +1621,51 @@ main() {
     mkdir -p "$(dirname "${ARTIFACTS_DIR}")"
     mkdir "${ARTIFACTS_DIR}" || die "artifacts directory must be new: ${ARTIFACTS_DIR}"
     : >"${ARTIFACTS_DIR}/events.log"
+    local planned_group
+    for planned_group in "${UPGRADE_GROUPS[@]}"; do
+      (IFS=,; printf '%s\t%s\t%s\n' "${planned_group%/*}" "${planned_group#*/}" "${UPGRADE_IDS[*]}")
+    done >"${ARTIFACTS_DIR}/plan.tsv.tmp"
+    mv "${ARTIFACTS_DIR}/plan.tsv.tmp" "${ARTIFACTS_DIR}/plan.tsv"
+    record_upgrade_cleanup NOT_TOUCHED
     ARTIFACTS_READY=1
+    evidence_line "[UPG-PLAN-BEGIN] ${#UPGRADE_GROUPS[@]}"
+    while IFS=$'\t' read -r group_topo group_backend planned_group; do
+      evidence_line "[UPG-PLAN] ${group_topo} ${group_backend} ${planned_group}"
+    done <"${ARTIFACTS_DIR}/plan.tsv"
+    evidence_line "[UPG-PLAN-END] ${#UPGRADE_GROUPS[@]}"
   fi
+
+  local _p
+  for _p in /root/.local/bin /home/*/.local/bin /usr/local/bin; do
+    if [ -d "${_p}" ] && [[ ":${PATH}:" != *":${_p}:"* ]]; then PATH="${_p}:${PATH}"; fi
+  done
+  export PATH
+  need_cmd ssh "SSH client"
+  need_cmd rc "RustFS client CLI"
+  need_cmd aws "AWS CLI (s3api channel)"
+  need_cmd warp "warp benchmark tool (mixed-size data seeding)"
+  need_cmd jq "JSON processor"
+  need_cmd curl "HTTP client"
+  need_cmd openssl "OpenSSL (SigV4)"
+  need_cmd "${UPGRADE_PYTHON}" "Python for upgrade evidence"
+  need_cmd timeout "bounded diagnostics"
+  log "nodes: ${NODES[*]}  from: $(resolve_from_url)  to: $(resolve_to_url)"
+  log "backends: ${BACKENDS[*]}  topologies: ${SELECTED_TOPOLOGIES[*]}"
 
   local overall_fail=0 topo backend
   for backend in "${BACKENDS[@]}"; do
     KMS_BACKEND="${backend}"
     for topo in "${SELECTED_TOPOLOGIES[@]}"; do
       CURRENT_TOPO="${topo}"; CURRENT_PHASE=PREPARE; CURRENT_RESULT=""
-      CURRENT_DONE=" "; CURRENT_STARTED=" "; DIAGNOSTICS_DONE=0
+      CURRENT_DONE=" "; CURRENT_STARTED=" "; DIAGNOSTICS_DONE=0; DIAGNOSTICS_STATUS=NOT_RUN
       OLD_VERSION_ACTUAL=unknown; NEW_VERSION_ACTUAL=unknown
       rm -f "${TEST_TMP}"/warp-put-*.log
       GROUP_DIR="${ARTIFACTS_DIR}/${topo}-${backend}"
-      if [ "${ARTIFACTS_READY}" -eq 1 ]; then mkdir "${GROUP_DIR}"; GROUP_ACTIVE=1; fi
+      if [ "${ARTIFACTS_READY}" -eq 1 ]; then
+        mkdir "${GROUP_DIR}"
+        record_upgrade_cleanup PENDING
+        GROUP_ACTIVE=1
+      fi
       evidence_line "[INFO] == topology: ${topo}  kms-backend: ${KMS_BACKEND} =="
       if [ "${KMS_BACKEND}" = "vault-kv2" ]; then
         vault_stop
