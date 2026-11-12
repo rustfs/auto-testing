@@ -1,10 +1,10 @@
-# Heal 真机执行手册：84 项操作卡的公共命令
+# Heal Live Execution Manual: Common Commands for the 84 Procedure Cards
 
-此手册和 [84 项逐例操作卡](validation-heal-cases.md) 一起构成可执行的**人工操作方案 + 脚本辅助**。不是 84 个无人值守自动测试，也不是通过报告。操作卡列出 302 个分支模板；真实盘角色、阈值、损坏数量和拓扑仍需在每批 `parameterBindings` 展开，不能把模板数量当实测次数。
+This manual, together with the [84 per-case procedure cards](validation-heal-cases.md), forms an executable **manual procedure plus script assistance**. It is not 84 unattended automated tests, and it is not a pass report. The procedure cards list 302 branch templates; actual disk roles, thresholds, damage counts, and topologies still have to be expanded in each batch's `parameterBindings`. The template count must not be treated as the number of live measurements.
 
-公共验收契约见 [Heal 规范](validation-heal-contract.md)。源仓库历史 pilot 结果不计入当前 canonical 分母。自动入口 `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` 已接入 67 个 Heal 用例，完整清单通过 `matrix.py list` 查看，以 `automaticExecutor` 为准。入口使用当前 Heal 节点、候选 deb 和独立 H1/H2 服务；其余操作卡仍需按本手册操作留证。
+The common acceptance contract is in the [Heal specification](validation-heal-contract.md). Historical pilot results from the source repository are not counted in the current canonical denominator. The automatic entry point `scripts/run_validation_case.sh CASE_ID CANDIDATE_MANIFEST TESTING_COMMIT ARTIFACTS_DIR` already covers 67 Heal cases. The complete list is viewed with `matrix.py list`, and `automaticExecutor` is authoritative. The entry point uses the current Heal nodes, the candidate deb, and independent H1/H2 services; the remaining procedure cards still have to be carried out, with evidence retained, according to this manual.
 
-## 1. 使用入口与交付物
+## 1. Entry points and deliverables
 
 ```bash
 python scripts/validation_heal/matrix.py list
@@ -16,61 +16,61 @@ python scripts/validation_heal/matrix.py plan --selection A01,A04,C01,C02,C04,J0
   --topologies H1 --run-id manual-heal-20260910-b --out reports/heal-h1-plan.json
 ```
 
-`plan` 只冻结选择/分支和对应操作，不部署、不评分。`show` 同时给出步骤、命令入口、验收和恢复要求。不同拓扑是不同实例；未选拓扑会保留 `scopeExclusions`，不能据局部结果声称全矩阵通过。
+`plan` only freezes the selection, the branches, and the corresponding operations. It does not deploy, and it does not score. `show` also gives the steps, the command entry points, the acceptance criteria, and the recovery requirements. Different topologies are different instances; an unselected topology retains `scopeExclusions`. A partial result must not be claimed as a full-matrix pass.
 
-自动用例通过 RustFS Functional Chain 的 `validation_case` 和精确 `auto_testing_sha` 分发。先用同一不可变候选的 `build_run_id`/`build_run_attempt`、`validation_tools_only=true` 构建只读 metadata inspector；live 分发提供该成功构建的 `validation_tools_run_id` 与 `validation_tools_run_attempt`。工具的 candidate/helper SHA、Linux 二进制 SHA 和独立 Cargo.lock 摘要均须通过检查，再复制到本例节点。普通 live 执行消费构建产物，不需要 RustFS checkout。
+Automatic cases are dispatched through the RustFS Functional Chain `validation_case` and the exact `auto_testing_sha`. First build the read-only metadata inspector from the same immutable candidate's `build_run_id`/`build_run_attempt` with `validation_tools_only=true`. Live dispatch supplies that successful build's `validation_tools_run_id` and `validation_tools_run_attempt`. The tool's candidate/helper SHA, Linux binary SHA, and independent Cargo.lock digest must all pass their checks before they are copied onto this case's nodes. Ordinary live execution consumes the build artifacts and does not need a RustFS checkout.
 
-| 工具 | 已实现的职责 | 不代表什么 |
+| Tool | Implemented responsibility | What it does not represent |
 | --- | --- | --- |
-| `matrix.py` | 84 项/302 分支索引、逐例操作卡、冻结计划、证据完整性审计 | 不自动分配拓扑，不根据文件存在就判 PASS |
-| `heal_probe.py` | 带签名/匿名/坏签名的原始 Admin；受限 S3 操作；全版本/标签/内容摘要清单及比较 | HTTP 检查通过不代表 heal 成功；inventory 的 GET 会触发读修复 |
-| `heal_workload.py` | DB/DV/DM/DS/DX 真实夹具；有界并发、同key前台修改串行、请求前及ACK后持久落盘 | 不替用户推导竞态后的最终版本；超时写必须单独解析 |
-| `heal_fault.py` | Linux 描述符相对寻址、mount ID 保护、单文件 missing/bitflip/truncate/zero/header、快照和恢复 | 文件故障不是物理掉盘；不修改系统 metadata；不盲目恢复新代次 |
-| `prepare_heal_meta_inspector.py` | 为精确候选源码准备只读 Rust metadata 解析器工程 | 需在批准的构建机编译；解析 metadata 不是验证 bitrot/EC |
-| `shards.py` | C01–C04、D02、D07、E01、E02 全 24 分支以及 A03 的两个 H2 跨节点状态分支、A04 的六个 DB/DV dry-run 分支；静默故障、真实角色、同角色原片与 HighwayHash、先物理后 GET/Range、MPU control | 有自动入口不等于候选通过；任务 unknown、目标只恢复 metadata 或救援备份均不能记 PASS |
-| `check_bitrot_tool.py` | 在固定 MinIO/历史 RustFS 产物上检查 24 个健康片和 12 个坏片负例 | 工具验证不等于 live 用例通过；不调用被测 RustFS 服务 |
+| `matrix.py` | Index of the 84 items and 302 branches, per-case procedure cards, frozen plans, and evidence-completeness audits | It does not assign topologies automatically, and it does not judge PASS merely because a file exists |
+| `heal_probe.py` | Raw Admin with a signature, anonymous access, or a bad signature; restricted S3 operations; full-version, tag, and content-digest inventories and comparison | An HTTP check passing does not mean heal succeeded; an inventory GET triggers read-repair |
+| `heal_workload.py` | Real DB/DV/DM/DS/DX fixtures; bounded concurrency, serial foreground mutation of the same key, and durable persistence before the request and after the ACK | It does not derive the post-race final version for the user; a timed-out write must be resolved separately |
+| `heal_fault.py` | Linux descriptor-relative addressing, mount-ID protection, single-file missing/bitflip/truncate/zero/header, snapshots, and recovery | A file fault is not a physical disk loss; it does not modify system metadata; it does not blindly restore a new generation |
+| `prepare_heal_meta_inspector.py` | Prepares a read-only Rust metadata parser project for the exact candidate source | It must be compiled on an approved build machine; parsing metadata is not verification of bitrot or EC |
+| `shards.py` | All 24 branches of C01–C04, D02, D07, E01, and E02, plus A03's two H2 cross-node state branches and A04's six DB/DV dry-run branches; quiescent faults, real roles, same-role original shards and HighwayHash, physical checks before GET/Range, and MPU control | An automatic entry point does not mean the candidate passed; a task that is unknown, a target that only restores metadata, or a rescued backup cannot be recorded as PASS |
+| `check_bitrot_tool.py` | Checks 24 healthy shards and 12 bad-shard negative cases against fixed MinIO and historical RustFS artifacts | Tool verification is not a live case pass; it does not call the RustFS service under test |
 
-## 2. 先绑定环境，禁止直接猜节点
+## 2. Bind the environment first; do not guess nodes directly
 
-live 命令使用当前 auto-testing 的 `smoke-testing` runner、`RUSTFS_NODES` 和 `RUSTFS_SSH_USER`，复用 `rustfs_heal_test.sh` 的 Heal 节点。运行前取得与 Functional Chain 一致的共享节点并发锁。H1–H6 是测试拓扑要求，不是另一组 SSH 主机；不得按源仓库历史主机名或 IP 选择机器。
+Live commands use the current auto-testing `smoke-testing` runner, `RUSTFS_NODES`, and `RUSTFS_SSH_USER`, and they reuse the Heal nodes of `rustfs_heal_test.sh`. Before a run, acquire the shared node concurrency lock that matches the Functional Chain. H1–H6 are test-topology requirements, not another set of SSH hosts. Machines must not be chosen by historical hostnames or IP addresses from the source repository.
 
-### Runner 无法接单时的只读诊断
+### Read-only diagnosis when the runner cannot accept work
 
-RustFS Functional Chain 提供 `validation_runner_inspect_only=true` 入口。它在 `ubuntu-latest` 上读取 GitHub 的 runner 注册信息与活动任务，使用独立并发组，不占用或替换测试 fleet 队列。一次请求只能选择该模式，不同时传入 candidate、tools、case 或 recovery 参数；使用包含此入口的已审核 workflow ref：
+The RustFS Functional Chain provides the `validation_runner_inspect_only=true` entry point. On `ubuntu-latest` it reads GitHub runner registration information and active jobs, uses an independent concurrency group, and neither occupies nor replaces the test fleet queue. A single request may select only this mode, and must not also pass candidate, tools, case, or recovery parameters. Use a reviewed workflow ref that contains this entry point:
 
 ```bash
 gh workflow run rustfs-functional-chain.yml --repo rustfs/rustfs \
   --ref "$VALIDATION_DRIVER_REF" -f validation_runner_inspect_only=true
 ```
 
-下载该次 `validation-runner-inspection-<runId>-<attempt>` artifact，核对 `workflowCommit`、`runId`、`runAttempt`、`observedAt`、`complete` 和 `runnerAvailability`。`offline`、`online-busy`、`online-idle`、`unregistered` 是 GitHub 注册状态的不同观察；API 拒绝、分页超过上限或其他错误保留 `complete=false` 与失败阶段，不能解释为空闲。报告不连接节点、不重启服务、不清理文件、不取消 workflow，也不证明环境已恢复或共享 workflow 全局空闲。runner 服务恢复后，仍需重新执行资源检查及原有现场/并发门控。
+Download that run's `validation-runner-inspection-<runId>-<attempt>` artifact and check `workflowCommit`, `runId`, `runAttempt`, `observedAt`, `complete`, and `runnerAvailability`. `offline`, `online-busy`, `online-idle`, and `unregistered` are distinct observations of GitHub registration state. An API rejection, pagination past the limit, or any other error retains `complete=false` and the failure stage, and must not be interpreted as idle. The report does not connect to nodes, does not restart services, does not clean up files, and does not cancel workflows, and it does not prove that the environment has recovered or that the shared workflow is globally idle. After the runner service recovers, the resource checks and the original scene and concurrency gates still have to be executed again.
 
-用 `matrix.py plan` 冻结当前 SSH 节点与所有适用操作分支，再根据本次只读 preflight 填写私有 `lab.json`。计划中的 `verified:false` 不可直接改成资源验证通过。H4 需要至少 24 个已分配独立盘端点；H6 需要独占主机及平台事件/恢复绑定。缺少资源的分支保留为 BLOCKED。
+Use `matrix.py plan` to freeze the current SSH nodes and every applicable operation branch, then fill in the private `lab.json` from this read-only preflight. `verified:false` in the plan must not be rewritten directly as a passed resource verification. H4 requires at least 24 allocated independent disk endpoints. H6 requires an exclusive host and bindings for platform events and recovery. A branch that lacks resources remains BLOCKED.
 
-填写内容须包含：
+The filled-in contents must include:
 
-- 本批 run ID、截止时间、独占服务/端口、jump route、实际主机名、每个磁盘的 mount UUID/major:minor、服务 unit/原 PID/数据根；
-- 与当前 validation lane 相同的不可变 candidate manifest、源码 commit、包与已安装二进制 SHA-256；当前 rc 路径与二进制 SHA-256；auto-testing commit；保存真实构建清单，不只填摘要字符串；
-- H1–H6 实際形状、每个对象 N/data/parity/R/W/lock quorum、pool/set/slot/盘 UUID；H4 至少 24 个实际盘端点；
-- 最长修复/重启/故障时限、对象/字节/请求/并发预算、所有危险动作的精确目标及恢复人；
-- 包含平台操作、独占故障设备、旧版本、KMS/tier 或原生屏障的实例，先提供能力及授权证据。
+- This batch's run ID, deadline, exclusive service and port, jump route, actual hostnames, each disk's mount UUID and major:minor, and the service unit, original PID, and data root;
+- The immutable candidate manifest, source commit, and package and installed-binary SHA-256 that match the current validation lane; the current rc path and binary SHA-256; the auto-testing commit; save the real build inventory, and do not fill in only a digest string;
+- The actual shape of H1–H6, each object's N/data/parity/R/W/lock quorum, and pool/set/slot/disk UUID; H4 has at least 24 actual disk endpoints;
+- The maximum repair, restart, and fault time limits, the object, byte, request, and concurrency budgets, and the exact target and recovery owner of every dangerous action;
+- For an instance that includes platform operations, an exclusive fault device, an old version, KMS/tier, or a native barrier, first provide capability and authorization evidence.
 
-`binding-check` 只是语法/租约检查，不是资源或包身份的远程证明：
+`binding-check` is only a syntax and lease check. It is not a remote proof of resource or package identity:
 
 ```bash
 python scripts/validation_heal/heal_probe.py --binding lab.json --out reports/binding-check.json binding-check
 ```
 
-先在跳板只读核验 `hostname`、`findmnt -J`、`lsblk -J`、`ss -lnt`、二进制 `sha256sum`/`--version`、实际运行配置与 PID。保存输出为 preflight。租约没有发放、拓扑不符、端口占用、磁盘 UUID 漂移时在这里 BLOCKED，不先注入后跳过。
+First, on the jump host, read-only verify `hostname`, `findmnt -J`, `lsblk -J`, `ss -lnt`, the binary `sha256sum` and `--version`, the actually running configuration, and the PID. Save the output as the preflight. When the lease has not been issued, the topology does not match, a port is occupied, or a disk UUID has drifted, record BLOCKED here. Do not inject first and skip afterward.
 
-### 独立实验服务的部署
+### Deployment of the independent experiment service
 
-H1 使用当前 Heal 节点经核验的四个独立 mount，**另建** `/data/rustfsN/heal-validation/<runId>/data` 和同级 `quarantine`，root-owned 0700；每个 `<runId>` 根写入包含 `runId` 的 root-owned `owner.json`。普通对象故障可以使用这些独立父盘下的 run 私有目录。B03 和 B04 还要求替换 target 和同组兄弟 endpoint 都能取得 candidate 认可的精确 mount lease；替换过程中必须证明旧 mount 与 quarantine 对服务不可读、新空设备挂到原 endpoint 后 candidate 取得新的 mount lease，并前后记录 mount ID、物理设备 ID 和 filesystem identity。独立文件系统或隔离 mount namespace 中的 bind mount 都可能作为实现方式，但仅创建 bind mount 不足以满足要求：adapter 还必须安全切换被替换 endpoint，且通过 candidate 对 root 和 sibling 物理设备身份的检查。Functional Chain 会先在 `stop_existing` 和候选 deb 下载/安装之前调用只读 `replacement-admission-preflight`，覆盖 H1/H2 endpoints；未通过时以 `BLOCKED` 保留 package/client provenance 和完整现场读数，不停服务、不碰已安装 package，也不创建远端 run namespace。`Fleet.deploy()` 在真正 reservation 前再重复该检查。缺少真实 endpoint mount 或已审核 mount-switch adapter 时应 BLOCKED；当前 runner 只把 run 私有子目录作为 endpoint，尚无此 mount-switch adapter，因此它现有的四个独立父盘不能证明 B03/B04 满足资源条件。不得延长等待时间或复制 quarantine 数据。先检查每个根不存在；已存在的根不能覆盖。复用 `rustfs_heal_test.sh` 的 candidate deb 下载、SHA 校验和安装流程，把已安装且摘要已核验的 `/usr/bin/rustfs` 放在本批 state 下；执行用例不需要 RustFS 源码 checkout。凭据文件为 0600。以下专用 unit 仍运行在当前 Heal 节点，使用已分配的 9000 测试端口：
+H1 uses the four verified independent mounts on the current Heal nodes, and **additionally creates** `/data/rustfsN/heal-validation/<runId>/data` and a sibling `quarantine`, root-owned mode 0700. Each `<runId>` root is written with a root-owned `owner.json` that contains `runId`. Ordinary object faults may use the run-private directories under these independent parent disks. B03 and B04 also require that both the replacement target and the sibling endpoints in the same group can obtain an exact mount lease recognized by the candidate. During replacement it must be proved that the old mount and the quarantine are unreadable to the service, that after the new empty device is mounted at the original endpoint the candidate obtains a new mount lease, and that the mount ID, physical device ID, and filesystem identity are recorded before and after. A bind mount on an independent filesystem, or in an isolated mount namespace, may be used as an implementation, but creating a bind mount alone does not meet the requirement: the adapter must also switch the replaced endpoint safely, and it must pass the candidate's checks of the root and sibling physical-device identities. Before `stop_existing` and before the candidate deb is downloaded or installed, the Functional Chain calls the read-only `replacement-admission-preflight`, covering the H1/H2 endpoints. On failure it retains the package and client provenance and the complete scene readings as `BLOCKED`. It does not stop services, does not touch the installed package, and does not create a remote run namespace. `Fleet.deploy()` repeats that check again before the real reservation. When a real endpoint mount or a reviewed mount-switch adapter is missing, the result should be BLOCKED. The current runner uses only a run-private subdirectory as the endpoint and does not yet have this mount-switch adapter, so its existing four independent parent disks cannot prove that B03 and B04 meet the resource conditions. Do not extend the wait, and do not copy quarantine data. First check that each root does not exist. An existing root must not be overwritten. Reuse the candidate deb download, SHA verification, and install flow from `rustfs_heal_test.sh`, and place the installed, digest-verified `/usr/bin/rustfs` under this batch's state. Executing a case does not require a RustFS source checkout. Credential files are mode 0600. The dedicated unit below still runs on the current Heal nodes and uses the allocated test port 9000:
 
-如果首次 gate 通过后、`Fleet.deploy()` 的 reservation-time 复检发现 mount 漂移，仍记录 `BLOCKED` 并保留已安装候选的 binary provenance；不得把该结果改写成产品 `FAIL`，也不得把它伪装成 pre-deployment 的 `NOT_REQUIRED_NO_MUTATION`。两阶段检查都必须跳过 reservation 和 fixture seed，并完成 cleanup。
+If the first gate passes and the reservation-time recheck in `Fleet.deploy()` then finds mount drift, still record `BLOCKED` and retain the installed candidate's binary provenance. That result must not be rewritten as a product `FAIL`, and it must not be disguised as the pre-deployment `NOT_REQUIRED_NO_MUTATION`. Both stages of the check must skip reservation and fixture seeding, and must complete cleanup.
 
 ```bash
-# 在目标节点；所有变量来自已审核的 lab binding，不接受任意在线输入。
+# On the target node; every variable comes from the reviewed lab binding. Arbitrary online input is not accepted.
 sudo systemd-run --unit="$HEAL_UNIT" --property=Type=exec \
   --property=PrivateMounts=yes --property=KillMode=control-group \
   --property=TimeoutStopSec=30 --property=RuntimeMaxSec=3600 \
@@ -80,11 +80,11 @@ sudo systemd-run --unit="$HEAL_UNIT" --property=Type=exec \
   "$HEAL_STATE/rustfs" "${HEAL_DATA_ROOTS[@]}"
 ```
 
-需重启的场景保留 unit 定义、env、二进制及原始 endpoint 参数，不使用 `--collect`；RuntimeMaxSec 按该批预算冻结，J05 必须单独分配长时服务。`HEAL_DATA_ROOTS` 是已审核的 Bash 数组，不从未审核字符串 eval。H2/H3/H4/H5 用各节点一致的 endpoint 序列/显式 pool 分组配置；启动后从每盘 `format.json` 读回，不能从启动参数猜拓扑成功。不得直接运行会清理旧 Pool 根的部署/reset 命令。
+A scenario that needs a restart retains the unit definition, the env, the binary, and the original endpoint arguments, and does not use `--collect`. RuntimeMaxSec is frozen to that batch's budget. J05 must be assigned its own long-running service. `HEAL_DATA_ROOTS` is a reviewed Bash array and is not eval'd from an unreviewed string. H2/H3/H4/H5 use an endpoint sequence, or an explicit pool-grouping configuration, that is consistent on every node. After startup, read the result back from each disk's `format.json`. Topology success must not be guessed from the startup arguments. Do not directly run a deploy or reset command that would clean old Pool roots.
 
-### 命令约定
+### Command conventions
 
-下列函数在**跳板机**执行。`HEAL_BINDING`、`HEAL_REPORT` 是该实例私有绝对路径；`B` 是绑定 prefix 下的一个桶，`K` 为逻辑 key，`V` 为先前 ACK 的精确版本。每条命令的 label 唯一，已有证据拒绝覆盖。凭据只通过受控环境注入 `HEAL_ACCESS_KEY`/`HEAL_SECRET_KEY`/可选 session token，禁用 `set -x`。
+The following functions run on the **jump host**. `HEAL_BINDING` and `HEAL_REPORT` are private absolute paths for this instance. `B` is a bucket under the binding prefix, `K` is the logical key, and `V` is the exact version of a previous ACK. Each command's label is unique, and existing evidence refuses overwrite. Credentials are injected only through the controlled environment, as `HEAL_ACCESS_KEY`, `HEAL_SECRET_KEY`, and an optional session token. `set -x` is disabled.
 
 ```bash
 set -euo pipefail
@@ -105,16 +105,16 @@ B=$(jq -er .bucketPrefix "$HEAL_BINDING")
 RUN=$(jq -er .runId "$HEAL_BINDING")
 ```
 
-特权故障命令在**经跳板连接的目标节点**执行。`ROOT` 是本例目标盘 `<runId>` 根；`NODE` 是已绑定 SSH alias；把该 SHA 的 `heal_fault.py` 放在 root-owned 的本批 state 下并核对摘要。不得从逻辑 key 拼 SSH shell。以下 `hf` 仅在该目标节点的交互 shell 定义：
+Privileged fault commands run on the **target node reached through the jump host**. `ROOT` is this case's `<runId>` root on the target disk. `NODE` is the bound SSH alias. Place that SHA's `heal_fault.py` under this batch's root-owned state and check the digest. Do not assemble an SSH shell from a logical key. The following `hf` is defined only in an interactive shell on that target node:
 
 ```bash
 hf() { sudo python3 "$HEAL_STATE/heal_fault.py" --root "$ROOT" --run-id "$RUN" "$@"; }
 hf init --bucket-prefix "$B" --lease-expires-at "$LEASE_EXPIRES_AT"
 ```
 
-初始化只增加故障所有权标记，不创建/格式化数据盘。每盘只 init 一次。系统重启导致 mount ID 变化时暂停注入；先重新核对 UUID/major:minor/所有权并人工重新绑定，不绕过检查。
+Initialization only adds the fault-ownership marker. It does not create or format a data disk. Each disk is initialized only once. When a system restart changes the mount ID, pause injection. First recheck the UUID, major:minor, and ownership, and rebind manually. Do not bypass the check.
 
-## 3. 数据与客户端命令
+## 3. Data and client commands
 
 <a id="SEED_DB"></a>
 <a id="SEED_DV"></a>
@@ -122,9 +122,9 @@ hf init --bucket-prefix "$B" --lease-expires-at "$LEASE_EXPIRES_AT"
 <a id="SEED_DS"></a>
 <a id="SEED_DX"></a>
 
-### 确定性夹具
+### Deterministic fixtures
 
-每个命令使用新桶，禁止在现有夹具桶上重复 seed 后称同一轮。
+Each command uses a new bucket. Do not seed an existing fixture bucket again and then call it the same round.
 
 ```bash
 hw seed-db seed --fixture DB --bucket "$B-db"
@@ -132,23 +132,23 @@ hw seed-dv seed --fixture DV --bucket "$B-dv"
 hw seed-dm seed --fixture DM --bucket "$B-dm"
 hw seed-ds seed --fixture DS --bucket "$B-ds"
 hw seed-dx seed --fixture DX --bucket "$B-dx"
-# 替换为候选确认的真实 inline/block 边界；可另外生成一桶：
+# Replace with the real inline/block boundary confirmed by the candidate; an additional bucket may be generated:
 hw seed-boundary seed --fixture DB --bucket "$B-boundary" \
   --count 128 --sizes "$BOUNDARY_SIZES"
 ```
 
-DB 默认 128 项，包含 0/1/4095/4096/4097、1MiB±1、多MiB，非重复 SHAKE 数据；1MiB 不是预设产品阈值。DV 默认 4 key，每 key 三个版本，交替创建当前 marker。DM 有已完成三 part（前两 part 分别 5MiB+17、5MiB+93，末 part 1MiB+47）及两个独立 pending upload。DS 默认 257 特殊/多前缀 key；DX 默认 257 外部对象。自动 seed 不包括 suspended/null、特殊压缩、SSE/retention 等额外分支，按下列 S3 命令补充并保存 ACK。
+DB defaults to 128 items, including 0/1/4095/4096/4097, 1MiB±1, and multi-MiB sizes, of non-repeating SHAKE data. 1MiB is not a preset product threshold. DV defaults to 4 keys, with three versions per key, alternately creating the current marker. DM has one completed three-part object (the first two parts are 5MiB+17 and 5MiB+93, and the last part is 1MiB+47) and two independent pending uploads. DS defaults to 257 special/multi-prefix keys. DX defaults to 257 external objects. Automatic seeding does not include extra branches such as suspended/null, special compression, or SSE/retention. Supplement those with the S3 commands below and save the ACKs.
 
-从 ACK 文件取得真正的 UploadId/VersionId/part ETag；不要在多个上传之间复用猜测的 ID。总字节预算包含所有版本/part，不足时先扩展经批准的预算，不自动跳过对象。
+Take the real UploadId, VersionId, and part ETag from the ACK file. Do not reuse a guessed ID across uploads. The total byte budget includes every version and part. When it is insufficient, first extend the approved budget. Do not skip objects automatically.
 
-后续命令的 `B` 必须改为该实例实际桶，例如 `B="$(jq -er .bucketPrefix "$HEAL_BINDING")-db"`，不要对没有创建的裸 prefix 做 inventory。根目录 owner 仍绑定原始 run prefix，以允许本run的各后缀桶。
+In later commands, `B` must be changed to this instance's actual bucket, for example `B="$(jq -er .bucketPrefix "$HEAL_BINDING")-db"`. Do not inventory a bare prefix that was never created. The root-directory owner stays bound to the original run prefix, so that each suffixed bucket of this run is allowed.
 
-seed 完成后自动以完整 GET/版本清单对账确定性原文与创建 ACK，保存 `expected-fixture.json`、`baseline.json`；没有通过基线校验就不准进入注入。这个 GET 发生在故障前，不可拿 seed 命令监测 scanner/read-repair 故障窗口。
+After seeding completes, the deterministic original content and the creation ACKs are reconciled automatically against a complete GET and version inventory, and `expected-fixture.json` and `baseline.json` are saved. Injection is not allowed until the baseline check has passed. This GET happens before the fault. The seed command must not be used to observe the scanner or read-repair fault window.
 
 <a id="S3"></a>
 <a id="GET"></a>
 
-### 单个 S3 操作与精确版本
+### Individual S3 operations and exact versions
 
 ```bash
 hp put s3 --operation put_object --size 5243003 --seed "$RUN/new/1" \
@@ -161,30 +161,30 @@ hp delete-version s3 --operation delete_object --expect-http 204 \
   --params "$(jq -nc --arg b "$B" --arg k "$K" --arg v "$V" '{Bucket:$b,Key:$k,VersionId:$v}')"
 ```
 
-请求复杂时 `--params-file` 使用 JSON。接口参数为 boto3 snake_case 操作名、原生 CamelCase 参数；只允许本 run 桶、受限操作，copy 源也必须在本 run。GET 只保存完整内容的 hash/长度，不把对象内容写入日志。PUT/Complete 超时记 resultUnknown，下一步用相同唯一 key/version/UploadId 查询解析，不静默重试。
+When a request is complex, `--params-file` uses JSON. Interface parameters are boto3 snake_case operation names and native CamelCase parameters. Only this run's buckets and restricted operations are allowed, and a copy source must also be in this run. GET saves only the hash and length of the complete content, and does not write object content into the log. A PUT or Complete timeout is recorded as resultUnknown. The next step resolves it by querying the same unique key/version/UploadId, with no silent retry.
 
-`--expect-http` 必须使用该请求预注册的精确值。例如 create/put/list 常见 200，delete/abort 常见 204，Range 206；负例按候选契约分别 304/403/404/405/412/416。CLI 返回 0 只说明该次预期 HTTP 匹配，永不宣称整个 case PASS。SSE-C 参数值可使用字面量 `$HEAL_SSE_C_KEY`，脚本只在内存替换，输出脱敏。
+`--expect-http` must use the exact value pre-registered for that request. For example, create, put, and list are commonly 200, delete and abort are commonly 204, and Range is 206. Negative cases are 304, 403, 404, 405, 412, and 416 respectively, according to the candidate contract. A CLI exit of 0 only means that this expected HTTP status matched. It never declares the whole case PASS. An SSE-C parameter value may use the literal `$HEAL_SSE_C_KEY`. The script substitutes it only in memory, and the output is redacted.
 
 <a id="BASELINE"></a>
 <a id="VERIFY"></a>
 
-### 全版本基线和最终核对
+### Full-version baseline and final check
 
 ```bash
 hp baseline inventory --bucket "$B"
-# 先完成触发归属和 PHYSICAL，再调用下面 GET 型检查：
+# Finish trigger attribution and PHYSICAL first, then call the GET-type checks below:
 hp post-heal inventory --bucket "$B"
 hp s3-comparison compare --before "$HEAL_REPORT/baseline.json" \
   --after "$HEAL_REPORT/post-heal.json"
 ```
 
-inventory 分页遍历全部版本/marker，按每个 versionId GET 全内容、tags 和公开 metadata，再用分页 current LIST 交叉核对；对象上限 10,000、单对象 64MiB，批次字节预算来自绑定文件。更大对象场景需单独预注册流式工具和预算，不能截断后称全量。
+The inventory pages through every version and marker, GETs the full content, tags, and public metadata for each versionId, and then cross-checks them with a paged current LIST. The object limit is 10,000 and a single object is limited to 64MiB. The batch byte budget comes from the binding file. A larger-object scenario must pre-register a streaming tool and a budget of its own. A truncated result must not be called a complete inventory.
 
-并发、生命周期、合法删除场景的预期清单会变化：人工先按逐请求 ACK 因果关系生成 `expected-post.json`，记录每项增删对应的 ACK 文件；再比较实际清单，不能直接拿静态基线判失败或拿实际输出复制成期望。未知写入未解析则不可通过。加密/归档对象先用授权 GET/restore 参数逐版本取证；默认 inventory 不会自动解锁、传 SSE-C 或 restore。恢复型 GET 必须保存密文/明文两层对应关系。
+For concurrency, lifecycle, and legitimate-deletion scenarios, the expected inventory changes. A person first generates `expected-post.json` from the causal relationship of the per-request ACKs, recording the ACK file that corresponds to each addition or deletion, and then compares the actual inventory. Failure must not be judged directly from the static baseline, and the actual output must not be copied into the expectation. An unresolved unknown write cannot pass. Encrypted or archived objects are evidenced version by version first, using authorized GET or restore parameters. The default inventory does not automatically unlock an object, supply SSE-C, or restore. A restore-type GET must save the correspondence between the ciphertext and plaintext layers.
 
 <a id="RANGE"></a>
 
-### Range、HEAD、条件请求
+### Range, HEAD, and conditional requests
 
 ```bash
 hp head s3 --operation head_object --params-file request-head.json
@@ -194,13 +194,13 @@ hp if-match-reject s3 --operation get_object --expect-http 412 --params-file req
 hp range-outside s3 --operation get_object --expect-http 416 --params-file request-range-outside.json
 ```
 
-JSON 都包含本例 Bucket/Key/可选 VersionId；另外分别添加 `Range:"bytes=5242879-5242882"`、`IfNoneMatch:<原ETag>`、`IfMatch:<错误但语法合法ETag>`、超出对象长度的 Range。时间条件用 `IfModifiedSince`/`IfUnmodifiedSince` 的 ISO 日期；从 HEAD 的真实 LastModified 推导早/晚两个控制值。验证 ContentRange、响应长度和从确定性原文计算的片段 hash，不能只验状态码。
+Every JSON object contains this case's Bucket, Key, and optional VersionId. In addition, add respectively `Range:"bytes=5242879-5242882"`, `IfNoneMatch:<original ETag>`, `IfMatch:<an ETag that is wrong but syntactically valid>`, and a Range past the object length. Time conditions use ISO dates for `IfModifiedSince` and `IfUnmodifiedSince`. Derive one earlier and one later control value from the real LastModified returned by HEAD. Verify ContentRange, the response length, and the fragment hash computed from the deterministic original content. Do not verify only the status code.
 
 <a id="SEED_DE"></a>
 <a id="SEED_DO"></a>
 <a id="DEPENDENCY"></a>
 
-### SSE、Object Lock 和外部依赖
+### SSE, Object Lock, and external dependencies
 
 ```bash
 hp sse-s3-put s3 --operation put_object --size 5243003 --seed "$RUN/sse" --params-file sse-s3-put.json
@@ -213,17 +213,17 @@ hp hold s3 --operation get_object_legal_hold --params-file protected-version.jso
 hp reject-delete s3 --operation delete_object --expect-http 403 --params-file protected-version.json
 ```
 
-SSE JSON 分别加 `ServerSideEncryption:"AES256"`、`ServerSideEncryption:"aws:kms",SSEKMSKeyId:<本例专用key>`、`SSECustomerAlgorithm:"AES256",SSECustomerKey:"$HEAL_SSE_C_KEY"`。SSE-C GET 也提供同一密钥，先用原请求证明可解密。所有外部 key/endpoint 是经过审批的测试租户，不复用生产依赖。
+The SSE JSON adds, respectively, `ServerSideEncryption:"AES256"`, `ServerSideEncryption:"aws:kms",SSEKMSKeyId:<key dedicated to this case>`, and `SSECustomerAlgorithm:"AES256",SSECustomerKey:"$HEAL_SSE_C_KEY"`. An SSE-C GET also supplies the same key. First prove that the object can be decrypted with the original request. Every external key and endpoint is an approved test tenant. Do not reuse a production dependency.
 
-锁桶 JSON 为 `{Bucket:...,ObjectLockEnabledForBucket:true}`。受保护 PUT 使用 `ObjectLockMode:"GOVERNANCE"` 或 `"COMPLIANCE"`、实际未来 UTC `ObjectLockRetainUntilDate`，或 `ObjectLockLegalHoldStatus:"ON"`。必须验证无 bypass 角色在保留期间真的不能删除；脚本拒绝 BypassGovernanceRetention=true。Legal hold 解除使用 `put_object_legal_hold` 的 `LegalHold:{Status:"OFF"}`，仅作用于本例版本。Compliance 等真实到期，不改主机时间、不内部删文件。
+The lock-bucket JSON is `{Bucket:...,ObjectLockEnabledForBucket:true}`. A protected PUT uses `ObjectLockMode:"GOVERNANCE"` or `"COMPLIANCE"`, an actual future UTC `ObjectLockRetainUntilDate`, or `ObjectLockLegalHoldStatus:"ON"`. It must be verified that a role without bypass really cannot delete during the retention period. The script rejects BypassGovernanceRetention=true. A legal hold is removed with `LegalHold:{Status:"OFF"}` of `put_object_legal_hold`, and it applies only to this case's version. Compliance waits for real expiry. Do not change the host clock, and do not delete files internally.
 
-KMS/tier outage 使用 NETWORK 在本例专用 net namespace 内仅阻断对应依赖的 IP/port，或仅撤销本例租户凭据；恢复原规则/权限后重试原 version。tier 缺失一个远端版本可通过远端本例桶 API 删除并保留ACK/原备份，但这是“远端对象丢失”负例，不等同网络中断。
+A KMS/tier outage uses NETWORK to block only the corresponding dependency's IP and port inside this case's dedicated net namespace, or revokes only this case's tenant credentials. After the original rules and permissions are restored, retry the original version. One missing remote version on a tier may be deleted through this case's remote bucket API, with the ACK and the original backup retained, but that is a "remote object lost" negative case and is not the same as a network interruption.
 
-## 4. Admin 触发、状态与窗口
+## 4. Admin triggers, status, and windows
 
 <a id="CONFIG"></a>
 
-实际服务配置要取证，但**不要转储包含凭据的全环境**。manual 模式记录以下非敏感字段：
+The actual service configuration must be captured as evidence, but **do not dump the full environment when it contains credentials**. Manual mode records the following non-sensitive fields:
 
 ```text
 RUSTFS_HEAL_ENABLED=true
@@ -233,7 +233,7 @@ RUSTFS_HEAL_MRF_ENABLE=false
 RUSTFS_PUT_RENAME_EARLY_ACK_ENABLE=false
 ```
 
-scanner/自动/MRF 场景按操作卡逐项开启相应字段，并冻结 scanner cycle/start delay/bitrot cycle。配置变更只改专用 service.env，重启本例 unit 后证明实际生效。read-repair 所需队列依赖按候选源码核实，不能为了“排除后台”关掉被测路径。
+Scanner, automatic, and MRF scenarios enable the corresponding fields item by item according to the procedure card, and freeze the scanner cycle, start delay, and bitrot cycle. A configuration change modifies only the dedicated service.env. After this case's unit is restarted, prove that the change actually took effect. Queue dependencies required by read-repair are verified against the candidate source. The path under test must not be turned off in order to "exclude the background".
 
 <a id="START"></a>
 <a id="STATUS"></a>
@@ -241,9 +241,9 @@ scanner/自动/MRF 场景按操作卡逐项开启相应字段，并冻结 scanne
 <a id="WAIT"></a>
 <a id="ADMIN_RAW"></a>
 
-### 原始 Admin 命令
+### Raw Admin commands
 
-`SCOPE_PATH` 为编码后的 `/rustfs/admin/v3/heal/<bucket>/<key-or-prefix>`；key 的每个字节按 URL 编码，root 为 `/rustfs/admin/v3/heal/`。JSON 中 pool/set 是实际零基索引，不能在 H5 固定填 0。例：
+`SCOPE_PATH` is the encoded `/rustfs/admin/v3/heal/<bucket>/<key-or-prefix>`. Every byte of the key is URL-encoded, and root is `/rustfs/admin/v3/heal/`. pool and set in the JSON are the actual zero-based indexes, and they must not be fixed at 0 on H5. Example:
 
 ```bash
 hp start admin --path "$SCOPE_PATH" \
@@ -252,12 +252,12 @@ TOKEN=$(jq -er '.observation.response.clientToken | select(type=="string" and le
 hp status-001 admin --path "$SCOPE_PATH" --query "clientToken=$TOKEN"
 hp stop admin --path "$SCOPE_PATH" --query "clientToken=$TOKEN" --query forceStop=true
 hp force-start admin --path "$SCOPE_PATH" --query forceStart=true --body-file heal-options.json
-# 保留重复 query，真正送到服务端验证：
+# Keep the duplicate query and actually send it to the server for verification:
 hp invalid-duplicate admin --path "$SCOPE_PATH" --query clientToken=a \
   --query clientToken=b --expect-http 400
 ```
 
-WAIT 用有界循环保存每一响应，不仅保存最后绿色状态；普通 repair 900 秒、重启后 1800 秒是起始测试预算，须预注册，不是产品 SLO：
+WAIT uses a bounded loop to save every response, not only the last green status. 900 seconds for an ordinary repair and 1800 seconds after a restart are starting test budgets. They must be pre-registered, and they are not a product SLO:
 
 ```bash
 for i in $(seq 1 900); do
@@ -269,9 +269,9 @@ for i in $(seq 1 900); do
 done
 ```
 
-循环退出后人工/候选 adapter 检查：execution completed、coverage complete；failed/unknown/attemptFailures=0；不溢出；逐对象 disposition 与设计匹配；非 dry-run 的 incarnation/版本/pool/set 正确。dry-run 只允许 observed，healed=0，随后无物理变更。负例以预注册错误/未完成契约判，不套正向 completed。
+After the loop exits, a person or the candidate adapter checks: execution completed and coverage complete; failed/unknown/attemptFailures=0; no overflow; per-object disposition matches the design; and, for a non-dry-run, incarnation, version, pool, and set are correct. A dry-run allows only observed, with healed=0 and no subsequent physical change. A negative case is judged by the pre-registered error or incomplete contract. The positive completed outcome is not applied to it.
 
-`summary=finished` 或 HTTP200 单独不够；`truncated=false` 可以省略，null/true 不算 false；status.settings 是查询默认值，不代表原任务实际 scanMode。outcome 的 128 项窗口不是完整对象清单。当前 rc 会简化部分字段，以 raw Admin + 独立 manifest 为准。
+`summary=finished` or HTTP 200 alone is not sufficient. `truncated=false` may be omitted, and null or true does not count as false. status.settings is the query default and does not represent the original task's actual scanMode. The 128-item window of an outcome is not a complete object inventory. The current rc simplifies some fields. Raw Admin plus an independent manifest is authoritative.
 
 <a id="BACKGROUND"></a>
 <a id="REPLACEMENT"></a>
@@ -283,12 +283,12 @@ hp replacement admin --method GET --path /rustfs/admin/v4/heal/replacement-recov
 "$RC_BIN" --json --no-color admin heal status "$RC_ALIAS"
 ```
 
-rc 必须是本批冻结二进制，私有 RC_CONFIG_DIR/alias 只指向本例服务，stdout/stderr/exitCode 都留存。查询其他节点：直接运行 heal_probe 的全局 `--endpoint n1`/`--endpoint stable`；保存实际连接 peer 身份。健康状态需要 expected/responded/unknown 与所有 peer 覆盖，不允许缺 peer 时 idle 假绿。
+The rc must be this batch's frozen binary. The private RC_CONFIG_DIR and alias point only at this case's service, and stdout, stderr, and exitCode are all retained. To query another node, run heal_probe's global `--endpoint n1` or `--endpoint stable` directly, and save the identity of the peer that was actually connected. A healthy status requires expected, responded, and unknown, together with coverage of every peer. An idle false green when a peer is missing is not allowed.
 
 <a id="WINDOW"></a>
 <a id="CURSOR"></a>
 
-### 部分进度与增量游标
+### Partial progress and incremental cursors
 
 ```bash
 hp cursor-001 admin --path "$SCOPE_PATH" --query "clientToken=$TOKEN" --query sinceSeq=0
@@ -296,209 +296,209 @@ NEXT=$(jq -er '.observation.response.nextSeq - 1' "$HEAL_REPORT/cursor-001.json"
 hp cursor-002 admin --path "$SCOPE_PATH" --query "clientToken=$TOKEN" --query "sinceSeq=$NEXT"
 ```
 
-WINDOW 的必要证据是 running 且 `0<processed<预先冻结对象总数`，再结合目标片快照证明确实还有未建文件；保存观测响应、触发命令和目标PID/代次。单看processed不足时需要显式 target completed/expected 集合。状态/采样时延必须小于故障窗口，超过就判 NOT_OBSERVED。不能固定 sleep 后无条件杀进程，不能无限重跑直到碰巧命中。
+The evidence required for WINDOW is that the task is running and `0<processed<pre-frozen object total>`, combined with a snapshot of the target shards proving that files have indeed not yet been created. Save the observation response, the trigger command, and the target PID and generation. When processed alone is insufficient, an explicit target completed/expected set is required. Status and sampling latency must be shorter than the fault window. If it exceeds that window, judge NOT_OBSERVED. Do not unconditionally kill the process after a fixed sleep, and do not rerun without bound until a hit happens to occur.
 
-CURSOR 逐响应保存 nextSeq/minSeq/truncated/items；过旧 cursor 的 gap 是预期观测项，不可静默丢弃。跨节点和重启后按 task/epoch分组，有界窗口之外用完整manifest补证。DX 257 是起始数据量；若仍过快，下一批预注册增加负载或受限故障层，而不是本批临时改分母。
+CURSOR saves nextSeq, minSeq, truncated, and items for every response. A gap from a cursor that is too old is an expected observation and must not be silently discarded. After cross-node operation and after a restart, group by task and epoch, and supplement evidence outside the bounded window with the complete manifest. DX 257 is the starting data volume. If it is still too fast, the next batch pre-registers additional load or a restricted fault layer, instead of temporarily changing the denominator in this batch.
 
-固定候选的 `sinceSeq` 是排他游标，`nextSeq` 是下一待分配序号，因此完整响应之后传 `nextSeq - 1`。上例只适用于本次 items 完整返回；若 payload 本身裁剪了 items，只推进到 `max(sinceSeq + 1, minSeq) + 实际收到项数 - 1`，继续读取未返回后缀。不要把响应裁剪或保留缺口隐藏在 nextSeq 跳跃中。J03 自动执行器预注册 1025 个 1MiB+73 字节的外部对象，实际越过该候选 1024 项的 item retention；128 项 outcome 诊断窗口另行验证。每节点物理清单显式限制 16384 文件，每批独立 streaming 校验最多 128 个 part。未观察到两个有效 running 增量窗口时记录 NOT_OBSERVED，完整用例不能 PASS。H1 的跨节点分支明确不适用，H2 查询所有四个实际节点。
+For a fixed candidate, `sinceSeq` is an exclusive cursor and `nextSeq` is the next sequence number to be assigned, so after a complete response pass `nextSeq - 1`. The example above applies only when this response's items were returned in full. If the payload itself trimmed the items, advance only to `max(sinceSeq + 1, minSeq) + actual number of items received - 1`, and continue reading the suffix that was not returned. Do not hide response trimming, or a retained gap, inside a nextSeq jump. The J03 automatic executor pre-registers 1025 external objects of 1MiB+73 bytes, which actually exceeds that candidate's item retention of 1024 items. The 128-item outcome diagnostic window is verified separately. Each node's physical inventory is explicitly limited to 16384 files, and each batch's independent streaming verification covers at most 128 parts. When two valid running incremental windows are not observed, record NOT_OBSERVED, and the complete case cannot PASS. H1's cross-node branch is explicitly inapplicable. H2 queries all four actual nodes.
 
 <a id="IAM"></a>
 
-### 权限和过期签名
+### Permissions and expired signatures
 
-在专用服务先保存当前 rc 的 `admin user --help`、`admin policy --help`、`admin heal --help`。使用候选 IAM 支持的 Admin Heal action 创建最小策略（从候选 `HealAdminAction` 的实际字符串导出，不猜拼写）；另建明确不含该 action 的角色。示例用户/策略动作按本批 rc help 的参数顺序执行并保存原始回执，凭据用私有输入通道，不开 shell trace。
+On the dedicated service, first save the current rc's `admin user --help`, `admin policy --help`, and `admin heal --help`. Create a minimal policy that uses the Admin Heal action supported by the candidate IAM, exported from the actual string of the candidate `HealAdminAction` without guessing the spelling, and separately create a role that explicitly does not contain that action. Example user and policy actions are executed in the parameter order given by this batch's rc help, and the raw receipts are saved. Credentials use a private input channel, and shell trace is not enabled.
 
-已核对参考候选 action 为 `admin:Heal`，最小策略主体为 `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:Heal"],"Resource":["arn:aws:s3:::*"]}]}`；RustFS policy parser 要求带类型的 ARN，裸 `"*"` 会被拒绝。将这个权限仅赋予本例临时身份，不改共享管理员策略。新候选仍需核对 action 和 rc attach 语法。
+The reference candidate action that has been checked is `admin:Heal`, and the minimal policy body is `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:Heal"],"Resource":["arn:aws:s3:::*"]}]}`. The RustFS policy parser requires a typed ARN, and a bare `"*"` is rejected. Grant this permission only to this case's temporary identity. Do not change the shared administrator policy. A new candidate still needs its action and the rc attach syntax checked.
 
 ```bash
 hp anonymous-start admin --path "$SCOPE_PATH" --auth anonymous --expect-http 403 --body-file heal-options.json
 hp bad-signature admin --path "$SCOPE_PATH" --auth bad-signature --expect-http 403 --body-file heal-options.json
-# 无权限/最小权限实例：更换本次调用环境中的 HEAL_ACCESS_KEY/HEAL_SECRET_KEY，执行相同请求。
+# No-permission or minimal-permission instance: replace HEAL_ACCESS_KEY and HEAL_SECRET_KEY in this invocation's environment, and execute the same request.
 ```
 
-过期签名：保存一次已签请求，在签名有效期外重放到**相同本例地址/路径/请求体**，仅等待客户端签名超期，不改变服务器时钟。先用新签名同请求做控制。时限按候选签名校验窗口预注册；签名本身含敏感身份，原请求存私有0600文件，只归档脱敏结果和请求摘要。对 start/status/stop 都测试；token 不能替代权限。结束时通过正常 IAM API 删除本例用户/策略并验证旧凭据失效。
+Expired signatures: save one signed request and, outside the signature validity period, replay it to the **same address, path, and request body of this case**. Only wait for the client signature to expire. Do not change the server clock. First run the same request with a new signature as a control. The time limit is pre-registered from the candidate's signature-verification window. The signature itself contains sensitive identity. Store the original request in a private mode-0600 file, and archive only the redacted result and the request digest. Test start, status, and stop. A token cannot stand in for a permission. At the end, delete this case's user and policy through the normal IAM API and verify that the old credentials are no longer valid.
 
-## 5. 物理证据与故障后端
+## 5. Physical evidence and fault backends
 
 <a id="FORMAT"></a>
 <a id="PHYSICAL"></a>
 
-### 真实布局、角色和物理快照
+### Real layout, roles, and physical snapshots
 
-在目标节点逐盘读取本例 `data/.rustfs.sys/format.json`（只读）及 mount UUID/major:minor，保存 pool/set/this 映射。不能把同一设备的多个目录作为独立盘。逐对象 xl.meta 使用与候选相同源码的只读解析器：
+On the target node, read this case's `data/.rustfs.sys/format.json` (read-only) and the mount UUID and major:minor on each disk, and save the pool/set/this mapping. Multiple directories on the same device must not be treated as independent disks. Per-object xl.meta uses a read-only parser built from the same source as the candidate:
 
 ```bash
 python scripts/validation_heal/prepare_heal_meta_inspector.py --source "$CANDIDATE_SOURCE" \
   --commit "$CANDIDATE_COMMIT" --out "$INSPECTOR_BUILD"
-# 仅批准的构建机；生成独立 helper 的锁文件后冻结，和服务构建清单分开。
+# Approved build machine only; after the independent helper's lockfile is generated, freeze it separately from the service build inventory.
 cargo build --release --manifest-path "$INSPECTOR_BUILD/Cargo.toml"
 sha256sum "$INSPECTOR_BUILD/Cargo.lock" "$INSPECTOR_BUILD/target/release/heal-meta-inspect"
 "$INSPECTOR_BUILD/target/release/heal-meta-inspect" "$XL_META_EVIDENCE_COPY" "$B" "$K"
 ```
 
-解析器不输出用户metadata或密钥，只输出版本、data_dir、parts、EC参数/分片角色。首先对同批健康样本和损坏样本分别证明成功/拒绝；不支持的版本不得换别的版本解析器后宣称同候选验证。源 checkout 必须为固定 SHA 且无已跟踪修改。
+The parser does not emit user metadata or keys. It emits only versions, data_dir, parts, and EC parameters and shard roles. First prove success on the healthy samples from the same batch, and refusal on the damaged samples. An unsupported version must not be declared verified for the same candidate after switching to a parser for another version. The source checkout must be a fixed SHA with no tracked modifications.
 
 ```bash
-# 目标节点。所有输出重定向到本例证据文件，不能覆盖已有阶段。
+# Target node. Redirect all output to this case's evidence files. An existing stage must not be overwritten.
 hf inspect --path "$TARGET_RELATIVE_PATH"
 hf snapshot --bucket "$B"
 ```
 
-快照对整桶每个文件保存长度/hash，目录描述符逐层拒绝 symlink/hardlink/不同mount ID（含同设备bind mount）；最多10,000文件/8GiB，每文件64MiB。四阶段 before/fault/after/restart 每盘各一份。外部part与**同一个角色、同版本的健康原片**字节完全相同是独立重建对照；数据应不重复且四片摘要不同。不得读取 quarantine 来辅助服务器重建。
+A snapshot saves the length and hash of every file in the whole bucket. Directory descriptors reject, level by level, a symlink, a hardlink, or a different mount ID, including a bind mount of the same device. The limit is 10,000 files and 8GiB, with 64MiB per file. Each of the four stages before, fault, after, and restart has one copy per disk. An external part that is byte-for-byte identical to the **healthy original shard of the same role and the same version** is the independent rebuild control. The data should not be duplicated, and the four shards' digests should differ. Do not read quarantine to assist the server rebuild.
 
-xl.meta 可合法重写；比较解析后的版本/引用，而非要求所有内部字节不变。允许的 xl.meta.bkp 必须属于同目标data_dir且摘要等于原xl.meta，不能泛化豁免任意额外文件。普通解析模式不验证 payload；`--verify-part XL_META BUCKET KEY PART_FILE VERSION_ID PART_NUMBER` 按候选 metadata 的实际版本、part 和 legacy/current framing 逐块验证 HighwayHash，同时拒绝短读、尾随字节和不支持的格式。分片执行器还逐项要求所有同版本片与故障前原始同角色长度/hash 完全一致，并确认基线全文、真实 set slot 及不重复分片摘要。它不支持加密/压缩、inline 或改变编码形态的物理验收；这些用例仍保留各自工具要求。
+xl.meta may be legally rewritten. Compare the parsed versions and references, rather than requiring every internal byte to stay unchanged. An allowed xl.meta.bkp must belong to the same target data_dir, and its digest must equal the original xl.meta. That allowance must not be generalized to exempt an arbitrary extra file. Ordinary parse mode does not verify the payload. `--verify-part XL_META BUCKET KEY PART_FILE VERSION_ID PART_NUMBER` verifies HighwayHash block by block according to the actual version, part, and legacy/current framing in the candidate metadata, and it also rejects a short read, trailing bytes, and an unsupported format. The shard executor further requires, item by item, that every same-version shard exactly match the pre-fault original length and hash of the same role, and it confirms the full baseline content, the real set slot, and non-duplicate shard digests. It does not support physical acceptance of encryption, compression, inline data, or a changed encoding shape. Those cases still keep their own tool requirements.
 
 <a id="FAULT"></a>
 
-### 单文件故障（已有脚本）
+### Single-file faults (existing script)
 
-先停止本例写入并让测试进程静止；格式映射已确认后选择精确物理路径，不能只找第一个part。注入/恢复时 `--service-quiescent` 是操作者确认，工具不会替你停止共享服务。
+First stop this case's writes and make the test processes quiescent. After the format mapping has been confirmed, select the exact physical path. Do not just find the first part. On inject and on recovery, `--service-quiescent` is the operator's confirmation. The tool will not stop the shared service for you.
 
 ```bash
 hf apply --path "$TARGET_RELATIVE_PATH" --fault-id C02-data-middle \
   --kind bitflip --offset "$BYTE_OFFSET" --expected-sha256 "$BASELINE_SHA256" --service-quiescent
-# 其他实例各用新故障ID：--kind missing / truncate / zero / header
+# Each other instance uses a new fault ID: --kind missing / truncate / zero / header
 hf snapshot --bucket "$B"
 ```
 
-`truncate` 保留一半；`header` 翻转前32字节；bitflip 可指定任意有效offset；zero 若不会改变字节则拒绝。先持久化intent/原件，再变更，再见证；重复apply拒绝覆盖。备份在同run隔离目录，绝不在RustFS数据根中。
+`truncate` keeps half; `header` flips the first 32 bytes; bitflip may specify any valid offset; zero is rejected if it would not change any byte. First persist the intent and the original, then apply the change, then witness it. A repeated apply refuses overwrite. The backup is in the same run's quarantine directory, and never inside a RustFS data root.
 
-文件故障为 F1/F2/对象级F3，不是整盘故障。helper 明确禁止 `.rustfs.sys`、format、IAM、任意shell或设备操作。用例需要系统记录/特殊格式时走下面人工白名单后端。
+File faults are F1, F2, and object-level F3, not whole-disk faults. The helper explicitly forbids `.rustfs.sys`, format, IAM, and any shell or device operation. When a case needs a system record or a special format, use the manual allowlist backend below.
 
 <a id="FAULT_FORMAT"></a>
 <a id="FORMAT_BAD"></a>
 <a id="CHECKPOINT"></a>
 
-### 格式/系统记录故障（人工白名单后端）
+### Format and system-record faults (manual allowlist backend)
 
-先 `PROCESS stop`，从候选源码/真实task定位**本例**精确记录，生成 `record-plan.json`：绝对路径、run/task/bucket/incarnation、盘UUID、原sha/size、变更offset或替换源sha、允许新增/删除字段、备份和undo。第二人/批准的操作人逐项审核；禁止递归 `.rustfs.sys` 修改。
+First `PROCESS stop`. Locate **this case's** exact record from the candidate source or the real task, and generate `record-plan.json`: the absolute path, run/task/bucket/incarnation, disk UUID, original sha and size, the change offset or the replacement-source sha, the fields allowed to be added or deleted, the backup, and the undo. A second person, or an approved operator, reviews each item. Recursive modification of `.rustfs.sys` is forbidden.
 
-可操作的配方：
+Operable recipes:
 
-1. **near-tail/长度不符**：复制目标part到本例quarantine并校验sha；在该目标副本上 `truncate -s "$NEW_SIZE" "$TARGET"`，其中 NEW_SIZE=原size−1或指定长度。核对新size/hash和原metadata未变。停止服务期间执行，目标路径来自已审核清单。
-2. **外来format/set**：同run的第二个隔离小集群正常启动产生format，停止两服务。仅把其format安装到本例空替换根，不改健康盘；记录原/外来id、this、sets。启动后期待安全拒绝，原外来format不能被改写。
-3. **未来format版本**：在本例替换根的format JSON副本，用 `jq` 只更改已核实的版本字段为不支持值；原件与变更diff归档。未来对象/checkpoint schema 按候选编解码结构更改对应版本头，不能随机翻位后称“未来schema”。如果存在校验，必须重算后证明结构可解析且schema未知；否则只计坏校验实例。
-4. **冲突代次/quorum**：串行合法写V1/V2或两个incarnation，分别保存全套本例副本；停服务后按预注册盘分配表安装各自不足R的集合。重启前用FORMAT逐盘核对，证明没有任一同版本quorum。
-5. **checkpoint/MRF坏记录**：只读保存 `.rustfs.sys/root-heal-<task-id>.json` 与候选实际journal路径；确认属于本run。截断、替换为从本run早期阶段保留的陈旧代次、或单独更改校验字段。不得凭目录名删除整个queue。写失败通过IO_FAULT构造，不改权限后未经见证就称失败。
-6. **bucket metadata**：只列入对应本例桶的记录；建立同run健康备份，分别缺失/截断后重启/heal。原策略、tags、版本/lock配置通过S3核对，其他系统文件摘要不变。
-7. **inline偏移**：用匹配候选的codec在证据副本中定位目标version的inline map/value；保存解析offset/长度及反向映射，之后只修改该value。不会解析时不能任意翻xl.meta头冒充inline损坏；改用已明确定义的“坏metadata”实例，原inline实例仍未覆盖。
-8. **orphan/dangling**：通过正常完成/覆盖/删除形成历史目录，FORMAT证明所有活version/MPU引用后再测试remove。宽限期按真实时间/本例服务配置等待，不改主机时间。共享引用控制必须保留。
+1. **near-tail / length mismatch**: copy the target part into this case's quarantine and verify the sha. On that target copy, run `truncate -s "$NEW_SIZE" "$TARGET"`, where NEW_SIZE is the original size−1 or a specified length. Check the new size and hash, and check that the original metadata is unchanged. Execute this while the service is stopped. The target path comes from the reviewed inventory.
+2. **Foreign format/set**: a second isolated small cluster of the same run starts normally and produces a format, and then both services are stopped. Install only that format onto this case's empty replacement root. Do not change a healthy disk. Record the original and foreign ids, this, and sets. After startup, expect a safe refusal. The original foreign format must not be rewritten.
+3. **Future format version**: on the format JSON copy in this case's replacement root, use `jq` to change only the verified version field to an unsupported value. Archive the original and the change diff. A future object or checkpoint schema changes the corresponding version header according to the candidate's codec structure. Do not flip bits at random and then call the result a "future schema". If a checksum exists, it must be recomputed and then used to prove that the structure is parseable and that the schema is unknown; otherwise count only the bad-checksum instance.
+4. **Conflicting generations/quorum**: serially perform valid writes of V1 and V2, or of two incarnations, and save a complete set of this case's copies for each. After the service is stopped, install each set that is short of R according to the pre-registered disk assignment table. Before restart, check disk by disk with FORMAT and prove that no same-version quorum exists.
+5. **Bad checkpoint/MRF records**: read-only save `.rustfs.sys/root-heal-<task-id>.json` and the candidate's actual journal path, and confirm that they belong to this run. Truncate them, replace them with a stale generation retained from an early stage of this run, or change only the checksum field. Do not delete an entire queue on the basis of a directory name. A write failure is constructed through IO_FAULT. Do not change permissions and then call it a failure without a witness.
+6. **bucket metadata**: include only the records that correspond to this case's bucket. Establish a healthy backup of the same run, then restart and heal after a missing case and after a truncated case respectively. Check the original policy, tags, and version and lock configuration through S3. The digests of the other system files stay unchanged.
+7. **inline offset**: use a codec that matches the candidate to locate the target version's inline map and value in the evidence copy. Save the parsed offset and length and the reverse mapping, and then modify only that value. If it cannot be parsed, do not arbitrarily flip the xl.meta header and present that as inline damage. Use the already defined "bad metadata" instance instead. The original inline instance remains uncovered.
+8. **orphan/dangling**: form historical directories through normal completion, overwrite, and deletion. After FORMAT proves every live version and MPU reference, test remove. The grace period waits according to real time and this case's service configuration. Do not change the host clock. The shared-reference control must be retained.
 
-上述人工操作每一步均需精确原件备份、变更前后hash、操作返回值与复查；不能直接 `rm` 记录。用 `mv -n` 同盘移到隔离路径可保留原件，但必须核实源消失/目标摘要相同，因为 `mv -n` 跳过未必报错。恢复时先保留失败后新记录，若有新ACK/代次，禁止把旧metadata拷回去。
+Every step of the manual operations above requires an exact backup of the original, hashes before and after the change, the operation's return value, and a recheck. Do not `rm` a record directly. Moving with `mv -n`, on the same disk, to a quarantine path can retain the original, but the disappearance of the source and the identical target digest must be verified, because an `mv -n` skip does not necessarily report an error. On recovery, first retain the new records produced after the failure. If there is a new ACK or generation, copying the old metadata back is forbidden.
 
 <a id="DRIVE_GATE"></a>
 
-### 逻辑盘不可达、只读、权限
+### Logical disk unreachable, read-only, and permissions
 
-仅在已设置 PrivateMounts 的**本例服务 mount namespace**使用；先证明目标PID仍属于本例unit、`/proc/$PID/ns/mnt` 与host不同，且目标挂载非shared。不能进入host namespace卸载 `/data/rustfsN`。原理参考 [Linux nsenter](https://www.man7.org/linux/man-pages/man1/nsenter.1.html)。
+Use this only inside **this case's service mount namespace** where PrivateMounts is already set. First prove that the target PID still belongs to this case's unit, that `/proc/$PID/ns/mnt` differs from the host, and that the target mount is not shared. Do not enter the host namespace to unmount `/data/rustfsN`. For the principle, see [Linux nsenter](https://www.man7.org/linux/man-pages/man1/nsenter.1.html).
 
-只读配方（在目标节点，DATA为本例完整数据根）：
+Read-only recipe (on the target node; DATA is this case's complete data root):
 
 ```bash
 sudo nsenter -t "$HEAL_PID" -m -- mount --bind "$DATA" "$DATA"
 sudo nsenter -t "$HEAL_PID" -m -- mount -o remount,bind,ro "$DATA"
 sudo nsenter -t "$HEAL_PID" -m -- findmnt -T "$DATA" -o TARGET,SOURCE,OPTIONS
-# 以服务实际UID在该namespace做本例临时文件写探针，必须观察EROFS。
-# 解除仅此额外的bind层：
+# Using the service's actual UID, write-probe a temporary file of this case in that namespace; EROFS must be observed.
+# Remove only this extra bind layer:
 sudo nsenter -t "$HEAL_PID" -m -- umount "$DATA"
 ```
 
-不可达用经批准的该服务 mount namespace 故障层覆盖此数据根（返回EIO的专用device-mapper设备，见IO_FAULT）；不能把空目录覆盖当作掉盘，因为可能触发新盘初始化。权限实例可使用本例非root UID +精确目录ACL拒绝，在相同UID实测EACCES；root服务单纯chmod不算有效注入。恢复后重新验证mount/磁盘身份和读写可达；在 namespace 内 helper 的跨mount拒绝是正确保护，不应关闭它。
+For unreachable, use an approved fault layer in that service's mount namespace to cover this data root (a dedicated device-mapper device that returns EIO; see IO_FAULT). Do not treat covering the root with an empty directory as a lost disk, because that may trigger new-disk initialization. A permission instance may use this case's non-root UID plus an exact directory ACL denial, and EACCES is measured under the same UID. A bare chmod against a root service does not count as a valid injection. After recovery, re-verify the mount and disk identity and that read and write are reachable. The helper's cross-mount refusal inside the namespace is correct protection, and it should not be turned off.
 
 <a id="REPLACE"></a>
 
-### 新逻辑盘替换
+### New logical-disk replacement
 
-停止本例unit及写入，校验 ROOT/data 与owner/run/mount；将**精确 data 根**同盘移至本例 quarantine 的唯一 old-disk 目录，新建同位置空data根。其他盘不动。重启后读取format，确认新disk UUID与slot；格式初始化失败要如实记录，不手动补出一个UUID。
+Stop this case's unit and its writes, and check ROOT/data against the owner, the run, and the mount. Move the **exact data root**, on the same disk, into the unique old-disk directory of this case's quarantine, and create a new empty data root in the same location. Leave the other disks untouched. After restart, read format and confirm the new disk UUID and slot. If format initialization fails, record it as it happened. Do not manually supply a UUID.
 
 ```bash
-# 仅已审核的本例 ROOT；先验证备份目标不存在，不递归删除任何目录。
+# Only this case's reviewed ROOT; first verify that the backup target does not exist. Do not recursively delete any directory.
 sudo mv -n -- "$ROOT/data" "$ROOT/quarantine/$FAULT_ID-old-disk"
 sudo install -d -m 0700 -- "$ROOT/data"
 ```
 
-检查旧根确实移走、摘要清单完整、服务无法访问quarantine；再正常启动。rebuild期间不得从old-disk复制part。失败救援时先停止unit并把新失败data根移至另一个保留目录，再恢复旧根；该恢复明确为rescue，不是heal结果。真实设备detach/attach仅属于另行批准的H6，不由此命令模拟。
+Check that the old root has really been moved away, that the digest inventory is complete, and that the service cannot access quarantine; then start normally. During rebuild, do not copy parts from old-disk. For a failure rescue, first stop the unit and move the new failed data root to another retained directory, then restore the old root. That recovery is explicitly a rescue, not a heal result. Real device detach and attach belong only to a separately approved H6, and they are not simulated by this command.
 
 <a id="PROCESS"></a>
 <a id="UPGRADE"></a>
 
-### 进程停止、崩溃、重启、升级
+### Process stop, crash, restart, and upgrade
 
 ```bash
 sudo systemctl show "$HEAL_UNIT" -p MainPID -p ExecMainStartTimestampMonotonic -p FragmentPath -p ActiveState
 sudo systemctl stop "$HEAL_UNIT"
 sudo systemctl start "$HEAL_UNIT"
-# 独立 crash 实例，必须先 WINDOW、记录被杀的实际MainPID：
+# Independent crash instance; WINDOW must come first, and the actual MainPID that is killed must be recorded:
 sudo systemctl kill --kill-whom=main --signal=SIGKILL "$HEAL_UNIT"
 sudo systemctl show "$HEAL_UNIT" -p ExecMainCode -p ExecMainStatus -p Result
 sudo systemctl reset-failed "$HEAL_UNIT"
 sudo systemctl start "$HEAL_UNIT"
 ```
 
-每次操作前核对 MainPID/exe 摘要/starttime，拒绝0或已替换PID，不 `pkill rustfs`。保存 `/proc/sys/kernel/random/boot_id`，SIGKILL前后boot_id相同，不能说断电。
+Before every operation, check the MainPID, the exe digest, and starttime. Refuse 0 or a PID that has already been replaced. Do not `pkill rustfs`. Save `/proc/sys/kernel/random/boot_id`. The boot_id is the same before and after SIGKILL, so this must not be called a power loss.
 
-UPGRADE 对本例节点逐一stop，用已经验证的第二个optimized release二进制替换该unit的exec路径（保留旧二进制），原env/endpoint/data不变，start后核对每个peer实际版本。旧新两份构建清单、包sha、库格式兼容表都须预注册；未知格式禁止直接回滚，改测安全拒绝。精确升级期间责任按CHECKPOINT验证，不依赖版本字符串判断兼容。
+UPGRADE stops this case's nodes one by one and replaces that unit's exec path with a second, already verified, optimized release binary, retaining the old binary. The original env, endpoint, and data stay unchanged. After start, check each peer's actual version. Both the old and the new build inventories, the package shas, and the library-format compatibility table must be pre-registered. An unknown format forbids a direct rollback; test safe refusal instead. Responsibility during the exact upgrade is verified according to CHECKPOINT. Compatibility is not judged from a version string.
 
 <a id="NETWORK"></a>
 
-### 测试端口分区 / 依赖故障
+### Test-port partition / dependency fault
 
-优先预分配专用net namespace，证明它与host不同；需要业务节点连接的路由已配置，SSH仍走host。只对本例API/RPC端口或本例KMS/tier endpoint加规则。先保存规则/路由，设置独立超时恢复任务。例：
+Prefer a pre-allocated dedicated net namespace, and prove that it differs from the host. Routes required for business-node connectivity are already configured, and SSH still goes through the host. Add rules only for this case's API/RPC port, or for this case's KMS/tier endpoint. First save the rules and routes, and set an independent timeout-recovery task. Example:
 
 ```bash
 sudo nsenter -t "$HEAL_PID" -n -- iptables -w -I OUTPUT 1 \
   -d "$TEST_PEER_IP" -p tcp --dport "$TEST_SERVICE_PORT" \
   -m comment --comment "$FAULT_ID" -j DROP
 sudo nsenter -t "$HEAL_PID" -n -- iptables -w -nvL OUTPUT --line-numbers
-# 相同namespace、完整相同规则删除，不flush任何链：
+# In the same namespace, delete the fully identical rule. Do not flush any chain:
 sudo nsenter -t "$HEAL_PID" -n -- iptables -w -D OUTPUT \
   -d "$TEST_PEER_IP" -p tcp --dport "$TEST_SERVICE_PORT" \
   -m comment --comment "$FAULT_ID" -j DROP
 ```
 
-双向分区分别在绑定双方namespace应用，不能扩大到22、管理平面或host OUTPUT。记录丢包计数与双端探针。无独立net namespace或专项host规则批准时该实例BLOCKED，不能全局断网凑结果。
+A bidirectional partition is applied in the namespaces of both bound parties, and it must not be expanded to port 22, the management plane, or host OUTPUT. Record the drop counters and the probes at both ends. When there is no independent net namespace, or no approval for a dedicated host rule, that instance is BLOCKED. Do not disconnect the network globally in order to force a result.
 
 <a id="IO_FAULT"></a>
 <a id="QUOTA"></a>
 <a id="LOCK_WINDOW"></a>
 
-### 慢IO/EIO/容量与锁窗口
+### Slow IO, EIO, capacity, and the lock window
 
-此组**只在预分配独占故障盘/有硬上限的专用loop设备**操作，绝不对 `/dev/nvme*` 共享生产设备运行。操作前记录backing file、loop/device-mapper名字、major:minor、mount UUID、上限和唯一FAULT_ID。设备创建/format需要本批单独的资源批准，不是case默认授权。
+This group operates **only on a pre-allocated exclusive fault disk, or on a dedicated loop device with a hard limit**, and it never runs against a shared production device such as `/dev/nvme*`. Before operating, record the backing file, the loop or device-mapper name, major:minor, the mount UUID, the limit, and the unique FAULT_ID. Creating or formatting a device requires a separate resource approval for this batch. It is not a default authorization of the case.
 
-已分配专用 `HEAL_DM_NAME` / `HEAL_BACKING_DEV` 的device-mapper配方：
+device-mapper recipe for an already allocated dedicated `HEAL_DM_NAME` / `HEAL_BACKING_DEV`:
 
 ```bash
 sudo dmsetup table "$HEAL_DM_NAME"
 sudo dmsetup suspend "$HEAL_DM_NAME"
 sudo dmsetup reload "$HEAL_DM_NAME" --table "0 $HEAL_SECTORS delay $HEAL_BACKING_DEV 0 200"
 sudo dmsetup resume "$HEAL_DM_NAME"
-# EIO实例用完全返回error的表；只用于专用故障层：
+# The EIO instance uses a table that returns error entirely; use it only for the dedicated fault layer:
 sudo dmsetup suspend "$HEAL_DM_NAME"
 sudo dmsetup reload "$HEAL_DM_NAME" --table "0 $HEAL_SECTORS error"
 sudo dmsetup resume "$HEAL_DM_NAME"
 ```
 
-恢复reload预先保存的精确原table，不猜linear偏移；在同服务namespace做定长读写见证（记录耗时/errno），并验证源设备可用。块设备EIO不等同应用层短读，短读实例使用FAULT truncate和真实读错误证据；若需“无内容变化的短读”必须有已分配的faultfs后端，另记能力条件。
+Recovery reloads the exact original table that was saved beforehand, and does not guess a linear offset. In the same service namespace, witness fixed-length reads and writes, recording the elapsed time and errno, and verify that the source device is usable. Block-device EIO is not the same as an application-layer short read. A short-read instance uses FAULT truncate together with real read-error evidence. If a "short read with no content change" is required, an allocated faultfs backend must exist, and that capability condition is recorded separately.
 
-ENOSPC仅写本例**硬上限卷**中的占位文件，先 `findmnt`/`df -B1` 和 inode计数确认不会耗尽外层XFS；按上限分块填充至返回ENOSPC并记录实际服务写失败。inode实例用创建空文件耗尽该卷的inode预算，不能在共享根创建无限文件。释放只删除已列举的本例占位文件或回收专用卷，不使用宽目录递归删除。
+ENOSPC writes placeholder files only into this case's **hard-limit volume**. First use `findmnt`, `df -B1`, and the inode count to confirm that the outer XFS will not be exhausted. Fill in chunks up to the limit until ENOSPC is returned, and record the actual service write failure. An inode instance exhausts that volume's inode budget by creating empty files. Do not create an unlimited number of files on a shared root. Release deletes only this case's enumerated placeholder files, or reclaims the dedicated volume. Do not use a broad recursive directory deletion.
 
-桶配额使用冻结rc的 `quota --help`，对本例桶 `quota set`/`quota info`；前后查询证明限额真实生效，结束恢复原配置。禁止把客户端本地限速当服务器quota。
+Bucket quota uses the frozen rc's `quota --help`, and runs `quota set` and `quota info` on this case's bucket. Queries before and after prove that the limit really took effect. At the end, restore the original configuration. Do not treat client-local rate limiting as a server quota.
 
 ```bash
 "$RC_BIN" --json --no-color quota info "$RC_ALIAS/$B"
 "$RC_BIN" --json --no-color quota set "$RC_ALIAS/$B" 64M
-# 只在原配置没有quota且本例结束时清除；否则恢复原限额：
+# Clear only when the original configuration had no quota and this case is ending; otherwise restore the original limit:
 "$RC_BIN" --json --no-color quota clear "$RC_ALIAS/$B"
 ```
 
-LOCK_WINDOW：慢IO层作用于一个实际持有对象写锁的请求，另发同key heal/PUT。用日志/原生runtime fence证明锁获取、超时、调用方退出、在途提交退出顺序；没有可观察锁窗口则黑盒实例为NOT_OBSERVED。客户端断开可由有界 `timeout` 结束**本次请求进程**，不杀服务；之后继续采集服务端在途状态。精确所有权证明依赖NATIVE，不能从一次超时推导锁已释放。
+LOCK_WINDOW: the slow-IO layer acts on one request that actually holds the object write lock, and a same-key heal or PUT is issued separately. Use logs, or a native runtime fence, to prove the order of lock acquisition, timeout, caller exit, and in-flight commit exit. If there is no observable lock window, the black-box instance is NOT_OBSERVED. A client disconnect may end **this request process** with a bounded `timeout`, without killing the service. Afterward, continue collecting the server-side in-flight state. Exact ownership proof depends on NATIVE. Do not infer from a single timeout that the lock has been released.
 
 <a id="HOST_POWER"></a>
 
-### 强制停机
+### Forced stop
 
-只对H6已批准的精确Azure资源ID执行，先核验该VM独占、没有其他服务、磁盘持久化策略及带外恢复；记录当前boot_id和平台状态：
+Execute only against the exact Azure resource ID already approved for H6. First verify that the VM is exclusive, that no other service is present, the disk persistence policy, and out-of-band recovery. Record the current boot_id and the platform status:
 
 ```bash
 az vm get-instance-view --ids "$APPROVED_EXCLUSIVE_VM_ID"
@@ -508,18 +508,18 @@ az monitor activity-log list --resource-id "$APPROVED_EXCLUSIVE_VM_ID" \
   --start-time "$RUN_STARTED_AT" --end-time "$RUN_FINISHED_AT"
 ```
 
-这是真实VM强制停止，不证明物理控制器掉电。物理主机power-cycle必须使用该独占机器已批准的带外控制台，记录BMC事件和电源周期；不能给未知机型编造通用命令。无授权不执行，也不把SIGKILL替代成通过。
+This is a real forced stop of the VM. It does not prove that a physical controller lost power. A physical-host power cycle must use the out-of-band console already approved for that exclusive machine, and it must record the BMC events and the power cycle. Do not invent a generic command for an unknown machine model. Without authorization, do not execute it, and do not substitute SIGKILL for a pass.
 
-## 6. 并发、Pool、ILM、复制及原生证据
+## 6. Concurrency, Pool, ILM, replication, and native evidence
 
 <a id="WORKLOAD"></a>
 <a id="METRICS"></a>
 <a id="LOGS"></a>
 <a id="PERFORMANCE"></a>
 
-### 有界负载与观测
+### Bounded load and observation
 
-`trace.json` 是按序的S3操作数组，例如：
+`trace.json` is an ordered array of S3 operations, for example:
 
 ```json
 [
@@ -532,27 +532,27 @@ az monitor activity-log list --resource-id "$APPROVED_EXCLUSIVE_VM_ID" \
 hw writer run --trace trace.json --rounds 100 --workers 2 --interval 0.1 --duration 300
 ```
 
-同worker串行；不同worker用不同key可明确先后，测试真正同key竞争时人工按ACK/不确定结果建立期望。`${round}`、`${worker}` 只做JSON字符串替换，不eval。上传内容由run/worker/round/step确定，大小/摘要写入ACK。每次ACK立即独占写文件；意外错误停止后续入场并保留在途结果。不因服务返回错误而无限重试。
+The same worker is serial. Different workers that use different keys can make the order explicit. When testing a real same-key race, a person builds the expectation from the ACKs and from uncertain results. `${round}` and `${worker}` are only JSON string substitution, not eval. Upload content is determined by run, worker, round, and step, and the size and digest are written into the ACK. Each ACK is immediately written to its own exclusive file. An unexpected error stops further admission and retains the in-flight results. Do not retry without bound because the service returned an error.
 
-长稳分支增加已批准 `--duration` 至86400/259200、足够rounds及限速，并核对实际elapsed，提前耗尽rounds/字节预算不算跑满窗口；每批最多1,000,000请求/16worker/64GiB写入预算，可按预注册多个分段运行并保留连续时序。不可通过事后拼接零散短跑冒充连续24h。
+A long-stability branch raises the approved `--duration` to 86400 or 259200, with enough rounds and rate limiting, and it checks the actual elapsed time. Exhausting the rounds or the byte budget early does not count as having filled the window. Each batch has a write budget of at most 1,000,000 requests, 16 workers, and 64GiB. It may run as several pre-registered segments, and a continuous timeline must be retained. Scattered short runs must not be spliced together afterward and presented as a continuous 24h.
 
-Admin队列压力使用同样的限量并发方式调用hp（例如shell后台最多4个固定任务），先冻结请求集合，独立label保存每个返回；不能把S3负载当Admin admission覆盖。
+Admin queue pressure calls hp with the same bounded concurrency, for example at most four fixed tasks in the shell background. First freeze the request set, and save each return under an independent label. An S3 load must not be treated as coverage of Admin admission.
 
 ```bash
-# 在目标节点按固定频率采样，时间窗口与本例一致；不要采集全环境凭据。
+# Sample on the target node at a fixed rate, with a time window that matches this case; do not collect credentials from the full environment.
 sudo journalctl -u "$HEAL_UNIT" --since "$RUN_STARTED_AT" --until "$RUN_FINISHED_AT" --no-pager
 sudo systemctl show "$HEAL_UNIT" -p MemoryCurrent -p TasksCurrent -p CPUUsageNSec
 pidstat -dru -p "$HEAL_PID" 1 60
 iostat -dx 1 60
 ```
 
-同时记录FD数量、目标IO、队列/持久记录及临时空间；工具未安装先预检阻断所需性能证据，不跑完才省略。性能ABBA每组四轮、至少三组：warmup、并发、内容、缓存/初始队列、负载窗口和阈值固定。分别统计GET/PUT P95/P99、错误率（所有失败/超时都在总分母）、修复吞吐、CPU/IO。没有预注册门限只能出测量报告，不能记性能通过。
+Also record the FD count, the target IO, the queue and persisted records, and temporary space. If a tool is not installed, preflight first blocks the performance evidence that is required. Do not finish the run and only then omit that evidence. Performance ABBA uses four rounds per group and at least three groups. Warmup, concurrency, content, the cache and the initial queue, the load window, and the thresholds are fixed. Separately compute GET and PUT P95 and P99, the error rate (every failure and timeout is in the total denominator), repair throughput, and CPU and IO. Without a pre-registered threshold, only a measurement report can be produced. A performance pass must not be recorded.
 
 <a id="POOL"></a>
 
-### Pool交互
+### Pool interaction
 
-使用**本例H5服务**的rc alias，已有13项Pool回归结果仅为前置控制，不直接调用其会reset旧fleet的部署脚本。扩容/移除拓扑复用已审阅的endpoint分组方案，但根目录替换为本例heal命名空间。所有poolId从实际status和format映射获得。
+Use the rc alias of **this case's H5 service**. The existing 13 Pool regression results are only a precondition control. Do not directly invoke the deploy script that would reset the old fleet. Scale-out and removal topologies reuse the reviewed endpoint-grouping plan, but the root directory is replaced by this case's heal namespace. Every poolId is taken from the actual status and from the format mapping.
 
 ```bash
 "$RC_BIN" --json --no-color admin rebalance start "$RC_ALIAS"
@@ -564,14 +564,14 @@ iostat -dx 1 60
 "$RC_BIN" --json --no-color admin decommission clear "$RC_ALIAS" "$POOL_ID" --by-id
 ```
 
-不是把以上所有操作依次跑完：按H01–H06操作卡在相应窗口执行。每次保存rc stdout/stderr/exitCode、相关Admin状态及前后manifest。退役写入限制沿用既定产品契约；仅survivor验证时源必须真实停机且配置移除。#2422/#2423的临界点是否实际触发单独登记。
+Do not run every operation above through to completion in sequence. Execute them in the corresponding window according to the H01–H06 procedure cards. Each time, save the rc stdout, stderr, and exitCode, the related Admin status, and the manifests before and after. Decommission write restrictions follow the established product contract. When only the survivor is verified, the source must actually be stopped and its configuration removed. Whether the critical points of #2422 and #2423 actually fire is registered separately.
 
 <a id="ILM"></a>
 <a id="REPLICATION"></a>
 
-### ILM、远端tier、复制
+### ILM, remote tier, and replication
 
-使用本仓库已实现lane作为**控制实验**核对候选功能，并在本例独立服务重新建立专用桶/远端租户。配置JSON只含本例资源，API操作如下：
+Use the lane already implemented in this repository as a **control experiment** to check the candidate's functionality, and re-establish a dedicated bucket and remote tenant on this case's independent service. The configuration JSON contains only this case's resources. The API operations follow:
 
 ```bash
 hp ilm-put s3 --operation put_bucket_lifecycle_configuration --params-file lifecycle.json
@@ -581,11 +581,11 @@ hp replication-put s3 --operation put_bucket_replication --params-file replicati
 hp replication-get s3 --operation get_bucket_replication --params-file bucket.json
 ```
 
-`lifecycle.json` 使用已验证候选的真实期限；规则ID含run，Filter仅本例prefix，分别配置Expiration/NoncurrentVersionExpiration/Transition。不要用未合并的分钟级测试hook冒充release。远端tier的初始化依照当前rc `ilm tier add --help` 和已有 `scripts/validation_ilm/ilm_behavior.py` 的实际调用，填写本例endpoint/bucket/region与受控凭据；原始凭据不归档。
+`lifecycle.json` uses the real durations of the candidate that has been verified. The rule ID contains the run, Filter is only this case's prefix, and Expiration, NoncurrentVersionExpiration, and Transition are configured respectively. Do not use an unmerged minute-level test hook and present it as a release. Remote-tier initialization follows the actual invocation of the current rc `ilm tier add --help` and of the existing `scripts/validation_ilm/ilm_behavior.py`, filling in this case's endpoint, bucket, and region and the controlled credentials. Raw credentials are not archived.
 
-复制配置含本例role/destination ARN、Filter和DeleteMarkerReplication；先证明对端版本映射/删除语义。resync使用本批rc `replicate resync --help` 所支持的实际命令，保存启动ID和两端状态。观察真实重叠窗口；没有tier/第二端，相关分支BLOCKED而非删除该项。结束通过API删除本例lifecycle/replication配置，远端本例数据按版本清单清理，不改共享服务规则。
+The replication configuration contains this case's role and destination ARN, Filter, and DeleteMarkerReplication. First prove the peer's version mapping and deletion semantics. resync uses the actual command supported by this batch's rc `replicate resync --help`, and saves the start ID and the status at both ends. Observe the real overlap window. Without a tier or a second endpoint, the related branch is BLOCKED rather than that item being deleted. At the end, delete this case's lifecycle and replication configuration through the API, and clean this case's remote data according to the version inventory. Do not change the rules of a shared service.
 
-已核对参考rc的resync操作（仍须新批help核验）：
+Resync operations of the reference rc that have been checked (a new batch must still verify them against help):
 
 ```bash
 "$RC_BIN" --json --no-color replicate resync start "$RC_ALIAS/$B" \
@@ -595,69 +595,69 @@ hp replication-get s3 --operation get_bucket_replication --params-file bucket.js
 
 <a id="NATIVE"></a>
 
-### 精确屏障与原生回归补证
+### Exact barriers and supplemental native-regression evidence
 
-F9类窗口不能靠普通release黑盒保证命中。使用同源码SHA的**独立native回归二进制**，绝不换掉被测optimized release服务。先列出真实测试并固定完整测试名、crate、源码位置和预期屏障事件：
+An F9-class window cannot rely on an ordinary release black box to guarantee a hit. Use an **independent native regression binary** built from the same source SHA, and never replace the optimized release service under test. First list the real tests and freeze the complete test name, the crate, the source location, and the expected barrier events:
 
 ```bash
 cargo test -p rustfs-heal -- --list
 cargo test -p rustfs-ecstore -- --list
 cargo test -p e2e_test -- --list
-# NATIVE_TEST必须逐字来自上面列表，日志必须显示恰好1项且屏障命中：
+# NATIVE_TEST must come verbatim from the list above, and the log must show exactly one item and a barrier hit:
 cargo test -p "$NATIVE_CRATE" "$NATIVE_TEST" -- --exact --nocapture
 ```
 
-已有replacement回归函数包含 `test_cluster_root_heal_recovers_remote_shards_after_background_target_restart`、`..._crash`、EC8+4和multi-set版本，完整限定名从该commit --list取得。它们默认创建本地E2E临时目录，**不是远端真实独立盘部署器**；不通过环境变量把这些会清理临时目录的测试指到现有fleet。原生锁/代次/checkpoint测试按所选操作卡在同commit源码中找到精确回归和屏障标记后运行，不存在对应屏障的分支要保留“需源侧增加确定性测试”的能力缺口，不能给计划生成器喂手写JSON声称measured。
+Existing replacement regression functions include `test_cluster_root_heal_recovers_remote_shards_after_background_target_restart`, `..._crash`, and the EC8+4 and multi-set versions. The fully qualified names are taken from that commit's --list. By default they create local E2E temporary directories, and they are **not a remote deployer of real independent disks**. Do not point these tests, which clean temporary directories, at the existing fleet through environment variables. Native lock, generation, and checkpoint tests are run only after the exact regression and its barrier marker have been found, in the source of the same commit, according to the selected procedure card. A branch with no corresponding barrier retains the capability gap "deterministic tests need to be added on the source side". Do not feed handwritten JSON to the plan generator and claim that the result was measured.
 
-归档 candidate SHA、native测试源码SHA、完整命令、测试数量、exitCode、运行时间及屏障事件。native与fleet分别计分；缺失精确native证据不影响已经完成的黑盒分支真实性，但不能宣布该case所有分支齐全。
+Archive the candidate SHA, the native-test source SHA, the complete command, the test count, the exitCode, the runtime, and the barrier events. Native and fleet are scored separately. Missing exact native evidence does not affect the truthfulness of black-box branches that have already been completed, but it cannot be announced that every branch of that case is complete.
 
-## 7. 恢复、报告和安全交还
+## 7. Recovery, reporting, and safe handover
 
 <a id="RECOVER"></a>
 
-先保存出错时的状态、日志和PHYSICAL，停止本例负载/任务/进程；再按fault receipt撤销规则/只读层/替换根。对已失效lease允许受限恢复，不允许继续注入。单文件恢复：
+First save the state, the logs, and PHYSICAL from the time of the error, and stop this case's load, tasks, and processes. Then, according to the fault receipt, revoke the rules, the read-only layer, and the replacement root. A restricted recovery is allowed for a lease that is already invalid. Continued injection is not allowed. Single-file recovery:
 
 ```bash
 hf recover --fault-id C02-data-middle --service-quiescent
 ```
 
-只恢复同run的备份，原件摘要不符则拒绝；目标如果已经是原始正确字节不重写；如果变成既不是原始也不是注入后字节（可能有新ACK或合法metadata重写），拒绝盲目覆盖，交人工保留现场。恢复工具输出 `physicalRepairPassAllowed=false`；任何 `restoredFromBackup=true` 都不能作为产品补片证据。
+Restore only a backup from the same run. Refuse the restore if the original's digest does not match. If the target is already the original correct bytes, do not rewrite it. If it has become bytes that are neither the original nor the post-injection bytes (there may be a new ACK, or a legal metadata rewrite), refuse a blind overwrite and leave the scene for a person to retain. The recovery tool outputs `physicalRepairPassAllowed=false`. Any `restoredFromBackup=true` cannot be used as evidence that the product repaired or rebuilt the shard.
 
 For an externally cancelled Functional Chain, `validation_cleanup_run_id` accepts only a completed run on the same workflow branch. F07 recovery supports the bounded H2/DV stale-generation boundary after four missing-part injections and before Admin admission: all 18 earlier branches must have complete cleanup receipts, and all 282 fixture requests must have matching successful SDK acknowledgements. Any additional action, unknown write, lost root or physical drift fails closed. Recovery stops the owned services, restores only the four original part backups, and verifies the complete original business files and disk formats. It then retains every data root and private state directory by the existing non-overwriting, same-filesystem archive protocol, with a durable inventory bound to each node's original business-scene digest. Partial restoration and partial archive moves are retryable. `ISOLATED` releases the active namespace while preserving backups; it never rewrites the original cancelled/RUNNING result, restores old system records, or claims canonical PASS.
 
-强制故障设置第二条恢复通道/超时撤销；本地 finally 不是网络或进程被杀时可靠的唯一恢复办法。退出前枚举本例网络规则、bind层、dm表、测试unit、临时IAM和未完成MPU，逐条撤销并复核。保留失败数据/backup，retention未到期则保留专用资源；记录剩余路径/到期安排。未恢复为 DIRTY/QUARANTINED，不继续下一用例。
+A forced fault sets up a second recovery channel and a timeout revocation. A local finally is not a reliable sole recovery method when the network or the process is killed. Before exit, enumerate this case's network rules, bind layers, dm tables, test units, temporary IAM, and incomplete MPUs, and revoke and recheck each one. Retain the failed data and the backup. If retention has not expired, retain the dedicated resources. Record the remaining paths and the expiry schedule. Anything not yet recovered is DIRTY or QUARANTINED, and the next case does not proceed.
 
-每个**实际参数实例**都填写人工结论和证据索引，不只填一个基础case总绿：
+Every **actual parameter instance** is filled in with a manual conclusion and an evidence index, not only one overall green result for the base case:
 
 ```text
-preflight/  基础设施/包/rc/harness/lease/拓扑/预注册参数
-baseline/   S3版本清单、物理基线、ACK、桶配置
-fault/      精确plan、intent、原件摘要、故障有效性见证
-trigger/    原始Admin/GET/后台来源及活动窗口
-control/    token/epoch/coverage/counter/负向错误/游标原始响应
-physical/   after/restart分片、metadata映射、独立重建对照
-s3/         所有应存/应删版本与ACK解析、完整内容和配置
-recovery/   故障解除、停止服务、retained路径与安全交还
-logs/       全部相关节点的有界日志/资源/平台或native事件
+preflight/  infrastructure/package/rc/harness/lease/topology/pre-registered parameters
+baseline/   S3 version inventory, physical baseline, ACKs, bucket configuration
+fault/      exact plan, intent, original digest, fault-effectiveness witness
+trigger/    raw Admin/GET/background source and the active window
+control/    token/epoch/coverage/counter/negative errors/raw cursor responses
+physical/   after/restart shards, metadata mapping, independent rebuild control
+s3/         every version to retain or delete, ACK resolution, complete content and configuration
+recovery/   fault removal, service stop, retained paths, and safe handover
+logs/       bounded logs/resources/platform or native events from every related node
 ```
 
-人工结论为 MANUAL_PASS/FAIL/INFRA_ERROR/BLOCKED/NOT_OBSERVED，列评审人、每条断言及引用。`evidence.json`包含runId、instanceId、九类evidence的数组，每个引用为相对于该实例目录的`path`和`sha256`。全部分支完成才能评审基础case；缺资源/窗口未命中/证据不全都不是PASS。
+The manual conclusion is MANUAL_PASS, FAIL, INFRA_ERROR, BLOCKED, or NOT_OBSERVED, and it lists the reviewer, each assertion, and its citation. `evidence.json` contains runId, instanceId, and an array for each of the nine evidence classes. Each citation is a `path` relative to that instance's directory and a `sha256`. The base case can be reviewed only after every branch is complete. Missing resources, a window that was not hit, and incomplete evidence are not a PASS.
 
 ```bash
 python scripts/validation_heal/matrix.py audit --plan reports/validation-heal-84-plan.json \
   --evidence-dir reports/heal-84 --out reports/heal-84-evidence-audit.json
 ```
 
-audit检查完整性/路径/摘要，输出`EVIDENCE_COMPLETE_REVIEW_REQUIRED`仍不是产品通过报告。原始失败批次永久保留，修复后新批次另记。本文提供全84项的可操作方案，但实际机器、专用依赖和native屏障的可用性必须单独核验，不能把“方案就绪”改写成“环境就绪”或“已实测”。
+audit checks completeness, paths, and digests. An output of `EVIDENCE_COMPLETE_REVIEW_REQUIRED` is still not a product pass report. The original failed batch is retained permanently, and a new batch after the fix is recorded separately. This document provides an operable plan for all 84 items, but the availability of the actual machines, the dedicated dependencies, and the native barriers must be verified separately. "Plan ready" must not be rewritten as "environment ready" or "already measured live".
 
 
-自动正向夹具固定使用独立分片承诺配置；`integrity-fleet-attestation` 记录本例 endpoint/节点/候选摘要，启动前逐节点 reserve 校验候选，启动后实际进程环境读回两项开关。此配置只作用于 run-owned 服务。默认 legacy 配置的失败批次独立保留；保护模式不代表旧版本混部或默认环境能力。D07 的条件请求以服务器 HEAD 的 LastModified 和基线 ETag 冻结预期，不改主机时间；304/412/416 不能包含成功 payload 或未知传输结果。
+Automatic positive fixtures are fixed to the independent shard-commitment configuration. `integrity-fleet-attestation` records this case's endpoint, node, and candidate digests, reserve-checks the candidate on each node before startup, and reads the two switches back from the actual process environment after startup. This configuration applies only to run-owned services. Failed batches of the default legacy configuration are retained separately. Protected mode does not represent mixed deployment with an old version, or default-environment capability. D07's conditional requests freeze the expectation from the server HEAD LastModified and the baseline ETag, and they do not change the host clock. 304, 412, and 416 must not contain a successful payload or an unknown transfer result.
 
 
-J06 的自动入口为 `heal.performance-abba`。执行器在部署前冻结三组 ABBA、每阶段 30 秒、2 并发、4 请求/秒、GET/PUT 各半与完整阈值；每阶段重启同一服务并按固定次数预热。每个 B 阶段的真实部分修复窗口必须包围 GET 和 PUT，否则整例不能 PASS。A 阶段持续检查完整 idle 与物理不变。所有排定请求（包括失败、未知和错过 admission 的请求）均计入分母；GET/PUT 独立报告 P95/P99，三组配对差异、实际修复分片吞吐与服务 CPU/IO/RSS/FD 分别留证。阈值保存在 `scripts/validation_heal/performance.py` 的 `PROTOCOL`，修改阈值必须产生新的 harness commit 和新验证记录；此入口不缩短 J05 的 24h/72h 要求。
+J06's automatic entry point is `heal.performance-abba`. Before deployment, the executor freezes three ABBA groups, 30 seconds per phase, a concurrency of 2, 4 requests per second, a half-and-half split of GET and PUT, and the complete thresholds. Each phase restarts the same service and warms it up a fixed number of times. The real partial-repair window of each phase B must enclose both GET and PUT; otherwise the whole case cannot PASS. Phase A continuously checks that idle is complete and that the physical state is unchanged. Every scheduled request, including failures, unknowns, and requests that missed admission, is counted in the denominator. GET and PUT report P95 and P99 independently. The paired differences of the three groups, the actual shard-repair throughput, and the service CPU, IO, RSS, and FD are each retained as evidence. Thresholds are kept in `PROTOCOL` of `scripts/validation_heal/performance.py`. Changing a threshold must produce a new harness commit and a new verification record. This entry point does not shorten J05's 24h/72h requirement.
 
 
-A02 的自动入口为 `heal.admin-scope-isolation`。H2 的专用 `scope-isolation` runtime 使用当前四节点/十六盘，按盘序交织节点并设置 `RUSTFS_ERASURE_SET_DRIVE_COUNT=8`，要求真实两个 set 各跨全部四个节点。普通执行器仍只接受原单 set。两个桶的完整 ACK/实际物理 set 清单冻结后，root/bucket/prefix/object/pool-set 各自新部署、注入选中与控制故障。完整物理和 streaming 证明必须先于 GET 和控制备份恢复。H1 保留原四盘单 set，明确记录不存在未选 set 的适用边界；不能拿同盘目录冒充第二个 set。未限制选择器的原始 receipt 在该固定候选中允许 null，单独保存实际物理映射，显式 pool/set 则必须严格匹配原始字段。
+A02's automatic entry point is `heal.admin-scope-isolation`. H2's dedicated `scope-isolation` runtime uses the current four nodes and sixteen disks, interleaves nodes in disk order, and sets `RUSTFS_ERASURE_SET_DRIVE_COUNT=8`, requiring two real sets that each span all four nodes. The ordinary executor still accepts only the original single set. After the complete ACKs and the actual physical set inventories of the two buckets are frozen, root, bucket, prefix, object, and pool-set are each deployed anew, and the selected fault and the control fault are injected. Complete physical and streaming proof must precede GET and recovery of the control backup. H1 retains the original four-disk single set, and it explicitly records the applicability boundary that no unselected set exists. Directories on the same disk must not be presented as a second set. On this fixed candidate, the raw receipt of an unrestricted selector is allowed to be null, and the actual physical mapping is saved separately. An explicit pool or set must match the original fields exactly.
 
 ### I04 durable responsibility during queue pressure
 

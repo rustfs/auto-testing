@@ -5,7 +5,7 @@
   "source_sha256": "463fdd02dee43e42fef4f3aacf7506709ce87af535e1a53d91c521bc2e361cad",
   "reviewed_testing_commit": "50baebb79f52b3b817f41c45db551588a4b28bd7",
   "scope": "Test implementation migration and candidate live acceptance are independent. This review does not rewrite original results, change migration_status semantics or relax the canonical gate. Environment procedures remain disabled by default under the accepted delivery scope.",
-  "evidence_basis": "20261026-canonical-migration-ledger-7094.json plus later G01/G02 attempts and source review on 2026-10-28; historical result bytes and audit reports remain in the separate evidence store. 2026-11-10: 对 Rebalance 活动夹具、容量准入、Started 非零进度与提前完成诊断进行限定复核；本次本地回归不新增产品 live acceptance。",
+  "evidence_basis": "20261026-canonical-migration-ledger-7094.json plus later G01/G02 attempts and source review on 2026-10-28; historical result bytes and audit reports remain in the separate evidence store. 2026-11-10: a scoped re-review of the Rebalance activity fixture, capacity admission, Started non-zero progress, and the early-completion diagnosis; this local regression adds no product live acceptance.",
   "reviewed_files": {
     "scripts/run_validation_case.sh": "ac51328ff860074f285999236a07ec8d2274d56607dc7c6c6389747fd7a0c498",
     "scripts/validation_heal/authority.py": "8f2225f184427674de1f45aff4c4976c812f9d70fd4bc927ce460726a4ff74a0",
@@ -17,8 +17,8 @@
     "scripts/validation_heal/capacity.py": "67a2b0836603cb7ddbb526a528c5f7896527cec406ba30c92afed4fc8188c990",
     "scripts/validation_heal/coordinator_crash.py": "9188d624e2429900c168e8500b740a4b3222831dc465eb74eab9fb62c11ed235",
     "scripts/validation_heal/environment.py": "93f13101553e6d3052147f1b4848cead44c201dc8447b4de5c898f7c1201865a",
-    "scripts/validation_heal/environment_gate.py": "b54ccb7a100d111289380759eb4b10c65a324280d3f50551031d87243205fcb4",
-    "scripts/validation_heal/execution_policy.py": "b5582404e09f19d70255f8da71cea0895c154afe4e1b3f5497c2d76361e53b6a",
+    "scripts/validation_heal/environment_gate.py": "4254980b5c202c7bcd0e6f44d7e64788a0132bdc941d413cf710dbb28333426d",
+    "scripts/validation_heal/execution_policy.py": "2e78b8f572ac0e9c0ff6138dd67b86416025c0972dc04f44cc7254145bf4593f",
     "scripts/validation_heal/flapping.py": "58ea6a0d480fa3188975658421f9dd8a92a89109fbaa2f34329f668f71bd1096",
     "scripts/validation_heal/generation_fault.py": "5a35483a3e4d21cbfede1e1262bb6bf911bb077f7f08eaeb94b34204d19775c1",
     "scripts/validation_heal/incarnation.py": "8ea507c13a471fbc52e9666c26a3ab3f6e276337d4c75579885ba9f929f277c9",
@@ -56,7 +56,7 @@
     "scripts/validation_heal/race_native.py": "fca55264c42ebad30fc796085512e959fa827753b3f0f52e14c09738f21464f6",
     "scripts/validation_heal/race_native_contracts.json": "cdd6228d9c99dc1c550d4044743d78c58e95c22f0bb8076bc9611b2fc18e01a4",
     "scripts/validation_heal/race_native_evidence.py": "caa2b5c63a419e2c0c29c6d5e38b50ab1ca34df03de10ccbd2e30954158339f4",
-    "scripts/validation_heal/recipes.json": "9dbfc7336e9cac1b8b8b7f8b5889eeb117cf4bca1678774249f553ddc8270a03",
+    "scripts/validation_heal/recipes.json": "b51b65c844bee65750b246a29d9c78966e759a3b6bfff1a3b455b6a750fb2b1c",
     "scripts/validation_heal/replace_drive.py": "dd7e13a85fdaf5e92b2f744167c6a8e4af9307ca827a78462e11082a2ba2349c",
     "scripts/validation_heal/replacement.py": "051161cf09769f327596e30088fa0630014ddf5fac039dcca01e0b613ab84b98",
     "scripts/validation_heal/replacement_preflight.py": "5440f25f5d9951e92513953733d4975f3893c883b0d4403ee6280131e2ca20d0",
@@ -77,7 +77,7 @@
     "test_validation_heal_capacity.py": "a07caec36bba2522b7ad48a86a953f8a702fc5219e0dd63d34ecb8b6f6f139e5",
     "test_validation_heal_coordinator_crash.py": "10b8ff58c618e85b4cc97e4780cc8abe1b183f1be6f64a8a5649fe36d8f3a691",
     "test_validation_heal_environment.py": "6c3a22ae0d091db396b8f9875eed9779ac35e570c90496dffa262d4cb09c34c3",
-    "test_validation_heal_environment_gate.py": "2ecbb7fe0fe2e723aa93160f609b2c63e97c6aa807a217f67170b169a9e3f9a1",
+    "test_validation_heal_environment_gate.py": "b82ec7001da77407aaeffefa533bbf25c7e31fd029b993efa8feee0e734ea57d",
     "test_validation_heal_flapping.py": "e310601f83d75dd65f6fa268484f40d56a7f8e8412fa9499f942d86bd53e0e3d",
     "test_validation_heal_g02_source.py": "e817c99de1c7b213ca8b6c1277064ed3de2f438b4f82fa1ece14588c67870ff4",
     "test_validation_heal_g03_source.py": "9cf62d56f13decdb5665d4da6cd34840c17ae6277d3e6ce829640b1bcc4b02f3",
@@ -147,7 +147,7 @@
     {
       "case_id": "pool.expansion-restart-persistence",
       "implementation": "implemented",
-      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 复核：独立 Rebalance 活动夹具在写入前检查容量；Started 与非零进度、操作后仍 active、终态迁移和对象完整性断言保持严格。提前 Completed 报告活动窗口不足；历史 accepted runs 仅保留原产物的验收含义。",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 review: the independent Rebalance activity fixture checks capacity before writing; the assertions for Started and non-zero progress, remaining active after the operation, terminal-state transition, and object integrity stay strict. An early Completed reports an insufficient activity window; historical accepted runs retain only the acceptance meaning of the original artifacts.",
       "references": [
         "scripts/run_validation_case.sh",
         "scripts/validation_pool/pool_behavior.py",
@@ -167,7 +167,7 @@
     {
       "case_id": "pool.rebalance-stop-resume",
       "implementation": "implemented",
-      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 复核：独立 Rebalance 活动夹具在写入前检查容量；Started 与非零进度、操作后仍 active、终态迁移和对象完整性断言保持严格。提前 Completed 报告活动窗口不足；历史 accepted runs 仅保留原产物的验收含义。",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 review: the independent Rebalance activity fixture checks capacity before writing; the assertions for Started and non-zero progress, remaining active after the operation, terminal-state transition, and object integrity stay strict. An early Completed reports an insufficient activity window; historical accepted runs retain only the acceptance meaning of the original artifacts.",
       "references": [
         "scripts/run_validation_case.sh",
         "scripts/validation_pool/pool_behavior.py",
@@ -187,7 +187,7 @@
     {
       "case_id": "pool.rebalance-live-io",
       "implementation": "implemented",
-      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 复核：独立 Rebalance 活动夹具在写入前检查容量；Started 与非零进度、操作后仍 active、终态迁移和对象完整性断言保持严格。提前 Completed 报告活动窗口不足；历史 accepted runs 仅保留原产物的验收含义。",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 review: the independent Rebalance activity fixture checks capacity before writing; the assertions for Started and non-zero progress, remaining active after the operation, terminal-state transition, and object integrity stay strict. An early Completed reports an insufficient activity window; historical accepted runs retain only the acceptance meaning of the original artifacts.",
       "references": [
         "scripts/run_validation_case.sh",
         "scripts/validation_pool/pool_behavior.py",
@@ -328,7 +328,7 @@
     {
       "case_id": "pool.operation-guards",
       "implementation": "implemented",
-      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 复核：独立 Rebalance 活动夹具在写入前检查容量；Started 与非零进度、操作后仍 active、终态迁移和对象完整性断言保持严格。提前 Completed 报告活动窗口不足；历史 accepted runs 仅保留原产物的验收含义。",
+      "basis": "Independent complete live acceptance already exercised the source procedure, assertions, evidence and finalization; accepted runs retain their own candidate/helper provenance. 2026-11-10 review: the independent Rebalance activity fixture checks capacity before writing; the assertions for Started and non-zero progress, remaining active after the operation, terminal-state transition, and object integrity stay strict. An early Completed reports an insufficient activity window; historical accepted runs retain only the acceptance meaning of the original artifacts.",
       "references": [
         "scripts/run_validation_case.sh",
         "scripts/validation_pool/pool_behavior.py",
@@ -1672,7 +1672,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要隔离 ILM/tier 租户、真实 Expire/Transition/Restore 窗口和远端版本映射；共享 ILM 环境不能安全制造交叠窗口。"
+        "finding": "Requires an isolated ILM/tier tenant, a real Expire/Transition/Restore window, and remote version mapping; a shared ILM environment cannot safely create an overlap window."
       }
     },
     {
@@ -1696,7 +1696,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要隔离的复制两端、resync 控制、跨端版本映射和 Heal/resync 实际交叠窗口；当前固定 fleet 没有独占复制对。"
+        "finding": "Requires isolated replication endpoints, resync control, cross-endpoint version mapping, and an actual Heal/resync overlap window; the current fixed fleet has no exclusive replication pair."
       }
     },
     {
@@ -1720,7 +1720,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要专用 faultfs 或故障设备、可恢复的 slow/short-read/EIO 注入和 namespace 隔离；共享盘模拟会污染其他运行。"
+        "finding": "Requires a dedicated faultfs or fault device, recoverable slow/short-read/EIO injection, and namespace isolation; simulating on a shared disk would contaminate other runs."
       }
     },
     {
@@ -1879,7 +1879,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要专用 KMS/tier 租户、依赖网络隔离和安全的 key/tier 版本证据；不能在共享依赖上全局断网。"
+        "finding": "Requires a dedicated KMS/tier tenant, network isolation of the dependency, and safe key/tier version evidence; do not cut the network globally on a shared dependency."
       }
     },
     {
@@ -2051,7 +2051,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要两个已固定且相互兼容的 RustFS release、混合版本 peer 状态和经过审核的回滚兼容矩阵；当前 auto-testing Heal 节点没有这组不可变双版本资源。"
+        "finding": "Requires two pinned, mutually compatible RustFS releases, mixed-version peer state, and a reviewed rollback-compatibility matrix; the current auto-testing Heal node does not have this immutable dual-version resource set."
       }
     },
     {
@@ -2075,7 +2075,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要 H6 专用主机、平台强制停启权限、带外恢复和 boot_id/平台事件证据；共享 Heal 节点不能证明真实电源循环。"
+        "finding": "Requires a dedicated H6 host, platform force stop/start permission, out-of-band recovery, and boot_id/platform-event evidence; a shared Heal node cannot prove a real power cycle."
       }
     },
     {
@@ -2099,7 +2099,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要 H5 pool 扩容、rebalance 和 Heal 同时活动的完整拓扑，并逐对象保存 pool/set 迁移证据；当前 auto-testing 未绑定扩容前后布局与专用操作窗口。"
+        "finding": "Requires a complete topology in which H5 pool expansion, rebalance, and Heal are active at the same time, with pool/set migration evidence saved per object; current auto-testing has not bound the layout before and after expansion or a dedicated operation window."
       }
     },
     {
@@ -2123,7 +2123,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要可观测的 H5 rebalance、停止/恢复/服务重启控制及独立 task 身份；当前 auto-testing 未绑定这两类任务的独立身份和操作窗口。"
+        "finding": "Requires observable H5 rebalance, stop/resume/service-restart control, and independent task identities; current auto-testing has not bound the independent identities and operation windows of these two task classes."
       }
     },
     {
@@ -2147,7 +2147,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要 H5 pool decommission、survivor 目标、写入限制和移动 ACK/物理权威证据；当前 auto-testing 未绑定本例退役前后拓扑和恢复方案。"
+        "finding": "Requires H5 pool decommission, a survivor target, write restrictions, and move-ACK and physical-authority evidence; current auto-testing has not bound this case's topology before and after decommission, or its recovery plan."
       }
     },
     {
@@ -2171,7 +2171,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要退役取消/清理/新代次恢复以及 #2423 所需容量锁重试窗口；普通取消结果不能替代这个临界点。"
+        "finding": "Requires decommission cancellation, cleanup, and new-generation recovery, plus the capacity-lock retry window required by #2423; an ordinary cancellation result cannot take the place of this boundary."
       }
     },
     {
@@ -2195,7 +2195,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要完整迁移后移除 retired pool、源保持离线和 survivor-only 访问；当前 auto-testing 未提供本例源持续离线和 survivor-only 的绑定证据。"
+        "finding": "Requires the retired pool to be removed after a complete migration, the source to stay offline, and survivor-only access; current auto-testing has not provided bound evidence for this case that the source stays offline and that access is survivor-only."
       }
     },
     {
@@ -2249,7 +2249,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "需要 H3 的 12 个独立盘和 H4 的至少 24 个独立 endpoint，并按 set 分别记录重启/崩溃窗口；当前 H4 资源不可用。"
+        "finding": "Requires 12 independent disks for H3 and at least 24 independent endpoints for H4, with the restart and crash windows recorded per set; H4 resources are currently unavailable."
       }
     },
     {
@@ -2273,7 +2273,7 @@
       "gaps": [],
       "live": {
         "state": "disabled",
-        "finding": "必须在独占 H2/H5 lane 真实运行 24 小时和 72 小时，包含限速、监控、到期回收和完整资源预算；短跑不能替代 soak 证据。"
+        "finding": "Must actually run for 24 hours and for 72 hours on an exclusive H2/H5 lane, including rate limiting, monitoring, expiry reclamation, and a complete resource budget. A short run cannot substitute for soak evidence."
       }
     },
     {
