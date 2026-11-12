@@ -283,6 +283,9 @@ class DryRunTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stdout.count("[DRY-RUN] STS-105"), 3)
+            for case_id in range(106, 113):
+                self.assertEqual(result.stdout.count(f"[DRY-RUN] STS-{case_id}"), 3)
+                self.assertEqual(report.read_text().count(f"| STS-{case_id} |"), 3)
             for topology in ("single-single", "single-multi", "multi-multi"):
                 self.assertIn(f"## Topology: {topology}", report.read_text())
             self.assertEqual(result.stdout, log_file.read_text())

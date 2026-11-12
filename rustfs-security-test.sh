@@ -17,7 +17,7 @@
 # RustFS unified IAM / STS / OIDC security test suite (backlog #2024).
 #
 # Integrates the backlog security case matrix (IAM-102..114, SA-101..104,
-# STS-101..105, OIDC-101..108) with the request flows proven by
+# STS-101..112, OIDC-101..108) with the request flows proven by
 # admin_iam_crud_test / sts_query_compat_test / oidc_keycloak_live.sh.
 #
 # Every case runs in three topologies, matching the other functional suites:
@@ -917,6 +917,48 @@ case_sts_105_revoke() {
   esac
 }
 
+# Issue #9279 uses an S3-scoped SigV4 POST, rather than the AWS CLI's STS
+# signer. Also verify every returned field and use the temporary credentials.
+case_sts_106_root_query() {
+  RUSTFS_ACCESS_KEY="${ACCESS_KEY}" RUSTFS_SECRET_KEY="${SECRET_KEY}" \
+    python3 "${SCRIPT_DIR}/scripts/sts_root_regression.py" --endpoint "${ENDPOINT}"
+}
+
+sts_root_startup_case() {
+  # The installed candidate runs on loopback with private temporary data and
+  # credentials. The helper always stops its own process; systemd and the
+  # topology's root credentials/data are never changed for these cases.
+  local option options=()
+  for option in "${SSH_OPTS[@]}"; do options+=("--ssh-option=${option}"); done
+  python3 "${SCRIPT_DIR}/scripts/sts_root_regression.py" \
+    --ssh-target "${SSH_USER}@${NODES[0]}" "${options[@]}" \
+    --rustfs-bin /usr/bin/rustfs --case "$1"
+}
+
+case_sts_107_short_root_secret() {
+  sts_root_startup_case secret-4
+}
+
+case_sts_108_seven_byte_root_secret() {
+  sts_root_startup_case secret-7
+}
+
+case_sts_109_short_root_access_key() {
+  sts_root_startup_case access-2
+}
+
+case_sts_110_minimum_root_credentials() {
+  sts_root_startup_case minimum
+}
+
+case_sts_111_eight_byte_root_secret() {
+  sts_root_startup_case secret-8
+}
+
+case_sts_112_utf8_root_secret() {
+  sts_root_startup_case secret-8-utf8
+}
+
 # ==================== OIDC / SSO ====================
 
 case_oidc_102_validate_rejects_bad_config() {
@@ -1093,6 +1135,13 @@ run_security_cases() {
   run_test STS-102 "AssumeRole duration clamped to 12h" case_sts_102_duration_clamp
   run_test STS-104 "temporary credentials respect identity scope" case_sts_104_temp_boundary
   run_test STS-105 "revoke-tokens invalidates temporary credentials" case_sts_105_revoke
+  run_test STS-106 "root signed Query AssumeRole returns usable credentials (#9279)" case_sts_106_root_query
+  run_test STS-107 "startup rejects a 4-byte root secret (#9279)" case_sts_107_short_root_secret
+  run_test STS-108 "startup rejects a 7-byte root secret (#9279)" case_sts_108_seven_byte_root_secret
+  run_test STS-109 "startup rejects a 2-byte root access key (#9279)" case_sts_109_short_root_access_key
+  run_test STS-110 "3-byte access key and 8-byte secret support AssumeRole (#9279)" case_sts_110_minimum_root_credentials
+  run_test STS-111 "root with an 8-byte secret supports AssumeRole (#9279)" case_sts_111_eight_byte_root_secret
+  run_test STS-112 "root secret minimum counts UTF-8 bytes (#9279)" case_sts_112_utf8_root_secret
   run_test OIDC-102 "OIDC validate rejects bad provider config" case_oidc_102_validate_rejects_bad_config
   run_test OIDC-108 "STS rejects expired/garbage web identity token" case_oidc_108_reject_garbage_jwt
   if [ "${OIDC_LIVE}" -eq 1 ] && [ "${OIDC_RUN}" -eq 0 ]; then
@@ -1109,6 +1158,7 @@ run_security_cases() {
 
 main() {
   parse_args "$@"
+  [ -f "${SCRIPT_DIR}/scripts/sts_root_regression.py" ] || die "missing scripts/sts_root_regression.py"
   need_cmd ssh "openssh client"
   need_cmd curl "curl"
   need_cmd openssl "openssl"

@@ -243,7 +243,36 @@ The default log filter is `error,rustfs::admin::auth=debug`; set
 commit, while console output includes Bash, curl, and AWS CLI versions.
 
 ```bash
-python3 -B -m unittest -v test_rustfs_security.py test_sensitive_diagnostics.py
+python3 -B -m unittest -v test_rustfs_security.py test_sts_root_regression.py test_sensitive_diagnostics.py
+```
+
+### Root AssumeRole regression (#9279)
+
+The security suite runs STS-106 through STS-112 for [rustfs/rustfs#9279](https://github.com/rustfs/rustfs/issues/9279) in every selected topology. STS-106 reproduces the report's form-encoded POST with the `aws:amz:us-east-1:s3` signature scope, requires HTTP 200 and complete, unexpired temporary credentials, then signs ListBuckets with those credentials and the session token.
+
+| Case | Credentials / behavior | Required result |
+|---|---|---|
+| STS-106 | Configured root, original Query request | HTTP 200, usable STS credentials |
+| STS-107 | Root secret: 4 bytes (`root`, as reported) | Nonzero startup exit with a credential-length error |
+| STS-108 | Root secret: 7 bytes | Nonzero startup exit with a credential-length error |
+| STS-109 | Root access key: 2 bytes | Nonzero startup exit with a credential-length error |
+| STS-110 | Root access key: 3 bytes, secret: 8 bytes | Startup succeeds, usable STS credentials |
+| STS-111 | Access key `root`, secret: 8 bytes | Startup succeeds, usable STS credentials |
+| STS-112 | Root secret: 4 Unicode characters / 8 UTF-8 bytes | Startup succeeds, usable STS credentials |
+
+Startup cases run the installed candidate binary on the topology's first node in separate loopback processes, with fresh temporary volumes and disposable credentials. They leave the topology's system service and credentials unchanged. The helper requires Python 3 and curl with `--aws-sigv4` support on that node. Keep `scripts/sts_root_regression.py` with the suite when copying the runner.
+
+The SSH runner keeps a heartbeat channel open after sending the helper source. Channel EOF or five seconds without a heartbeat requests remote cancellation without depending on a PTY or SIGHUP. Cancellation is checked between bounded requests; teardown completes its wait, forced termination if necessary, and private-directory removal before returning exit status 130. Repeated cancellation cannot interrupt teardown.
+
+The assertions target the intended fix: older versions that accept short root credentials fail these startup cases, even if their STS request returns HTTP 200 or 403. If invalid credentials reach readiness, the report records the STS HTTP status and error code (including the reported `500 InternalError`) before failing. Unrelated startup errors, timeouts, malformed responses, and unusable credentials also fail. Only credential byte lengths and structured outcomes are printed; secret keys, session tokens, and raw server logs are never included.
+
+Run the same matrix against a local candidate binary, or check only the signed Query flow against a running endpoint:
+
+```bash
+python3 scripts/sts_root_regression.py --rustfs-bin /absolute/path/to/rustfs
+python3 scripts/sts_root_regression.py --rustfs-bin /absolute/path/to/rustfs --case secret-4
+# Uses RUSTFS_ACCESS_KEY and RUSTFS_SECRET_KEY from the environment.
+python3 scripts/sts_root_regression.py --endpoint http://127.0.0.1:9000
 ```
 
 ## Tier suite artifacts
