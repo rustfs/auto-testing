@@ -39,6 +39,8 @@ def new_bucket(prefix):
 
 
 class Session:
+    read_timeout = 60
+
     def __init__(self, endpoint, events, budget, factory=None):
         self.endpoint = endpoint
         self.events = events
@@ -57,7 +59,7 @@ class Session:
             aws_secret_access_key=os.environ["WARP_SECRET_KEY"],
             aws_session_token=os.environ.get("WARP_SESSION_TOKEN") or None,
             config=Config(s3={"addressing_style": "path"}, proxies={},
-                          connect_timeout=min(3, remaining), read_timeout=min(60, remaining),
+                          connect_timeout=min(3, remaining), read_timeout=min(self.read_timeout, remaining),
                           retries={"total_max_attempts": 1}),
         )
 
@@ -66,15 +68,20 @@ class Session:
         with self.events.open("a") as stream:
             stream.write(json.dumps(record) + "\n")
 
+    def invoke(self, operation, **arguments):
+        return getattr(self.s3, operation)(**arguments)
+
     def call(self, operation, **arguments):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise RequestFailure("CleanupDeadlineExceeded")
         try:
             # Rebuild near the deadline so a call cannot retain a longer old timeout.
-            if self.s3 is None or remaining < 60:
+            if self.s3 is None or remaining < self.read_timeout:
                 self.s3 = self.factory(max(0.01, remaining))
-            response = getattr(self.s3, operation)(**arguments)
+            response = self.invoke(operation, **arguments)
+        except RequestFailure:
+            raise
         except Exception as exc:
             response = getattr(exc, "response", {})
             if not isinstance(response, dict):

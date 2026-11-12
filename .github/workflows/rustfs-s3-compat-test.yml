@@ -77,6 +77,14 @@ jobs:
           openssl version
           df -h /data | tail -1
 
+      - name: Install bulk-delete regression client
+        run: |
+          set -euo pipefail
+          BULK_CLIENT="${FUNCTIONAL_ARTIFACTS_DIR}-scratch/bulk-client"
+          python3 -m venv "${BULK_CLIENT}"
+          "${BULK_CLIENT}/bin/python" -m pip install 'boto3>=1.35,<2'
+          printf 'RUSTFS_S3_BULK_PYTHON=%s/bin/python\n' "${BULK_CLIENT}" >> "${GITHUB_ENV}"
+
       - name: Admit clean shared environment
         id: environment
         timeout-minutes: 5
@@ -113,7 +121,7 @@ jobs:
           chmod +x rustfs-s3-compat-test.sh
           PACKAGE_URL='${{ inputs.package_url }}'
           RUSTFS_VERSION='${{ inputs.rustfs_version }}'
-          ARGS=(--all-topologies -y --log-file "${LOG_FILE}")
+          ARGS=(--all-topologies -y --log-file "${LOG_FILE}" --bulk-delete-results-dir "${FUNCTIONAL_ARTIFACTS_DIR}/bulk-delete")
           if [ -n "${PACKAGE_URL}" ]; then
             ARGS+=(--package-url "${PACKAGE_URL}")
           elif [ -n "${RUSTFS_VERSION}" ]; then
@@ -292,6 +300,7 @@ jobs:
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/report.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/suite.log
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/cases.md
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/bulk-delete/
           if-no-files-found: error
 
       - name: Cleanup environment (after)

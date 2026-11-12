@@ -86,6 +86,10 @@ per-key failures, request ids, GET results and residue before/after cleanup.
 Cleanup runs in `finally`; an incomplete cleanup aborts the remaining cases.
 The caller must hold the environment's test lock throughout this probe.
 
+## Bulk-delete regressions
+
+The complete S3 topology suite includes bulk-delete regressions `S3C-213`, `S3C-214`, `S3C-1306` and `S3C-1307`. They cover batch boundaries, duplicate keys, immutable GET load and finite same-key PUT contention in off/on/suspended versioning modes. Python boto3 is required. Each subcase retains JSON, phase/request timing, HTTP 503 and per-object error counts, version/marker cleanup receipts and a Chinese Markdown summary under `--bulk-delete-results-dir`. The standalone runner accepts existing endpoints and does not deploy nodes; its caller must hold the environment lock. See [the case contracts and usage](docs/s3-bulk-delete-regressions.zh-CN.md).
+
 ## Release validation migration
 
 `validation-cases.json` snapshots all 158 canonical cases from

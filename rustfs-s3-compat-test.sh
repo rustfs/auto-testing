@@ -94,6 +94,8 @@ VALIDATION_OBJECT_CLEANUP_STATUS=PASS
 VALIDATION_BINARY_SHA256=""
 ENDPOINT=""
 VOLUMES=""
+S3_BULK_RESULTS_DIR="${RUSTFS_S3_BULK_RESULTS_DIR:-}"
+S3_BULK_PYTHON="${RUSTFS_S3_BULK_PYTHON:-python3}"
 
 # ==================== Helpers ====================
 
@@ -882,6 +884,27 @@ worm_object_lock_tests() {
   run_test S3C-605 "LegalHold"               test_s3c605
 }
 
+bulk_delete_regression() {
+  local id="$1" index=1 node
+  local args=(--case "${id}" --endpoint "${ENDPOINT}")
+  if [ -z "${S3_BULK_RESULTS_DIR}" ]; then
+    S3_BULK_RESULTS_DIR="$(mktemp -d "${LOG_FILE:+$(dirname "${LOG_FILE}")/}rustfs-s3-bulk.XXXXXX")"
+  fi
+  mkdir -p "${S3_BULK_RESULTS_DIR}/${CURRENT_TOPOLOGY:-existing}"
+  args+=(--result-dir "${S3_BULK_RESULTS_DIR}/${CURRENT_TOPOLOGY:-existing}/${id}")
+  for node in $(topology_nodes "${CURRENT_TOPOLOGY}"); do
+    if [ "${index}" -gt 1 ]; then args+=(--endpoint "http://${node}:9000"); fi
+    index=$((index+1))
+  done
+  RUSTFS_ACCESS_KEY="${ACCESS_KEY}" RUSTFS_SECRET_KEY="${SECRET_KEY}" AWS_DEFAULT_REGION="${REGION}" \
+    "${S3_BULK_PYTHON}" "${SCRIPT_DIR}/scripts/s3_bulk_delete_regressions.py" "${args[@]}"
+}
+
+test_s3c213()  { bulk_delete_regression S3C-213; }
+test_s3c214()  { bulk_delete_regression S3C-214; }
+test_s3c1306() { bulk_delete_regression S3C-1306; }
+test_s3c1307() { bulk_delete_regression S3C-1307; }
+
 run_all_tests() {
   run_test S3C-101 "CreateBucket"            test_s3c101
   run_test S3C-102 "HeadBucket"              test_s3c102
@@ -901,6 +924,8 @@ run_all_tests() {
   run_test S3C-210 "SpecialCharKey"          test_s3c210
   run_test S3C-211 "ServerSideMove"          test_s3c211
   run_test S3C-212 "ReservedStorageNames"    test_s3c212
+  run_test S3C-213 "BulkDeleteBatchMatrix"   test_s3c213
+  run_test S3C-214 "BulkDeleteDuplicateKeys" test_s3c214
   run_test S3C-301 "MultipartFullFlow"       test_s3c301
   run_test S3C-302 "UploadPartCopy"          test_s3c302
   run_test S3C-303 "ListPartsAndUploads"     test_s3c303
@@ -963,6 +988,8 @@ run_all_tests() {
   run_test S3C-1303 "HugeKeyMetadata"        test_s3c1303
   run_test S3C-1304 "MalformedXmlParams"     test_s3c1304
   run_test S3C-1305 "ConcurrentOverwrite"    test_s3c1305
+  run_test S3C-1306 "BulkDeleteUnderGetLoad" test_s3c1306
+  run_test S3C-1307 "BulkDeleteWriteRecovery" test_s3c1307
   run_test S3C-1401 "CopyMetadataOnCopy"     test_s3c1401
   run_test S3C-1402 "AwsChunkedNoDecodedLen" test_s3c1402
   run_test S3C-1403 "ConcurrentUploadPart"   test_s3c1403
@@ -3141,6 +3168,7 @@ Options:
   --ssh-user USER            SSH user for the nodes (default azureuser)
   --ssh-port PORT            SSH port for the nodes (default 22)
   --log-file FILE            Append all output to FILE
+  --bulk-delete-results-dir DIR  Retain bulk-delete JSON, request traces and Markdown
   --validation-case ID       Run only s3.basic-object-round-trip (single-single)
   --validation-artifacts-dir DIR  Write canonical validation result and evidence
   --candidate-manifest FILE  Immutable candidate manifest for validation results
@@ -3188,6 +3216,7 @@ main() {
       --ssh-user) SSH_USER="$1"; shift ;;
       --ssh-port) SSH_PORT="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
+      --bulk-delete-results-dir) S3_BULK_RESULTS_DIR="$1"; shift ;;
       --validation-case) VALIDATION_CASE="$1"; shift ;;
       --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
       --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
@@ -3247,6 +3276,13 @@ main() {
   need_cmd openssl "OpenSSL (SigV4)"
   need_cmd python3 "Python 3 (archive fixtures)"
   need_cmd tar "tar archive tool"
+  if [ "${DRY_RUN}" -eq 0 ] && [ -z "${VALIDATION_CASE}" ]; then
+    case ",${SELECTED_CASES}," in
+      ,,|*,S3C-213,*|*,S3C-214,*|*,S3C-1306,*|*,S3C-1307,*)
+        "${S3_BULK_PYTHON}" -c 'import boto3' >/dev/null 2>&1 || die "bulk-delete regressions require Python boto3"
+        ;;
+    esac
+  fi
   log "nodes: ${NODES[*]}  package: $(resolve_package_url)"
   local overall_fail=0 topo
   for topo in "${SELECTED_TOPOLOGIES[@]}"; do
