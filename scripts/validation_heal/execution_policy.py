@@ -58,67 +58,67 @@ def _native(code: str, reason_code: str, reason: str, capabilities: tuple[str, .
 ENVIRONMENT_GATED_CASES = {
     "heal.mixed-version-upgrade-rollback": _environment(
         "F08", "ENV_IMMUTABLE_RELEASE_PAIR",
-        "需要两个已固定且相互兼容的 RustFS release、混合版本 peer 状态和经过审核的回滚兼容矩阵；当前 auto-testing Heal 节点没有这组不可变双版本资源。",
+        "Requires two pinned, mutually compatible RustFS releases, mixed-version peer state, and a reviewed rollback-compatibility matrix; the current auto-testing Heal node does not have this immutable dual-version resource set.",
         ("immutable_release_pair", "mixed_version_peer_status", "rolling_upgrade_rollback", "rollback_compatibility_matrix"),
     ),
     "heal.dedicated-host-forced-restart": _environment(
         "F09", "ENV_DEDICATED_H6_HOST",
-        "需要 H6 专用主机、平台强制停启权限、带外恢复和 boot_id/平台事件证据；共享 Heal 节点不能证明真实电源循环。",
+        "Requires a dedicated H6 host, platform force stop/start permission, out-of-band recovery, and boot_id/platform-event evidence; a shared Heal node cannot prove a real power cycle.",
         ("dedicated_h6_host", "platform_power_cycle", "out_of_band_recovery", "boot_id_evidence"),
     ),
     "heal.race-ilm-expiry-and-transition": _environment(
         "G07", "ENV_DEDICATED_ILM_TIER_WINDOW",
-        "需要隔离 ILM/tier 租户、真实 Expire/Transition/Restore 窗口和远端版本映射；共享 ILM 环境不能安全制造交叠窗口。",
+        "Requires an isolated ILM/tier tenant, a real Expire/Transition/Restore window, and remote version mapping; a shared ILM environment cannot safely create an overlap window.",
         ("dedicated_ilm_tier", "real_expire_transition_restore_window", "remote_version_mapping", "isolated_rule_cleanup"),
     ),
     "heal.race-replication-resync": _environment(
         "G08", "ENV_ISOLATED_REPLICATION_PAIR",
-        "需要隔离的复制两端、resync 控制、跨端版本映射和 Heal/resync 实际交叠窗口；当前固定 fleet 没有独占复制对。",
+        "Requires isolated replication endpoints, resync control, cross-endpoint version mapping, and an actual Heal/resync overlap window; the current fixed fleet has no exclusive replication pair.",
         ("isolated_replication_pair", "resync_control", "cross_endpoint_version_mapping", "replication_overlap_window"),
     ),
     "heal.with-expansion-rebalance": _environment(
         "H01", "ENV_H5_EXPANSION_REBALANCE",
-        "需要 H5 pool 扩容、rebalance 和 Heal 同时活动的完整拓扑，并逐对象保存 pool/set 迁移证据；当前 auto-testing 未绑定扩容前后布局与专用操作窗口。",
+        "Requires a complete topology in which H5 pool expansion, rebalance, and Heal are active at the same time, with pool/set migration evidence saved per object; current auto-testing has not bound the layout before and after expansion or a dedicated operation window.",
         ("h5_pool_expansion", "rebalance_task", "per_object_pool_set_mapping", "retired_scanner_evidence"),
     ),
     "heal.with-rebalance-stop-resume": _environment(
         "H02", "ENV_H5_REBALANCE_LIFECYCLE",
-        "需要可观测的 H5 rebalance、停止/恢复/服务重启控制及独立 task 身份；当前 auto-testing 未绑定这两类任务的独立身份和操作窗口。",
+        "Requires observable H5 rebalance, stop/resume/service-restart control, and independent task identities; current auto-testing has not bound the independent identities and operation windows of these two task classes.",
         ("h5_rebalance", "rebalance_stop_resume", "independent_task_identity", "service_restart_control"),
     ),
     "heal.with-decommission": _environment(
         "H03", "ENV_H5_DECOMMISSION",
-        "需要 H5 pool decommission、survivor 目标、写入限制和移动 ACK/物理权威证据；当前 auto-testing 未绑定本例退役前后拓扑和恢复方案。",
+        "Requires H5 pool decommission, a survivor target, write restrictions, and move-ACK and physical-authority evidence; current auto-testing has not bound this case's topology before and after decommission, or its recovery plan.",
         ("h5_decommission", "survivor_pool", "decommission_write_guard", "movement_ack_physical_proof"),
     ),
     "heal.with-decommission-cancel-clear": _environment(
         "H04", "ENV_H5_DECOMMISSION_CANCEL",
-        "需要退役取消/清理/新代次恢复以及 #2423 所需容量锁重试窗口；普通取消结果不能替代这个临界点。",
+        "Requires decommission cancellation, cleanup, and new-generation recovery, plus the capacity-lock retry window required by #2423; an ordinary cancellation result cannot take the place of this boundary.",
         ("h5_decommission", "cancel_clear_resume", "capacity_lock_retry_window", "generation_bound_ack_ledger"),
     ),
     "heal.after-retired-pool-removal": _environment(
         "H05", "ENV_H5_RETIRED_POOL_REMOVAL",
-        "需要完整迁移后移除 retired pool、源保持离线和 survivor-only 访问；当前 auto-testing 未提供本例源持续离线和 survivor-only 的绑定证据。",
+        "Requires the retired pool to be removed after a complete migration, the source to stay offline, and survivor-only access; current auto-testing has not provided bound evidence for this case that the source stays offline and that access is survivor-only.",
         ("h5_retired_pool_removal", "source_offline_proof", "survivor_authority", "retired_pool_write_guard"),
     ),
     "heal.ec84-multi-set-restart": _environment(
         "H07", "ENV_EC84_MULTI_SET_TOPOLOGY",
-        "需要 H3 的 12 个独立盘和 H4 的至少 24 个独立 endpoint，并按 set 分别记录重启/崩溃窗口；当前 H4 资源不可用。",
+        "Requires 12 independent disks for H3 and at least 24 independent endpoints for H4, with the restart and crash windows recorded per set; H4 resources are currently unavailable.",
         ("h3_ec84_12_independent_disks", "h4_ec84_24_independent_endpoints", "per_set_identity", "per_set_restart_crash_evidence"),
     ),
     "heal.slow-io-and-eio": _environment(
         "I01", "ENV_DEDICATED_FAULT_IO",
-        "需要专用 faultfs 或故障设备、可恢复的 slow/short-read/EIO 注入和 namespace 隔离；共享盘模拟会污染其他运行。",
+        "Requires a dedicated faultfs or fault device, recoverable slow/short-read/EIO injection, and namespace isolation; simulating on a shared disk would contaminate other runs.",
         ("dedicated_faultfs_or_device", "slow_io_short_read_eio", "namespace_isolation", "fault_layer_restore"),
     ),
     "heal.kms-and-tier-outage": _environment(
         "I06", "ENV_DEDICATED_KMS_TIER_TENANT",
-        "需要专用 KMS/tier 租户、依赖网络隔离和安全的 key/tier 版本证据；不能在共享依赖上全局断网。",
+        "Requires a dedicated KMS/tier tenant, network isolation of the dependency, and safe key/tier version evidence; do not cut the network globally on a shared dependency.",
         ("dedicated_kms_tier_tenant", "dependency_network_isolation", "key_redaction", "tier_version_mapping"),
     ),
     "heal.long-soak": _environment(
         "J05", "ENV_DEDICATED_LONG_SOAK_LANE",
-        "必须在独占 H2/H5 lane 真实运行 24 小时和 72 小时，包含限速、监控、到期回收和完整资源预算；短跑不能替代 soak 证据。",
+        "Must actually run for 24 hours and for 72 hours on an exclusive H2/H5 lane, including rate limiting, monitoring, expiry reclamation, and a complete resource budget. A short run cannot substitute for soak evidence.",
         ("dedicated_soak_lane", "wall_clock_24h_72h", "resource_budget_monitoring", "scheduled_fault_recovery"),
     ),
 }
@@ -129,22 +129,22 @@ ENVIRONMENT_GATED_CASES = {
 EVIDENCE_BLOCKED_CASES = {
     "heal.bucket-incarnation-recreation": _native(
         "C11", "EVIDENCE_INCARNATION_LIVE_ORCHESTRATION",
-        "已实现 H1/H2 旧元数据重返、真实 checkpoint/resume 回放、ACK 绑定的 committed MRF 回放和精确 native 证据门禁；尚缺全部现场分支的独立审计，诊断执行保持 FAIL/BLOCKED，原生前置通过不能替代 canonical 验收。",
+        "H1/H2 old-metadata rejoin, real checkpoint/resume replay, ACK-bound committed MRF replay, and the precise native evidence gate are implemented; an independent audit of every live branch is still missing, diagnostic execution stays FAIL/BLOCKED, and a passing native prerequisite cannot replace canonical acceptance.",
         ("bucket_incarnation_isolation", "checkpoint_mrf_replay_guard", "incarnation_native_evidence_binding", "complete_live_orchestrator"),
     ),
     "heal.checkpoint-and-mrf-corruption": _native(
         "F07", "EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION",
-        "已实现 H1/H2 checkpoint 截断、未来 schema、真实较早代次回放、committed MRF CRC 故障、私有限额卷的真实 journal ENOSPC 和独立安全重扫；10 项原生回归仅为前置证据。仍缺全部所需 fsync/commit 临界点审核和完整现场分支的独立 live 审计，诊断执行不能提升 canonical 验收。",
+        "Implemented H1/H2 checkpoint truncation, future schema, replay of a real earlier generation, a committed MRF CRC fault, real journal ENOSPC on a private quota volume, and an independent safe rescan; the 10 native regressions are only prerequisite evidence. Still missing are review of every required fsync/commit boundary and an independent live audit of the complete live branches. Diagnostic execution cannot raise canonical acceptance.",
         ("durable_checkpoint_mrf_fault", "write_failure_retention", "publication_boundary_evidence_binding", "complete_live_orchestrator"),
     ),
     "heal.lock-timeout-and-caller-abort": _native(
         "I05", "NATIVE_LOCK_OWNER_ABORT_BARRIER",
-        "已有同候选源码的 lock owner、取消物理 unlink 与 stale read-repair 原生子集；H1/H2 timeout 与 queued-successor 诊断均已通过独立 live 审计（39767336741/1、39817606025/1），包括原始 ACK、历史代次、真实锁事件、各 peer inventory、停机后新分片完整性和有界 FD 收尾。仍缺实际断连边界的精确所有权、完整 native timeout/stale 屏障、stale-generation controller，以及 H1/H2 DL/DV 完整对象/ACK/物理/锁/FD 闭环。精确源码 cfg(test) 原生证据独立保留；诊断子集和原生子集不能充作完整 canonical PASS。",
+        "A native subset from the same candidate source already exists for lock owner, cancelled physical unlink, and stale read-repair. The H1/H2 timeout and queued-successor diagnostics have both passed an independent live audit (39767336741/1, 39817606025/1), including the original ACKs, historical generations, real lock events, each peer inventory, new-shard integrity after shutdown, and bounded FD cleanup. Still missing are precise ownership at the actual disconnect boundary, a complete native timeout/stale barrier, the stale-generation controller, and the complete H1/H2 DL/DV object/ACK/physical/lock/FD closed loop. Precise source cfg(test) native evidence is retained on its own; the diagnostic subset and the native subset cannot stand in for a complete canonical PASS.",
         ("server_lock_owner", "lock_timeout_fence", "caller_abort_sequence", "stale_read_repair_fence", "exact_source_native_evidence", "complete_live_orchestrator", "final_object_lock_fd_closure"),
     ),
     "heal.outcome-counters-and-error-truth": _native(
         "J02", "EVIDENCE_MIXED_OUTCOME_ORCHESTRATION",
-        "已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral、真实 SDK legacy Unknown、原始全副本损坏元数据 Unknown、只读永久失败/新 token 补偿及版本级 grace Deferred/新 token 清理执行流程，均按逐对象 manifest/attemptFailures 对账；仍需完整串行 live 证据及独立验收，故保持禁止默认 dispatch 和 canonical admission；本地检查不能作为完整 PASS。",
+        "Execution flows already exist for mixed healthy/repaired/failed, an independent dry-run, dependency deferral, a real SDK legacy Unknown, an original all-replica corrupt-metadata Unknown, read-only permanent failure with new-token compensation, and version-level grace Deferred with new-token cleanup, all reconciled per object against the manifest and attemptFailures. Complete serial live evidence and independent acceptance are still required, so default dispatch and canonical admission stay prohibited; a local check cannot serve as a complete PASS.",
         ("mixed_outcome_fixture", "per_object_canonical_receipts", "complete_live_orchestrator", "attempt_failure_visibility"),
     ),
 }

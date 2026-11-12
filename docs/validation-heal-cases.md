@@ -9,20 +9,20 @@ Use [the operations reference](validation-heal-operations.md) before injecting a
 
 Topologies: H1,H2. Branches: normal, deep.
 
-1. 用 DB 夹具生成完整 manifest；先对每个对象保存 S3 基线和四盘分片摘要，关闭 scanner/MRF/auto-heal。
-2. 依次执行 START object（scanMode=1、2），WAIT 原 token 直至终态；再 STATUS 同 token 两次。
-3. 对每个对象的 outcome 区分 Normal 的 metadata_healthy 与 Deep 的 verified_healthy；两者均要求 healed=0、unchanged>0，Normal 不得冒充 payload 完整性证明。比较目标/控制对象物理摘要和 S3 清单，重复请求不得新建版本。
+1. Generate a complete manifest with the DB fixture; first, for each object, save the S3 baseline and the four-disk shard digests, and disable scanner/MRF/auto-heal.
+2. In sequence, run START object (scanMode=1 and 2), WAIT the original token until the terminal state; then STATUS the same token twice.
+3. For each object's outcome, distinguish Normal's metadata_healthy from Deep's verified_healthy; both require healed=0 and unchanged>0, and Normal must not be passed off as proof of payload integrity. Compare the physical digests of the target and control objects with the S3 inventory, and a repeated request must not create a new version.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [BASELINE](validation-heal-operations.md#BASELINE) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [STATUS](validation-heal-operations.md#STATUS) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL)
 
 Source assertions:
 
-- 对健康对象分别执行 normal/deep，再重复查询
-- 不修改用户数据或版本；Normal 只接受 `metadata_healthy`，Deep 才要求 `verified_healthy`，healthy 与 repaired 分开计数，不能把检查盘数当修复盘数。
+- On healthy objects, run normal and deep separately, then query again.
+- Do not modify user data or versions. Normal accepts only `metadata_healthy`, and only Deep requires `verified_healthy`. Count healthy and repaired separately, and do not treat the number of disks checked as the number of disks repaired.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A02"></a>
 
@@ -30,21 +30,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: root, bucket, prefix, object, pool-set.
 
-1. 用 DS 在两个桶的 a/、ab/、b/ 写入不同内容；另在未选 set 放控制对象；逐对象预先记录实际 pool/set。
-2. 分别隔离选中对象、相邻前缀及另一桶/未选 set 的一个 part。每个 selector 使用新夹具和故障 ID。
-3. 对象请求路径到完整 key；prefix 路径到 a/ 且 recursive=true；bucket 路径只含桶；root 为 /；pool/set 写入 body。START 后 WAIT。
-4. 先 PHYSICAL：选择范围内全部重建、范围外控制故障仍缺失；然后 GET 验证，避免验证请求提前修好控制故障。root 必须包含整个专用服务清单。
+1. Use DS to write different content at a/, ab/, and b/ in two buckets; also place a control object in an unselected set; record the actual pool/set of each object in advance.
+2. Separately isolate one part of the selected object, of an adjacent prefix, and of another bucket or an unselected set. Each selector uses a new fixture and a new fault ID.
+3. The object request path is the full key; the prefix path is a/ with recursive=true; the bucket path contains only the bucket; root is /; pool/set is written in the body. WAIT after START.
+4. First PHYSICAL: everything inside the selected range is rebuilt, and control faults outside the range are still missing; then verify with GET, so the verification request does not repair the control fault early. root must include the entire dedicated-service manifest.
 
 Operations: [SEED_DS](validation-heal-operations.md#SEED_DS) → [BASELINE](validation-heal-operations.md#BASELINE) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 分别以 root、bucket、prefix、object、pool/set 选择器启动
-- 目标范围实际遍历；相邻前缀、其他桶及未选 set 的故障保持原状；按对象清单而非目录数量验收。
+- Start separately with the root, bucket, prefix, object, and pool/set selectors.
+- The target range is actually traversed. Faults on an adjacent prefix, on other buckets, and on an unselected set stay as they were. Accept by the object manifest rather than by the directory count.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A03"></a>
 
@@ -52,21 +52,21 @@ Source assertions:
 
 Topologies: H2. Branches: coordinator-to-peer, coordinator-to-stable-endpoint.
 
-1. 在 H2 同一跨节点 set 写入 DB；保存协调者、目标、稳定入口分别对应的端点，不把同一节点的两个别名当跨节点。
-2. 隔离目标节点 part；从 n0 START，记录原始 clientToken；通过 n1 和 stable 对同一路径、同 token 执行 STATUS。
-3. 按同一任务身份对齐三端状态，最多等候冻结的状态收敛预算；终态及核心计数必须一致，404/unknown 不能视为结束。
-4. WAIT 后先物理证明目标重建，再从所有 S3 入口 VERIFY；保存每个请求实际连接的节点日志。
+1. Write DB on the same cross-node set in H2; save the endpoints for the coordinator, the target, and the stable entry respectively, and do not treat two aliases of the same node as cross-node.
+2. Isolate the target node's part; START from n0 and record the original clientToken; run STATUS through n1 and stable on the same path with the same token.
+3. Align the three endpoints' state by the same task identity, waiting at most the frozen state-convergence budget; the terminal state and the core counts must match, and 404/unknown cannot be treated as finished.
+4. After WAIT, first physically prove that the target was rebuilt, then VERIFY from every S3 entry; save the log of the node each request actually connected to.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [STATUS](validation-heal-operations.md#STATUS) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 从节点甲启动，经乙及稳定入口按原 token 查询
-- 任务身份、scope、终态及核心计数有界收敛；状态缺失/未知不能解释为完成。
+- Start from node A, and query with the original token through node B and the stable entry.
+- Task identity, scope, terminal state, and core counts converge within bounds. A missing or unknown state must not be interpreted as completion.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A04"></a>
 
@@ -74,21 +74,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: missing-remove0-recreate0, missing-remove1-recreate0, bitflip-remove0-recreate1, bitflip-remove1-recreate1, versioned-missing, versioned-bitflip.
 
-1. 分别用 DB 与 DV 建夹具，冻结全部 versionId/marker；关闭后台来源，不在注入后 GET。
-2. 在原始 part 上做 missing/bitflip，每组独立新目录；保存故障后的 PHYSICAL 快照作为 dry-run 前基线。
-3. START body 同时传 dryRun=true、scanMode=2 和该实例的 remove/recreate；WAIT 仅接受 dry_run_observed，不能要求 dry-run 持有 incarnation。
-4. 前后所有分片/元数据/marker 字节与版本清单相同；没有 repaired ACK。完成非变更证明后恢复故障，再 VERIFY。
+1. Build fixtures with DB and DV respectively, and freeze every versionId/marker; disable background sources, and do not GET after injection.
+2. Apply missing/bitflip on the original part, with an independent new directory for each group; save the post-fault PHYSICAL snapshot as the baseline before the dry-run.
+3. The START body passes dryRun=true, scanMode=2, and that instance's remove/recreate together; WAIT accepts only dry_run_observed, and must not require the dry-run to hold an incarnation.
+4. All shard, metadata, and marker bytes and the version manifest are the same before and after; there is no repaired ACK. After the no-change proof is complete, clear the fault, then VERIFY.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [BASELINE](validation-heal-operations.md#BASELINE) → [FAULT](validation-heal-operations.md#FAULT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 对缺片与损坏对象执行 dryRun，参数化 remove/recreate
-- 有明确 dry_run_observed 诊断；用户对象分片、xl.meta、版本与删除标记不变；后台修复干扰须排除。
+- Run dryRun on objects with missing shards and on corrupt objects, with remove/recreate parameterized.
+- There is an explicit dry_run_observed diagnosis. The user object's shards, xl.meta, versions, and delete markers stay unchanged. Interference from background repair must be ruled out.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A05"></a>
 
@@ -96,21 +96,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: same-scope, parent-child, disjoint, force-start.
 
-1. 用 DX 超过 128 项的外部分片夹具注入多对象缺片；预先从固定候选记录 overlap policy（复用 token 或冲突错误），禁止接受任意结果。
-2. START 递归范围，WINDOW 证明 0<processed<expected 且任务 running；在窗口内重发同范围、父子前缀或不相交范围。
-3. 保存每次 token/HTTP 错误；forceStart 实例在 query 加 forceStart=true。观察旧任务停止与新任务独立接管责任，不能同时提交陈旧结果。
-4. 等待所有被受理任务终态；逐对象补片/版本校验，检查活动任务与在途写退出，未命中活动窗口计 NOT_OBSERVED。
+1. Use a DX external-shard fixture of more than 128 entries to inject missing shards across multiple objects; record the overlap policy from the fixed candidate in advance (token reuse or a conflict error), and do not accept an arbitrary result.
+2. START a recursive range, and use WINDOW to prove 0<processed<expected and that the task is running; within the window, resend the same range, a parent or child prefix, or a disjoint range.
+3. Save every token and HTTP error; the forceStart instance adds forceStart=true to the query. Observe that the old task stops and the new task independently takes over responsibility, and that the two do not both commit a stale result.
+4. Wait for every accepted task to reach a terminal state; check shard repair and versions object by object, check that active tasks and in-flight writes have exited, and count a missed active window as NOT_OBSERVED.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [WAIT](validation-heal-operations.md#WAIT) → [VERIFY](validation-heal-operations.md#VERIFY) → [LOGS](validation-heal-operations.md#LOGS)
 
 Source assertions:
 
-- 活动中重发同范围、父子前缀和不相交请求，再 forceStart
-- 按已固定 overlap policy 验证合并返回原 token 或明确冲突；forceStart 不能泄漏旧任务责任或并发破坏对象。
+- While the task is active, resend the same range, the parent and child prefixes, and disjoint requests, then forceStart.
+- Per the overlap policy already fixed, verify that a merge returns the original token or an explicit conflict. forceStart must not leak the old task's responsibility or damage objects concurrently.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A06"></a>
 
@@ -118,21 +118,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: stop-active, repeat-stop, old-status, old-stop-new-task.
 
-1. DX 批量缺片后 START；WINDOW 观察非零且未完成进度，再 STOP 原 token。
-2. 状态显示 aborted/cancelled 后仍观察物理写入静默窗口；停止受理成功不能替代在途退出。
-3. 新 START 得到不同 token，再对旧 token STATUS/STOP；新任务不应被旧请求终止，重复 stop 按冻结的 HTTP/错误码验收。
-4. 新任务完成后完整 VERIFY；记录取消项不能算 repaired，所有暂态错误保留原始 body。
+1. After the DX batch of missing shards, START; use WINDOW to observe nonzero, incomplete progress, then STOP the original token.
+2. After the status shows aborted/cancelled, still observe a quiescence window for physical writes; successful acceptance of the stop cannot substitute for in-flight exit.
+3. A new START yields a different token, then STATUS/STOP the old token; the new task must not be terminated by the old request, and a repeated stop is checked against the frozen HTTP status and error code.
+4. After the new task completes, run a full VERIFY; items recorded as cancelled must not count as repaired, and every transient error keeps its original body.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [STOP](validation-heal-operations.md#STOP) → [STATUS](validation-heal-operations.md#STATUS) → [WAIT](validation-heal-operations.md#WAIT) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL)
 
 Source assertions:
 
-- 非零修复进度时 stop，稳定后新建任务，再发旧 token 的查询/停止
-- 停止需等在途写结束并稳定；新任务身份独立，旧请求不得终止新任务；重复 stop 按公开契约处理。
+- Stop while repair progress is non-zero, create a new task after the state is stable, then send a query and a stop for the old token.
+- A stop must wait until in-flight writes finish and the state is stable. The new task's identity is independent, and an old request must not terminate the new task. A repeated stop is handled according to the public contract.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A07"></a>
 
@@ -140,21 +140,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: duplicate-query, invalid-bool, invalid-scan, conflicting-flags, invalid-selector, oversize-body.
 
-1. 建立健康 DB 和 PHYSICAL 基线；保存后台/任务状态及对象版本集合，用于检查负请求未意外启动任务。
-2. 逐个发送服务端负例：重复 clientToken；forceStart=wat；scanMode=99；forceStart=true&forceStop=true；pool=-1/set 越界；超过候选限制的 body。每个例固定预期 HTTP 及结构化错误码。
-3. 使用 ADMIN_RAW 的重复 --query 和原始 --body-file，不能只调用 rc 的参数校验；不使用超出专用 Heal 路由的请求。
-4. 全部响应无有效新任务受理，服务仍可用；PHYSICAL、版本、后台责任无改变；若返回 2xx 或错误无明确原因保留 FAIL。
+1. Establish a healthy DB and PHYSICAL baseline; save the background and task state and the object version set, to check that a negative request did not unexpectedly start a task.
+2. Send the server-side negative cases one by one: a repeated clientToken; forceStart=wat; scanMode=99; forceStart=true&forceStop=true; pool=-1 or set out of range; a body that exceeds the candidate limit. Each case has a fixed expected HTTP status and structured error code.
+3. Use ADMIN_RAW's repeated --query and the raw --body-file, and do not rely only on rc's parameter validation; do not use a request outside the dedicated Heal route.
+4. No response accepts a valid new task, and the service remains available; PHYSICAL, versions, and background responsibility are unchanged; if a 2xx is returned or an error has no clear cause, keep FAIL.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [BASELINE](validation-heal-operations.md#BASELINE) → [ADMIN_RAW](validation-heal-operations.md#ADMIN_RAW) → [STATUS](validation-heal-operations.md#STATUS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 发送非法 selector、重复 query、非法布尔/scanMode、冲突 flags、超长 body
-- 服务端返回已核实的结构化错误；无误启动、范围扩大或持久化副作用；CLI 参数错误不能替代服务端负例。
+- Send an illegal selector, a duplicate query, an illegal boolean or scanMode, conflicting flags, and an oversized body.
+- The server returns a verified structured error. There is no mistaken start, no widened range, and no persisted side effect. A CLI parameter error cannot take the place of a server-side negative case.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A08"></a>
 
@@ -162,21 +162,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: anonymous, bad-signature, expired-signature, denied-user, least-privilege-user.
 
-1. 通过 IAM 手册在专用服务创建两个临时用户，分别没有和仅有 HealAdminAction；用受控凭据环境运行，先证明限制用户不能读未授权对象。
-2. 管理员创建待查询/停止任务；分别对 start/status/stop 发匿名、坏签名、有效签名但时间超期、无授权用户请求；过期请求由隔离客户端签名时间设置产生，不改服务器时间。
-3. 检查冻结的 AccessDenied/签名/时间错误；响应不暴露对象结果。最小授权用户完成受理/查询/停止，证明接口本身可工作。
-4. 移除临时用户和策略并验证凭据失效；所有原始证据先脱敏再归档，不把管理员 token 暴露给无关主体。
+1. Per the IAM manual, create two temporary users on the dedicated service, one with no HealAdminAction and one with only HealAdminAction; run in a controlled credential environment, and first prove that the restricted user cannot read an unauthorized object.
+2. The administrator creates a task to be queried and stopped; for start/status/stop, send an anonymous request, a bad signature, a valid signature whose time has expired, and an unauthorized-user request; the expired request is produced by the isolated client's signature-time setting, without changing the server time.
+3. Check the frozen AccessDenied, signature, and time errors; the response does not expose object results. The least-privilege user completes acceptance, query, and stop, proving the interface itself works.
+4. Remove the temporary users and policies and verify that the credentials are invalid; redact all raw evidence before archiving, and do not expose the administrator token to an unrelated principal.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [IAM](validation-heal-operations.md#IAM) → [START](validation-heal-operations.md#START) → [ADMIN_RAW](validation-heal-operations.md#ADMIN_RAW) → [STATUS](validation-heal-operations.md#STATUS) → [STOP](validation-heal-operations.md#STOP) → [VERIFY](validation-heal-operations.md#VERIFY) → [RECOVER](validation-heal-operations.md#RECOVER)
 
 Source assertions:
 
-- 匿名、坏签名、过期签名、无 HealAdminAction 用户与最小授权用户分别请求
-- 未授权 start/status/stop 均不能越权或泄漏对象信息；授权用户可完成规定操作，凭据不得写入证据。
+- Send the request separately as anonymous, with a bad signature, with an expired signature, as a user without HealAdminAction, and as a minimally authorized user.
+- Unauthorized start, status, and stop must not escalate privilege or leak object information. An authorized user can complete the specified operations. Credentials must not be written into the evidence.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A09"></a>
 
@@ -184,21 +184,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: overwrite-nolock, delete-nolock, native-lock-fence.
 
-1. DB/DV 准备同一目标并缺片；两客户端使用同 key，冻结每个 PUT/DELETE 的唯一 nonce 和 ACK ledger。
-2. 一端 START body nolock=true，另一端按 WORKLOAD 提交覆盖或精确 versionId 删除；记录确实交叠的运行区间。
-3. 按 ACK 因果顺序重建期望清单并 VERIFY；最后成功覆盖不回退、已删除版本不复活。
-4. 另外运行 NATIVE 的锁/提交屏障回归并保存精确测试名、源码 SHA、命中日志；黑盒竞态与 native-lock-fence 单独结果，不以偶然重叠证明强制锁时点。
+1. Use DB/DV to prepare the same target with a missing shard; the two clients use the same key, and freeze a unique nonce and the ACK ledger for each PUT/DELETE.
+2. One side sends a START body with nolock=true, and the other side submits an overwrite or an exact versionId delete per WORKLOAD; record the run interval that actually overlapped.
+3. Rebuild the expected manifest in ACK causal order and VERIFY; the last successful overwrite does not roll back, and a deleted version does not come back.
+4. Also run the NATIVE lock/commit-fence regression and save the exact test name, source SHA, and hit log; the black-box race and native-lock-fence are separate results, and an accidental overlap does not prove the time at which the lock is mandatory.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [FAULT](validation-heal-operations.md#FAULT) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [VERIFY](validation-heal-operations.md#VERIFY) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 通过签名 API 传 nolock=true，并与同对象提交制造确定性争用
-- 兼容字段不得跳过存储层对象锁；最后成功写入和已确认删除保持正确，原生屏障与真机竞争证据分开。
+- Pass nolock=true through the signed API, and create deterministic contention with a commit of the same object.
+- The compatibility field must not skip the storage-layer object lock. The last successful write and the confirmed deletes stay correct. Keep native-barrier evidence separate from live contention evidence.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="A10"></a>
 
@@ -206,10 +206,10 @@ Source assertions:
 
 Topologies: H1,H2. Branches: recursive-false, recursive-true, recreate, remove-false, remove-true, update-parity, read-repair, selector-valid, selector-invalid.
 
-1. 将候选 HealOpts 支持表和危险参数副作用写入本批 contract.json；不根据 CLI help 推导 API 未暴露字段。
-2. 为每个 variant 使用新 DB/DV：固定范围、足够权威和控制对象；remove=true 只对经 C10 证明无活引用的本次孤儿执行。
-3. 逐一 START 并对比只改变一个字段的基线；recursive 检查子前缀，pool/set 检查实际目标身份，非法组合要求结构化拒绝且无副作用。
-4. WAIT、PHYSICAL、VERIFY 三者验收；updateParity/readRepair 若候选不支持必须显示明确拒绝，不可悄悄按默认修复算覆盖。
+1. Write the candidate HealOpts support table and the side effects of dangerous parameters into this batch's contract.json; do not infer unexposed API fields from CLI help.
+2. Use a new DB/DV for each variant: a fixed range, sufficient authority, and control objects; remove=true is applied only to this run's orphans that C10 has proved have no live reference.
+3. START each one and compare it with the baseline that changes only one field; recursive checks child prefixes, pool/set checks the actual target identity, and an illegal combination requires a structured rejection with no side effects.
+4. Accept on all three of WAIT, PHYSICAL, and VERIFY; if the candidate does not support updateParity/readRepair, it must show an explicit rejection, and a default repair must not quietly be counted as coverage.
 
 Source implementation detail: frozen `heal_h1_options_batch.py` and
 `heal_h1_options_node.py` at `524eb5b32c3236497fdd8a9271df0494fa3d9974`
@@ -233,12 +233,12 @@ Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](valid
 
 Source assertions:
 
-- 参数化 recursive、recreate、remove、updateParity、readRepair 与合法/非法 pool/set 组合
-- 仅测试已核实的候选语义；normal/deep 与危险 remove 的副作用明确；API 独有选项不得伪称 rc 已覆盖。
+- Parameterize recursive, recreate, remove, updateParity, and readRepair, together with legal and illegal pool/set combinations.
+- Test only candidate semantics that have been verified. The side effects of normal/deep and of a dangerous remove are explicit. An option that exists only in the API must not be presented as though rc already covered it.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B01"></a>
 
@@ -246,21 +246,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: original-drive-return, offline-ack-repair.
 
-1. 由 layout.json 选一成员盘，记录同版本 N/R/W；使用 DRIVE_GATE 仅让本服务看不到该逻辑盘，不卸载共享 XFS。
-2. 故障窗口经测试进程 mount namespace 的读失败与 Admin offline 状态双重见证；在 quorum 允许范围执行 GET 和唯一 key PUT，逐次记 ACK。
-3. DRIVE_GATE 恢复原盘身份后，等待所选手工/自动来源处理离线期间责任；不得复制备份补盘。
-4. 验证所有故障前对象及成功 ACK 对象、目标盘实际新增分片；节点 ready/GET 成功不是补片证据。
+1. Select one member disk from layout.json and record N/R/W for the same version; use DRIVE_GATE so that only this service cannot see that logical disk, without unmounting the shared XFS.
+2. Witness the fault window both by a read failure in the test process's mount namespace and by the Admin offline state; within the range quorum allows, run GET and a unique-key PUT, and record an ACK each time.
+3. After DRIVE_GATE restores the original disk identity, wait for the selected manual or automatic source to handle responsibility from the offline period; do not fill the disk by copying a backup.
+4. Verify every pre-fault object and every successfully ACKed object, and that the target disk actually gained new shards; node ready or a successful GET is not evidence of shard repair.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [BASELINE](validation-heal-operations.md#BASELINE) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 让一个已确认 set 成员盘对 heal 服务不可用，持续读取，恢复原盘
-- 记录真实故障窗口和源/目标盘身份；在可恢复条件下最终补齐目标分片及完整 manifest，不只验证降级 GET。
+- Make one confirmed set-member disk unavailable to the heal service, keep reading, and restore the original disk.
+- Record the real fault window and the source and target disk identities. When the fault is recoverable, finally reconstruct the target shards and the complete manifest; verifying a degraded GET alone is not enough.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B02"></a>
 
@@ -268,23 +268,23 @@ Source assertions:
 
 Topologies: H1,H2. Branches: read-only, permission-denied.
 
-1. 在专用测试服务的 mount namespace 设置目标根只读；permission 实例用专用非 root 服务 UID 和独立目录 ACL，不能对 root 仅 chmod 后假称生效。
-2. 在服务相同身份/namespace 执行有界写探针，要求 EROFS/EACCES；先保存并隔离目标 part，再触发 deep heal。
-3. 目标不可写期间必须保留失败/待修责任，不能 reported repaired；PHYSICAL 确認没有写到父目录/系统盘。
-4. 解除只读或恢复原 ACL，重新修复并 VERIFY；保留故障期间错误和恢复后物理补片证据。
+1. In the dedicated test service's mount namespace, set the target root read-only; the permission instance uses a dedicated non-root service UID and an independent directory ACL, and must not merely chmod as root and then claim it took effect.
+2. Under the same identity and namespace as the service, run a bounded write probe and require EROFS/EACCES; first save and isolate the target part, then trigger deep heal.
+3. While the target is not writable, the failed or pending-repair responsibility must be kept, and it must not be reported repaired; PHYSICAL confirms that nothing was written to the parent directory or the system disk.
+4. Clear the read-only state or restore the original ACL, repair again, and VERIFY; keep the errors from the fault period and the physical shard-repair evidence after recovery.
 
-permission-denied 分支释放 ACL gate 后，保持同一候选进程运行，并用进程 birth、候选摘要及释放后的物理快照证明状态。释放后、提交新的唯一 Admin token 前，目标分片必须仍保持故障态；若自动恢复先改变分片，该分支记为 `NOT_OBSERVED`，不能将恢复归因给新的手工任务。新的修复 token 终态后再停止服务并验证原始分片摘要。read-only 分支按其 unit mount gate 的生命周期清理 gate，再执行独立修复任务。
+After the permission-denied branch releases the ACL gate, keep the same candidate process running and prove the state with the process birth, the candidate digest, and the physical snapshot taken after release. After release, and before a new unique Admin token is submitted, the target shard must still be faulty. If automatic recovery changes the shard first, record the branch as `NOT_OBSERVED`; the recovery must not be attributed to the new manual task. After the new repair token reaches a terminal state, stop the service and verify the original shard digest. The read-only branch clears the gate according to its unit mount-gate lifecycle, then runs an independent repair task.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FAULT](validation-heal-operations.md#FAULT) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 仅对独占测试卷制造只读/拒绝访问，恢复后重试
-- 不可写目标不得 reported repaired；错误及待修责任可见；恢复后真实写入目标且不落到系统盘或其他目录。
+- Make only the exclusive test volume read-only or access-denied, and retry after it is restored.
+- An unwritable target must not be reported repaired. The error and the responsibility still awaiting repair are visible. After recovery, the write actually goes to the target and does not land on the system disk or in another directory.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B03"></a>
 
@@ -292,21 +292,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: new-disk-data, new-disk-versioned.
 
-1. 完整基线后停止本例服务，将目标逻辑盘 data 整体隔离到本 run 的 quarantine；使用 REPLACE 建空的新 data 根。
-2. 按候选初始化契约启动，读取 format.json 证明新 this UUID 属于原 pool/set/slot；其他盘格式不得变成新集群。
-3. 显式 START root/deep 或本实例指定重建来源，旧盘备份不可读给测试进程；WAIT 全部责任。
-4. 逐对象/版本验证目标盘分片与同角色基线摘要；确认不是从 quarantine 拷贝回去；恢复操作只在取证后做并标为 rescue。
+1. After a complete baseline, stop this case's service and isolate the target logical disk's data as a whole into this run's quarantine; use REPLACE to create an empty new data root.
+2. Start according to the candidate initialization contract, and read format.json to prove the new this UUID belongs to the original pool/set/slot; other disks' formats must not become a new cluster.
+3. Explicitly START root/deep or the rebuild source this instance specifies, and the old-disk backup must not be readable by the test process; WAIT for all responsibility.
+4. For each object and version, verify that the target disk's shards match the same-role baseline digest; confirm they were not copied back from quarantine; do recovery only after evidence collection and mark it as rescue.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [BASELINE](validation-heal-operations.md#BASELINE) → [REPLACE](validation-heal-operations.md#REPLACE) → [FORMAT](validation-heal-operations.md#FORMAT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 换入空的新逻辑盘，确认新 disk UUID/正确格式后触发重建
-- 新盘与旧盘身份可区分且属于正确 pool/set/slot；逐版本重建完成，不能从隔离备份复制回来冒充 heal。
+- Swap in an empty new logical disk, and after confirming the new disk UUID and a correct format, trigger rebuild.
+- The new disk is distinguishable from the old disk and belongs to the correct pool/set/slot. Rebuild completes for every version. Copying the data back from an isolated backup must not be passed off as heal.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B04"></a>
 
@@ -320,21 +320,21 @@ If exact endpoint mounts or the reviewed mount-switch adapter are unavailable,
 the case is recorded as pre-deployment `BLOCKED` without creating either
 the blank or foreign-format fixture.
 
-1. REPLACE 建没有 format 的空逻辑盘；记录空目录证据，启动并观察候选支持的安全初始化或明确拒绝。
-2. 第二实例使用同 run 的第二个隔离小集群生成外来 format，将其按 FORMAT_BAD 手册装入替换根，保留原始副本和所有 UUID。
-3. 外来身份不能被静默覆盖或挂到错误 set；若拒绝，等待有界 deadline 并确认其他正常盘数据不变。
-4. 停止本服务、撤回替换根、恢复原身份后 VERIFY；空盘正常接纳实例还须逐对象重建证明。
+1. Use REPLACE to create an empty logical disk with no format; record the empty-directory evidence, start, and observe the safe initialization the candidate supports or an explicit rejection.
+2. The second instance uses this run's second isolated small cluster to generate a foreign format, installs it into the replacement root per the FORMAT_BAD manual, and keeps the original copy and every UUID.
+3. A foreign identity must not be silently overwritten or attached to the wrong set; if it is rejected, wait for a bounded deadline and confirm that data on the other healthy disks is unchanged.
+4. Stop this service, withdraw the replacement root, and restore the original identity, then VERIFY; an instance that normally accepts an empty disk must also prove the rebuild object by object.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [REPLACE](validation-heal-operations.md#REPLACE) → [FORMAT_BAD](validation-heal-operations.md#FORMAT_BAD) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 引入空未格式化测试盘，并与带异集群格式的盘分别比较
-- 按候选支持的初始化契约安全接纳或明确拒绝；不得覆盖外来身份或将未就绪盘标为可写健康。
+- Introduce an empty unformatted test disk, and compare that case separately with a disk that carries a foreign cluster's format.
+- Per the initialization contract the candidate supports, accept it safely or reject it explicitly. Do not overwrite a foreign identity, and do not mark a disk that is not ready as writable and healthy.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B05"></a>
 
@@ -351,21 +351,21 @@ members expire as `NOT_OBSERVED` without retrying the Heal task. The original
 `38200772548` unknown-version receipts remain a retained failure. This startup
 check alone does not establish its underlying cause or a new live PASS.
 
-1. 从候选/实际元数据确定 M=N-R，枚举 1..M 的合法缺片数及 data/parity 组合，写入本批展开参数表；不得只运行 loss=1。
-2. 每实例用相同版本的新对象，将指定成员上的 part 分别 FAULT missing；多份元数据也要证明指向同 version/data_dir。
-3. 在满足修复提交条件时 START deep/WAIT；先检查全部目标片与角色基线相同，再 VERIFY。
-4. 每次恢复隔离备份后换新对象再做下一组合；低于 R 的组合另由 B07 计负例，不合并成绩。
+1. From the candidate and the actual metadata, determine M=N-R, enumerate the legal missing-shard counts 1..M and the data/parity combinations, and write them into this batch's expanded parameter table; do not run only loss=1.
+2. Each instance uses a new object of the same version and applies FAULT missing, separately, to the part on each specified member; multiple metadata copies must also be shown to point at the same version/data_dir.
+3. When the conditions for committing a repair are met, START deep/WAIT; first check that every target shard matches the role baseline, then VERIFY.
+4. After each restore of the isolated backup, switch to a new object before the next combination; combinations below R are counted as negative cases by B07 on their own, and the results are not merged.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [BASELINE](validation-heal-operations.md#BASELINE) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 按实际同版本 EC 布局依次缺失 1..M 个 shard，覆盖 data/parity 角色组合
-- 每个参数实例单独满足读取与写入 quorum；满足修复条件时全部目标重建，不把跨版本或跨 set 的 shard 合并。
+- Following the actual same-version EC layout, drop 1..M shards in turn, covering the data and parity role combinations.
+- Each parameter instance on its own meets read quorum and write quorum. When the repair conditions are met, rebuild every target, and do not merge shards across versions or across sets.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B06"></a>
 
@@ -373,23 +373,23 @@ Source assertions:
 
 Topologies: H1,H2. Branches: exact-r-read, exact-r-heal-write-limited, restored-w.
 
-执行器仅接受经逐文件和锁策略复核的 `072b57b37559fbe626aeda8abf61617fdcbdd926` 与 GET quorum 修复候选 `1c7fc818dd858247c45b39542abd8291b1e6e31b`。记录所选候选的精确锁契约；inspector 必须同时匹配候选及当前 helper 源码摘要，未知候选在部署前拒绝。below-R GET 仍必须为候选冻结的 `503/SlowDownRead`，旧 `500/InternalError` 失败记录保留；支持新候选不等于新的 live 验收。
+The executor accepts only `072b57b37559fbe626aeda8abf61617fdcbdd926`, reviewed file by file and against the lock policy, and the GET-quorum repair candidate `1c7fc818dd858247c45b39542abd8291b1e6e31b`. Record the exact lock contract of the selected candidate. The inspector must match both the candidate and the current helper source digest; an unknown candidate is rejected before deployment. A below-R GET must still be the candidate-frozen `503/SlowDownRead`. The historical `500/InternalError` failure record is retained. Supporting a new candidate is not a new live acceptance.
 
-1. 记录读取 R、修复写 W、锁 quorum 的来源；选择同一版本保留恰好 R 个权威片，其他片隔离。
-2. 第一次请求 GET 验证读取边界并记录 read-repair 干扰；用第二个相同形态新对象执行只手工 deep heal。
-3. 如果只有 R 但写/锁 quorum 不足，要求拒绝持久化成功；若拓扑中该组合不可实现，在运行前声明精确原因并选满足条件的拓扑，不伪造离线数。
-4. 恢复到 W 后重新启动修复并保存独立 token，比较精确目标片与全部内容；成功读不能充修复成功。
+1. Record the source of read R, of repair-write W, and of the lock quorum; for the same version, keep exactly R authoritative shards and isolate the others.
+2. The first request uses GET to verify the read boundary and records read-repair interference; with a second new object of the same shape, run a manual-only deep heal.
+3. If only R are present but the write or lock quorum is insufficient, require that a persisted success be rejected; if that combination cannot be realized in the topology, state the exact reason before the run and choose a topology that meets the conditions, without fabricating an offline count.
+4. After restoring to W, start the repair again and save an independent token, and compare the exact target shards with the full content; a successful read cannot count as a successful repair.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [GET](validation-heal-operations.md#GET) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [RECOVER](validation-heal-operations.md#RECOVER) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 保留恰好 R 个同版本权威 shard，测试读取及修复提交，再恢复写 quorum
-- 读取边界和修复写入边界分别判定；不能因还能 GET 就要求在写 quorum 不足时提交成功。
+- Keep exactly R authority shards of the same version, test the read and the repair commit, then restore write quorum.
+- Judge the read boundary and the repair-write boundary separately. Do not require a successful commit when write quorum is short merely because GET still succeeds.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B07"></a>
 
@@ -397,21 +397,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: r-minus-1-unversioned, r-minus-1-historical.
 
-1. 选定精确 versionId 保留 R-1 份同版本权威；隔离其余 part，确保没有其他 pool 或旧版本兜底被当作同版本来源。
-2. GET 必须返回冻结的不可恢复错误，不能返回 200 错内容或空对象；deep heal 的 execution/disposition 必须如实失败/未解决。
-3. 在恢复前快照所有好片和 xl.meta，证实负例没有扩大损坏或执行 remove；保留失败任务原 token。
-4. 仅在负例取证完成后 RECOVER 原始片，再显式 heal 和 VERIFY；恢复后的绿不能覆盖故障期间的错误。
+1. For the chosen exact versionId, keep R-1 authoritative copies of the same version; isolate the remaining parts, and ensure that no other pool or old-version fallback is treated as a same-version source.
+2. GET must return the frozen unrecoverable error, and must not return 200 with the wrong content or an empty object; deep heal's execution/disposition must truthfully be failed or unresolved.
+3. Before recovery, snapshot every good shard and xl.meta, and confirm that the negative case did not spread the damage or execute remove; keep the failed task's original token.
+4. Only after negative-case evidence collection is complete, RECOVER the original shards, then explicitly heal and VERIFY; a green result after recovery must not cover the errors from the fault period.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FAULT](validation-heal-operations.md#FAULT) → [GET](validation-heal-operations.md#GET) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 使权威来源小于 R，执行 GET 与 deep heal，再恢复被隔离源
-- 故障期间不得返回伪造的成功内容、空对象或误删记录；明确 unresolved/失败；恢复后原对象和版本完整。
+- Reduce the authority sources to fewer than R, run GET and deep heal, then restore the isolated sources.
+- During the fault, do not return forged successful content, an empty object, or a mistaken delete record. State unresolved or failure explicitly. After recovery, the original object and its versions are complete.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B08"></a>
 
@@ -419,21 +419,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: read-present-write-absent, lock-quorum-absent.
 
-1. 用 layout.json 分别计算对象写和锁 quorum；DRIVE_GATE/NETWORK 构造仍可读但不能安全提交的测试服务可见性。
-2. 执行唯一 key PUT 与已有缺片对象 heal；保存每个 ACK/HTTP/body，超时写必须查询唯一 key 解析结果，禁止直接重试换 key。
-3. 期间不能 reported repaired 或返回无法兑现的成功写 ACK；从各 peer 收集 quorum 与锁失败日志。
-4. 解除故障后按全部已确认/已解析写入重建 manifest，实际补齐目标并 VERIFY；普通低 quorum 错误不是基础设施错误。
+1. Use layout.json to compute the object-write quorum and the lock quorum separately; use DRIVE_GATE/NETWORK to construct a test-service visibility that can still read but cannot commit safely.
+2. Run a unique-key PUT and a heal of an existing object that is missing a shard; save every ACK/HTTP/body, a timed-out write must query that unique key's resolution, and a direct retry that changes the key is forbidden.
+3. During this period it must not be reported repaired or return a successful write ACK that cannot be honored; collect quorum and lock-failure logs from every peer.
+4. After the fault is cleared, rebuild the manifest from every confirmed or resolved write, actually complete the target shards, and VERIFY; an ordinary low-quorum error is not an infrastructure error.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FORMAT](validation-heal-operations.md#FORMAT) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [NETWORK](validation-heal-operations.md#NETWORK) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [START](validation-heal-operations.md#START) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 构造读 quorum 尚存而写/锁 quorum 不足，执行 heal 与新 PUT
-- 不能虚报持久化修复或成功写入；分别记录对象、元数据、分布式锁 quorum；恢复后核对所有已确认写入。
+- Construct a case where read quorum still exists but write quorum and lock quorum are insufficient, and run heal and a new PUT.
+- Do not falsely report a persisted repair or a successful write. Record the object, metadata, and distributed-lock quorums separately. After recovery, check every confirmed write.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B09"></a>
 
@@ -441,21 +441,21 @@ Source assertions:
 
 Topologies: H2. Branches: one-node-stop, rejoin-with-new-versions.
 
-1. 确认 H2 目标 set 跨节点，统计停一节点实际损失的盘数，不能使用每台独立 pool 的 H5 替代。
-2. PROCESS stop 精确测试 unit，见证 MainPID 消失及端点不可达；保持其他节点服务。
-3. 按计算允许的 quorum 执行降级 PUT/DELETE/GET，保存版本化 ACK；重入同一节点同一数据根。
-4. 观察 MRF/修复责任直到补齐离线期间成功对象；从所有节点 VERIFY 和目标 PHYSICAL，不能只看进程 ready。
+1. Confirm that the H2 target set is cross-node, count the disks actually lost by stopping one node, and do not substitute H5, which gives each machine its own pool.
+2. PROCESS stop the exact test unit, and witness that MainPID is gone and the endpoint is unreachable; keep the services on the other nodes running.
+3. Within the quorum the calculation allows, run degraded PUT/DELETE/GET and save the versioned ACKs; re-enter the same node and the same data root.
+4. Observe MRF and repair responsibility until the objects that succeeded during the offline period are fully repaired; VERIFY from every node and PHYSICAL the target, and do not look only at process ready.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [PROCESS](validation-heal-operations.md#PROCESS) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 停止同一跨节点 set 的一个节点，执行允许的降级 I/O，再重入
-- 按实际丢失盘数判定可用性；缺失期间成功提交的对象补齐；节点重新 ready 不等于所有对象已重建。
+- Stop one node of the same cross-node set, perform the degraded I/O that is allowed, then rejoin.
+- Judge availability by the number of disks actually lost. Reconstruct the objects that were successfully committed during the outage. A node becoming ready again does not mean every object has been rebuilt.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="B10"></a>
 
@@ -463,21 +463,21 @@ Source assertions:
 
 Topologies: H2. Branches: drive-flap-3, node-flap-3, interrupt-rebuild-again.
 
-1. 预注册三个故障周期、每次最长窗口和总 deadline；准备带 nonce 的 ACK ledger，设置只属于本服务的 drive gate 或 unit 操作。
-2. 每轮离线/在线都先见证实际状态；第三轮在 WINDOW 证明部分重建时再次离线，不以固定 sleep 替代。
-3. 记录每轮责任/队列、任务身份、错误率及 CPU/FD；超过预注册重试/资源预算即失败，不继续循环等绿。
-4. 彻底解除故障后验证全部已确认对象、目标分片和持久队列收敛；活动窗口没命中记 NOT_OBSERVED。
+1. Pre-register three fault cycles, the maximum window of each, and the total deadline; prepare an ACK ledger with nonces, and set a drive gate or unit operation that belongs only to this service.
+2. On each offline and online round, witness the actual state first; on the third round, go offline again when WINDOW proves a partial rebuild, and do not substitute a fixed sleep.
+3. Record each round's responsibility and queue, task identity, error rate, and CPU/FD; exceeding the pre-registered retry or resource budget is a failure, and do not keep looping to wait for green.
+4. After the fault is fully cleared, verify that every confirmed object, the target shards, and the persistent queue have converged; if the active window was not hit, record NOT_OBSERVED.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [PROCESS](validation-heal-operations.md#PROCESS) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [WINDOW](validation-heal-operations.md#WINDOW) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [METRICS](validation-heal-operations.md#METRICS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 重复短暂离线/在线并在重建途中再次失联
-- 重试与队列有界、身份稳定，无重复任务风暴；最终故障解除后收敛，所有已确认对象保持正确。
+- Go briefly offline and online repeatedly, and drop offline again while a rebuild is in progress.
+- Retries and the queue stay bounded, and identity stays stable, with no storm of duplicate tasks. After the fault is finally cleared, converge, and every confirmed object stays correct.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C01"></a>
 
@@ -485,21 +485,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: data-single-part, parity-single-part, multipart-first, multipart-middle, multipart-last.
 
-1. DB/DM 写入后用 FORMAT/PHYSICAL 将每个 version/part 映射到真实盘角色；每个 variant 选不同目标，不按盘序号猜 data/parity。
-2. 停住注入目标写入后 FAULT missing 只移除已冻结摘要的 part，xl.meta 和 format 保持；恢复运行后禁止目标 GET。
-3. START deep 并 WAIT；首先验证该角色目标 part 恢复到故障前完整 SHA-256/长度，再 GET/Range 和版本清单。
-4. 任何仅 xl.meta 恢复、重建错误 part 或 control 变更都失败；清理时才允许使用原始备份。
+1. After the DB/DM writes, use FORMAT/PHYSICAL to map each version/part to its real disk role; each variant selects a different target, and does not guess data/parity by disk index.
+2. After writes to the injection target are stopped, FAULT missing removes only the part whose digest was frozen, while xl.meta and format stay; once it is running again, GET of the target is forbidden.
+3. START deep and WAIT; first verify that the target part of that role is restored to the full pre-fault SHA-256 and length, then check GET/Range and the version manifest.
+4. Restoring only xl.meta, rebuilding the wrong part, or changing the control is a failure; the original backup may be used only at cleanup.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DM](validation-heal-operations.md#SEED_DM) → [FORMAT](validation-heal-operations.md#FORMAT) → [BASELINE](validation-heal-operations.md#BASELINE) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 仅隔离指定对象某个 part/shard，保留 format 与其他元数据，执行 deep heal
-- 对应数据或校验分片重新生成，part/版本身份准确；不得只看到 xl.meta 重现就通过。
+- Isolate only one part/shard of the specified object, keep format and the other metadata, and run deep heal
+- The corresponding data or parity shard is regenerated, and the part/version identity is accurate; do not pass merely because xl.meta reappears.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C02"></a>
 
@@ -507,21 +507,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: data-first-byte, data-middle-byte, data-last-byte, multipart-data.
 
-1. 记录候选解析出的 data shard；用不重复 SHAKE 内容避免数据片/校验片摘要相同，验证健康基线。
-2. FAULT bitflip 在冻结的首/中/尾字节偏移各翻转一位；保存偏移、注入前后 hash 及目标物理角色。
-3. 保持足够正确来源，分别执行本批预注册 deep/read-repair 触发；手工实例不得预读目标。
-4. 目标恢复完整原始片摘要，解码后全文和 Range 正确；只返回正确 GET 但坏片仍在必须失败。
+1. Record the data shard the candidate resolved; use non-repeating SHAKE content so the data-shard and parity-shard digests are not the same, and verify the healthy baseline.
+2. FAULT bitflip flips one bit at each of the frozen first, middle, and last byte offsets; save the offsets, the hashes before and after injection, and the target physical role.
+3. Keep enough correct sources, and run this batch's pre-registered deep and read-repair triggers separately; the manual instance must not pre-read the target.
+4. The target is restored to the complete original shard digest, and the decoded full content and Range are correct; a correct GET alone, while the bad shard remains, must fail.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DM](validation-heal-operations.md#SEED_DM) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 在指定 data shard 的已知偏移翻转字节，包含首/中/尾位置
-- 故障前后摘要证明注入生效；deep 或 read-repair 发现损坏并修复；独立 bitrot/EC 及 S3 全内容验证通过。
+- Flip bytes at known offsets of the specified data shard, including the head, middle, and tail positions
+- Digests before and after the fault prove the injection took effect; deep or read-repair finds the corruption and repairs it; independent bitrot/EC and full-content S3 verification pass.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C03"></a>
 
@@ -529,21 +529,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: parity-first-byte, parity-middle-byte, parity-last-byte.
 
-1. 选择经 FORMAT 证明的 parity 片，保留足够 data；普通读取是否需要该片另作控制实例，不能触发后再声称纯 deep。
-2. FAULT bitflip 覆盖首/中/尾位置；注入后仅 PHYSICAL，不 GET/HEAD。
-3. START deep/WAIT，要求 repaired 责任对应正确对象/版本/pool/set；与修复前同角色 SHA-256 比较。
-4. 全文 GET 及版本/metadata 对照通过且错误 parity 已消失才通过；后台提前补片则该触发实例未观测。
+1. Select a parity shard proved by FORMAT, and keep enough data; whether an ordinary read needs that shard is a separate control instance, and it must not be triggered and then claimed to be pure deep.
+2. FAULT bitflip covers the first, middle, and last positions; after injection, run PHYSICAL only, with no GET or HEAD.
+3. START deep/WAIT, and require the repaired responsibility to correspond to the correct object, version, pool, and set; compare it with the same-role SHA-256 from before the repair.
+4. It passes only when the full GET and the version/metadata comparison pass and the bad parity is gone; if the background repairs the shard early, that trigger instance was not observed.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 损坏 parity shard，使普通 GET 仍可能成功，再执行 deep heal
-- 必须识别并重建损坏 parity；只有 GET 正确、无目标分片修复不能通过。
+- Corrupt a parity shard so that an ordinary GET may still succeed, then run deep heal
+- The corrupted parity must be identified and reconstructed; a correct GET alone, with no repair of the target shard, cannot pass.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C04"></a>
 
@@ -551,21 +551,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: truncate-half, truncate-near-tail, zero-all, checksum-header.
 
-1. 保存外部 part 完整备份及正确 metadata quorum；每种损坏使用新的独立对象。
-2. FAULT truncate 默认保留一半；near-tail 按 FAULT_FORMAT 手册只截去最后一字节并记录原始长度；zero 清零全部；header 翻转前 32 字节。
-3. 见证实际长度/摘要差异后 START deep，捕获短读/校验诊断与责任结果。
-4. 目标原始长度和完整片摘要恢复，GET 无截断/补零，控制对象不变；拒绝把一份可解析 metadata 当内容健康。
+1. Save a complete backup of the external part and a correct metadata quorum; each kind of corruption uses a new independent object.
+2. FAULT truncate keeps half by default; near-tail, per the FAULT_FORMAT manual, removes only the last byte and records the original length; zero clears everything to zero; header flips the first 32 bytes.
+3. After witnessing the actual length and digest difference, START deep, and capture the short-read and checksum diagnostics and the responsibility result.
+4. The target's original length and complete shard digest are restored, GET has no truncation or zero-fill, and the control object is unchanged; do not treat one parseable metadata copy as healthy content.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [BASELINE](validation-heal-operations.md#BASELINE) → [FAULT](validation-heal-operations.md#FAULT) → [FAULT_FORMAT](validation-heal-operations.md#FAULT_FORMAT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 分别截断 shard、置零和破坏校验头，保留正确元数据仲裁来源
-- 短读、全零和校验损坏被准确识别；修复不能接受截断内容或错误长度。
+- Separately truncate the shard, zero it, and corrupt the checksum header, keeping a correct metadata-arbitration source
+- Short reads, all-zero content, and checksum corruption are identified accurately; repair must not accept truncated content or a wrong length.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C05"></a>
 
@@ -573,21 +573,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: missing-xlmeta, truncated-xlmeta, corrupt-xlmeta, inline-payload, versioned-xlmeta.
 
-1. DB 小对象与 DV 历史版本先全量读取，FORMAT 解析每盘 xl.meta 的版本/inline/data_dir 关联并保存解析器源码 SHA。
-2. 在少数成员上对精确对象 xl.meta 做 missing/truncate/header；inline 实例仅由匹配候选的解析器定位 payload 后翻位，不能随便偏移后称 inline。
-3. 保留同版本正确来源，START deep/WAIT；恢复后重新解析 xl.meta，核对所有版本、marker 与 data 引用。
-4. 每个 versionId 全 GET 和版本集合一致；可以有合法重编码，但不能新建空 metadata、遗漏历史版本或移动删除语义。
+1. First read the DB small objects and the DV historical versions in full; FORMAT parses the version/inline/data_dir linkage in each disk's xl.meta and saves the parser source SHA.
+2. On a minority of members, apply missing/truncate/header to the exact object's xl.meta; the inline instance flips a bit only after the parser that matches the candidate has located the payload, and must not pick an arbitrary offset and call it inline.
+3. Keep correct sources of the same version, and START deep/WAIT; after recovery, parse xl.meta again and check every version, marker, and data reference.
+4. A full GET of every versionId agrees with the version set; legal re-encoding is allowed, but it must not create empty metadata, omit a historical version, or move delete semantics.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [FAULT_FORMAT](validation-heal-operations.md#FAULT_FORMAT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 在少数成员上移走或损坏 xl.meta/inline 内容，保留足够权威来源
-- 恢复同一对象的全部应存版本、数据引用与删除标记；不以新建空元数据替代真正修复。
+- On a minority of members, remove or corrupt xl.meta/inline content, keeping enough authority sources
+- Restore every version that should exist for the same object, together with its data references and delete markers; do not substitute newly created empty metadata for a real repair.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C06"></a>
 
@@ -595,21 +595,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: unversioned-overwrite, delete-historical-version, delete-marker.
 
-1. 保存 DV/旧代次，DRIVE_GATE 让一个成员离线且其旧数据原样保留。
-2. 在线 quorum 执行新内容覆盖、精确旧 versionId 删除或创建 marker；串行 ACK 确定因果顺序，并在在线端确认提交。
-3. 恢复携带旧数据的同一盘，核对原 disk UUID 后观察手工/自动修复，并保存旧/新代次权威选择日志。
-4. 最终最新值与全部历史/marker 严格匹配 ACK 清单；已删除版本不复活；目标旧盘同一 key 的 metadata 与内容纠正。
+1. Save the DV and the old generation; DRIVE_GATE takes one member offline while its old data is kept as-is.
+2. The online quorum performs a new-content overwrite, a delete of the exact old versionId, or marker creation; serial ACKs determine the causal order, and the commit is confirmed on the online side.
+3. Restore the same disk that carries the old data, check the original disk UUID, then observe manual or automatic repair, and save the authority-selection log for the old and new generations.
+4. The final latest value and the full history and markers strictly match the ACK manifest; a deleted version does not come back; metadata and content for the same key on the target old disk are corrected.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [START](validation-heal-operations.md#START) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 盘离线后执行覆盖/版本删除，再让携带旧元数据的盘重入
-- 以已确认的新代次/版本为准；旧当前值与已删版本不复活，旧盘被纠正而非成为新的错误权威。
+- After a disk goes offline, perform an overwrite or a version delete, then let the disk that carries the old metadata rejoin
+- The confirmed new generation/version is authoritative; the old current value and deleted versions are not resurrected, and the old disk is corrected rather than becoming a new incorrect authority.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C07"></a>
 
@@ -617,21 +617,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: disjoint-version-quorums, disjoint-incarnations, native-authority-fence.
 
-1. 同一个本例 key 串行写两个不同版本/代次，保存各自成员副本；按 FORMAT_BAD 在静止服务下组合为两个各小于 R 的集合，原片全部保留。
-2. 解析每个成员版本身份，生成按 version/incarnation 分组的计数表；即使总数达到 R，也证明每一组都没有 quorum。
-3. GET/deep heal 必须安全拒绝，不以较新 mtime 或跨版本片并集提交；检查原本仍可恢复的证据没有被 remove。
-4. 运行匹配源代码的 NATIVE 权威仲裁回归；在真机解除混合现场后恢复原夹具并 VERIFY，两类证据分开计数。
+1. Serially write two different versions or generations to this case's same key, and save each member's copy; per FORMAT_BAD, with the service at rest, combine them into two sets each smaller than R, keeping every original shard.
+2. Parse each member's version identity and produce a count table grouped by version/incarnation; even if the total reaches R, prove that every group has no quorum.
+3. GET and deep heal must reject safely, and must not commit from a newer mtime or from the union of shards across versions; check that evidence which was still recoverable has not had remove applied.
+4. Run the NATIVE authority-arbitration regression that matches the source code; on the fleet, after the mixed scene is cleared, restore the original fixture and VERIFY, and count the two kinds of evidence separately.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [FORMAT_BAD](validation-heal-operations.md#FORMAT_BAD) → [GET](validation-heal-operations.md#GET) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 用受控原生夹具构造互不构成 quorum 的版本/代次集合，再做对应真机反例
-- 禁止把不同版本的 shard 数量并集当成权威；无法证明时安全拒绝且保留可恢复证据，不猜测较新时间戳。
+- Use a controlled native fixture to construct version/generation sets that do not form a quorum with each other, then run the corresponding live counterexample on the fleet
+- Do not treat the union of shard counts from different versions as authority; when it cannot be proven, reject safely and retain recoverable evidence, and do not guess a newer timestamp.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C08"></a>
 
@@ -639,21 +639,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: length-mismatch, payload-mismatch, insufficient-authority.
 
-1. 先保存版本化外部 part 的全套 metadata 与 hash；从本例另一种长度/内容的版本取得替换 payload。
-2. 停服务按 FAULT_FORMAT 只更换少数 part 的内容或截断，保留原 xl.meta 声称的长度/摘要，不改健康成员。
-3. deep heal 对比 metadata 与实际内容；充分权威实例应重建，不充分权威实例应拒绝且保留好的副本。
-4. 取证后恢复，验证精确版本无跨代内容；保留实际解析结果，不把任意无效 header 注入当作长度字段覆盖。
+1. First save the full metadata and the hash of the versioned external part; take the replacement payload from another version of this case with a different length or content.
+2. With the service stopped, per FAULT_FORMAT, replace the content of or truncate only a minority of parts, keep the length and digest claimed by the original xl.meta, and do not change healthy members.
+3. deep heal compares the metadata with the actual content; an instance with sufficient authority should rebuild the shard, and an instance with insufficient authority should reject and keep the good copies.
+4. After evidence collection, recover, and verify that the exact version has no cross-generation content; keep the actual parse result, and do not treat an arbitrary invalid-header injection as an overwrite of the length field.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT_FORMAT](validation-heal-operations.md#FAULT_FORMAT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 构造元数据声称某长度/摘要但实际 part 不匹配的少数副本
-- 元数据与内容联合判断；不把可解析的 xl.meta 当健康；权威不足时拒绝覆盖正确副本。
+- Construct a minority of replicas whose metadata claims a length or digest that the actual part does not match
+- Judge metadata and content together; do not treat a parseable xl.meta as healthy; when authority is insufficient, refuse to overwrite a correct replica.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C09"></a>
 
@@ -661,21 +661,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: foreign-disk, foreign-set, future-format, future-object-schema.
 
-1. 用第二个隔离测试集群生成真实外来 disk/set format；当前实例只有一个替换逻辑根可被修改。
-2. FORMAT_BAD 在服务停止时分别装入外来 format 或按候选解析器支持的版本头写入未来 schema；记录原始 bytes/digest，不碰共享盘 format。
-3. 启动、GET/deep heal，核对明确隔离/unsupported，不得把未知格式当 missing 初始化或写成新集群。
-4. 停止服务收集原记录仍存在的物理证据；撤回坏根、恢复原身份后完整 VERIFY；无法确认格式字段不能冒充已注入。
+1. Use a second isolated test cluster to generate a real foreign disk/set format; the current instance has only one replacement logical root that may be modified.
+2. While the service is stopped, FORMAT_BAD separately installs a foreign format or writes a future schema using the version header the candidate parser supports; record the original bytes/digest, and do not touch the shared disk's format.
+3. Start, then GET and deep heal, and check for explicit isolation or unsupported; an unknown format must not be initialized as missing or written out as a new cluster.
+4. Stop the service and collect physical evidence that the original records are still present; withdraw the bad root, restore the original identity, then run a full VERIFY; a format field that cannot be confirmed must not be passed off as injected.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FORMAT](validation-heal-operations.md#FORMAT) → [REPLACE](validation-heal-operations.md#REPLACE) → [FORMAT_BAD](validation-heal-operations.md#FORMAT_BAD) → [PROCESS](validation-heal-operations.md#PROCESS) → [START](validation-heal-operations.md#START) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 提供外来 disk/set 身份、未来 schema 或不支持的记录格式
-- 明确隔离/拒绝且不破坏原记录，不把未知当 missing 后直接重建；解除故障后原数据可用。
+- Provide a foreign disk/set identity, a future schema, or an unsupported record format
+- Explicitly isolate or reject without damaging the original record, and do not treat unknown as missing and then rebuild immediately; after the fault is cleared, the original data is usable.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C10"></a>
 
@@ -683,21 +683,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: remove-false, remove-true-before-grace, remove-true-after-grace, shared-version-reference, pending-mpu.
 
-1. 创建 DV/DM 并合法覆盖/删除形成候选孤儿；以匹配格式解析器列出所有 version→data_dir 引用和 pending UploadId。
-2. 只在没有活引用的本次测试目录形成 dangling；保存 orphan 成因与真实年龄，宽限期实例等待配置窗口，不改全局时间。
-3. 分别 START remove=false/true；宽限期前、共享历史引用、pending MPU 必须保留，过期且有充分删除证明的孤儿才允许清理。
-4. 比较物理引用集合，所有应存版本及未完成 upload list_parts 完整；remove 误删任何共享引用即失败，救援只在取证后。
+1. Create DV/DM and form candidate orphans by a legal overwrite or delete; with the matching format parser, list every version→data_dir reference and pending UploadId.
+2. Form dangling only in this test's directories that have no live reference; save the orphan's cause and its real age, and have the grace-period instance wait for the configured window without changing the global time.
+3. START remove=false and remove=true separately; items still within the grace period, shared historical references, and a pending MPU must be kept, and only an orphan that has expired and has sufficient delete proof may be cleaned up.
+4. Compare the physical reference set: every version that should remain, and list_parts of incomplete uploads, are complete; if remove deletes any shared reference by mistake, it fails, and rescue happens only after evidence collection.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [SEED_DM](validation-heal-operations.md#SEED_DM) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT_FORMAT](validation-heal-operations.md#FAULT_FORMAT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 构造 dangling part、旧 data_dir 与共享历史引用，分别 remove=false/true、宽限期前后检查
-- 默认不得破坏仍可恢复数据；显式 remove 只清除具有充分删除证明且过期的本次孤儿，不删共享版本或 MPU。
+- Construct a dangling part, an old data_dir, and a shared historical reference, and check remove=false and remove=true separately, before and after the grace period
+- By default, do not destroy data that can still be recovered; an explicit remove clears only this orphan, and only when it has sufficient delete proof and has expired, and does not delete a shared version or an MPU.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="C11"></a>
 
@@ -707,23 +707,23 @@ Topologies: H1,H2. Branches: old-metadata-rejoin, old-checkpoint-replay, old-mrf
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`EVIDENCE_INCARNATION_LIVE_ORCHESTRATION`): 已实现 H1/H2 旧元数据重返、真实 checkpoint/resume 回放、ACK 绑定的 committed MRF 回放和精确 native 证据门禁；尚缺全部现场分支的独立审计，诊断执行保持 FAIL/BLOCKED，原生前置通过不能替代 canonical 验收。
+Blocked reason (`EVIDENCE_INCARNATION_LIVE_ORCHESTRATION`): H1/H2 old-metadata rejoin, real checkpoint/resume replay, ACK-bound committed MRF replay, and the precise native evidence gate are implemented; an independent audit of every live branch is still missing, diagnostic execution stays FAIL/BLOCKED, and a passing native prerequisite cannot replace canonical acceptance.
 
-1. 建旧 DV 桶并让一盘离线；按 S3 正常列举/删除全部版本和 marker，确认 delete_bucket 成功，禁止直接内部清空绕过删除。
-2. 同名 create_bucket 后写新内容，保存新 incarnation；恢复旧盘并让旧任务/持久 MRF 重放。
-3. 对比任务身份和代次守卫，旧责任不得删除/覆盖新对象，不得把旧 marker 或数据复活到新桶。
-4. 按 NATIVE 验证精确 incarnation 提交屏障；真机清单及新桶配置始终匹配成功 ACK，旧/新物理范围独立留证。
+1. Create an old DV bucket and take one disk offline; list and delete every version and marker through normal S3, confirm that delete_bucket succeeds, and do not wipe internally to bypass deletion.
+2. After create_bucket with the same name, write new content and save the new incarnation; restore the old disk and let the old task and the persistent MRF replay.
+3. Compare the task identity and the generation guard: old responsibility must not delete or overwrite the new object, and must not resurrect an old marker or old data into the new bucket.
+4. Per NATIVE, verify the commit fence of the exact incarnation; on the fleet, the manifest and the new bucket configuration always match the successful ACKs, and the old and new physical ranges are kept as separate evidence.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [S3](validation-heal-operations.md#S3) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [START](validation-heal-operations.md#START) → [FORMAT](validation-heal-operations.md#FORMAT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 盘离线时完成旧桶合法清空/删除，再同名建桶写入新对象，恢复旧盘与旧任务
-- 旧 bucket incarnation 的 checkpoint/MRF/元数据不得污染新桶；旧任务不得删除或恢复新 incarnation 的对象。
+- While a disk is offline, complete a legitimate empty or delete of the old bucket, then create a bucket of the same name and write new objects, and bring the old disk and the old tasks back
+- The old bucket incarnation's checkpoint/MRF/metadata must not contaminate the new bucket; old tasks must not delete or restore objects of the new incarnation.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D01"></a>
 
@@ -731,21 +731,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: zero, one, 4kib-minus-exact-plus, inline-minus-exact-plus, stripe-minus-exact-plus, large-external.
 
-1. SEED_DB 显式包含 0、1、4095、4096、4097；从固定候选配置/FORMAT 获得 inline 与 EC block 阈值，新增阈值±1 和一个多 block 外部对象。
-2. 每个大小先按物理记录确认实际形态；零字节/inline 没有外部 part 时改用合法 metadata/inline 故障，不能虚构 part。
-3. data/parity 上依次 missing 与 bitflip，START deep/WAIT；每个形态独立 variant 计数。
-4. 核对全体长度/摘要/ETag/HEAD/LIST；跨边界及末字节 Range 为正确 206，空对象范围按冻结契约拒绝。
+1. SEED_DB explicitly includes 0, 1, 4095, 4096, and 4097; obtain the inline and EC block thresholds from the fixed candidate configuration and FORMAT, and add threshold±1 and one multi-block external object.
+2. For each size, first confirm the actual form from the physical record; when a zero-byte or inline object has no external part, switch to a legal metadata or inline fault, and do not invent a part.
+3. On data and on parity, apply missing and then bitflip, and START deep/WAIT; count each form as an independent variant.
+4. Check every length, digest, ETag, HEAD, and LIST; a Range that crosses a boundary and a Range of the last byte are a correct 206, and a range on an empty object is rejected per the frozen contract.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [FAULT_FORMAT](validation-heal-operations.md#FAULT_FORMAT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [RANGE](validation-heal-operations.md#RANGE) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 覆盖 0/1 字节、页/inline/EC block 边界±1以及大对象
-- 每个实际存储形态均确认后注入；长度、SHA-256、ETag、HEAD/LIST 与边界 Range 正确，无假设阈值。
+- Cover 0-byte and 1-byte objects, page/inline/EC block boundaries ±1, and large objects
+- Inject only after each actual storage form is confirmed; length, SHA-256, ETag, HEAD/LIST, and boundary Range are correct, with no assumed threshold.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D02"></a>
 
@@ -753,21 +753,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: first-part, middle-part, last-part, cross-part-range.
 
-1. SEED_DM 建至少三 part 且非末 part≥5 MiB，非等长内容和独立 nonce；保存 UploadId、每个 part ETag、Complete ACK/最终版本。
-2. 每实例损坏第一、中间、末尾 part 对应的一个物理片；按 FORMAT 映射实际 part，不依赖文件名猜逻辑位置。
-3. START deep/WAIT 后先验证对应目标片，再完整 GET；最终 ETag 应与基线一致，但不用 multipart ETag 计算整对象 MD5。
-4. RANGE 覆盖两个 part 边界及尾部，比较逐字节/摘要、metadata 和版本；其他未完成 MPU 仍可 list_parts。
+1. SEED_DM creates at least three parts, with every non-final part ≥5 MiB, unequal content lengths, and independent nonces; save the UploadId, each part's ETag, and the Complete ACK and final version.
+2. Each instance corrupts one physical shard corresponding to the first, the middle, or the last part; map the actual part per FORMAT, and do not guess the logical position from the file name.
+3. After START deep/WAIT, first verify the corresponding target shard, then do a full GET; the final ETag should match the baseline, but do not compute the whole-object MD5 from the multipart ETag.
+4. RANGE covers two part boundaries and the tail; compare byte-by-byte/digest, metadata, and version; other incomplete MPUs can still list_parts.
 
 Operations: [SEED_DM](validation-heal-operations.md#SEED_DM) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RANGE](validation-heal-operations.md#RANGE) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 修复已完成的不等长多 part 对象，分别损坏首/中/末 part
-- 完整内容、part 顺序、原版本/ETag/元数据和跨 part Range 不变；multipart ETag 不能当整对象 MD5。
+- Repair a completed multipart object with unequal part lengths, corrupting the first, middle, and last part separately
+- Full content, part order, the original version/ETag/metadata, and cross-part Range stay unchanged; a multipart ETag must not be treated as the whole-object MD5.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D03"></a>
 
@@ -775,21 +775,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: old-version-part, current-version-part, recursive-all-versions, multiple-version-targets.
 
-1. SEED_DV 每 key 三个不同 payload 版本，逐一保存 versionId/ETag；可额外写 marker，清单不按当前 GET 代替历史读取。
-2. 为不同历史/当前版本选不同盘和 part，metadata 故障实例保留同版本 quorum。
-3. 对 object 和 recursive bucket 分别 START/WAIT；物理解析必须显示所有应存 version/data_dir 而不是只最新对象。
-4. 对每个原 versionId 全 GET，LIST versions 无新增/遗漏，isLatest 身份与 marker 顺序保持。
+1. SEED_DV writes three different payload versions per key and saves each versionId/ETag; a marker may also be written. The manifest must not substitute the current GET for historical reads.
+2. Select different disks and parts for different historical/current versions; the metadata-fault instance retains a same-version quorum.
+3. START/WAIT separately for the object and the recursive bucket; physical parsing must show every version/data_dir that should be stored, not only the latest object.
+4. Full GET of every original versionId; LIST versions has no additions or omissions; isLatest identity and marker order are preserved.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 不同版本分布不同损坏位置，按对象和递归范围修复
-- 所有原 versionId 可寻址且内容正确，最新版本身份不漂移，无多余版本或遗漏历史版本。
+- Place different corruption locations on different versions, and repair by object and by recursive scope
+- Every original versionId is addressable and its content is correct, the latest version identity does not drift, and there are no extra versions or omitted historical versions.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D04"></a>
 
@@ -797,21 +797,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: current-marker, historical-marker, missing-marker-replica, stale-disk-marker.
 
-1. 创建三个数据版本与当前/历史 marker，记录 delete_object 返回的 VersionId/DeleteMarker。
-2. 缺少 marker 的实例使用 xl.meta 少数副本缺失；陈旧实例通过成员离线后合法创建/删除 marker 形成，不能直接改任意 metadata。
-3. heal 后 current GET/HEAD 对当前 marker 应为 404 且正确 marker 身份头；指定 marker versionId 的 GET 按 S3 契约为 405 并保留版本头。
-4. LIST versions 精确集合与最新标记一致；显式删除当前 marker 后露出的应是预期历史对象，不能产生额外数据版本。
+1. Create three data versions and current/historical markers, and record the VersionId/DeleteMarker returned by delete_object.
+2. The instance missing a marker uses a minority of xl.meta replicas missing; the stale instance is formed by legitimately creating/deleting a marker after a member goes offline, and arbitrary metadata must not be edited directly.
+3. After heal, current GET/HEAD of the current marker should be 404 with the correct marker identity headers; GET of a specified marker versionId is 405 per the S3 contract and retains the version headers.
+4. The exact LIST versions set matches the latest marker; after the current marker is explicitly deleted, what is exposed should be the expected historical object, and no extra data version may be produced.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [S3](validation-heal-operations.md#S3) → [FAULT](validation-heal-operations.md#FAULT) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 缺失/陈旧 marker 副本后 heal，并按当前值与精确 marker versionId 查询
-- 当前 GET/HEAD 与指定 marker 的状态码及身份头符合契约；marker 不复活数据，LIST versions 无重复。
+- After marker replicas are missing or stale, heal, and query by the current value and the exact marker versionId
+- The status codes and identity headers of the current GET/HEAD and of the specified marker match the contract; the marker does not resurrect data, and LIST versions has no duplicates.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D05"></a>
 
@@ -819,21 +819,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: enabled-to-suspended, null-overwrite, null-delete-marker.
 
-1. 启用版本写三代，再 put_bucket_versioning Status=Suspended，连续写两次 null 版本并创建/删除 null marker。
-2. 基线同时保存非 null 历史和当前 null 身份；对目标外部 part 或 xl.meta 制造少数缺失。
-3. START deep/WAIT；记录 null 不能被转换成随机 versionId，也不能与启用期历史版本混片。
-4. VERIFY 全部原 versionId、null 内容和 marker；再次开启版本后写新对象，验证旧历史仍可寻址。
+1. Enable versioning and write three generations, then put_bucket_versioning with Status=Suspended, write the null version twice in succession, and create/delete a null marker.
+2. The baseline saves both the non-null history and the current null identity; induce a minority missing on the target external part or xl.meta.
+3. START deep/WAIT; record that null must not be converted into a random versionId, and must not have its shards mixed with historical versions from the versioning-enabled period.
+4. VERIFY every original versionId, the null content, and the marker; after versioning is enabled again, write a new object and verify the old history is still addressable.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [S3](validation-heal-operations.md#S3) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 在版本开启、暂停、null 版本覆盖之间建夹具再修复
-- null 和非 null 版本不混淆，不新增假版本；暂停前历史对象仍准确可读。
+- Build the fixture across versioning enabled, suspended, and null-version overwrite, then repair
+- Null and non-null versions are not confused, and no fake version is added; historical objects from before suspension remain accurately readable.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D06"></a>
 
@@ -841,21 +841,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: user-metadata, content-headers, versioned-tags.
 
-1. 用 DS 设置中文值可编码的 metadata、Content-Type、Content-Encoding、Content-Disposition、Cache-Control 与两组 tags；内容本身使用已声明编码。
-2. 先 GET/HEAD/get_object_tagging 精确记录；对外部 part 和少数 xl.meta 分别故障。
-3. START deep/WAIT，比较所有对外属性和逐版本 tags，修复不新增版本、不丢用户 key 大小写规范化结果。
-4. 允许内部 metadata 合法重写，但必须通过 FORMAT 引用和物理内容证明；不把 Content-Encoding 当服务端压缩已启用。
+1. Use DS to set metadata, Content-Type, Content-Encoding, Content-Disposition, Cache-Control, and two tag sets to encodable Chinese values; the content itself uses the declared encoding.
+2. First record GET/HEAD/get_object_tagging exactly; fault the external part and a minority of xl.meta separately.
+3. START deep/WAIT, and compare every externally visible attribute and the per-version tags; repair adds no version and does not drop the case-normalization result of user keys.
+4. Legitimate rewrite of internal metadata is allowed, but it must be proven by FORMAT references and physical content; do not treat Content-Encoding as server-side compression being enabled.
 
 Operations: [SEED_DS](validation-heal-operations.md#SEED_DS) → [BASELINE](validation-heal-operations.md#BASELINE) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 包含用户 metadata、Content-Type/Encoding/Disposition、tags 的对象修复
-- 对外 metadata、tags 和相关响应头逐项相同；不要求无关内部元数据字节完全一致。
+- Repair objects that include user metadata, Content-Type/Encoding/Disposition, and tags
+- External metadata, tags, and the related response headers match item by item; unrelated internal metadata bytes are not required to be identical.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D07"></a>
 
@@ -863,21 +863,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: head, range-valid, range-outside, if-match, if-none-match, if-modified-since, if-unmodified-since.
 
-1. DB/DM 基线保存 ETag/LastModified 和跨 part 内容；先执行所有条件请求，冻结预期 200/206/304/412/416。
-2. 对精确 part 制造缺失/坏校验并 repair；同一组 HEAD、Range、IfMatch/IfNoneMatch、时间条件再次请求。
-3. 304/412/416 验证响应无错误成功内容；合法范围比较准确长度、ContentRange 和原片段摘要。
-4. 完整 VERIFY 版本和 metadata；条件请求必须用 API 参数传递，不由本地短路模拟状态码。
+1. The DB/DM baseline saves ETag/LastModified and cross-part content; first issue all conditional requests and freeze the expected 200/206/304/412/416.
+2. Induce missing/bad checksum on the exact part and repair; issue the same set of HEAD, Range, IfMatch/IfNoneMatch, and time-condition requests again.
+3. For 304/412/416, verify the response contains no erroneous success content; for a valid range, compare the exact length, ContentRange, and the original fragment digest.
+4. Fully VERIFY the version and metadata; conditional requests must be passed as API parameters, and status codes must not be simulated by a local short-circuit.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DM](validation-heal-operations.md#SEED_DM) → [RANGE](validation-heal-operations.md#RANGE) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [RANGE](validation-heal-operations.md#RANGE) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 修复前后验证 HEAD、合法/越界 Range、If-Match/If-None-Match 及时间条件
-- 200/206/304/412/416 等按逐请求契约判断，绝不返回旧内容、错误范围或错误 ETag。
+- Before and after repair, verify HEAD, valid and out-of-range Range, If-Match/If-None-Match, and time conditionals
+- Judge 200/206/304/412/416 and similar codes against the per-request contract, and never return old content, a wrong range, or a wrong ETag.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D08"></a>
 
@@ -885,21 +885,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: sse-s3, sse-kms, sse-c, encrypted-versioned.
 
-1. DEPENDENCY 先验证候选支持的每种 SSE 与专用 KMS/key 就绪；不支持的产品能力按明确错误契约另记，不能删除该参数实例。
-2. 用 S3 ServerSideEncryption/SSEKMSKeyId 或 SSECustomerAlgorithm/SSECustomerKey 创建对象；密钥从环境注入到内存，不放命令行/清单。
-3. 在密文物理层选择 part 做 missing/bitflip；deep heal 后比较同角色原密文片或匹配候选的重编码验证。
-4. 用正确授权逐版本解密 GET 校验原文，用缺少/错误密钥请求验证拒绝；不得写出明文替代或把密钥错误判成不存在。
+1. DEPENDENCY first verifies that every SSE the candidate supports and the dedicated KMS/key are ready; unsupported product capabilities are recorded separately under an explicit error contract, and that parameter instance must not be deleted.
+2. Create the object with S3 ServerSideEncryption/SSEKMSKeyId or SSECustomerAlgorithm/SSECustomerKey; inject the key from the environment into memory, and do not place it on the command line or in the manifest.
+3. At the ciphertext physical layer, select a part for missing/bitflip; after deep heal, compare the original ciphertext shard of the same role, or verify by re-encoding that matches the candidate.
+4. With correct authorization, decrypt-GET each version to check the plaintext; with a missing/wrong key, verify the request is rejected. Do not write a plaintext substitute, and do not classify a key error as not-found.
 
 Operations: [DEPENDENCY](validation-heal-operations.md#DEPENDENCY) → [SEED_DE](validation-heal-operations.md#SEED_DE) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [S3](validation-heal-operations.md#S3) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 按候选支持的 SSE-S3/SSE-KMS/SSE-C 建加密对象并修复
-- 授权解密后原内容及版本一致，物理验证使用正确编码/密文层；密钥不可用时不误删、不降级明文，证据脱敏。
+- Create encrypted objects with the SSE-S3/SSE-KMS/SSE-C modes the candidate supports, and repair them
+- After authorized decryption, the original content and version match, and physical verification uses the correct encoding/ciphertext layer; when the key is unavailable, do not delete by mistake or downgrade to plaintext, and redact the evidence.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D09"></a>
 
@@ -907,21 +907,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: governance-retention, compliance-retention, legal-hold, historical-protected-version.
 
-1. 创建启用 ObjectLock 的专用桶，SEED_DO 使用短且真实未到期的 retention 或 ON legal hold；记录 UTC 截止和独占资源到期安排。
-2. 在无 bypass 权限角色下对受保护 versionId DELETE 必须 AccessDenied，确认保护本来有效。
-3. 对受保护版本缺片/xl.meta 缺失后 repair，核对内容及 get_object_retention/legal_hold；保留期内再次删除仍拒绝。
-4. legal hold 仅正常 API 解除；Compliance 等到真实到期后清理，禁止改时钟或内部删文件；未到期现场标 RETAINED，不能交还空环境。
+1. Create a dedicated bucket with ObjectLock enabled. SEED_DO uses a short retention that has genuinely not expired, or legal hold ON; record the UTC deadline and the exclusive-resource expiry schedule.
+2. DELETE of a protected versionId by a role without bypass permission must be AccessDenied, confirming the protection was effective to begin with.
+3. After a missing shard or missing xl.meta on a protected version, repair and check the content and get_object_retention/legal_hold; a further delete within the retention period is still rejected.
+4. Legal hold is released only through the normal API; Compliance is cleaned up only after genuine expiry. Changing the clock or deleting files internally is forbidden. An unexpired scene is marked RETAINED and must not be handed back as an empty environment.
 
 Operations: [SEED_DO](validation-heal-operations.md#SEED_DO) → [S3](validation-heal-operations.md#S3) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [RECOVER](validation-heal-operations.md#RECOVER)
 
 Source assertions:
 
-- 对开启 retention/legal hold 的受保护版本修复，期间测试非法删除
-- heal 不绕过保留/hold，也不丢失其元数据；拒绝删除与合法修复均有明确证据。
+- Repair a protected version with retention/legal hold enabled, and test an illegal delete during that interval
+- Heal does not bypass retention/hold and does not lose their metadata; both the rejected delete and the legitimate repair have explicit evidence.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D10"></a>
 
@@ -929,21 +929,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: unicode-space-percent, encoded-slash, adjacent-prefixes, multi-page-list.
 
-1. DS 创建中文、空格、%2F 字面量、真实 / 和多层前缀键；至少 257 个对象并设置 List MaxKeys=17，确保跨页。
-2. FORMAT 建逻辑 key→物理路径映射，确认 %2F 与 / 不混淆；文件故障只用受限相对路径工具，不拼 shell。
-3. 对选定 key 分别 missing part/xl.meta，使用 URL percent-encode 后的 Admin scope，deep heal。
-4. 分页 LIST/versions 与 manifest 无遗漏/重复；控制前缀不变；对每个特殊 key 精确 GET 和 metadata 校验。
+1. DS creates keys with Chinese, spaces, a literal %2F, a real /, and multi-level prefixes; at least 257 objects, with List MaxKeys=17, to ensure the listing crosses pages.
+2. FORMAT builds the logical key→physical path mapping and confirms %2F is not confused with /; file faults use only a constrained relative-path tool, and do not concatenate a shell command.
+3. For the selected keys, apply missing part/xl.meta separately, using the URL percent-encoded Admin scope, then deep heal.
+4. Paginated LIST/versions and the manifest have no omissions or duplicates; the control prefix is unchanged; exact GET and metadata checks for every special key.
 
 Operations: [SEED_DS](validation-heal-operations.md#SEED_DS) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [S3](validation-heal-operations.md#S3) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 覆盖中文、空格、百分号、编码斜线、多层前缀和多页对象列表
-- 逻辑 key 与物理路径映射准确，不跨桶/前缀；分页无遗漏重复，不能把用户 key 当可执行 shell 或裸文件路径。
+- Cover Chinese, spaces, percent signs, encoded slashes, multi-level prefixes, and multi-page object listings
+- The logical key maps accurately to the physical path and does not cross buckets or prefixes; pagination has no omissions or duplicates, and a user key must not be treated as an executable shell command or a bare file path.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="D11"></a>
 
@@ -951,21 +951,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: versioning-config, bucket-policy-tags, lock-config, unknown-record-negative.
 
-1. DS/DV 创建隔离桶配置：版本、只授权本桶的策略、bucket tags、可到期锁配置；通过 S3 GET 配置存基线。
-2. FORMAT_BAD 白名单仅包含该桶对应的系统 bucket metadata 文件；在匹配格式/可恢复契约已核实后少数副本缺失/截断。
-3. 不能使用通用 heal_fault 修改 .rustfs.sys；按专用系统记录手册在停止服务、精确备份和审批清单下操作，未知格式实例只要求安全拒绝。
-4. repair 后逐 API 读取配置比对，业务对象版本完整；确认 IAM/凭据配置及其他桶系统记录完全未变。
+1. DS/DV creates an isolated bucket configuration: versioning, a policy that authorizes only this bucket, bucket tags, and an expirable lock configuration; save the baseline by S3 GET of the configuration.
+2. The FORMAT_BAD allowlist contains only the system bucket metadata files for that bucket; after the matching format/recoverable contract has been verified, a minority of replicas are missing/truncated.
+3. Do not use the generic heal_fault to modify .rustfs.sys; operate per the dedicated system-record runbook with the service stopped, an exact backup, and an approved manifest. Unknown-format instances require only a safe rejection.
+4. After repair, read and compare the configuration through each API; business-object versions are complete. Confirm that the IAM/credential configuration and the system records of other buckets are completely unchanged.
 
 Operations: [SEED_DS](validation-heal-operations.md#SEED_DS) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [S3](validation-heal-operations.md#S3) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT_FORMAT](validation-heal-operations.md#FAULT_FORMAT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL)
 
 Source assertions:
 
-- 在隔离桶白名单内测试可支持的桶元数据恢复，并核对外部 bucket 配置
-- 版本设置、策略/标签/保留配置按契约保持；不得遍历凭据配置或把未知内部记录当可重建数据。
+- Within the isolated-bucket allowlist, test supported bucket-metadata recovery, and check the external bucket configuration
+- Versioning settings and policy/tag/retention configuration are kept per the contract; do not walk credential configuration or treat an unknown internal record as rebuildable data.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="E01"></a>
 
@@ -973,21 +973,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: normal-missing-data, normal-missing-parity.
 
-1. 部署 manual 配置：关闭 scanner、auto-heal、MRF；保留 format，记录服务实际环境与 PID，不只保存拟用 env 文件。
-2. FAULT missing 后不能 GET/HEAD 目标；先确认缺失仍在，再 START scanMode=1。
-3. WAIT 精确 token/outcome，先 PHYSICAL 证明目标新生成，再 VERIFY；源归属需结合配置、时间线和任务对象。
-4. 正常扫描未发现静默 bitrot 不能因此判 E01 失败；那是 E02/C02/C03 的 deep 实例。
+1. Deploy the manual configuration: turn off scanner, auto-heal, and MRF; keep format, and record the service's actual environment and PID, not only the intended env file.
+2. After FAULT missing, the target cannot be GET/HEAD; first confirm the missing state is still present, then START scanMode=1.
+3. WAIT for the exact token/outcome; PHYSICAL first proves the target was newly generated, then VERIFY. Source attribution needs to combine the configuration, the timeline, and the task object.
+4. A normal scan that does not find silent bitrot must not fail E01 for that reason; that is the deep instance of E02/C02/C03.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [CONFIG](validation-heal-operations.md#CONFIG) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 禁止预读目标，保留 format，隔离背景干扰后显式 normal heal
-- 证明本次 Admin token 实际覆盖目标并修复可由 normal 检出的缺失；不要求 normal 发现所有静默 bitrot。
+- Do not pre-read the target, keep format, isolate background interference, then explicitly run normal heal
+- Prove that this Admin token actually covers the target and repairs the missing data that normal can detect; normal is not required to find all silent bitrot.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="E02"></a>
 
@@ -995,21 +995,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: deep-parity-bitrot, deep-data-bitrot.
 
-1. manual 配置排除其他后台来源；FORMAT 确认分片角色，注入 bitflip 并保存坏片仍存在证据。
-2. 不先读目标，START scanMode=2；保留请求 body、clientToken、incarnation/pool/set 与最终对象 disposition。
-3. 先验证坏片完整恢复，再读取原文；如果任务开始前已有恢复，记录 ATTRIBUTION_NOT_OBSERVED。
-4. 检查健康 control 没被意外修改，source 不能仅由最后一次发出的命令推测。
+1. The manual configuration excludes other background sources; FORMAT confirms the shard role, injects a bitflip, and saves evidence that the bad shard still exists.
+2. Do not read the target first; START scanMode=2; retain the request body, clientToken, incarnation/pool/set, and the final object disposition.
+3. First verify the bad shard is fully restored, then read the original content; if restoration already occurred before the task started, record ATTRIBUTION_NOT_OBSERVED.
+4. Check that the healthy control was not modified unexpectedly; source must not be inferred only from the last command issued.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [CONFIG](validation-heal-operations.md#CONFIG) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 在普通读取仍可成功的 parity 损坏上显式 deep heal
-- 按 token/对象/版本及物理变更证明 deep 检查和修复，不把后台提前修复算给手工任务。
+- On parity corruption where an ordinary read can still succeed, explicitly run deep heal
+- Prove the deep check and the repair by token, object, version, and physical change, and do not credit a background repair that finished early to the manual task.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="E03"></a>
 
@@ -1017,21 +1017,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: get-missing, range-bitrot, historical-version-read.
 
-1. 关闭 scanner/auto-heal，按候选 read-repair 实现配置其所需 MRF 队列，记录为何开启；不发送 Admin heal。
-2. FAULT 后物理证明损坏尚存；只对一个精确 key/version 发一次带请求 ID 的 GET 或 Range。
-3. GET 内容先验正确还不够：只观察 PHYSICAL/后台状态/日志，直到该片重建；异步路径需关联 read-repair 入队和责任完成。
-4. 完成补片后才全量 VERIFY；如果只能看到读取成功但找不到 source 证据，该路径仍 NOT_OBSERVED，不能计 PASS。
+1. Turn off scanner/auto-heal; per the candidate's read-repair implementation, configure the MRF queue it requires and record why it is enabled; do not send an Admin heal.
+2. After FAULT, physically prove the corruption still exists; send only one GET or Range, with a request ID, for one exact key/version.
+3. It is not enough that the GET content is already correct: observe only PHYSICAL/background state/logs until that shard is rebuilt; the async path needs to correlate read-repair enqueue and completion of the responsibility.
+4. Run a full VERIFY only after shard repair completes; if only a successful read is visible and source evidence cannot be found, that path remains NOT_OBSERVED and must not count as PASS.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [CONFIG](validation-heal-operations.md#CONFIG) → [FAULT](validation-heal-operations.md#FAULT) → [GET](validation-heal-operations.md#GET) → [RANGE](validation-heal-operations.md#RANGE) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [LOGS](validation-heal-operations.md#LOGS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 不发 Admin heal，对已确认的特定损坏对象发一次可追踪 GET/Range
-- 读取正确且后续真实补片；若走异步队列需证实 source=read-repair，不能只有 GET 成功。
+- Do not issue an Admin heal; issue one traceable GET/Range against the confirmed, specifically corrupted object
+- The read is correct and a real on-disk shard reconstruction follows; if it goes through the async queue, source=read-repair must be proven, and a successful GET alone is not enough.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="E04"></a>
 
@@ -1039,21 +1039,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: cold-missing, cold-bitrot, scanner-cycle-boundary.
 
-1. 启用 scanner 和所需自动修复，预注册 cycle/start delay/bitrot cycle 与预算；先用健康冷对象证明扫描器实际巡检。
-2. 注入时用 PROCESS 短停以保持静止窗口；重启后不发目标 GET/HEAD、不发 Admin heal。
-3. 只用磁盘快照、scanner 遍历日志和后台责任观察，证明当前周期检查目标，记录发现→入队→补片。
-4. PHYSICAL 完成后再全量 VERIFY；单纯周期计数增长、全局 idle 或其他自动 replacement 先修不能记 scanner 通过。
+1. Enable the scanner and the required automatic repair; pre-register cycle/start delay/bitrot cycle and the budget; first use a healthy cold object to prove the scanner actually inspects.
+2. During injection, use PROCESS for a short stop to hold a quiescent window; after restart, do not send a target GET/HEAD and do not send an Admin heal.
+3. Use only disk snapshots, scanner traversal logs, and background responsibility observation to prove the current cycle inspects the target, and record discovery→enqueue→shard repair.
+4. Run a full VERIFY only after PHYSICAL completes; a mere cycle-count increase, global idle, or another automatic replacement repairing first must not be recorded as the scanner passing.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [CONFIG](validation-heal-operations.md#CONFIG) → [PROCESS](validation-heal-operations.md#PROCESS) → [FAULT](validation-heal-operations.md#FAULT) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [LOGS](validation-heal-operations.md#LOGS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 不 GET/HEAD 损坏目标、不发手工 heal，仅等待已启用的 scanner 路径
-- 冷对象被发现并修复，来源和遍历窗口明确；scanner 周期结束但目标没检查不能通过。
+- Do not GET/HEAD the corrupted target and do not issue a manual heal; wait only for the scanner path that is already enabled
+- The cold object is discovered and repaired, with the source and the traversal window made explicit; it cannot pass if the scanner cycle ends without the target being checked.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="E05"></a>
 
@@ -1061,21 +1061,21 @@ Source assertions:
 
 Topologies: H2. Branches: offline-put, offline-version-delete, offline-marker.
 
-1. 在 H2 开启 durable MRF，先验证目标节点离线时剩余同 set 满足提交条件；DRIVE_GATE 或 PROCESS 只影响目标成员。
-2. 在线节点执行唯一 key PUT、精确版本 DELETE、marker 操作；逐个保存 ACK 和责任 identity。
-3. 在目标仍离线时采集 journal/状态，证明责任已持久化；恢复同一盘身份，不发手工 heal。
-4. 观察 MRF 重放和退休理由；只有实际 repaired/verified_healthy/authoritatively_absent 后退休；VERIFY 全部 ACK 和目标片，不能以队列空独自证明。
+1. On H2, enable durable MRF; first verify that, when the target node is offline, the remaining members of the same set satisfy the commit condition; DRIVE_GATE or PROCESS affects only the target member.
+2. Online nodes perform a unique-key PUT, an exact-version DELETE, and marker operations; save each ACK and responsibility identity.
+3. While the target is still offline, collect the journal/state to prove the responsibility has been persisted; restore the same disk identity, and do not issue a manual heal.
+4. Observe MRF replay and the retire reason; retire only after the result is actually repaired/verified_healthy/authoritatively_absent; VERIFY every ACK and the target shard, and do not use an empty queue as the sole proof.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [CONFIG](validation-heal-operations.md#CONFIG) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 成员离线时完成有 quorum 的 PUT/DELETE，确认待修责任后重入
-- durable MRF 责任持久且身份精确；只在 repaired/verified healthy/authoritatively absent 等已证明结果后释放，成功提交不丢失。
+- While a member is offline, complete a quorum PUT/DELETE, confirm the pending-repair responsibility, then rejoin
+- The durable MRF responsibility persists and its identity is exact; release it only after a proven result such as repaired/verified healthy/authoritatively absent, and a successful commit is not lost.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="E06"></a>
 
@@ -1083,21 +1083,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: replacement-unversioned, replacement-versioned-marker.
 
-1. 启用 replacement auto-heal；REPLACE 注入空逻辑盘，旧盘备份对服务不可达；保存新 UUID/slot。
-2. 重启/接纳后不发 Admin heal、不读目标；仅查询 BACKGROUND/REPLACEMENT、日志及 PHYSICAL。
-3. 从 replacement generation、ready 与责任完成状态关联所有 manifest 对象/版本的补片时间线。
-4. 全部目标分片实际重建后 VERIFY；服务 ready、计数重置或队列空都不能提前结束。
+1. Enable replacement auto-heal; REPLACE injects an empty logical disk, and the old disk's backup is unreachable to the service; save the new UUID/slot.
+2. After restart/acceptance, do not send an Admin heal and do not read the target; query only BACKGROUND/REPLACEMENT, logs, and PHYSICAL.
+3. From the replacement generation, ready, and responsibility-completion state, correlate the shard-repair timeline of every manifest object/version.
+4. VERIFY only after every target shard has actually been rebuilt; service ready, a counter reset, or an empty queue must not end the run early.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [CONFIG](validation-heal-operations.md#CONFIG) → [REPLACE](validation-heal-operations.md#REPLACE) → [FORMAT](validation-heal-operations.md#FORMAT) → [REPLACEMENT](validation-heal-operations.md#REPLACEMENT) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 替换盘接纳后不发 Admin/目标 GET，观察自动 replacement heal
-- 替换代次、ready/completion 与盘上全部目标版本一致；不能用服务 ready、队列空或计数重置代替完成。
+- After the replacement disk is accepted, do not issue an Admin or target GET; observe automatic replacement heal
+- The replacement generation, ready/completion, and every target version on disk agree; service ready, an empty queue, or a counter reset cannot substitute for completion.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F01"></a>
 
@@ -1105,21 +1105,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: root-partial-graceful, same-record-disk-resume.
 
-1. DX root heal 启动前保存原协调者、拓扑、记录盘和预算；所有 root checkpoint 通过 CHECKPOINT 只读白名单采集。
-2. WINDOW 证明 0<已修目标数<总数 且任务 running，再 PROCESS graceful-stop 原协调者；记录退出信号和持久记录。
-3. 用原 unit/env/数据根/候选重启原协调者，不换记录盘；观察原任务 ID/剩余责任恢复，不能将新扫描当原任务续跑。
-4. 最终全部对象/片正确，root 活动记录退休，重复重启无重复任务；未观察部分进度保留 NOT_OBSERVED。
+1. Before DX root heal starts, save the original coordinator, topology, record disk, and budget; collect every root checkpoint through the CHECKPOINT read-only allowlist.
+2. WINDOW proves 0 < repaired target count < total and that the task is running, then PROCESS graceful-stop of the original coordinator; record the exit signal and the persistent record.
+3. Restart the original coordinator with the original unit/env/data root/candidate, without replacing the record disk; observe recovery of the original task ID/remaining responsibility, and do not treat a new scan as the original task continuing.
+4. In the end every object/shard is correct, the root activity record is retired, and repeated restarts produce no duplicate task; unobserved partial progress remains NOT_OBSERVED.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [PROCESS](validation-heal-operations.md#PROCESS) → [STATUS](validation-heal-operations.md#STATUS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- root heal 非零进度时优雅重启原协调者，保留原拓扑与记录盘
-- 在明确支持的边界内恢复原 task ID 和剩余责任/预算，完成后无遗留活动记录；不扩张为协调盘丢失后的故障转移。
+- While root heal has non-zero progress, gracefully restart the original coordinator, keeping the original topology and the record disk
+- Within the explicitly supported boundary, restore the original task ID and the remaining responsibility/budget, and leave no active record after completion; do not expand this into failover after the coordinator disk is lost.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F02"></a>
 
@@ -1127,21 +1127,21 @@ Source assertions:
 
 Topologies: H2. Branches: target-partial-graceful, versioned-target-partial.
 
-1. REPLACE 目标逻辑盘并启用自动重建，使用 DX/DV 使目标总量可观测；协调者不是重启目标。
-2. PHYSICAL 与 REPLACEMENT 双证实目标只完成部分，再 PROCESS 对目标 unit 优雅停止；保存 MainPID、退出码、前后 boot_id。
-3. 保留同一新 disk UUID/代次，正常启动原目标服务；不能换新目录重测。
-4. 观察余下目标继续构建且任务责任一致，全部版本/marker/片完整；备份不得参与重建。
+1. REPLACE the target logical disk and enable automatic rebuild, using DX/DV so the target total is observable; the coordinator is not the restart target.
+2. PHYSICAL and REPLACEMENT both confirm the target has completed only part, then PROCESS gracefully stops the target unit; save MainPID, the exit code, and boot_id before and after.
+3. Keep the same new disk UUID/generation and start the original target service normally; do not switch to a new directory and retest.
+4. Observe that the remaining targets continue to build with consistent task responsibility, and that every version/marker/shard is complete; the backup must not participate in the rebuild.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [REPLACE](validation-heal-operations.md#REPLACE) → [REPLACEMENT](validation-heal-operations.md#REPLACEMENT) → [WINDOW](validation-heal-operations.md#WINDOW) → [PROCESS](validation-heal-operations.md#PROCESS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 替换目标仅完成部分重建时优雅重启目标节点
-- 故障确实发生于部分完成窗口；重启后续建同一目标盘/代次，最终 manifest 与全部目标分片正确。
+- When the replacement target has completed only part of the reconstruction, gracefully restart the target node
+- The fault actually occurs inside the partial-completion window; after the restart, reconstruction continues on the same target disk/generation, and the final manifest and all target shards are correct.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F03"></a>
 
@@ -1149,21 +1149,21 @@ Source assertions:
 
 Topologies: H2. Branches: target-partial-sigkill, target-partial-sigkill-versioned.
 
-1. 与 F02 同样准备替换盘和可观察部分进度，先冻结将被杀掉的 unit MainPID/进程启动时间。
-2. WINDOW 内 PROCESS kill，精确 systemctl kill --signal=SIGKILL --kill-whom=main；记录 signal=9 与非优雅退出，明确不是物理断电。
-3. 正常启动同 unit/根/新 disk UUID；记录恢复 responsibility/代次，不允许丢弃尚未完成对象。
-4. 全量 VERIFY/PHYSICAL，检查临时文件和持久责任无泄漏；最终通过不抹掉这次真实中断的证据。
+1. Prepare the replacement disk and observable partial progress the same way as F02, and first freeze the MainPID/process start time of the unit that will be killed.
+2. Within the WINDOW, PROCESS kill, exactly systemctl kill --signal=SIGKILL --kill-whom=main; record signal=9 and a non-graceful exit, and state explicitly that this is not a physical power loss.
+3. Start normally with the same unit/root/new disk UUID; record the recovered responsibility/generation, and do not allow objects that are not yet complete to be discarded.
+4. Full VERIFY/PHYSICAL; check that temporary files and persistent responsibilities are not leaked. A final pass does not erase the evidence of this real interruption.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [REPLACE](validation-heal-operations.md#REPLACE) → [WINDOW](validation-heal-operations.md#WINDOW) → [PROCESS](validation-heal-operations.md#PROCESS) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 部分重建时 SIGKILL 测试进程，再正常启动
-- unclean shutdown 与修复进度有真实证据；已提交对象不丢失，未完成目标不会被当完整；明确不是断电测试。
+- During partial reconstruction, SIGKILL the test process, then start it normally
+- There is real evidence of the unclean shutdown and of the repair progress; committed objects are not lost, and an unfinished target is not treated as complete; this is explicitly not a power-loss test.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F04"></a>
 
@@ -1171,21 +1171,21 @@ Source assertions:
 
 Topologies: H2. Branches: root-coordinator-kill, mrf-coordinator-kill, replacement-coordinator-kill.
 
-1. 三个机制使用独立场景和冻结的持久化支持表；在协调者非零且未完成进度时采集 CHECKPOINT。
-2. PROCESS SIGKILL 协调者，目标节点保持；恢复原根/原拓扑。
-3. 分别核对机制承诺：持久任务必须续责；易失 token 丢失不能算已完成，应显示未完成并允许明确的新扫描补偿。
-4. 原任务与补偿任务分别保存；最终 VERIFY 所有 ACK、版本和片，不能把安全重扫成功写成原 token 自动恢复。
+1. The three mechanisms use independent scenarios and a frozen persistence-support table; collect CHECKPOINT while the coordinator has nonzero, incomplete progress.
+2. PROCESS SIGKILL the coordinator; the target node stays up. Restore the original root/original topology.
+3. Check each mechanism's promise separately: a durable task must continue its responsibility; loss of a volatile token must not count as completed. It should show incomplete and allow an explicit new-scan compensation.
+4. Save the original task and the compensation task separately; finally VERIFY all ACKs, versions, and shards. A successful safe rescan must not be recorded as automatic recovery of the original token.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [SEED_DB](validation-heal-operations.md#SEED_DB) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [PROCESS](validation-heal-operations.md#PROCESS) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 协调者非优雅退出并恢复，分别观察 root、MRF、replacement
-- 按各机制已核实的持久化边界判断；不得把丢失的易失 token 当成功，需显式记录剩余责任并可安全重扫恢复。
+- The coordinator exits ungracefully and then recovers; observe root, MRF, and replacement separately
+- Judge by each mechanism's verified persistence boundary; a lost volatile token must not be treated as success, remaining responsibility must be recorded explicitly, and recovery by a safe rescan must be possible.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F05"></a>
 
@@ -1193,21 +1193,21 @@ Source assertions:
 
 Topologies: H2. Branches: all-graceful-restart, all-restart-with-mpu, repeat-full-restart.
 
-1. 准备 DB/DV/DM、pending UploadId 与未完成持久修复责任；冻结全部节点/盘/slot。
-2. WINDOW 命中后按固定顺序只停止本例全部 units；保存每节点退出码、checkpoint/MRF 与完整时序。
-3. 按原拓扑同时或预注册顺序重启，等待全部 peer，不能用自动重新格式化或新数据根恢复。
-4. 完成后全版本/marker/MPU 和物理片校验，再重复一次重启验证幂等，任何丢失的已承诺责任计失败。
+1. Prepare DB/DV/DM, a pending UploadId, and an incomplete durable repair responsibility; freeze every node/disk/slot.
+2. After the WINDOW is hit, stop only all units of this case, in a fixed order; save each node's exit code, checkpoint/MRF, and the full timeline.
+3. Restart on the original topology, simultaneously or in the pre-registered order, and wait for every peer; do not recover by automatic reformat or a new data root.
+4. After completion, verify every version/marker/MPU and physical shard, then repeat one restart to verify idempotence; any lost already-promised responsibility counts as a failure.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [SEED_DM](validation-heal-operations.md#SEED_DM) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [PROCESS](validation-heal-operations.md#PROCESS) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 有未完成修复责任时重启全部测试节点，固定原拓扑/磁盘身份
-- 有持久化保证的责任不遗失；全部端点恢复一致，旧版本/marker/MPU 与目标分片完整，重复重启不扩散错误。
+- While unfinished repair responsibility remains, restart all test nodes, with the original topology and disk identity fixed
+- Responsibility that has a persistence guarantee is not lost; all endpoints recover consistently, old versions/markers/MPUs and the target shards are complete, and repeated restarts do not spread the error.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F06"></a>
 
@@ -1215,21 +1215,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: cancel-restart, old-token-after-restart, force-new-after-cancel.
 
-1. DX 缺片任务在 WINDOW 中 STOP；STATUS 与磁盘静默窗口证明取消和在途退出完成。
-2. 保存旧 token/checkpoint，PROCESS 优雅重启；确认已取消任务不会自行复活或报 repaired。
-3. 新 START/forceStart 获取独立 token，向旧 token 发 stop/status；不得影响新任务。
-4. 新任务完成后 VERIFY/PHYSICAL；取消记录/新任务责任不串代。
+1. STOP the DX missing-shard task during the WINDOW; STATUS and the disk quiescence window prove that cancellation and in-flight exit have completed.
+2. Save the old token/checkpoint and PROCESS a graceful restart; confirm the cancelled task does not revive on its own or report repaired.
+3. A new START/forceStart obtains an independent token; send stop/status to the old token. It must not affect the new task.
+4. After the new task completes, VERIFY/PHYSICAL; the cancellation record and the new task's responsibility must not cross generations.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [STOP](validation-heal-operations.md#STOP) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [PROCESS](validation-heal-operations.md#PROCESS) → [STATUS](validation-heal-operations.md#STATUS) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL)
 
 Source assertions:
 
-- 完成取消及在途退出后重启，随后 forceStart/新任务正常修复
-- 已取消的任务不自动复活；旧 checkpoint/token 不能取消或覆盖新任务，旧责任不会误标为修复完成。
+- Restart after cancellation and in-flight exit have finished, then forceStart or a new task repairs normally
+- A cancelled task does not revive on its own; an old checkpoint/token cannot cancel or overwrite a new task, and old responsibility is not marked repair-complete by mistake.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F07"></a>
 
@@ -1237,11 +1237,11 @@ Source assertions:
 
 Topologies: H1,H2. Branches: checkpoint-truncate, mrf-checksum, future-schema, stale-generation, journal-write-failure, native-persist-fence.
 
-实时读取遇到原子替换后链接数为零的旧文件句柄时，先核对文件类型、大小与挂载边界，再拒绝旧句柄字节并返回读取变化。只有原有有界观察循环可以重试；停止后的读取和故障注入仍直接失败，硬链接、非普通文件、超限和挂载逃逸仍被拒绝。原 pidfd、60 秒 advance 预算和完整 checkpoint/resume/root 校验不变。Linux 原子替换组件复现仅证明读取竞争，不证明旧 live 失败的唯一原因，也不替代 RustFS 持久化屏障证据。
+When a live read meets an old file handle whose link count is zero after an atomic replace, first check the file type, size, and mount boundary, then reject the old handle's bytes and report that the read changed. Only the original bounded observation loop may retry. Reads and fault injection after stop still fail immediately. Hard links, non-regular files, over-limit files, and mount escapes are still rejected. The original pidfd, the 60-second advance budget, and the complete checkpoint/resume/root checks are unchanged. Reproducing the Linux atomic-replace component only proves a read race. It does not prove the sole cause of a previous live failure, and it does not replace RustFS persistence-fence evidence.
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION`): 已实现 H1/H2 checkpoint 截断、未来 schema、真实较早代次回放、committed MRF CRC 故障、私有限额卷的真实 journal ENOSPC 和独立安全重扫；10 项原生回归仅为前置证据。仍缺全部所需 fsync/commit 临界点审核和完整现场分支的独立 live 审计，诊断执行不能提升 canonical 验收。
+Blocked reason (`EVIDENCE_DURABLE_JOURNAL_ORCHESTRATION`): Implemented H1/H2 checkpoint truncation, future schema, replay of a real earlier generation, a committed MRF CRC fault, real journal ENOSPC on a private quota volume, and an independent safe rescan; the 10 native regressions are only prerequisite evidence. Still missing are review of every required fsync/commit boundary and an independent live audit of the complete live branches. Diagnostic execution cannot raise canonical acceptance.
 
 Journal ENOSPC recovery preserves the first failed checkpoint/terminal publication
 attempt before restarting the original durable owner after filler release. A new
@@ -1253,21 +1253,21 @@ GET; the later distinct rescan must report zero repairs and preserve original
 completion bytes. No forceStart, owner deletion or old-record restoration is
 used to bypass overlap admission. This flow still requires fresh live evidence.
 
-1. 先制造并证明真实 durable root/MRF 责任，CHECKPOINT 定位精确本 run task/record，其他系统记录禁止触碰。
-2. 停止测试服务，按 FAULT_FORMAT 对这些已审核记录分别截断、坏校验、未来 schema、旧代次；写失败实例用独占限额故障层，不塞满真实共享盘。
-3. 重启后核对解析/错误状态：未知或损坏记录保留、可诊断，不能静默删除并 ACK；责任仍能安全重扫处理。
-4. 精确 fsync/commit 崩溃窗口执行 NATIVE 回归，保存屏障命中证据；真机记录损坏与原生临界点不要混算。
+1. First create and prove a real durable root/MRF responsibility; CHECKPOINT locates the exact task/record of this run, and other system records must not be touched.
+2. Stop the test service and, per FAULT_FORMAT, apply truncation, a bad checksum, a future schema, and an older generation separately to these reviewed records; the write-failure instance uses an exclusive quota fault layer and must not fill a real shared disk.
+3. After restart, check the parse/error state: unknown or damaged records are retained and diagnosable, and must not be silently deleted and ACKed; the responsibility can still be handled by a safe rescan.
+4. Run the NATIVE regression in the exact fsync/commit crash window and save evidence that the barrier was hit; do not count corruption recorded on the fleet together with the native boundary.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [START](validation-heal-operations.md#START) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [PROCESS](validation-heal-operations.md#PROCESS) → [FAULT_FORMAT](validation-heal-operations.md#FAULT_FORMAT) → [IO_FAULT](validation-heal-operations.md#IO_FAULT) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 受控构造 checkpoint/MRF 截断、坏校验、未来 schema、陈旧代次及写入失败
-- 已确认持久化责任不得静默删除或伪 ACK；未知记录保留且可诊断；精确崩溃窗口由原生屏障证明，不伪称真机命中。
+- Under control, construct checkpoint/MRF truncation, a bad checksum, a future schema, a stale generation, and a write failure
+- Confirmed persisted responsibility must not be silently deleted or given a false ACK; unknown records are retained and diagnosable; the exact crash window is proven by a native barrier and is not falsely claimed as a hit on the live fleet.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F08"></a>
 
@@ -1277,23 +1277,23 @@ Topologies: H2. Branches: rolling-old-new, mixed-peer-status, rollback-new-old, 
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_IMMUTABLE_RELEASE_PAIR`): 需要两个已固定且相互兼容的 RustFS release、混合版本 peer 状态和经过审核的回滚兼容矩阵；当前 auto-testing Heal 节点没有这组不可变双版本资源。
+Blocked reason (`ENV_IMMUTABLE_RELEASE_PAIR`): Requires two pinned, mutually compatible RustFS releases, mixed-version peer state, and a reviewed rollback-compatibility matrix; the current auto-testing Heal node does not have this immutable dual-version resource set.
 
-1. 固定两个 release optimized 包的 commit/tree/binary/格式兼容说明；UPGRADE 先验证支持回滚的记录版本，不能使用任意旧包。
-2. 有持久修复责任时逐节点升级，保留数据根和 unit；混合阶段通过各 endpoint STATUS/BACKGROUND 并持续唯一版本写入。
-3. 缺少能力的 peer 必须显示 partial/unsupported，不能 aggregate 成 complete；新记录不被老节点误退休。
-4. 按兼容方案回滚并重启，验证所有 ACK 和责任；不兼容格式只测明确拒绝/保护，禁止冒险降级覆盖。
+1. Pin the commit/tree/binary/format-compatibility notes of two release optimized packages; UPGRADE first verifies a record version that supports rollback, and must not use an arbitrary old package.
+2. When a durable repair responsibility exists, upgrade node by node, keeping the data root and unit; during the mixed phase, pass STATUS/BACKGROUND on each endpoint and continue unique-version writes.
+3. A peer that lacks the capability must show partial/unsupported and must not be aggregated into complete; new records must not be retired by mistake by an old node.
+4. Roll back and restart according to the compatibility plan, and verify all ACKs and responsibilities; incompatible formats are tested only for explicit rejection/protection. A risky downgrade overwrite is forbidden.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [START](validation-heal-operations.md#START) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [UPGRADE](validation-heal-operations.md#UPGRADE) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [STATUS](validation-heal-operations.md#STATUS) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 固定前后两个明确兼容候选，覆盖滚动升级、混合 peer、回滚与重启
-- 能力不足必须显示 partial/unsupported 而非完整成功；按格式兼容契约保留责任，旧版本不能误退休新版本记录。
+- Pin two explicitly compatible candidates, one before and one after, covering rolling upgrade, mixed peers, rollback, and restart
+- Insufficient capability must be shown as partial/unsupported rather than complete success; retain responsibility under the format-compatibility contract, and an older version must not mistakenly retire a newer version's records.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="F09"></a>
 
@@ -1303,23 +1303,23 @@ Topologies: H6. Branches: dedicated-vm-forced-stop, dedicated-host-power-cycle.
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_DEDICATED_H6_HOST`): 需要 H6 专用主机、平台强制停启权限、带外恢复和 boot_id/平台事件证据；共享 Heal 节点不能证明真实电源循环。
+Blocked reason (`ENV_DEDICATED_H6_HOST`): Requires a dedicated H6 host, platform force stop/start permission, out-of-band recovery, and boot_id/platform-event evidence; a shared Heal node cannot prove a real power cycle.
 
-1. 先取得 H6 专项资源 ID、独占证明和带外恢复批准；普通 fixed fleet 禁止执行本例。
-2. 持续限量写入并在 replacement 部分重建窗口，记录已成功 ACK/结果未知写集合与最近持久化证据。
-3. HOST_POWER 使用批准的平台命令强制停启，保留平台活动 ID、时间线和 boot_id；VM stop 与真实电源断电分别命名实例。
-4. 恢复后按原盘/根重启并解析未知写；全版本/片和持久责任验收，不把 SIGKILL 或软件 reboot 当作此项证据。
+1. First obtain the H6 dedicated resource ID, proof of exclusive use, and out-of-band recovery approval; an ordinary fixed fleet must not run this case.
+2. Continue limited-volume writes and, in the replacement partial-rebuild window, record the set of writes with a successful ACK or an unknown result, and the latest persistence evidence.
+3. HOST_POWER uses an approved platform command to force stop and start, retaining the platform activity ID, timeline, and boot_id; VM stop and a real power loss are named as separate instances.
+4. After recovery, restart on the original disk/root and resolve the unknown writes; accept every version/shard and durable responsibility. Do not treat SIGKILL or a software reboot as evidence for this item.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [REPLACE](validation-heal-operations.md#REPLACE) → [WINDOW](validation-heal-operations.md#WINDOW) → [HOST_POWER](validation-heal-operations.md#HOST_POWER) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 经专项授权在部分修复/持续写入时强制重启独占测试 VM/主机
-- 保留平台事件与 ACK ledger；验证落盘和恢复，不把 SIGKILL 当断电；VM 强制停止也不等同于物理控制器断电。
+- Under specific authorization, force-restart the exclusive test VM/host during partial repair or continuous writes
+- Retain platform events and the ACK ledger; verify the on-disk write and recovery, and do not treat SIGKILL as power loss; a forced VM stop is not equivalent to power loss of the physical controller either.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="G01"></a>
 
@@ -1327,21 +1327,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: overwrite-vs-deep, overwrite-vs-read-repair, native-commit-cleanup.
 
-1. 同 key 串行 nonce 的覆盖客户端与 heal 客户端独立；WORKLOAD 每次记录 request-start/end、ACK、payload hash，不凭跨机墙钟判最后版本。
-2. 旧对象缺片/bitflip 后两端同时运行，WINDOW 证明实际交叠；每个 worker 的同 key PUT 必须串行，避免期望值本身无序。
-3. 停止写入后解析全部未知 ACK，按最后可证明提交核对最新 GET 与 data_dir；不能回滚旧内容。
-4. 运行 NATIVE commit/cleanup 屏障实例；真实竞争没命中精确窗口只算黑盒实例，记录 no-lock/锁重验日志。
+1. The overwrite client, with a per-key serial nonce, is independent of the heal client; WORKLOAD records request-start/end, ACK, and payload hash every time, and does not decide the last version from cross-machine wall clocks.
+2. After the old object has a missing shard/bitflip, run both sides at the same time; WINDOW proves actual overlap. Same-key PUTs of each worker must be serial, so the expected value is not itself unordered.
+3. After writes stop, resolve every unknown ACK and check the latest GET and data_dir against the last provable commit; do not roll back to the old content.
+4. Run the NATIVE commit/cleanup barrier instance; a real race that misses the exact window counts only as a black-box instance. Record the no-lock/lock-revalidation logs.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [FAULT](validation-heal-operations.md#FAULT) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 同 key 连续覆盖与 heal 同时推进，包含提交尾部清理窗口
-- 按可证明的提交顺序验证最终最后一次成功写入；不能回滚到旧 data_dir，未确认超时写入单独解析。
+- Successive overwrites of the same key proceed concurrently with heal, including the commit-tail cleanup window
+- In a provable commit order, verify that the final result is the last successful write; do not roll back to the old data_dir, and resolve an unconfirmed timed-out write separately.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="G02"></a>
 
@@ -1349,21 +1349,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: new-version-vs-historical-heal, read-all-versions-during-heal, native-version-fence.
 
-1. DV 历史版本缺片时，前台串行写入独立 payload 的新版本，保存每个成功 versionId。
-2. START deep 与 WORKLOAD 交叠；读取端始终指定 versionId 验证新旧内容，禁止用 current GET 代替。
-3. 静默后按完整 ACK ledger 重建期望版本集合，最新值根据串行提交顺序判断；全量 PHYSICAL 检查不同 data_dir 无混片。
-4. 精确版本提交屏障运行 NATIVE；任何未解析超时写/缺失 ACK 阻止最终通过。
+1. When a DV historical version is missing a shard, the foreground serially writes a new version with an independent payload and saves every successful versionId.
+2. START deep overlaps WORKLOAD; the reader always specifies versionId to verify old and new content, and must not substitute a current GET.
+3. After quiescence, rebuild the expected version set from the complete ACK ledger; the latest value is determined by serial commit order. A full PHYSICAL checks that different data_dirs have no mixed shards.
+4. Run NATIVE on the exact-version commit barrier; any unresolved timed-out write or missing ACK blocks the final pass.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [FAULT](validation-heal-operations.md#FAULT) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 修复历史版本时创建新版本并重复读取各 versionId
-- 新旧版本不混片、不串内容；已返回成功的每个版本都保留，最新值按确定的先后关系验收。
+- While repairing a historical version, create a new version and read each versionId repeatedly
+- Old and new versions do not mix shards or cross content; every version that has already returned success is retained, and the latest value is accepted according to a determined order.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="G03"></a>
 
@@ -1371,21 +1371,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: delete-old-version-vs-deep, delete-current-version-vs-deep, native-delete-fence.
 
-1. 选 DV 的精确 versionId 制造可恢复缺片；前台删除请求明确带该 ID，不是只创建 marker。
-2. WINDOW 内并发 delete_object 与 deep heal，保存 DELETE 成功回执和 heal scope/identity。
-3. 终态按精确 version GET 应不存在，LIST versions 不得复活；其他所有版本内容保持。
-4. 运行 NATIVE 删除/修复提交交错点；清理旧片仅作为最终物理证据，不能先用备份复活已删版本。
+1. Select an exact versionId from DV and induce a recoverable missing shard; the foreground delete request explicitly carries that ID, and does not only create a marker.
+2. Within the WINDOW, run delete_object concurrently with deep heal, and save the DELETE success receipt and the heal scope/identity.
+3. In the terminal state, GET of the exact version should find it absent, and LIST versions must not resurrect it; the content of every other version is preserved.
+4. Run NATIVE at the delete/repair commit interleaving point; cleanup of the old shard is only final physical evidence, and a backup must not be used first to resurrect a deleted version.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [WINDOW](validation-heal-operations.md#WINDOW) → [S3](validation-heal-operations.md#S3) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 对损坏的精确历史 versionId 发 DELETE，与 deep heal 竞争
-- 已确认删除的版本不能被复活，其他历史版本不受影响；原生临界点测试与真机竞争分别留证。
+- Issue DELETE for the exact corrupted historical versionId, racing deep heal
+- A version whose deletion is confirmed cannot be resurrected, and other historical versions are unaffected; the native boundary test and the live race on the fleet each keep their own evidence.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="G04"></a>
 
@@ -1393,21 +1393,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: create-marker, delete-marker, batch-version-delete, unversioned-delete, native-marker-fence.
 
-1. 分别建立版本化和非版本化桶；marker创建/删除、批量带versionId删除和无版本DELETE分开运行，不混淆接口语义。
-2. 在 xl.meta 少数缺失下启动 heal，同时提交冻结的删除列表；delete_objects 必须逐项检查 Deleted/Errors，HTTP200不代表全成功。
-3. 按逐项 ACK 计算最终数据版本、marker 和最新值集合；精确 GET验证不存在项和存留项。
-4. native-marker-fence 独立取证；恢复故障不得把已确认删除的旧 metadata 覆盖回来。
+1. Create a versioned bucket and an unversioned bucket separately; run marker create/delete, batch delete with versionId, and versionless DELETE separately, without mixing the API semantics.
+2. Start heal with a minority of xl.meta missing, and submit the frozen delete list at the same time; delete_objects must check Deleted/Errors item by item. HTTP 200 does not mean every item succeeded.
+3. From per-item ACKs, compute the final sets of data versions, markers, and latest values; exact GET verifies absent items and retained items.
+4. native-marker-fence is evidenced independently; recovering the fault must not overwrite back old metadata that was already confirmed deleted.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [SEED_DB](validation-heal-operations.md#SEED_DB) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [S3](validation-heal-operations.md#S3) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 与创建/删除 marker、批量版本删除和无版本删除分别交错
-- 按逐项 DELETE 回执核对版本/marker 集合，无复活、误删或遗漏批量错误。
+- Interleave separately with marker create/delete, batch version delete, and unversioned delete
+- Check the version/marker set against each DELETE receipt, with no resurrection, no mistaken deletion, and no omitted batch error.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="G05"></a>
 
@@ -1415,21 +1415,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: upload-continue, complete, abort, native-mpu-fence.
 
-1. DM 同时准备已提交对象与两个可识别的 pending UploadId，各自 part/ETag 独立。
-2. 已提交对象缺片并 heal；并发给 upload-A 续传并 Complete，upload-B Abort，WINDOW 保存实际交叠。
-3. Complete 返回版本只出现一次，完整内容为按PartNumber排序的ACK part；Abort 的 UploadId 不再可list_parts，不能误伤另一个upload或已提交对象。
-4. 核对所有 MPU 列表和物理目录；原生提交/取消屏障另用 NATIVE，不允许仅发出并发请求即声称命中。
+1. DM prepares, at the same time, a committed object and two identifiable pending UploadIds, each with an independent part/ETag.
+2. The committed object is missing a shard and is healed; concurrently resume upload-A and Complete it, and Abort upload-B. WINDOW saves the actual overlap.
+3. The version returned by Complete appears only once, and the full content is the ACKed parts sorted by PartNumber; the Aborted UploadId can no longer list_parts, and must not harm the other upload or the committed object.
+4. Check every MPU listing and physical directory; the native commit/cancel barrier uses NATIVE separately. Issuing concurrent requests alone must not be claimed as a hit.
 
 Operations: [SEED_DM](validation-heal-operations.md#SEED_DM) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [WINDOW](validation-heal-operations.md#WINDOW) → [S3](validation-heal-operations.md#S3) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- heal 期间对不同已知 UploadId 分别续传、Complete、Abort
-- 成功 Complete 内容只出现一次；Abort 不破坏已提交对象或别的 upload；未完成 part 不被伪造为完整对象。
+- During heal, separately resume, Complete, and Abort different known UploadIds
+- Content from a successful Complete appears only once; Abort does not damage a committed object or another upload; an unfinished part is not forged into a complete object.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="G06"></a>
 
@@ -1437,21 +1437,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: copy-source, copy-destination, replace-metadata, update-tags, native-copy-fence.
 
-1. DS 源/目标使用不同内容和 metadata，copy 请求 CopySource 使用结构化 Bucket/Key/VersionId，不拼路径字符串。
-2. 源或目标缺片并 heal，同窗口 COPY、MetadataDirective=REPLACE 的自拷贝、put_object_tagging 分别运行。
-3. 保存对应提交ETag/versionId及更新顺序，验证最终内容与该提交 metadata/tags 组合一致；旧 read-repair 必须重验代次。
-4. 检查源目标和control均无交叉覆盖；NATIVE 记录锁升级/陈旧提交拒绝的精确窗口。
+1. The DS source and target use different content and metadata; the copy request's CopySource uses structured Bucket/Key/VersionId and does not concatenate a path string.
+2. The source or the target is missing a shard and is healed; in the same window, run COPY, a self-copy with MetadataDirective=REPLACE, and put_object_tagging separately.
+3. Save the corresponding commit ETag/versionId and the update order, and verify the final content matches that commit's metadata/tags combination; an old read-repair must revalidate the generation.
+4. Check that the source, the target, and the control have no cross-overwrite; NATIVE records the exact window of lock upgrade/stale-commit rejection.
 
 Operations: [SEED_DS](validation-heal-operations.md#SEED_DS) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [WINDOW](validation-heal-operations.md#WINDOW) → [S3](validation-heal-operations.md#S3) → [VERIFY](validation-heal-operations.md#VERIFY) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- COPY 源/目标和标签/元数据更新与修复交错
-- 最终对象内容与对应提交的 metadata 一致，读修复发现新代次应重验/放弃陈旧提交而非覆盖。
+- Interleave COPY of the source/target and tag/metadata updates with repair
+- The final object content matches the metadata of the corresponding commit; when read-repair finds a new generation, it re-verifies or abandons the stale commit instead of overwriting.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="G07"></a>
 
@@ -1461,23 +1461,23 @@ Topologies: H2. Branches: current-expiry, noncurrent-expiry, transition, restore
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_DEDICATED_ILM_TIER_WINDOW`): 需要隔离 ILM/tier 租户、真实 Expire/Transition/Restore 窗口和远端版本映射；共享 ILM 环境不能安全制造交叠窗口。
+Blocked reason (`ENV_DEDICATED_ILM_TIER_WINDOW`): Requires an isolated ILM/tier tenant, a real Expire/Transition/Restore window, and remote version mapping; a shared ILM environment cannot safely create an overlap window.
 
-1. 用现有 ILM 专用远端 tier 能力建立本例桶和规则；记录真实到期窗口/远端version映射，不在共享桶上改规则。
-2. 在实际出现 Expire/Transition/Restore 进度时启动缺片 heal，WINDOW 必须从日志/状态证明交叠；提前完成只能记 NOT_OBSERVED。
-3. 过期 ACK/ILM 删除证明决定哪些版本应不存在，禁止 heal 复活；迁移对象通过真实远端 GET/restore 验证原版本内容。
-4. 本地物理与远端引用双重校验；源端 GET 成功不足，清理只删除本例规则/远端数据。
+1. Use the existing ILM dedicated remote-tier capability to create this case's bucket and rules; record the real expiry window/remote version mapping, and do not change rules on a shared bucket.
+2. Start the missing-shard heal when Expire/Transition/Restore progress actually appears; WINDOW must prove overlap from logs/state. Finishing early can only be recorded as NOT_OBSERVED.
+3. Expiry ACKs/ILM delete proofs decide which versions should be absent; heal must not resurrect them. Migrated objects verify the original version content through a real remote GET/restore.
+4. Double-check local physical data and the remote reference; a successful source-side GET is not sufficient. Cleanup deletes only this case's rules/remote data.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [SEED_DE](validation-heal-operations.md#SEED_DE) → [DEPENDENCY](validation-heal-operations.md#DEPENDENCY) → [ILM](validation-heal-operations.md#ILM) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [S3](validation-heal-operations.md#S3) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 分别与当前/历史版本过期、远端 transition/restore 同窗口执行
-- 已授权过期不被恢复；迁移状态与远端版本引用正确；只有实际观察到交叠才计并发覆盖，tier 未配置需明确阻断对应实例。
+- Run in the same window as expiry of the current or historical version, and as remote transition/restore, respectively
+- An authorized expiry is not restored; migration state and remote version references are correct; concurrent coverage counts only when overlap is actually observed, and an unconfigured tier must explicitly block the corresponding instance.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="G08"></a>
 
@@ -1487,23 +1487,23 @@ Topologies: H2. Branches: replicate-put, replicate-delete, resync, native-replic
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_ISOLATED_REPLICATION_PAIR`): 需要隔离的复制两端、resync 控制、跨端版本映射和 Heal/resync 实际交叠窗口；当前固定 fleet 没有独占复制对。
+Blocked reason (`ENV_ISOLATED_REPLICATION_PAIR`): Requires isolated replication endpoints, resync control, cross-endpoint version mapping, and an actual Heal/resync overlap window; the current fixed fleet has no exclusive replication pair.
 
-1. 准备两个隔离复制端点/本例桶、明确源目标版本映射和同步规则；先跑一份健康复制控制。
-2. 源端缺片 heal 同时提交 PUT/DELETE 并启动指定 resync；保存两侧日志与跨端版本映射，证明操作时间交叠。
-3. 分别从两端全量列举版本、marker、内容并比对复制契约；源端正确但远端缺失/无限重试必须失败。
-4. 恢复临时规则/凭据，确认无无限循环/重复传播；精确交错仅由匹配 NATIVE 证据补充。
+1. Prepare two isolated replication endpoints/this case's buckets, an explicit source-target version mapping, and sync rules; first run one healthy replication control.
+2. While the source heals a missing shard, concurrently submit PUT/DELETE and start the specified resync; save logs on both sides and the cross-endpoint version mapping to prove the operations overlap in time.
+3. Fully list versions, markers, and content from both ends and compare them with the replication contract; if the source is correct but the remote side is missing or retries forever, the case must fail.
+4. Restore the temporary rules and credentials, and confirm there is no infinite loop or repeated propagation; precise interleaving may be supplied only by matching NATIVE evidence.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [DEPENDENCY](validation-heal-operations.md#DEPENDENCY) → [REPLICATION](validation-heal-operations.md#REPLICATION) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [WINDOW](validation-heal-operations.md#WINDOW) → [VERIFY](validation-heal-operations.md#VERIFY) → [LOGS](validation-heal-operations.md#LOGS) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 在隔离复制两端与 heal 同时运行新增/删除/重同步
-- 对端版本、删除语义及源数据最终一致，无无限回环或重复传播；不得依赖仅源端 GET 宣称复制正确。
+- On both isolated replication ends, run create, delete, and resync concurrently with heal
+- Peer versions, delete semantics, and source data end up consistent, with no infinite loop-back and no duplicate propagation; do not claim replication is correct from a source-side GET alone.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="H01"></a>
 
@@ -1513,23 +1513,23 @@ Topologies: H5. Branches: expand-while-data-heal, expand-while-parity-heal, vers
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_H5_EXPANSION_REBALANCE`): 需要 H5 pool 扩容、rebalance 和 Heal 同时活动的完整拓扑，并逐对象保存 pool/set 迁移证据；当前 auto-testing 未绑定扩容前后布局与专用操作窗口。
+Blocked reason (`ENV_H5_EXPANSION_REBALANCE`): Requires a complete topology in which H5 pool expansion, rebalance, and Heal are active at the same time, with pool/set migration evidence saved per object; current auto-testing has not bound the layout before and after expansion or a dedicated operation window.
 
-1. 使用已批准 H5，先在源 pool 写 DB/DV 并以 FORMAT/PHYSICAL 证明位置；新 pool 为空且未纳入旧选择器。
-2. 目标 data/parity 缺失或bitflip后按 POOL 手册扩容重启，确认新拓扑；启动 rebalance 与 heal。
-3. WINDOW 保存两任务活动证据，逐对象跟踪源/目标 pool/set/版本身份，不能只看全局数量。
-4. 两任务均正常完成后物理证明目标权威副本，VERIFY全版本，保留scanner backlog的持久提交/退休证据。
+1. Using the approved H5, first write DB/DV in the source pool and prove placement with FORMAT/PHYSICAL; the new pool is empty and is not included in the old selector.
+2. After the target data/parity is missing or bitflipped, expand and restart per the POOL manual, confirm the new topology, and start rebalance and heal.
+3. WINDOW saves evidence that both tasks are active and tracks source/target pool/set/version identity per object; looking only at global counts is not enough.
+4. After both tasks complete normally, physically prove the target authority replicas, VERIFY every version, and retain the scanner backlog's persisted commit and retirement evidence.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [POOL](validation-heal-operations.md#POOL) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 先证明源 pool 持有夹具，再扩容并与修复同时 rebalance
-- 修复目标不得指向错误 pool/set；新旧数据完整、移动终态正确，保留 scanner backlog 提交权威检查。
+- First prove the source pool holds the fixture, then expand and rebalance concurrently with repair
+- The repair target must not point at the wrong pool/set; old and new data are complete and the move terminal state is correct, and the scanner-backlog commit authority check is retained.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="H02"></a>
 
@@ -1539,23 +1539,23 @@ Topologies: H5. Branches: rebalance-stop, rebalance-resume, rebalance-service-re
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_H5_REBALANCE_LIFECYCLE`): 需要可观测的 H5 rebalance、停止/恢复/服务重启控制及独立 task 身份；当前 auto-testing 未绑定这两类任务的独立身份和操作窗口。
+Blocked reason (`ENV_H5_REBALANCE_LIFECYCLE`): Requires observable H5 rebalance, stop/resume/service-restart control, and independent task identities; current auto-testing has not bound the independent identities and operation windows of these two task classes.
 
-1. H5 中使用足够对象使移动可观测，缺片 heal 与 rebalance 同时活动；记录两类独立 task ID。
-2. 只停止 rebalance，观察 heal 不被误取消；然后恢复 rebalance，重启实例仅重启本例 unit。
-3. 持续唯一 key 写入并保存 ACK；停止/恢复前后物理和任务状态要连续，不用新数据根替代恢复。
-4. 最终两类任务各自满足完成契约、对象/版本及移动目标正确，重复停止不影响新代次。
+1. On H5, use enough objects for movement to be observable, with missing-shard heal and rebalance active at the same time; record an independent task ID for each of the two classes.
+2. Stop only rebalance, and observe that heal is not cancelled by mistake; then resume rebalance. The restart instance restarts only this case's unit.
+3. Keep writing unique keys and save the ACKs; physical state and task state must stay continuous across stop and resume, and a new data root must not stand in for recovery.
+4. In the end, each of the two task classes meets its completion contract, and the objects, versions, and move targets are correct; stopping again does not affect the new generation.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [POOL](validation-heal-operations.md#POOL) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [PROCESS](validation-heal-operations.md#PROCESS) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- heal 活动期间 stop/restart/resume rebalance
-- 两类任务状态和身份独立；停止/恢复移动不误终止修复或丢失对象，恢复后两者均满足各自契约。
+- While heal is active, stop/restart/resume rebalance
+- The two kinds of tasks have independent state and identity; stopping or resuming the move does not terminate repair by mistake or lose objects, and after resume both satisfy their own contracts.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="H03"></a>
 
@@ -1565,23 +1565,23 @@ Topologies: H5. Branches: heal-decommission-source, heal-survivor-target, versio
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_H5_DECOMMISSION`): 需要 H5 pool decommission、survivor 目标、写入限制和移动 ACK/物理权威证据；当前 auto-testing 未绑定本例退役前后拓扑和恢复方案。
+Blocked reason (`ENV_H5_DECOMMISSION`): Requires H5 pool decommission, a survivor target, write restrictions, and move-ACK and physical-authority evidence; current auto-testing has not bound this case's topology before and after decommission, or its recovery plan.
 
-1. 先证实夹具位于待退役源，另写 survivor control；分别在源和目标制造在quorum内可恢复故障。
-2. 按既有 Pool 行为启动退役与 heal；退役期间按当前与 MinIO 一致的写入限制检查拒绝，不能把拒绝写当数据丢失。
-3. 源数据只能在目标提交权威后删除；记录移动 ACK 与 target physical，而不是临时副本数量。
-4. 退役完成后停止/移除源，只访问 survivor 全版本/MPU/内容；若还依赖源兜底必失败。
+1. First confirm that the fixture sits on the source pending decommission, and write a separate survivor control; on the source and on the target, inject recoverable faults that remain within quorum.
+2. Start decommission and heal according to existing Pool behavior; during decommission, check rejections against the current write restrictions that match MinIO, and do not treat a rejected write as data loss.
+3. Source data may be deleted only after the target commits authority; record the move ACK and target physical, not the number of temporary replicas.
+4. After decommission completes, stop and remove the source, and read only the survivor for every version, MPU, and the content; if the result still depends on the source as a fallback, the case must fail.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [SEED_DM](validation-heal-operations.md#SEED_DM) → [POOL](validation-heal-operations.md#POOL) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 分别在待退役源和存活目标制造可恢复缺片，再执行退役
-- 不得提前删源或以临时副本冒充迁移成功；按 Pool 既定写入限制验收；只剩 survivor 后仍完整可读且有物理证明。
+- On the source pending decommission and on the surviving target, separately create recoverable missing shards, then run decommission
+- Do not delete the source early or pass a temporary replica off as a successful migration; accept according to the Pool's established write restrictions; after only the survivor remains, the data is still fully readable and there is physical proof.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="H04"></a>
 
@@ -1591,23 +1591,23 @@ Topologies: H5. Branches: cancel-during-heal, clear-after-inflight-exit, resume-
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_H5_DECOMMISSION_CANCEL`): 需要退役取消/清理/新代次恢复以及 #2423 所需容量锁重试窗口；普通取消结果不能替代这个临界点。
+Blocked reason (`ENV_H5_DECOMMISSION_CANCEL`): Requires decommission cancellation, cleanup, and new-generation recovery, plus the capacity-lock retry window required by #2423; an ordinary cancellation result cannot take the place of this boundary.
 
-1. 在移动和 heal 都有部分进度时取消退役；保存取消持久化记录、通知和在途退出顺序。
-2. 确认已退出后 Clear，再恢复/新建退役；旧 token/代次不得误取消新任务，持续 ACK ledger 不能丢。
-3. 容量锁超时实例需要 LOCK_WINDOW 或匹配 NATIVE 屏障，实际见证 #2423 所涉重试路径；普通取消成功不能代替。
-4. 两流程收敛后 VERIFY/PHYSICAL；没有命中锁窗口单列 NOT_OBSERVED，不声称覆盖 #2423 的临界点。
+1. Cancel decommission while both the move and heal have partial progress; save the persisted cancellation record, the notifications, and the in-flight exit order.
+2. After confirming that it has exited, Clear, then resume or create a new decommission; an old token or generation must not cancel the new task by mistake, and the continuous ACK ledger must not be lost.
+3. The capacity-lock timeout instance requires a LOCK_WINDOW or a matching NATIVE barrier, and must actually witness the retry path involved in #2423; an ordinary successful cancellation cannot take its place.
+4. After both flows converge, run VERIFY/PHYSICAL; if the lock window was not hit, record NOT_OBSERVED on its own, and do not claim coverage of the #2423 boundary.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [POOL](validation-heal-operations.md#POOL) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [LOCK_WINDOW](validation-heal-operations.md#LOCK_WINDOW) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- heal/移动争用中取消退役、Clear、恢复，并覆盖容量锁超时恢复
-- 保持持久化后通知及在途退出顺序；不误取消新代次；对 #2423 的重试窗口单独注明真机是否实际触发，不只看最终绿色。
+- During heal/move contention, cancel decommission, Clear, and resume, and cover recovery from capacity-lock timeout
+- Keep the order of notify-after-persist and in-flight exit; do not cancel a new generation by mistake; for the #2423 retry window, separately note whether the live run on the fleet actually triggered it, and do not look only at the final green result.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="H05"></a>
 
@@ -1617,23 +1617,23 @@ Topologies: H5. Branches: survivor-missing-part, survivor-missing-metadata, reti
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_H5_RETIRED_POOL_REMOVAL`): 需要完整迁移后移除 retired pool、源保持离线和 survivor-only 访问；当前 auto-testing 未提供本例源持续离线和 survivor-only 的绑定证据。
+Blocked reason (`ENV_H5_RETIRED_POOL_REMOVAL`): Requires the retired pool to be removed after a complete migration, the source to stay offline, and survivor-only access; current auto-testing has not provided bound evidence for this case that the source stays offline and that access is survivor-only.
 
-1. 依既有 Pool 全量迁移并完成退休配置移除，停止源服务，证明入口仅绑定 survivor；保留源不可达证据。
-2. 只在 survivor 的选定对象/版本制造缺片或metadata缺失；START root或正确pool/set deep。
-3. 记录 source authority 选择，不能向已退休 pool 写入，也不能无权威覆盖/错误回退（#2422）。
-4. 检查survivor实际补片、全部版本/marker和源根未变化；在源持续停机情况下全量 VERIFY。
+1. Following existing Pool behavior, finish a full migration and removal of the retirement configuration, stop the source service, and prove the entry point is bound only to the survivor; retain evidence that the source is unreachable.
+2. Inject missing shards or missing metadata only on selected objects or versions on the survivor; START root, or deep on the correct pool/set.
+3. Record the source authority selection. Do not write to a pool that has already been retired, and do not overwrite without authority or fall back incorrectly (#2422).
+4. Check that the survivor actually reconstructed the on-disk shards, and that every version and marker and the source root are unchanged; with the source kept down, VERIFY in full.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [POOL](validation-heal-operations.md#POOL) → [PROCESS](validation-heal-operations.md#PROCESS) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [LOGS](validation-heal-operations.md#LOGS)
 
 Source assertions:
 
-- 源 pool 完全退役移除并停机后，只在 survivor 上触发修复
-- 不再向已移除源写入或依赖其兜底；来源权威和版本正确；#2422 路径不能出现无权威覆盖或错误回退。
+- After the source pool is fully decommissioned, removed, and stopped, trigger repair only on the survivor
+- Do not write to the removed source or rely on it as a fallback; source authority and version are correct; the #2422 path must not show an overwrite without authority or an incorrect rollback.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="H06"></a>
 
@@ -1641,21 +1641,21 @@ Source assertions:
 
 Topologies: H5. Branches: selected-pool, selected-set, unselected-control-fault.
 
-1. 在两个以上 pool/set分别放不同对象，用实际layout确认归属；健康control与控制故障分开登记。
-2. 只选一个pool/set START；其他pool保留缺片控制，不先GET它们。
-3. PHYSICAL先确认选中目标补齐，未选故障原样保留；任务、容量、配额与drive身份都指向正确目标。
-4. 取证后才恢复控制故障和VERIFY；对象在其他pool可读不能证明所选盘完成修复。
+1. Place different objects on two or more pool/sets, and confirm ownership from the actual layout; register the healthy control and the control fault separately.
+2. START only one pool/set; leave the missing-shard controls on the other pools, and do not GET them first.
+3. PHYSICAL first confirms that the selected target is fully reconstructed and that unselected faults remain as they were; the task, capacity, quota, and drive identity all point to the correct target.
+4. Restore the control fault and run VERIFY only after the evidence has been collected; an object that is readable on another pool does not prove that the selected disk finished repair.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 仅破坏选定 pool/set，并在另一 pool 保留不同对象与控制故障
-- 选择器、任务、容量/配额和目标 drive 一致；未选 pool 不受错误修复，跨 pool 存在不等于该目标已修复。
+- Corrupt only the selected pool/set, and in another pool keep different objects and a control fault
+- The selector, the task, capacity/quota, and the target drive agree; an unselected pool is not affected by an incorrect repair, and presence across pools does not mean that target has been repaired.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="H07"></a>
 
@@ -1665,23 +1665,23 @@ Topologies: H3,H4. Branches: ec84-one-set-restart, ec84-one-set-crash, ec84-two-
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_EC84_MULTI_SET_TOPOLOGY`): 需要 H3 的 12 个独立盘和 H4 的至少 24 个独立 endpoint，并按 set 分别记录重启/崩溃窗口；当前 H4 资源不可用。
+Blocked reason (`ENV_EC84_MULTI_SET_TOPOLOGY`): Requires 12 independent disks for H3 and at least 24 independent endpoints for H4, with the restart and crash windows recorded per set; H4 resources are currently unavailable.
 
-1. 分别绑定 H3 12盘和 H4 至少24盘，FORMAT必须证实每set为8data+4parity；同一物理设备多个目录不能算独立故障盘。
-2. 每个set都准备DB/DV/DX并证明对象归属，REPLACE选定目标，在目标仅部分重建时优雅重启或SIGKILL。
-3. 保存实际中断窗口、盘代次、每set已修/未修对象，不能跨set合并片数。
-4. 每个set单独完成物理与全版本校验；四盘pilot不进入该项分子，native EC8+4回归作为独立补证。
+1. Bind 12 disks for H3 and at least 24 disks for H4. FORMAT must prove that every set is 8data+4parity; multiple directories on the same physical device do not count as independent fault disks.
+2. Prepare DB/DV/DX on every set and prove object ownership, REPLACE the selected target, and gracefully restart or send SIGKILL while that target is only partly rebuilt.
+3. Save the actual interruption window, the disk generation, and the repaired and unrepaired objects of each set; do not merge shard counts across sets.
+4. Each set completes its own physical check and full-version check; the four-disk pilot does not enter this item's numerator, and the native EC8+4 regression is independent supplementary evidence.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [REPLACE](validation-heal-operations.md#REPLACE) → [WINDOW](validation-heal-operations.md#WINDOW) → [PROCESS](validation-heal-operations.md#PROCESS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 固定 EC8+4 单 set 与至少两 set，部分重建时重启/崩溃目标
-- 每个 set 的故障覆盖和重建分别证明，不跨 set 拼 shard；必须满足真实盘数及映射，不能用 4 盘用例替代 EC8+4。
+- Pin EC8+4 for a single set and for at least two sets, and restart or crash the target during partial reconstruction
+- Prove fault coverage and reconstruction separately for each set, and do not assemble shards across sets; the real disk count and mapping must be met, and a 4-disk case cannot substitute for EC8+4.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="I01"></a>
 
@@ -1691,23 +1691,23 @@ Topologies: H1,H2. Branches: bounded-latency, short-read, eio.
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_DEDICATED_FAULT_IO`): 需要专用 faultfs 或故障设备、可恢复的 slow/short-read/EIO 注入和 namespace 隔离；共享盘模拟会污染其他运行。
+Blocked reason (`ENV_DEDICATED_FAULT_IO`): Requires a dedicated faultfs or fault device, recoverable slow/short-read/EIO injection, and namespace isolation; simulating on a shared disk would contaminate other runs.
 
-1. IO_FAULT 只在预分配专用故障设备或受限faultfs，冻结延迟/错误率、IO范围、最长窗口和原状恢复命令。
-2. 在服务相同namespace/UID先证明迟延/短读/EIO真实生效，再启动目标缺片heal；不得让dd填满共享盘。
-3. 错误窗口记录重试、CPU、队列和物理片，不能提前reported healthy；暂态与永久错误分开记录。
-4. 撤销故障后重新观察责任完成并VERIFY；故障层证据缺失算INFRA_ERROR，不把模拟EIO说成真实介质损坏。
+1. Apply IO_FAULT only on a preallocated dedicated fault device or a restricted faultfs, and freeze the latency and error rate, the IO range, the maximum window, and the command that restores the original state.
+2. Under the same namespace and UID as the service, first prove that the delay, short read, and EIO really take effect, then start the target missing-shard heal; do not let dd fill the shared disk.
+3. In the error window, record retries, CPU, the queue, and the physical shards, and do not let the result be reported healthy early. Record transient errors and permanent errors separately.
+4. After the fault is removed, observe completion of responsibility again and VERIFY; missing fault-layer evidence counts as INFRA_ERROR, and a simulated EIO must not be described as real media damage.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DX](validation-heal-operations.md#SEED_DX) → [IO_FAULT](validation-heal-operations.md#IO_FAULT) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [METRICS](validation-heal-operations.md#METRICS) → [RECOVER](validation-heal-operations.md#RECOVER) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 在独占故障层注入有界延迟、短读、EIO，解除后观察恢复
-- 暂态与永久错误分开，重试有界且无忙循环；解除故障后实际修复，期间不得提前标健康。
+- At the exclusive fault layer, inject bounded delay, short reads, and EIO, then observe recovery after they are cleared
+- Keep transient and permanent errors separate; retries are bounded and there is no busy loop; after the fault is cleared, repair actually occurs, and health must not be marked early while the fault is in effect.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="I02"></a>
 
@@ -1715,21 +1715,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: bounded-volume-enospc, bounded-inode-exhaustion, bucket-quota.
 
-1. IO_FAULT使用有容量上限的独立loop/fault卷，预注册字节/inode限制及本例桶配额，不改变共享XFS全局配额。
-2. 先证明服务实际写返回ENOSPC或quota错误；准备缺片目标和DM写入，再触发heal/PUT，逐次保留ACK和错误。
-3. 不可写期间不得损坏健康来源、虚报补片或释放仍需容量；元数据/part双重快照。
-4. 释放本例占用或提高已批准限额后续修，VERIFY全内容和目标片；共享盘可用空间保持安全余量。
+1. IO_FAULT uses an independent loop/fault volume with a capacity limit, preregisters the byte and inode limits and this case's bucket quota, and does not change the shared XFS global quota.
+2. First prove that a real service write returns ENOSPC or a quota error; prepare a missing-shard target and a DM write, then trigger heal/PUT, and keep the ACK and the error of every attempt.
+3. During the unwritable period, do not damage healthy sources, falsely report shard reconstruction, or release capacity that is still required; snapshot both metadata and parts.
+4. Release this case's usage or raise the approved limit, then continue the repair, and VERIFY the full content and the target shards; keep a safe margin of free space on the shared disk.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DM](validation-heal-operations.md#SEED_DM) → [IO_FAULT](validation-heal-operations.md#IO_FAULT) → [QUOTA](validation-heal-operations.md#QUOTA) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [RECOVER](validation-heal-operations.md#RECOVER) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 限制专用测试卷空间/inode，并参数化本次桶配额
-- 仅填专用受限卷、不耗尽共享真实盘；失败不破坏好副本或释放尚需容量，释放空间后正确续修。
+- Limit space and inodes on the dedicated test volume, and parameterize this run's bucket quota
+- Fill only the dedicated constrained volume, and do not exhaust the shared real disk; on failure, do not damage good replicas or release capacity that is still needed, and continue the repair correctly after space is freed.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="I03"></a>
 
@@ -1737,25 +1737,25 @@ Source assertions:
 
 Topologies: H2. Branches: minority-partition, read-boundary, write-boundary, lock-boundary, rejoin.
 
-候选支持与 B06 相同，但 storageclass 与锁策略分别按精确候选绑定。`1c7fc81` 的锁客户端范围、quorum 阈值及 EC:8 配置已复核；其 RPC 控制通道工厂有变化，必须重新取得真实双向网络探针、admission、partial coverage 和 rejoin 证据，不能由源码等价或 B07 通过推定本例通过。B08 的候选范围保持独立。
+Candidate support matches B06, but the storage class and the lock policy are bound separately to the exact candidate. The lock-client scope, quorum thresholds, and EC:8 configuration of `1c7fc81` have been reviewed. Its RPC control-channel factory has changed, so real bidirectional network probes, admission, partial coverage, and rejoin evidence must be collected again. Source equivalence, or a passing B07, must not be taken to mean this case passed. The candidate scope for B08 stays independent.
 
 The adapter additionally binds exact source `62ff96774fa4139d45f14d70b70519aae8070ac0` and its typed RPC `Unavailable` response mapping to `503/ServiceUnavailable`. Every referenced lock, EC, multipart and delete-recovery source file remains independently checked against that committed source; neighboring or abbreviated revisions are rejected. This source requires its matching immutable package and source-bound inspector before live execution. All five original branches, complete DB/DV/DL fixtures, refused-mutation accounting, physical-before-GET proofs, task responsibility and cleanup requirements remain mandatory; the source admission alone does not establish live acceptance.
 
-1. H2 先冻结实际节点/slot/对象R/W和锁quorum，NETWORK规则只匹配本例服务端口并带run ID、超时恢复。
-2. 构造少数派及边界分区，双端探针证实隔离；SSH、跳板机和其他服务端口保持连通。
-3. 双方执行带nonce的PUT/GET/heal，少数派不能承诺不安全提交；BACKGROUND必须暴露missing peer/partial coverage。
-4. 解除规则并检查规则计数归零，按ACK因果对账全版本/内容及目标片，无分叉、旧代覆盖或丢失责任。
+1. On H2, first freeze the actual node/slot/object R/W quorum and the lock quorum. NETWORK rules match only this case's service port and carry the run ID and timeout recovery.
+2. Construct a minority partition and a boundary partition, and confirm the isolation with probes from both ends; SSH, the jump host, and the other service ports stay connected.
+3. Both sides run PUT/GET/heal with a nonce. The minority must not promise an unsafe commit; BACKGROUND must expose missing peer/partial coverage.
+4. Remove the rules and check that the rule count returns to zero. Reconcile every version, the content, and the target shards by ACK causality, with no fork, no old-generation overwrite, and no lost responsibility.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [FORMAT](validation-heal-operations.md#FORMAT) → [NETWORK](validation-heal-operations.md#NETWORK) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [START](validation-heal-operations.md#START) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [METRICS](validation-heal-operations.md#METRICS) → [RECOVER](validation-heal-operations.md#RECOVER) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 仅隔离测试服务节点间流量，覆盖少数派、读/写/锁 quorum 边界及恢复
-- 少数派不得承诺无安全性的修复或写入；cluster coverage 不完整不能显示全局健康；恢复无分叉、跨代覆盖。
+- Isolate only traffic among the test service nodes, covering the minority, the read/write/lock quorum boundaries, and recovery
+- A minority must not promise a repair or write that lacks safety; incomplete cluster coverage must not be shown as global health; recovery has no fork and no cross-generation overwrite.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="I04"></a>
 
@@ -1763,21 +1763,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: full-queue, dropped-admission, merged-duplicates, cross-bucket-fairness.
 
-1. 专用服务冻结队列容量、并发、最大请求数和时限；DX与多桶夹具通过WORKLOAD施加有上限的Admin/read-repair请求。
-2. 分别记录Full/Dropped/Merged的真实返回及任务ID，重复token/合并不按独立修复数计分。
-3. 持久责任不能因入队失败被退休；记录journal、队列深度、等待时延和资源曲线，超过预算立即停注入。
-4. 停止负载后在deadline内收敛，所有可修目标真实补齐；不能只以CLI exit0或全局idle通过。
+1. The dedicated service freezes queue capacity, concurrency, the maximum request count, and the time limit; the DX fixture and the multi-bucket fixtures apply a bounded number of Admin/read-repair requests through WORKLOAD.
+2. Record the actual return and the task ID of Full, Dropped, and Merged separately; a repeated token or a merge is not scored as an independent repair.
+3. Persistent responsibility must not be retired because enqueue failed. Record the journal, queue depth, wait latency, and resource curves, and stop injection as soon as the budget is exceeded.
+4. After the load stops, converge within the deadline, and actually reconstruct every repairable target; the case must not pass on CLI exit0 or global idle alone.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [CONFIG](validation-heal-operations.md#CONFIG) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [START](validation-heal-operations.md#START) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [METRICS](validation-heal-operations.md#METRICS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 多来源请求冲击有限队列，混合重复任务、不同优先级和多个桶
-- Full/Dropped/Merged 语义与实际任务一致；丢弃不能丢 durable 责任；在预先声明负载窗口内无无限堆积或健康误报。
+- Requests from multiple sources stress the bounded queue, mixing duplicate tasks, different priorities, and multiple buckets
+- Full/Dropped/Merged semantics match the actual tasks; a drop must not drop durable responsibility; within the predeclared load window there is no unbounded buildup and no false health report.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="I05"></a>
 
@@ -1787,23 +1787,23 @@ Topologies: H1,H2. Branches: object-lock-timeout, caller-disconnect, stale-read-
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`NATIVE_LOCK_OWNER_ABORT_BARRIER`): 已有同候选源码的 lock owner、取消物理 unlink 与 stale read-repair 原生子集；H1/H2 timeout 与 queued-successor 诊断均已通过独立 live 审计（39767336741/1、39817606025/1），包括原始 ACK、历史代次、真实锁事件、各 peer inventory、停机后新分片完整性和有界 FD 收尾。仍缺实际断连边界的精确所有权、完整 native timeout/stale 屏障、stale-generation controller，以及 H1/H2 DL/DV 完整对象/ACK/物理/锁/FD 闭环。精确源码 cfg(test) 原生证据独立保留；诊断子集和原生子集不能充作完整 canonical PASS。
+Blocked reason (`NATIVE_LOCK_OWNER_ABORT_BARRIER`): A native subset from the same candidate source already exists for lock owner, cancelled physical unlink, and stale read-repair. The H1/H2 timeout and queued-successor diagnostics have both passed an independent live audit (39767336741/1, 39817606025/1), including the original ACKs, historical generations, real lock events, each peer inventory, new-shard integrity after shutdown, and bounded FD cleanup. Still missing are precise ownership at the actual disconnect boundary, a complete native timeout/stale barrier, the stale-generation controller, and the complete H1/H2 DL/DV object/ACK/physical/lock/FD closed loop. Precise source cfg(test) native evidence is retained on its own; the diagnostic subset and the native subset cannot stand in for a complete canonical PASS.
 
-1. LOCK_WINDOW用本例慢IO/受控原生锁屏障持有目标对象锁，先证明真实争用超过预注册预算。
-2. 同时heal/覆盖或删除；调用方断开实例仅断本次TCP连接，不杀服务器或关闭跳板机；记录请求开始/断开/服务在途结束。
-3. 锁释放后观察取消/超时不提前释放所有权、不重复提交，陈旧read-repair必须重验版本。
-4. 核对所有ACK和最终代次，检查锁/FD无泄漏；黑盒不能证明锁所有权时以NATIVE窗口独立补证，不能猜命中。
+1. LOCK_WINDOW holds the target object lock with this case's slow IO or a controlled native lock barrier, and first proves that the real contention exceeds the preregistered budget.
+2. At the same time, heal, overwrite, or delete. The caller-disconnect instance drops only this TCP connection and does not kill the server or shut down the jump host; record request start, disconnect, and the end of in-flight work on the service.
+3. After the lock is released, observe that cancel and timeout do not release ownership early and do not commit a second time, and that a stale read-repair revalidates the version.
+4. Check every ACK and the final generation, and check that locks and FDs do not leak. When a black box cannot prove lock ownership, supply independent evidence with a NATIVE window; do not guess that the window was hit.
 
 Operations: [SEED_DV](validation-heal-operations.md#SEED_DV) → [IO_FAULT](validation-heal-operations.md#IO_FAULT) → [LOCK_WINDOW](validation-heal-operations.md#LOCK_WINDOW) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [START](validation-heal-operations.md#START) → [WINDOW](validation-heal-operations.md#WINDOW) → [METRICS](validation-heal-operations.md#METRICS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [NATIVE](validation-heal-operations.md#NATIVE)
 
 Source assertions:
 
-- 真实对象锁争用超过预算及调用方断开，再释放锁恢复
-- 取消/超时不得提前释放在途所有权或重复提交；陈旧 read-repair 必须重验代次；恢复后无泄漏和错误覆盖。
+- Real object-lock contention exceeds the budget and the caller disconnects, then release the lock and recover
+- Cancel or timeout must not release in-flight ownership early or commit twice; a stale read-repair must re-verify the generation; after recovery there is no leak and no incorrect overwrite.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="I06"></a>
 
@@ -1813,23 +1813,23 @@ Topologies: H2. Branches: kms-unavailable, kms-denied, tier-unavailable, tier-ve
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_DEDICATED_KMS_TIER_TENANT`): 需要专用 KMS/tier 租户、依赖网络隔离和安全的 key/tier 版本证据；不能在共享依赖上全局断网。
+Blocked reason (`ENV_DEDICATED_KMS_TIER_TENANT`): Requires a dedicated KMS/tier tenant, network isolation of the dependency, and safe key/tier version evidence; do not cut the network globally on a shared dependency.
 
-1. 先在专用KMS/tier租户验证DE/DV夹具可正常解密/restore，保存非敏感key/tier版本标识。
-2. DEPENDENCY仅断本测试客户端/服务到该依赖的专用namespace路由，或撤销本例租户权限；不全局停共享KMS。
-3. 发GET/restore/deep heal并观察责任，依赖错误不能判对象不存在、可remove、已修好；密钥不进入错误日志。
-4. 恢复依赖和权限后原版本可解密/恢复，物理/责任完整；远端对象不存在与远端暂不可达分别判定。
+1. On a dedicated KMS/tier tenant, first verify that the DE/DV fixtures decrypt and restore normally, and save the non-sensitive key/tier version identifiers.
+2. DEPENDENCY cuts only this test client's or service's dedicated namespace route to that dependency, or revokes this case's tenant permission; do not stop the shared KMS globally.
+3. Issue GET, restore, and deep heal, and observe responsibility. A dependency error must not be judged as the object not existing, as remove being allowed, or as already repaired; keys must not enter error logs.
+4. After the dependency and the permissions are restored, the original version can be decrypted and restored, and the physical state and responsibility are complete; judge a remote object that does not exist separately from a remote that is temporarily unreachable.
 
 Operations: [SEED_DE](validation-heal-operations.md#SEED_DE) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [DEPENDENCY](validation-heal-operations.md#DEPENDENCY) → [NETWORK](validation-heal-operations.md#NETWORK) → [S3](validation-heal-operations.md#S3) → [START](validation-heal-operations.md#START) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 仅让已分配测试 KMS/远端 tier 暂不可用，持续查询与修复
-- 依赖故障不得解释为对象不存在/可删/已修复，不暴露密钥；恢复后原版本可解密或恢复，责任未丢失。
+- Make only the assigned test KMS/remote tier temporarily unavailable, and keep querying and repairing
+- A dependency failure must not be interpreted as the object being absent, deletable, or already repaired, and must not expose the key; after recovery the original version can be decrypted or restored, and responsibility is not lost.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="J01"></a>
 
@@ -1837,21 +1837,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: enabled-idle, disabled, uninitialized, missing-peer, recovered-complete.
 
-1. 在独立服务配置分别观察 enabled无任务、HEAL禁用、初始化未完成，保留实际启动配置及时间线。
-2. H2 PROCESS停一个peer并跨节点查询BACKGROUND/REPLACEMENT；完整coverage必须含expected/responded/unknown明细。
-3. disabled/uninitialized/partial/degraded不能被rc或聚合器解释成全局完成；收集rc原输出与raw Admin逐字段对照。
-4. 恢复所有peer后才允许完整idle，依然用PHYSICAL/manifest核对无遗留责任；未观测初始化窗口单独记NOT_OBSERVED。
+1. On an independent service configuration, observe separately enabled with no task, HEAL disabled, and initialization not finished, and keep the actual startup configuration and timeline.
+2. On H2, PROCESS stops one peer and queries BACKGROUND/REPLACEMENT across nodes; complete coverage must include the expected/responded/unknown detail.
+3. disabled/uninitialized/partial/degraded must not be interpreted by rc or by an aggregator as global completion; collect the original rc output and compare it field by field with raw Admin.
+4. A complete idle is allowed only after every peer is restored, and PHYSICAL/manifest is still used to check that no responsibility remains; an unobserved initialization window is recorded on its own as NOT_OBSERVED.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [CONFIG](validation-heal-operations.md#CONFIG) → [PROCESS](validation-heal-operations.md#PROCESS) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [REPLACEMENT](validation-heal-operations.md#REPLACEMENT) → [RC_STATUS](validation-heal-operations.md#RC_STATUS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 分别检查 enabled/disabled/uninitialized、全体可达及缺失 peer 的状态
-- idle 只在覆盖完整且真实无活动时成立；partial/unknown/degraded/disabled 不被客户端转换为全部完成。
+- Separately check the status for enabled/disabled/uninitialized, for all peers reachable, and for a missing peer
+- idle holds only when coverage is complete and there is truly no activity; partial/unknown/degraded/disabled are not converted by the client into all-complete.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="J02"></a>
 
@@ -1861,13 +1861,13 @@ Topologies: H1,H2. Branches: mixed-healthy-repaired-failed, dry-run, deferred, r
 
 Execution policy: `evidence-blocked`; disabled by default: `false`.
 
-Blocked reason (`EVIDENCE_MIXED_OUTCOME_ORCHESTRATION`): 已有 mixed healthy/repaired/failed、独立 dry-run、依赖 deferral、真实 SDK legacy Unknown、原始全副本损坏元数据 Unknown、只读永久失败/新 token 补偿及版本级 grace Deferred/新 token 清理执行流程，均按逐对象 manifest/attemptFailures 对账；仍需完整串行 live 证据及独立验收，故保持禁止默认 dispatch 和 canonical admission；本地检查不能作为完整 PASS。
+Blocked reason (`EVIDENCE_MIXED_OUTCOME_ORCHESTRATION`): Execution flows already exist for mixed healthy/repaired/failed, an independent dry-run, dependency deferral, a real SDK legacy Unknown, an original all-replica corrupt-metadata Unknown, read-only permanent failure with new-token compensation, and version-level grace Deferred with new-token cleanup, all reconciled per object against the manifest and attemptFailures. Complete serial live evidence and independent acceptance are still required, so default dispatch and canonical admission stay prohibited; a local check cannot serve as a complete PASS.
 
-1. 同批独立key建立健康、可恢复缺片、低于R的不可恢复对象；deferred由冻结的锁/依赖故障产生，dry-run另建任务。
-2. 保存逐对象物理基线和期望disposition，对结果的execution/coverage/counters/object identities做逐项对账。
-3. unknown/skipped/completed_with_errors不算修复成功，legacy objectsHealed与canonical healed分开解释；attemptFailures不得被隐藏。
-4. 使用独立完整manifest弥补有界outcome窗口，保持不可修对象的正确失败记录；恢复后另任务修复不覆盖原结果。
-5. grace 分支先用 SDK PUT 建立两个真实版本并验证完整分片；保存一个成员的原对象树后，SDK DELETE 精确历史版本，逐盘验证仅当前版本存在且其逻辑元数据、数据片及控制对象未变。只向原成员回放原对象树；实际候选进程固定 grace=120 秒，不修改元数据年龄或时钟。原任务须在窗口内完成，精确报告旧版 deferred、当前版 verified_healthy 及 retryNotBefore；自然等待过期后原 token 仍不变，新 token 才能清理旧版。清理后先核对全部物理字节等于 DELETE 后权威现场，再跨节点 GET/404 和复查旧 token，最后才做 fixture finalization。错过窗口保留 NOT_OBSERVED；异常保留现场并标 DIRTY；救援仅恢复 DELETE 后权威树，不复活已删除版本。
+1. In the same batch of independent keys, create healthy objects, objects with recoverable missing shards, and unrecoverable objects below R; deferred is produced by a frozen lock or dependency fault, and dry-run is a separate task.
+2. Save the per-object physical baseline and the expected disposition, and reconcile the result's execution/coverage/counters/object identities item by item.
+3. unknown/skipped/completed_with_errors do not count as a successful repair. Explain legacy objectsHealed separately from canonical healed; attemptFailures must not be hidden.
+4. Use an independent complete manifest to make up for the bounded outcome window, and keep the correct failure record of each unrepairable object; a repair by another task after recovery must not overwrite the original result.
+5. The grace branch first uses SDK PUT to create two real versions and verifies that the shards are complete. After saving one member's original object tree, SDK DELETE the exact historical version, and verify disk by disk that only the current version exists and that its logical metadata, data shards, and control objects are unchanged. Replay the original object tree only onto the original member. The actual candidate process fixes grace=120 seconds and does not change metadata age or the clock. The original task must finish inside the window and report exactly the old version as deferred, the current version as verified_healthy, and retryNotBefore. After naturally waiting out the expiry, the original token is still unchanged, and only a new token may clean up the old version. After cleanup, first check that every physical byte equals the authoritative scene after DELETE, then run cross-node GET/404 and recheck the old token, and only then perform fixture finalization. If the window is missed, retain NOT_OBSERVED. On an exception, preserve the scene and mark DIRTY. Rescue restores only the authoritative tree from after DELETE and does not resurrect the deleted version.
 6. Manual diagnostic entry: explicitly select heal.outcome-counters-and-error-truth through Functional Chain with the frozen candidate and candidate-bound manager/inspector tools. The default catalog policy stays evidence-blocked; even all passing diagnostic branches retain complete=false, canonicalCasePassClaimed=false and a blocking gate verdict until independent acceptance.
 7. For a pre-replay public-manifest refusal, recover only after the complete SDK request/ACK ledger proves all writes acknowledged and no DELETE or replay occurred. Bind all four original physical members and the reserved owner, stop the exact candidate, then preserve all roots and state using durable same-filesystem non-overwriting rename. Partial archive retries require the same durable inventory; missing roots or drift retain DIRTY. Isolation is not product repair or restoration and never rewrites the failed case.
 8. Manual J02 candidate admission is limited to the original 072b57b37559fbe626aeda8abf61617fdcbdd926 and corrected 1c7fc818dd858247c45b39542abd8291b1e6e31b sources. Each execution requires the matching immutable package and independently audited inspector/manager bundle. A corrected-candidate run is new evidence; it cannot replace an original failure. The full exact-version, physical, timing, retry and responsibility oracles remain unchanged, and all passing diagnostics still require independent canonical acceptance.
@@ -1877,12 +1877,12 @@ Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](valid
 
 Source assertions:
 
-- 同批次混合健康、可修、不可修、deferred、dry-run 对象
-- execution/coverage/disposition/计数和逐对象物理结果相符；unknown、skipped 或 completed_with_errors 不能算修复成功。
+- Mix healthy, repairable, unrepairable, deferred, and dry-run objects in the same batch
+- execution/coverage/disposition, the counts, and the per-object physical results agree; unknown, skipped, or completed_with_errors cannot count as a successful repair.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="J03"></a>
 
@@ -1890,21 +1890,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: within-window-cursor, past-retention-gap, cross-node-cursor, terminal-truncation.
 
-1. DX至少257个目标，超过128诊断窗口；边启动recursive heal边以sinceSeq查询，每次请求/nextSeq/minSeq/items全部保存。
-2. 单端连续读取应无重复倒退；故意使用过旧cursor应明示truncated/gap；跨节点查询按任务/epoch而非全局数字比较。
-3. 任务终态也读取旧cursor，验证有界列表不被当完整清单；所有错误与缺口原样进入报告。
-4. 最终用全量独立S3/physical manifest与canonical counters验收覆盖；若任务太快仍可做终态截断，但不能声称观察了运行中游标。
+1. DX has at least 257 targets, past the 128 diagnostic window. While starting recursive heal, query with sinceSeq, and save every request, nextSeq, minSeq, and items.
+2. Continuous reads from a single end must not repeat or move backward. Deliberately using an overly old cursor must explicitly indicate truncated/gap. Compare cross-node queries by task/epoch rather than by a global number.
+3. At the task's terminal state, also read the old cursor, and verify that a bounded list is not treated as a complete manifest; every error and gap enters the report unchanged.
+4. Finally accept coverage with a full independent S3/physical manifest and the canonical counters. If the task is too fast, truncation at the terminal state is still allowed, but it must not be claimed as an observation of a running cursor.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [CURSOR](validation-heal-operations.md#CURSOR) → [STATUS](validation-heal-operations.md#STATUS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 生成超过结果保留上限的任务，分页轮询 sinceSeq，并跨节点/终态读取
-- nextSeq/minSeq 单调且 gap/truncation 明示；有界 items 不是完整责任清单，最终须用独立 manifest/计数补证，不静默丢错误。
+- Generate tasks past the result-retention limit, poll sinceSeq with pagination, and read across nodes and terminal states
+- nextSeq/minSeq are monotonic and gap/truncation is explicit; bounded items are not the complete responsibility manifest, the final result must be corroborated by an independent manifest and counts, and errors are not dropped silently.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="J04"></a>
 
@@ -1912,21 +1912,21 @@ Source assertions:
 
 Topologies: H1,H2. Branches: normal-repeat, deep-repeat, repeat-after-restart, versioned-repeat.
 
-1. DB/DV缺片先修复；versioned 的整份 xl.meta 缺失允许所有 identity repaired，或至少一个 repaired 加其余正健康态；marker 只能为 repaired/metadata_healthy，counters.healed 与 repaired 数量一致、counters.unchanged 与其余数量一致，unknown/skipped/failed=0。完整保存 post-heal S3/physical 作为第二轮基线，不使用最初故障前 xl.meta 要求内部字节完全相同。
-2. 再次 normal/deep：normal 只接受 metadata_healthy，deep 才要求 verified_healthy；两者均 healed=0、unknown/skipped/failed=0，不得新增 repaired，所有原版本/marker 身份与数量一致。
-3. PROCESS原unit重启后再重复；检查新任务有独立token但不产生新对象版本、无限责任或重复修复计数。
-4. 允许经格式证据证明的内部维护记录变化，用户内容/引用不变，目标片摘要稳定。
+1. Repair missing DB/DV shards first. When an entire versioned xl.meta is missing, every identity may be repaired, or at least one repaired with the rest in a positive healthy state. A marker may only be repaired/metadata_healthy. counters.healed matches the repaired count, counters.unchanged matches the count of the rest, and unknown/skipped/failed=0. Save the complete post-heal S3/physical result as the second-round baseline, and do not use the original pre-fault xl.meta to require identical internal bytes.
+2. Run normal/deep again: normal accepts only metadata_healthy, and only deep requires verified_healthy. Both have healed=0 and unknown/skipped/failed=0, must not add any repaired, and every original version and marker keeps the same identity and count.
+3. After PROCESS restarts the original unit, repeat. Check that the new task has an independent token and does not create a new object version, unbounded responsibility, or a duplicate repair count.
+4. Changes to internal maintenance records are allowed when format evidence proves them. User content and references stay unchanged, and the target-shard digests stay stable.
 
 Operations: [SEED_DB](validation-heal-operations.md#SEED_DB) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [WAIT](validation-heal-operations.md#WAIT) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY) → [PROCESS](validation-heal-operations.md#PROCESS)
 
 Source assertions:
 
-- 第一次修复后重复 normal/deep、重启再检查
-- versioned 首次允许所有 identity repaired 或至少一个 repaired 加其余正健康态，marker 仅 repaired/metadata_healthy，计数必须与 receipt 集合一致；normal repeat 接受 `metadata_healthy`，deep repeat 要求 `verified_healthy`，repeat marker 为 `metadata_healthy` 且 healed=0；unknown/skipped/failed 不得成为 PASS。
+- After the first repair, repeat normal/deep, restart, and check again
+- For the first versioned run, allow all identities repaired, or at least one repaired plus the rest in a positive healthy state; a marker is only repaired/metadata_healthy, and the counts must match the receipt set; a normal repeat accepts `metadata_healthy`, a deep repeat requires `verified_healthy`, a repeat marker is `metadata_healthy` with healed=0; unknown/skipped/failed must not become PASS.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="J05"></a>
 
@@ -1936,23 +1936,23 @@ Topologies: H2,H5. Branches: 24h, 72h.
 
 Execution policy: `environment-gated`; disabled by default: `true`.
 
-Blocked reason (`ENV_DEDICATED_LONG_SOAK_LANE`): 必须在独占 H2/H5 lane 真实运行 24 小时和 72 小时，包含限速、监控、到期回收和完整资源预算；短跑不能替代 soak 证据。
+Blocked reason (`ENV_DEDICATED_LONG_SOAK_LANE`): Must actually run for 24 hours and for 72 hours on an exclusive H2/H5 lane, including rate limiting, monitoring, expiry reclamation, and a complete resource budget. A short run cannot substitute for soak evidence.
 
-1. 只在专门分配的H2/H5独占lane，冻结完整24h或72h墙钟窗口、循环故障日程、并发/限速/存储上限和到期回收安排。
-2. WORKLOAD持续记录逐请求ACK，周期性故障仅使用本run DRIVE_GATE/PROCESS/依赖规则；每轮见证与恢复，不无限加数据。
-3. 持续METRICS、日志、队列/MRF/checkpoint取样；资源增长、panic、未解释责任达到预注册阈值立即保留失败证据。
-4. 到期停止写入/注入，解除全部故障，解析未知ACK后全量VERIFY和PHYSICAL；短跑不能充24h/72h结果。
+1. Only on a specially assigned exclusive H2/H5 lane, freeze the full 24h or 72h wall-clock window, the cyclic fault schedule, the concurrency, rate-limit, and storage caps, and the expiry-reclamation plan.
+2. WORKLOAD continuously records the ACK of every request. Periodic faults use only this run's DRIVE_GATE/PROCESS/dependency rules; witness and recover every round, and do not add data without a bound.
+3. Continuously sample METRICS, logs, and queue/MRF/checkpoint. As soon as resource growth, a panic, or unexplained responsibility reaches a preregistered threshold, retain the failure evidence.
+4. When the window expires, stop writes and injection, clear every fault, and after unknown ACKs are resolved run a full VERIFY and PHYSICAL. A short run cannot stand in for a 24h or 72h result.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [SEED_DV](validation-heal-operations.md#SEED_DV) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [DRIVE_GATE](validation-heal-operations.md#DRIVE_GATE) → [PROCESS](validation-heal-operations.md#PROCESS) → [BACKGROUND](validation-heal-operations.md#BACKGROUND) → [CHECKPOINT](validation-heal-operations.md#CHECKPOINT) → [METRICS](validation-heal-operations.md#METRICS) → [LOGS](validation-heal-operations.md#LOGS) → [RECOVER](validation-heal-operations.md#RECOVER) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 独占环境运行预注册 24h/72h 窗口，混合修复、掉线、写入和版本删除
-- 每次 ACK 可追踪；最终全量 manifest 正确，队列/内存/FD/临时空间无无界增长，无后台 panic 或未解释持久责任。
+- In an exclusive environment, run a preregistered 24h/72h window, mixing repair, offline events, writes, and version deletes
+- Every ACK is traceable; the final full manifest is correct; queue, memory, FDs, and temporary space do not grow without bound; and there is no background panic or unexplained persisted responsibility.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.
 
 <a id="J06"></a>
 
@@ -1960,18 +1960,18 @@ Source assertions:
 
 Topologies: H2. Branches: abba-repeat-1, abba-repeat-2, abba-repeat-3.
 
-1. 同硬件/候选/rc预注册预热、每轮时长、并发、读写比例、数据量/缓存策略、P95/P99与错误率阈值；禁止结果出来再定门槛。
-2. 按A无heal、B有heal、B有heal、A无heal顺序，每轮从相同逻辑内容和队列基线开始；完成至少三组独立ABBA。
-3. WORKLOAD记录每请求延迟/成功/错误/超时，METRICS记录CPU/IO/FD及实际修复字节；错误不从总请求分母删除。
-4. 报告每轮及配对差异、修复吞吐和GET/PUT各自P95/P99；功能VERIFY必须通过，性能阈值也必须独立满足。
+1. On the same hardware, candidate, and rc, preregister the warmup, each round's duration, concurrency, the read/write ratio, the data volume and cache policy, and the P95/P99 and error-rate thresholds. Do not set the threshold after the results are in.
+2. Follow the order A without heal, B with heal, B with heal, and A without heal. Each round starts from the same logical content and the same queue baseline. Complete at least three independent ABBA groups.
+3. WORKLOAD records latency, success, error, and timeout for every request. METRICS records CPU, IO, FD, and the bytes actually repaired. Do not remove errors from the total-request denominator.
+4. Report each round and the paired difference, repair throughput, and the P95/P99 of GET and of PUT separately. Functional VERIFY must pass, and the performance thresholds must also be met on their own.
 
 Operations: [SEED_DX](validation-heal-operations.md#SEED_DX) → [PERFORMANCE](validation-heal-operations.md#PERFORMANCE) → [WORKLOAD](validation-heal-operations.md#WORKLOAD) → [FAULT](validation-heal-operations.md#FAULT) → [START](validation-heal-operations.md#START) → [METRICS](validation-heal-operations.md#METRICS) → [LOGS](validation-heal-operations.md#LOGS) → [PHYSICAL](validation-heal-operations.md#PHYSICAL) → [VERIFY](validation-heal-operations.md#VERIFY)
 
 Source assertions:
 
-- 同硬件同候选按 ABBA 运行无 heal 基线和有 heal 负载，重复并固定限速
-- 分别报告修复吞吐、GET/PUT P95/P99、错误率和 CPU/IO；阈值事先冻结，不能事后挑轮次或把功能 PASS 充性能验收。
+- On the same hardware and the same candidate, run the no-heal baseline and the with-heal load in ABBA order, repeat, and keep the rate limit fixed
+- Report repair throughput, GET/PUT P95/P99, error rate, and CPU/IO separately; freeze the thresholds in advance, and do not cherry-pick rounds afterward or treat a functional PASS as performance acceptance.
 
-先保存失败现场及物理/状态证据，停止本例写入与在途任务，再按 RECOVER 撤销本例故障。并发版本已变化时禁止盲目恢复旧 xl.meta；恢复不能充作产品修复。未恢复环境标 DIRTY，保留本例备份和原失败结果。
+First save the failure scene and the physical and state evidence, stop this case's writes and in-flight tasks, then undo this case's fault per RECOVER. When a concurrent version has already changed, do not blindly restore the old xl.meta; recovery must not serve as a product fix. Mark an unrestored environment DIRTY, and keep this case's backup and the original failure result.
 
-逐项满足设计公共契约、该分支步骤及附加断言后人工评审。缺资源为 BLOCKED，窗口未命中为 NOT_OBSERVED，产品错误为 FAIL，工具/恢复错误为 INFRA_ERROR；未运行不记 PASS。
+Manually review after each item satisfies the design's common contract, that branch's steps, and the additional assertions. Missing resources are BLOCKED, a window miss is NOT_OBSERVED, a product error is FAIL, and a tool or recovery error is INFRA_ERROR; a case that did not run is not recorded as PASS.

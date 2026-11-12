@@ -1,4 +1,4 @@
-# Heal 环境门控与原生阻断
+# Heal environment gates and native blocks
 
 ## Read-only fleet inspection
 
@@ -8,49 +8,49 @@ These observations do not certify a clean environment. Independently audit retai
 
 When the shared runner cannot start `environment.inspect`, the separate `validation_runner_inspect_only=true` entry inspects GitHub registration and queue metadata on a hosted runner without fleet access. Inspection [40256930895/1](https://github.com/rustfs/rustfs/actions/runs/40256930895) observed `rustfs-smoke-testing` (ID 139653) offline at `2026-10-26T02:00:24Z`. This is not a diagnosis of host or disk health. API failures remain incomplete; restoring registration does not certify retained-scene cleanup or release the existing live admission gates.
 
-第一批 13 个用例保留全部 recipe、分支和 source assertions，并新增 `environment_cases.py` 的控制流程与断言，接入 validation 调度。它们默认关闭，只产生 `BLOCKED` 结果与未满足原因；默认路径不会连接或修改 fleet。真实执行沿用 auto-testing 的 S3/Admin collector、ACK ledger、候选包绑定、物理故障 oracle 和恢复模式，专用资源操作由部署环境的适配器提供。当前没有把适配器协议或未运行代码计为 canonical PASS。
+The first batch of 13 cases keeps every recipe, branch, and source assertion, and adds the control flow and assertions in `environment_cases.py`, wired into validation dispatch. They are disabled by default and produce only a `BLOCKED` result and the unmet reason. The default path does not connect to or modify the fleet. A real run reuses auto-testing's S3/Admin collector, ACK ledger, candidate-package binding, physical-fault oracle, and recovery mode. Dedicated resource operations are provided by an adapter in the deployment environment. The adapter protocol, and code that has not been run, are not counted as a canonical PASS.
 
-设置 `AUTO_TESTING_ENABLE_ENV_GATED_HEAL=1` 并通过 `VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES` 指向 JSON 能力清单后，门控会检查全部能力。缺项仍返回 `BLOCKED`。能力齐全后还要用 `VALIDATION_HEAL_ENVIRONMENT_RUNTIME` 指向 runtime JSON；只有候选/checkout/client 摘要、全部拓扑、当前 Heal SSH 节点和适配器摘要校验通过后才会运行分支。未绑定适配器仍为 `BLOCKED`；执行结果需要 source assertion 审核，当前实现不会自动生成 canonical PASS。
+After `AUTO_TESTING_ENABLE_ENV_GATED_HEAL=1` is set and `VALIDATION_HEAL_ENVIRONMENT_CAPABILITIES` points at a JSON capability manifest, the gate checks every capability. A missing item still returns `BLOCKED`. Once the capabilities are complete, `VALIDATION_HEAL_ENVIRONMENT_RUNTIME` must also point at the runtime JSON. Branches run only after the candidate/checkout/client digests, every topology, the current Heal SSH nodes, and the adapter digest have been checked. An unbound adapter remains `BLOCKED`. Execution results require source-assertion review. The current implementation does not automatically produce a canonical PASS.
 
-能力清单示例：
+Example capability manifest:
 
 ```json
 {"capabilities": ["dedicated_faultfs_or_device", "slow_io_short_read_eio", "namespace_isolation", "fault_layer_restore"]}
 ```
 
-| Code | 用例 | 当前未满足原因 | 启用条件 |
+| Code | Case | Currently unmet reason | Enablement condition |
 | --- | --- | --- | --- |
-| F08 | `heal.mixed-version-upgrade-rollback` | 没有经过审核的不可变双版本组合 | 两个兼容 release、混合 peer 状态、滚动升级/回滚和格式兼容矩阵 |
-| F09 | `heal.dedicated-host-forced-restart` | 共享 Heal 节点不具备 H6 专用主机及平台断电能力 | 专用 H6、平台 power-cycle、带外恢复、boot_id/平台事件证据 |
-| G07 | `heal.race-ilm-expiry-and-transition` | 缺隔离 ILM/tier 与真实操作交叠窗口 | 专用租户、Expire/Transition/Restore 窗口、远端版本映射、规则清理 |
-| G08 | `heal.race-replication-resync` | 缺独占复制两端与 resync 控制 | 隔离复制对、resync、跨端版本映射、复制/Heal 交叠证据 |
-| H01 | `heal.with-expansion-rebalance` | 缺完整 H5 扩容/rebalance 拓扑 | H5 扩容、rebalance task、逐对象 pool/set 映射、scanner 退休证据 |
-| H02 | `heal.with-rebalance-stop-resume` | 缺独立 rebalance 停止/恢复/重启控制 | H5 rebalance、独立 task、stop/resume 和 service restart |
-| H03 | `heal.with-decommission` | 缺可回滚的退役拓扑 | H5 decommission、survivor pool、写入限制、移动 ACK 与物理权威证据 |
-| H04 | `heal.with-decommission-cancel-clear` | 缺退役新代次与容量锁重试窗口 | cancel/clear/resume、#2423 锁窗口、代次绑定 ACK ledger |
-| H05 | `heal.after-retired-pool-removal` | 缺 retired pool 移除后的 survivor-only 拓扑 | retired pool 配置移除、源持续离线、survivor 权威、旧 pool 写保护 |
-| H07 | `heal.ec84-multi-set-restart` | H4 的至少 24 个独立 endpoint 不可用 | H3 12 独立盘、H4 24 endpoint、逐 set 身份与重启/崩溃证据 |
-| I01 | `heal.slow-io-and-eio` | 没有专用 faultfs/故障设备 | 专用故障层、slow/short-read/EIO、namespace 隔离、原状恢复 |
-| I06 | `heal.kms-and-tier-outage` | 没有专用 KMS/tier 租户与依赖隔离 | 独占租户、依赖网络隔离、key 脱敏、tier 版本映射 |
-| J05 | `heal.long-soak` | 缺可持续 24h/72h 的独占 lane 与资源预算 | 真实墙钟窗口、限速和监控、循环故障、到期回收；短跑不能替代 |
+| F08 | `heal.mixed-version-upgrade-rollback` | No reviewed immutable dual-version pair | Two compatible releases, mixed peer state, rolling upgrade/rollback, and a format-compatibility matrix |
+| F09 | `heal.dedicated-host-forced-restart` | The shared Heal nodes do not have a dedicated H6 host or platform power-off capability | Dedicated H6, platform power-cycle, out-of-band recovery, and boot_id/platform-event evidence |
+| G07 | `heal.race-ilm-expiry-and-transition` | Missing an isolated ILM/tier tenant and a real overlapping operation window | Dedicated tenant, Expire/Transition/Restore window, remote version mapping, and rule cleanup |
+| G08 | `heal.race-replication-resync` | Missing exclusive replication endpoints and resync control | Isolated replication pair, resync, cross-endpoint version mapping, and replication/Heal overlap evidence |
+| H01 | `heal.with-expansion-rebalance` | Missing a complete H5 expansion/rebalance topology | H5 expansion, rebalance task, per-object pool/set mapping, and retired-scanner evidence |
+| H02 | `heal.with-rebalance-stop-resume` | Missing independent rebalance stop/resume/restart control | H5 rebalance, an independent task, stop/resume, and service restart |
+| H03 | `heal.with-decommission` | Missing a rollback-capable decommission topology | H5 decommission, survivor pool, write restriction, and movement ACK plus physical-authority evidence |
+| H04 | `heal.with-decommission-cancel-clear` | Missing a new decommission generation and the capacity-lock retry window | cancel/clear/resume, the #2423 lock window, and a generation-bound ACK ledger |
+| H05 | `heal.after-retired-pool-removal` | Missing a survivor-only topology after retired-pool removal | Retired-pool configuration removal, source kept offline, survivor authority, and write protection for the old pool |
+| H07 | `heal.ec84-multi-set-restart` | H4's minimum of 24 independent endpoints is unavailable | H3 with 12 independent disks, H4 with 24 endpoints, per-set identity, and restart/crash evidence |
+| I01 | `heal.slow-io-and-eio` | No dedicated faultfs or fault device | Dedicated fault layer, slow/short-read/EIO, namespace isolation, and restoration to the original state |
+| I06 | `heal.kms-and-tier-outage` | No dedicated KMS/tier tenant or dependency isolation | Exclusive tenant, dependency network isolation, key redaction, and tier version mapping |
+| J05 | `heal.long-soak` | Missing an exclusive lane and resource budget that can sustain 24h/72h | A real wall-clock window, rate limits and monitoring, cyclic faults, and expiry reclamation; a short run cannot stand in |
 
-`matrix.py list` 同时输出 `automaticExecutor`、`dispatchable` 和 `executionPolicy`：67 个 Heal 自动执行器、13 个环境门控、4 个证据/执行器阻断。调度覆盖共 80 个 Heal，连同 74 个非 Heal 为 154/158；这不代表 154 个 live PASS。
+`matrix.py list` also reports `automaticExecutor`, `dispatchable`, and `executionPolicy`: 67 Heal automatic executors, 13 environment gates, and 4 evidence/executor blocks. Dispatch covers 80 Heal cases, and 154/158 together with the 74 non-Heal cases. That is not 154 live PASSes.
 
-第二批 4 个用例仍未进入 canonical 调度。C11/F07/J02 已有 candidate-bound 原生回归和显式诊断入口；诊断分支通过仍需完整矩阵和独立审计后才能解除门控。I05 仍缺精确服务端屏障，增加节点不能解决：
+The second batch of 4 cases is still outside canonical dispatch. C11/F07/J02 already have candidate-bound native regressions and explicit diagnostic entry points. A passing diagnostic branch still needs the full matrix and an independent audit before the gate can be lifted. I05 still lacks an exact server-side fence, and adding nodes does not close it:
 
-| Code | 用例 | Block 原因 | 解锁所需证据 |
+| Code | Case | Block reason | Evidence required to unlock |
 | --- | --- | --- | --- |
-| C11 | `heal.bucket-incarnation-recreation` | H1/H2 旧元数据盘重返、原始 checkpoint/resume 与 committed MRF 重放编排已实现；精确候选的 9 项存储原生回归和 3 项 manager incarnation 前置证据已独立核验。完整现场分支尚无独立审计结果 | 旧/新 incarnation、正常 S3 删除与新 ACK、物理范围和原生 artifact 精确绑定；单分支不提升整例 |
-| F07 | `heal.checkpoint-and-mrf-corruption` | 已实现 H1/H2 checkpoint 截断、未来 schema、committed MRF CRC 故障及独立安全重扫；10 项原生回归作为前置证据。真实较早代次回放与私有限额卷的 journal ENOSPC 已实现；仍缺完整 native cut 审核，完整 live 尚未审计 | 真实 durable 记录故障与 publication 证据绑定；现有 interruption hooks 不等于每个 fsync 或断电 |
-| I05 | `heal.lock-timeout-and-caller-abort` | 同源码 native 子集已保留；H1/H2 timeout 与 queued-successor 诊断已通过独立 live 审计（39767336741/1、39817606025/1），完整用例仍 BLOCKED | 实际断连边界所有权、完整 native timeout/stale 屏障、stale-generation controller 和 H1/H2 DL/DV 完整对象/ACK/物理/锁/FD 闭环 |
-| J02 | `heal.outcome-counters-and-error-truth` | 全部夹具与 manifest 对账均已实现。候选 `7951bb629821246868ee3761b321dd07c06db45c` 修复整桶重试覆盖 repaired 记录，210 项 manager 与 5 项独立进程集成测试通过。新实机 `38874900846/1` 完成 20 个分支：16 个报告通过，4 个原始全元数据损坏探针返回永久 Failed，保留 NOT_OBSERVED；四组混合任务与全部 50 条节点清理记录已独立审计。真实 legacy Unknown 已观察，不能代替原始探针 | 原始元数据损坏分支的 Unknown 仍未观察；完整 source-procedure 验收尚未闭合。原始 Failed、NOT_OBSERVED 和完整用例门控保持不变 |
+| C11 | `heal.bucket-incarnation-recreation` | Orchestration for H1/H2 old-metadata disk rejoin, original checkpoint/resume, and committed MRF replay is implemented. Nine storage native regressions and three manager-incarnation prerequisites for the exact candidate have been independently checked. The complete live branches still have no independent audit result | Exact binding of old/new incarnation, a normal S3 delete and the new ACK, the physical range, and the native artifact. One branch does not promote the whole case |
+| F07 | `heal.checkpoint-and-mrf-corruption` | H1/H2 checkpoint truncation, a future schema, committed MRF CRC faults, and an independent safe rescan are implemented. Ten native regressions are prerequisite evidence. Real earlier-generation replay and journal ENOSPC on a private quota volume are implemented. A complete native-cut review is still missing, and the complete live run has not been audited | Binding of a real durable-record fault to publication evidence. Existing interruption hooks are not every fsync or a power loss |
+| I05 | `heal.lock-timeout-and-caller-abort` | The same-source native subset is retained. H1/H2 timeout and queued-successor diagnostics have passed independent live audit (39767336741/1, 39817606025/1). The complete case remains BLOCKED | Ownership at the real disconnect boundary, the complete native timeout/stale fence, a stale-generation controller, and the full H1/H2 DL/DV object/ACK/physical/lock/FD closure |
+| J02 | `heal.outcome-counters-and-error-truth` | Every fixture and manifest reconciliation is implemented. Candidate `7951bb629821246868ee3761b321dd07c06db45c` fixes whole-bucket retry overwriting repaired records. 210 manager tests and 5 independent-process integration tests passed. The new live run `38874900846/1` completed 20 branches: 16 reported pass, and 4 probes of originally corrupt metadata on every replica returned permanent Failed and retained NOT_OBSERVED. Four mixed-task groups and all 50 node-cleanup records were independently audited. A real legacy Unknown has been observed and cannot stand in for the original probe | Unknown on the originally corrupt-metadata branch is still unobserved. Complete source-procedure acceptance is not closed. The original Failed, NOT_OBSERVED, and the full-case gate stay unchanged |
 
-I05 与 A09、G01–G06 的精确屏障证据允许使用同一不可变候选源码单独构建的 `cfg(test)` 原生测试执行文件。不得给优化服务候选加入隐藏 hook 冒充原包，也不能把缺少 release hook 本身归为外部环境阻塞。原生子集、完整服务调用和现场最终 ACK/物理检查分别验收；已验收 native 证据不能代替尚缺的 controller 或完整 live 结果。第一批 G07/G08 的 native 分支与 H04 容量锁窗口保留各自未完成条件；外部请求重试或最终对象正确均不能证明精确锁或提交窗口。
+Exact fence evidence for I05 and for A09 and G01–G06 may use a `cfg(test)` native test executable built separately from the same immutable candidate source. Do not add a hidden hook to an optimized service candidate and present it as the original package, and do not classify the absence of a release hook itself as an external environment block. The native subset, the full service invocation, and the final live ACK/physical check are accepted separately. Accepted native evidence cannot stand in for a controller that is still missing, or for a complete live result. The native branches of first-batch G07/G08, and the H04 capacity-lock window, each keep their unfinished conditions. An external request retry, or a finally correct object, does not prove the exact lock or commit window.
 
-2026-10-26 已独立复核 hosted-only tools [40086026324/1](https://github.com/rustfs/rustfs/actions/runs/40086026324)：候选 `757b751482bb970bc321e92059690a7698554358` 上 10 项精确原生测试和 104 条有序 milestone 全部通过，覆盖 A09、G01–G06 与 I05 的原生子集。固定 helper `002473b` 的 runtime admission 在该候选上仅开放 A09/G05/G06；G01–G04 仍须选择各自审核过的候选及匹配工具，或先完成新的 runtime 源码审核。完整 live 用例和 I05 剩余控制流程均未因此通过，canonical 计数保持 114/158。
+On 2026-10-26 the hosted-only tools run [40086026324/1](https://github.com/rustfs/rustfs/actions/runs/40086026324) was independently reviewed: on candidate `757b751482bb970bc321e92059690a7698554358`, 10 exact native tests and 104 ordered milestones all passed, covering the native subsets of A09, G01–G06, and I05. Runtime admission for the pinned helper `002473b` opens only A09/G05/G06 on that candidate. G01–G04 must still select their own reviewed candidate and matching tools, or complete a new runtime source review first. The complete live cases and the remaining I05 control flow did not pass because of this, and the canonical count stays 114/158.
 
-资源适配器协议使用 stdin/stdout JSON，不调用 shell。runtime 中的 `adapter` 包含绝对可执行路径、SHA-256 和操作 allowlist；`environment_cases.required_operations(case_id)` 给出所需操作。每个请求携带 run ID、原候选 commit、sequence、拓扑/分支 scope、bucket prefix、租约和参数。响应必须回显上述身份、按 `heal_probe.canonical(request)` 的 UTF-8 SHA-256 绑定原请求，并把真实观察写在 `observation`，禁止返回 verdict。资源适配器需独立实现平台 power control、故障层、pool lifecycle 或 KMS/tier 隔离；本 PR 未向当前共享环境部署适配器。
+The resource-adapter protocol uses stdin/stdout JSON and does not invoke a shell. The runtime `adapter` contains an absolute executable path, a SHA-256, and an operation allowlist. `environment_cases.required_operations(case_id)` lists the required operations. Each request carries the run ID, the original candidate commit, a sequence, the topology/branch scope, the bucket prefix, the lease, and the parameters. The response must echo that identity, bind the original request by the UTF-8 SHA-256 from `heal_probe.canonical(request)`, and write real observations in `observation`. It must not return a verdict. A resource adapter has to implement platform power control, the fault layer, pool lifecycle, or KMS/tier isolation on its own. This change does not deploy an adapter into the current shared environment.
 
-runtime 的 `binding` 使用现有 `heal_probe.validate_binding` 契约，另含 `schemaVersion: 1`、`provider: auto-testing`、`sshNodes`、`rcBinary`、`topologies`、`capabilities`、`adapter` 和对应资源字段。F08 需要 `releasePair`，F09 需要 `hostResourceId`，I01 需要 `faultDeviceId/ioLatencyMs`，G07/I06 需要 `kmsKeyId/tierEndpoint/tenantId/dependencyNamespaceId`，G08 需要 `replicaEndpoint`，J05 需要 `soakLimits`。H6 专用主机应由适配器按 `hostResourceId` 独占绑定；SSH fleet 仍记录当前 auto-testing Heal 节点。secret 通过环境传入，适配器诊断会脱敏，`redactionEnvironmentVariables` 可指定额外 secret 环境变量名。
+The runtime `binding` uses the existing `heal_probe.validate_binding` contract and also contains `schemaVersion: 1`, `provider: auto-testing`, `sshNodes`, `rcBinary`, `topologies`, `capabilities`, `adapter`, and the corresponding resource fields. F08 requires `releasePair`, F09 requires `hostResourceId`, I01 requires `faultDeviceId/ioLatencyMs`, G07/I06 require `kmsKeyId/tierEndpoint/tenantId/dependencyNamespaceId`, G08 requires `replicaEndpoint`, and J05 requires `soakLimits`. A dedicated H6 host must be exclusively bound by the adapter using `hostResourceId`. The SSH fleet still records the current auto-testing Heal nodes. Secrets are passed through the environment. Adapter diagnostics are redacted, and `redactionEnvironmentVariables` can name additional secret environment variables.
 
-J05 的实际控制循环保留固定 86400/259200 秒窗口、精确版本写入/删除 ACK、三类循环故障、恢复、资源阈值和到期全量校验。单元测试用可注入的时钟验证窗口控制，不修改生产时长。G07/G08 精确 native 分支不调用资源适配器。清理失败保留原失败与 DIRTY 原因，停止后续分支。
+J05's real control loop keeps the fixed 86400/259200-second windows, exact version write/delete ACKs, three kinds of cyclic faults, recovery, resource thresholds, and a full check at expiry. Unit tests verify window control with an injectable clock and do not change the production duration. The exact native branches of G07/G08 do not call the resource adapter. A cleanup failure retains the original failure and the DIRTY reason and stops later branches.

@@ -2,7 +2,7 @@
 
 Node-outage heal test driven by
 [`rustfs_heal_test.sh`](rustfs_heal_test.sh), based on the
-Obsidian note "RustFS Heal 测试步骤". Uses the same 3-node test environment as
+Obsidian note "RustFS Heal test procedure". Uses the same 3-node test environment as
 the pool expansion test (`vm000 vm001 vm002`).
 
 All status checks talk to the RustFS admin API directly (SigV4-signed,

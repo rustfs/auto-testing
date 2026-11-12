@@ -65,8 +65,8 @@ def decision(case_id: str, *, environ: Mapping[str, str] | None = None,
             "enabled": False,
             "missingCapabilities": list(policy["requiredCapabilities"]),
             "reason": (
-                f"{policy['reason']} 默认关闭；不会启动真实测试。只有设置 "
-                f"{ENABLE_ENV}=1 并提供 {CAPABILITIES_ENV}，且清单满足全部能力后才允许进入准备阶段。"
+                f"{policy['reason']} Disabled by default; a real test is not started. Preparation is allowed only after "
+                f"{ENABLE_ENV}=1 is set and {CAPABILITIES_ENV} is provided, and only once the manifest satisfies every capability."
             ),
         }
     missing = sorted(set(policy["requiredCapabilities"]) - requested)
@@ -77,8 +77,8 @@ def decision(case_id: str, *, environ: Mapping[str, str] | None = None,
             "enabled": True,
             "missingCapabilities": missing,
             "reason": (
-                f"已显式开启 {ENABLE_ENV}=1，但 auto-testing Heal 环境能力清单仍缺少："
-                f"{', '.join(missing)}。原始阻断原因：{policy['reason']}"
+                f"{ENABLE_ENV}=1 is explicitly enabled, but the auto-testing Heal environment capability manifest is still missing: "
+                f"{', '.join(missing)}. Original block reason: {policy['reason']}"
             ),
         }
     return {
@@ -87,8 +87,9 @@ def decision(case_id: str, *, environ: Mapping[str, str] | None = None,
         "enabled": True,
         "missingCapabilities": [],
         "reason": (
-            "已显式开启且环境能力清单满足；还需 VALIDATION_HEAL_ENVIRONMENT_RUNTIME 指定候选绑定的资源与控制适配器。"
-            "缺少实际资源绑定仍为 BLOCKED，能力声明本身不记 PASS。"
+            "Explicitly enabled, and the environment capability manifest is satisfied. "
+            "VALIDATION_HEAL_ENVIRONMENT_RUNTIME must still name the candidate-bound resources and control adapter. "
+            "A missing real resource binding remains BLOCKED. A capability declaration itself is not recorded as PASS."
         ),
     }
 
@@ -122,7 +123,7 @@ def write_blocked(case_id: str, artifacts: Path, *, candidate: Path | None,
     result_decision = decision(case_id, environ=values, capabilities=capabilities)
     if capabilities_error:
         result_decision.update(state="blocked", reasonCode="ENV_CAPABILITY_MANIFEST_INVALID",
-                               reason=f"能力清单无效：{capabilities_error}；原始阻断原因：{policy['reason']}")
+                               reason=f"Capability manifest is invalid: {capabilities_error}; original block reason: {policy['reason']}")
     if override:
         result_decision.update(state="blocked", reasonCode=override[0], reason=override[1])
 

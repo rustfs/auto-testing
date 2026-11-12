@@ -154,7 +154,7 @@ class ExtendedScenariosTest(unittest.TestCase):
             rows, errors = validate_results(catalog, artifacts / "cases", gate_statuses=set(), gate_cases={case_id})
             self.assertEqual(errors, [case_id + ": gate verdict is 'BLOCKED'"])
             self.assertIn("ENV_DISABLED_BY_DEFAULT", render_report(rows, errors))
-            self.assertIn("专用 faultfs", render_report(rows, errors))
+            self.assertIn("dedicated faultfs", render_report(rows, errors))
 
     def test_runtime_requires_all_topologies_candidate_and_adapter_digest_before_commands(self):
         case_id = "heal.slow-io-and-eio"
