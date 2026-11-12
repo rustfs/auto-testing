@@ -74,7 +74,7 @@ defaults:
 env:
   RUSTFS_ACCESS_KEY: ${{ secrets.RUSTFS_ACCESS_KEY }}
   RUSTFS_SECRET_KEY: ${{ secrets.RUSTFS_SECRET_KEY }}
-  RUSTFS_NODES: ${{ secrets.RUSTFS_NODES || vars.RUSTFS_NODES }}
+  RUSTFS_NODES: ${{ secrets.RUSTFS_NODES || vars.RUSTFS_NODES || 'vm000 vm001 vm002 vm003' }}
   RUSTFS_SSH_USER: ${{ secrets.RUSTFS_SSH_USER || vars.RUSTFS_SSH_USER }}
   RUSTFS_NIGHTLY_PACKAGE_URL: ${{ vars.RUSTFS_NIGHTLY_PACKAGE_URL || 'https://dl.rustfs.com/artifacts/rustfs/packages/nightly/rustfs-nightly-latest.deb' }}
   PF_TESTING_GH_TOKEN: ${{ secrets.PF_TESTING_GH_TOKEN }}
@@ -133,7 +133,7 @@ jobs:
         if: ${{ inputs.cleanup_before != 'false' || github.event_name != 'workflow_dispatch' }}
         run: |
           set -euo pipefail
-          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
+          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002 vm003}"
           SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
           for node in "${NODES[@]}"; do
             ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${SSH_USER}@${node}" '
@@ -174,7 +174,7 @@ jobs:
           TO_VERSION='${{ inputs.to_version }}'
           TOPOLOGY='${{ inputs.topology }}'
           BACKENDS='${{ inputs.backends }}'
-          ARGS=(-y --log-file "${LOG_FILE}")
+          ARGS=(-y --log-file "${LOG_FILE}" --artifacts-dir "${FUNCTIONAL_ARTIFACTS_DIR}/upgrade")
           if [ "${TOPOLOGY}" = "all" ] || [ -z "${TOPOLOGY}" ] || [ "${TOPOLOGY}" = "null" ]; then
             ARGS+=(--all-topologies)
           else
@@ -246,8 +246,10 @@ jobs:
           fi
           CASE_TABLE="${FUNCTIONAL_ARTIFACTS_DIR}/cases.md"
           MATRIX_TABLE="${FUNCTIONAL_ARTIFACTS_DIR}/matrix.md"
+          CASE_LOG="${FUNCTIONAL_ARTIFACTS_DIR}/upgrade/events.log"
+          [ -f "${CASE_LOG}" ] || CASE_LOG="${LOG_FILE}"
           CASE_RESULT=success
-          python3 scripts/functional_case_report.py "${LOG_FILE}" "${CASE_TABLE}" "${MATRIX_TABLE}" || CASE_RESULT=failure
+          python3 scripts/functional_case_report.py "${CASE_LOG}" "${CASE_TABLE}" "${MATRIX_TABLE}" || CASE_RESULT=failure
           RESULT=failure
           if [ '${{ steps.test.outcome }}' = 'success' ] && [ "${CASE_RESULT}" = 'success' ]; then
             RESULT=success
@@ -255,10 +257,12 @@ jobs:
 
           # Report harness completion here; the final verdict checks every
           # case result after diagnostics and cleanup have been retained.
-          CASES_TOTAL="$(grep -cE '^\| [A-Z][A-Z0-9]*-[0-9]+ .*\| (PASS|FAIL|UNSUPPORTED|RUNNING) \|' "${CASE_TABLE}" 2>/dev/null || true)"
+          CASES_TOTAL="$(grep -cE '^\| [A-Z][A-Z0-9]*-[0-9]+ .*\| (PASS|FAIL|UNSUPPORTED|RUNNING|NOT_RUN) \|' "${CASE_TABLE}" 2>/dev/null || true)"
           CASES_FAIL="$(grep -cE '^\| [A-Z][A-Z0-9]*-[0-9]+ .*\| FAIL \|' "${CASE_TABLE}" 2>/dev/null || true)"
+          CASES_PASS="$(grep -cE '^\| [A-Z][A-Z0-9]*-[0-9]+ .*\| PASS \|' "${CASE_TABLE}" 2>/dev/null || true)"
+          CASES_NOT_RUN="$(grep -cE '^\| [A-Z][A-Z0-9]*-[0-9]+ .*\| (NOT_RUN|RUNNING) \|' "${CASE_TABLE}" 2>/dev/null || true)"
           CASES_TOTAL=$(( ${CASES_TOTAL:-0} + 0 )); CASES_FAIL=$(( ${CASES_FAIL:-0} + 0 ))
-          CASES_PASS=$(( CASES_TOTAL - CASES_FAIL ))
+          CASES_PASS=$(( ${CASES_PASS:-0} + 0 )); CASES_NOT_RUN=$(( ${CASES_NOT_RUN:-0} + 0 ))
           HARNESS_OK=0
           if [ '${{ steps.test.outcome }}' = 'success' ]; then
             HARNESS_OK=1
@@ -285,7 +289,7 @@ jobs:
               cat "${CASE_TABLE}"
               echo ""
             fi
-            echo "- Product result: ${CASES_PASS} passed, ${CASES_FAIL} failed (failing cases are tracked in rustfs/backlog)"
+            echo "- 用例结果：${CASES_PASS} 通过，${CASES_FAIL} 断言失败，${CASES_NOT_RUN} 未完成；准备、升级及恢复状态见矩阵。"
             echo ""
             if [ -s "${CASE_TABLE}" ]; then
               echo "## Log tail"
@@ -401,6 +405,7 @@ jobs:
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/suite.log
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/cases.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/matrix.md
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/upgrade/
           if-no-files-found: error
           retention-days: 3
 
@@ -410,7 +415,7 @@ jobs:
         if: ${{ always() && (inputs.cleanup_after != 'false' || github.event_name != 'workflow_dispatch') && steps.environment.outcome == 'success' }}
         run: |
           set -euo pipefail
-          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002}"
+          read -r -a NODES <<< "${RUSTFS_NODES:-vm000 vm001 vm002 vm003}"
           SSH_USER="${RUSTFS_SSH_USER:-azureuser}"
           for node in "${NODES[@]}"; do
             ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${SSH_USER}@${node}" '
@@ -431,7 +436,14 @@ jobs:
         env:
           FUNCTIONAL_ENVIRONMENT_RECEIPT: ${{ runner.temp }}/environment-upgrade.json
           CLEANUP_OUTCOME: ${{ steps.environment_cleanup.outcome }}
-        run: python3 scripts/functional_environment.py finish --suite upgrade --cleanup-outcome "$CLEANUP_OUTCOME"
+        run: |
+          # The outer node cleanup cannot prove Vault cleanup or that the
+          # interrupted suite cleaned every resource it touched.
+          if ! python3 scripts/upgrade_evidence.py check-cleanup \
+            --state-file "${FUNCTIONAL_ARTIFACTS_DIR}/upgrade/fleet-cleanup.state"; then
+            CLEANUP_OUTCOME=failure
+          fi
+          python3 scripts/functional_environment.py finish --suite upgrade --cleanup-outcome "$CLEANUP_OUTCOME"
 
       - name: Retain environment ownership and cleanup receipt
         if: ${{ always() }}
