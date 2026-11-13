@@ -422,15 +422,19 @@ def execute_case(case, directory, options, provenance, native_manifest=None, cli
             except (ProbeError, OSError, ValueError) as exc:
                 failure = exc if isinstance(exc, ProbeError) else ProbeError(str(exc))
                 errors.append(failure)
-                path = evidence.save("native-adapter-error", {"reason": str(failure), "verdict": failure.verdict,
-                                                              "cleanup_status": failure.cleanup_status})
                 records.update(getattr(failure, "native_records", {}))
+                path = None
+                try:
+                    path = evidence.save("native-adapter-error", {"reason": str(failure), "verdict": failure.verdict,
+                                                                  "cleanup_status": failure.cleanup_status})
+                except (OSError, ValueError) as diagnostic_error:
+                    errors.append(ProbeError(f"Native adapter diagnostic could not be saved: {diagnostic_error}"))
                 for identifier in native_needed:
                     if identifier not in records:
                         not_run = identifier in getattr(failure, "native_not_run", set())
                         records[identifier] = {"status": "BLOCKED" if not_run else failure.verdict,
                                                "reason": "Not executed after an earlier native test failed" if not_run else str(failure),
-                                               "evidence": [path]}
+                                               "evidence": [path] if path is not None else []}
                 result["capabilities"]["native_assertions"] = "unavailable or rejected"
     except (ProbeError, OSError, ValueError) as exc:
         errors.append(exc if isinstance(exc, ProbeError) else ProbeError(str(exc)))

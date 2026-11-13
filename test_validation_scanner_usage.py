@@ -556,6 +556,31 @@ class NativeTests(unittest.TestCase):
         self.assertTrue(result["assertions"][0]["native_evidence"])
         self.assertIn("Permission denied", result["reason"])
 
+    def test_diagnostic_write_failure_keeps_completed_native_records_and_unexecuted_states(self):
+        self.case = CASES[12]
+        all_ids = [assertion_id(self.case, index) for index in range(len(self.case.assertions))]
+        self.ids = all_ids[:1]
+        manifest = self.manifest()
+        specs = manifest["cases"][self.case.design_id]["tests"]
+        blocked_binary = self.root / "not-executable"
+        blocked_binary.write_text(Path(specs[0]["binary"]).read_text())
+        blocked_binary.chmod(0o600)
+        specs.extend({**specs[0], "binary": str(blocked_binary), "binary_sha256": sha256(blocked_binary),
+                      "assertions": [identifier]} for identifier in all_ids[1:])
+        original_save = Evidence.save
+        def fail_diagnostic(evidence, stem, value):
+            if stem == "native-adapter-error":
+                raise OSError("injected diagnostic write failure")
+            return original_save(evidence, stem, value)
+        with patch.object(Evidence, "save", fail_diagnostic):
+            result = execute_case(self.case, self.root, options(execution="native"), PROVENANCE, native_manifest=manifest)
+        self.assertEqual(result["verdict"], "INFRA_ERROR")
+        self.assertEqual([row["status"] for row in result["assertions"]], ["PASS", "INFRA_ERROR"] + ["BLOCKED"] * 6)
+        for path in result["assertions"][0]["evidence"]:
+            self.assertTrue((self.root / path).is_file())
+        self.assertEqual(result["assertions"][1]["evidence"], [])
+        self.assertIn("diagnostic could not be saved", result["reason"])
+
     def test_real_signal_interrupts_native_process_and_leaves_cleanup_unverified(self):
         manifest = self.manifest()
         spec = manifest["cases"][self.case.design_id]["tests"][0]
