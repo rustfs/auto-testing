@@ -24,7 +24,7 @@ class CatalogTest(unittest.TestCase):
         validate_reuse_candidates(snapshot, ROOT)
         self.assertEqual(158, sum(len(module["cases"]) for module in snapshot["modules"]))
         if SOURCE.is_file():
-            self.assertEqual(build_snapshot(SOURCE), snapshot)
+            self.assertEqual(build_snapshot(SOURCE), {key: value for key, value in snapshot.items() if key != "local_modules"})
 
     def test_duplicate_case_is_rejected(self) -> None:
         snapshot = json.loads((ROOT / "validation-cases.json").read_text(encoding="utf-8"))

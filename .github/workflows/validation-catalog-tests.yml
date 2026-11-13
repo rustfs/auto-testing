@@ -74,6 +74,10 @@ on:
       - rustfs-replication-test.sh
       - rustfs-storage-test.sh
       - test_validation_scanner_usage.sh
+      - test_validation_scanner_usage.py
+      - rustfs-scanner-usage-test.sh
+      - scripts/validation_scanner_usage/**
+      - docs/scanner-usage-validation.md
       - .github/workflows/validation-catalog-tests.yml
   push:
     branches: [main]
@@ -149,6 +153,10 @@ on:
       - rustfs-replication-test.sh
       - rustfs-storage-test.sh
       - test_validation_scanner_usage.sh
+      - test_validation_scanner_usage.py
+      - rustfs-scanner-usage-test.sh
+      - scripts/validation_scanner_usage/**
+      - docs/scanner-usage-validation.md
       - .github/workflows/validation-catalog-tests.yml
 
 permissions:
@@ -187,3 +195,5 @@ jobs:
       - run: bash -n scripts/run_validation_case.sh scripts/validation_heal/run_case.sh scripts/validation_oidc/run_case.sh
       - run: bash -n rustfs-storage-test.sh rustfs_pool_expand.sh rustfs-replication-test.sh scripts/validation_pool/run_case.sh scripts/validation_replication/run_case.sh test_validation_scanner_usage.sh
       - run: bash test_validation_scanner_usage.sh
+      - run: python3 -B -m unittest -v test_validation_scanner_usage.py
+      - run: bash -n rustfs-scanner-usage-test.sh scripts/validation_scanner_usage/run_case.sh

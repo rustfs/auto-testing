@@ -11,9 +11,9 @@ import re
 import sys
 
 try:
-    from .validation_catalog import validate_snapshot
+    from .validation_catalog import catalog_modules, validate_snapshot
 except ImportError:
-    from validation_catalog import validate_snapshot
+    from validation_catalog import catalog_modules, validate_snapshot
 
 
 TERMINAL = {"PASS", "FAIL", "INFRA_ERROR", "BLOCKED", "UNSUPPORTED"}
@@ -129,7 +129,7 @@ def validate_results(
     validate_snapshot(catalog)
     cases = {
         case["id"]: (case, module["target_environments"])
-        for module in catalog["modules"] for case in module["cases"]
+        for module in catalog_modules(catalog) for case in module["cases"]
     }
     gate_cases = gate_cases or set()
     unknown = gate_cases - set(cases)

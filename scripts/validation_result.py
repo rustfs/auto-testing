@@ -11,7 +11,7 @@ from pathlib import Path
 import sys
 import tempfile
 
-from validation_catalog import validate_snapshot
+from validation_catalog import catalog_modules, validate_snapshot
 
 
 def write_result(path: Path, value: dict) -> None:
@@ -25,7 +25,7 @@ def write_result(path: Path, value: dict) -> None:
 
 def case_from_catalog(catalog: dict, case_id: str) -> dict:
     validate_snapshot(catalog)
-    for module in catalog["modules"]:
+    for module in catalog_modules(catalog):
         for case in module["cases"]:
             if case["id"] == case_id:
                 return case
