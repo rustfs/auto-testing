@@ -1152,11 +1152,23 @@ test_kms208() {
     echo "immediate deletion unexpectedly allowed"; return 1
   fi
   echo "expected rejection of unconfirmed immediate deletion (HTTP ${code}): ${body}"
-  # positive path: env flag on + explicit confirm -> unreferenced key destroyed
+  # Destruction is two steps: a confirmed immediate request against a key that
+  # was never scheduled must be refused and must leave the key usable.
   kms_create_key "k208b" "env=ci" || return 1
-  local kid2="${KMS_KEY_ID}"
+  local kid2="${KMS_KEY_ID}" st
   body="$(admin_api DELETE /rustfs/admin/v3/kms/keys/delete "" "{\"key_id\":\"${kid2}\",\"force_immediate\":true,\"confirm_key_id\":\"${kid2}\"}")"; code="$(admin_api_code)"
-  [ "${code}" = "200" ] || { echo "confirmed immediate deletion failed: HTTP ${code}: ${body}"; return 1; }
+  [ "${code}" = "400" ] || { echo "immediate deletion of an unscheduled key -> HTTP ${code}, expected 400: ${body}"; return 1; }
+  st="$(kms_describe_key "${kid2}")" || return 1
+  if printf '%s' "${st}" | grep -qiE 'pending'; then echo "refused immediate deletion still scheduled the key: ${st}"; return 1; fi
+  printf '%s' "${st}" | grep -qiE 'active|enabled|available|usable|ready' || { echo "key not usable after refused immediate deletion: ${st}"; return 1; }
+  # positive path: schedule first, then env flag on + explicit confirm destroys
+  # the pending key without waiting out its window
+  body="$(admin_api DELETE /rustfs/admin/v3/kms/keys/delete "" "{\"key_id\":\"${kid2}\",\"pending_window_in_days\":7}")"; code="$(admin_api_code)"
+  [ "${code}" = "200" ] || { echo "scheduling deletion failed: HTTP ${code}: ${body}"; return 1; }
+  body="$(admin_api DELETE /rustfs/admin/v3/kms/keys/delete "" "{\"key_id\":\"${kid2}\",\"force_immediate\":true,\"confirm_key_id\":\"${kid2}\"}")"; code="$(admin_api_code)"
+  [ "${code}" = "200" ] || { echo "confirmed immediate deletion of a pending key failed: HTTP ${code}: ${body}"; return 1; }
+  body="$(admin_api GET "/rustfs/admin/v3/kms/keys/${kid2}" "")"; code="$(admin_api_code)"
+  [ "${code}" = "404" ] || { echo "destroyed key still answers HTTP ${code}: ${body}"; return 1; }
 }
 
 test_kms209() {
