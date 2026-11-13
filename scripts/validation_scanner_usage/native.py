@@ -45,10 +45,13 @@ def run_native(case, manifest, source_commit, evidence, timeout, required_ids):
             raise error
         try:
             current = _run_native_test(case, spec, evidence, remaining)
-        except ProbeError as exc:
-            exc.native_records = {identifier: row for identifier, row in records.items() if identifier in required_ids}
-            exc.native_not_run = {identifier for pending in specs[index + 1:] for identifier in pending["assertions"]}
-            raise
+        except (ProbeError, OSError, ValueError) as exc:
+            failure = exc if isinstance(exc, ProbeError) else ProbeError(f"Native test could not run: {exc}")
+            failure.native_records = {identifier: row for identifier, row in records.items() if identifier in required_ids}
+            failure.native_not_run = {identifier for pending in specs[index + 1:] for identifier in pending["assertions"]}
+            if failure is exc:
+                raise
+            raise failure from exc
         declared.update(current)
         for identifier, row in current.items():
             records[identifier] = {**row, "native_evidence": [row["native_evidence"]]}
@@ -87,6 +90,18 @@ def _run_native_test(case, spec, evidence, timeout):
     remaining = timeout - (time.monotonic() - started)
     if remaining <= 0:
         raise ProbeError("Native inventory exhausted the execution deadline")
+    try:
+        return _execute_native_test(case, binary, name, declared, evidence, remaining, inventory_path)
+    except (ProbeError, OSError, ValueError) as exc:
+        failure = exc if isinstance(exc, ProbeError) else ProbeError(f"Native execution was interrupted: {exc}")
+        failure.cleanup_status = "FAIL"
+        if failure is exc:
+            raise
+        raise failure from exc
+
+
+def _execute_native_test(case, binary, name, declared, evidence, remaining, inventory_path):
+    """Cleanup stays unverified until both execution and its milestones settle."""
     result = run_command([str(binary), name, "--exact", "--show-output", "--test-threads=1"], remaining)
     execution_path = evidence.save("native-execution", result)
     if result["timed_out"]:

@@ -5,8 +5,9 @@ It runs against **explicitly configured endpoints**. It never installs RustFS,
 changes scanner settings, restarts a node, acquires a VM deployment lock, or
 deletes system metadata. It creates random `usage-<run-id>-*` buckets and deletes
 only buckets that this invocation successfully created. `owned-buckets.json`
-retains the exact names, create intents and acknowledged operations if cleanup
-fails. An unacknowledged create remains in `unconfirmed_creates` and forces
+retains the exact names and create intents if cleanup fails. A separate
+`acknowledged-requests.jsonl` appends each acknowledged PUT and DELETE without
+rewriting previous requests. An unacknowledged create remains in `unconfirmed_creates` and forces
 `cleanup_status=FAIL`, even when the create may have committed remotely.
 Ownership is unconfirmed, so the runner does not delete that bucket
 automatically; the environment owner must inspect

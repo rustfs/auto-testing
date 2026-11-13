@@ -15,7 +15,7 @@ import signal
 import sys
 import time
 
-from .client import Client, Evidence, ProbeError, bucket_view, integer, run_command, sha256, utc_now
+from .client import Client, Evidence, ProbeError, bucket_view, endpoint_url, integer, run_command, sha256, utc_now
 from .contracts import CASES, assertion_id, select_cases
 from .native import run_native
 
@@ -36,14 +36,20 @@ class Fixture:
         self.unconfirmed_creates = set()
         self.objects = {}
         self.versions = {}
-        self.journal = []
+        self.request_count = 0
+        self.journal_path = self.directory / "acknowledged-requests.jsonl"
         self.prefix = "usage-" + secrets.token_hex(10)
 
     def persist_ownership(self):
         (self.directory / "owned-buckets.json").write_text(json.dumps({
             "prefix": self.prefix, "buckets": sorted(self.owned),
             "unconfirmed_creates": sorted(self.unconfirmed_creates),
-            "committed_requests": self.journal}, indent=2) + "\n")
+            "request_journal": self.journal_path.name}, indent=2) + "\n")
+
+    def record_acknowledgement(self, entry):
+        with self.journal_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"sequence": self.request_count + 1, **entry}) + "\n")
+        self.request_count += 1
 
     def create(self, suffix, *, name=None, versioned=False):
         bucket = name or self.prefix + "-" + suffix
@@ -65,7 +71,7 @@ class Fixture:
 
     def put(self, bucket, key, size, *, endpoint_index=0):
         require(bucket in self.owned, "refusing writes to an unowned bucket", "INFRA_ERROR")
-        payload = (hashlib.sha256((key + str(len(self.journal))).encode()).digest() * ((size + 31) // 32))[:size]
+        payload = (hashlib.sha256((key + str(self.request_count)).encode()).digest() * ((size + 31) // 32))[:size]
         path = self.directory / "request-payload.bin"
         path.write_bytes(payload)
         response = self.client.s3("put-object", "--bucket", bucket, "--key", key, "--body", path,
@@ -76,9 +82,8 @@ class Fixture:
             require(bool(entry["version_id"]), "versioned PUT did not return a VersionId")
             self.versions[bucket].append(entry)
         self.objects[bucket][key] = entry
-        self.journal.append({"operation": "put", "bucket": bucket, "endpoint_index": endpoint_index,
-                             "acknowledged_at": utc_now(), **entry})
-        self.persist_ownership()
+        self.record_acknowledgement({"operation": "put", "bucket": bucket, "endpoint_index": endpoint_index,
+                                     "acknowledged_at": utc_now(), **entry})
         return entry
 
     def delete(self, bucket, key):
@@ -89,9 +94,8 @@ class Fixture:
                     "versioned DELETE did not create the expected marker")
             self.versions[bucket].append({"key": key, "version_id": response["VersionId"], "marker": True, "size": 0})
         self.objects[bucket].pop(key, None)
-        self.journal.append({"operation": "delete", "bucket": bucket, "key": key, "response": response,
-                             "acknowledged_at": utc_now()})
-        self.persist_ownership()
+        self.record_acknowledgement({"operation": "delete", "bucket": bucket, "key": key, "response": response,
+                                     "acknowledged_at": utc_now()})
 
     def inventory(self, bucket, *, versioned=False):
         require(bucket in self.owned, "refusing inventory of an unowned bucket", "INFRA_ERROR")
@@ -274,7 +278,7 @@ class PublicProbe:
         require(len(self.client.endpoints) >= 2, "Multiple explicit S3 endpoints are required", "BLOCKED")
         require(len(self.client.admin_endpoints) >= 2, "Multiple explicit Admin endpoints are required", "BLOCKED")
         bucket = self.fixture.create("sources")
-        self.seed(bucket, endpoints=True)
+        self.seed(bucket, max(self.options.objects, len(self.client.endpoints)), endpoints=True)
         evidence = []
         for index in range(len(self.client.endpoints)):
             values, oracle = self.fixture.oracle(bucket, verify_payloads=True, endpoint_index=index)
@@ -418,7 +422,8 @@ def execute_case(case, directory, options, provenance, native_manifest=None, cli
             except (ProbeError, OSError, ValueError) as exc:
                 failure = exc if isinstance(exc, ProbeError) else ProbeError(str(exc))
                 errors.append(failure)
-                path = evidence.save("native-adapter-error", {"reason": str(failure), "verdict": failure.verdict})
+                path = evidence.save("native-adapter-error", {"reason": str(failure), "verdict": failure.verdict,
+                                                              "cleanup_status": failure.cleanup_status})
                 records.update(getattr(failure, "native_records", {}))
                 for identifier in native_needed:
                     if identifier not in records:
@@ -511,6 +516,8 @@ def main(argv=None):
     args.endpoints = args.endpoint or ([os.environ["RUSTFS_USAGE_ENDPOINT"]] if os.environ.get("RUSTFS_USAGE_ENDPOINT") else [])
     args.admin_endpoints = args.admin_endpoint or ([os.environ["RUSTFS_USAGE_ADMIN_ENDPOINT"]] if os.environ.get("RUSTFS_USAGE_ADMIN_ENDPOINT") else [])
     try:
+        args.endpoints = [endpoint_url(value) for value in args.endpoints]
+        args.admin_endpoints = [endpoint_url(value) for value in args.admin_endpoints]
         selected = select_cases(args.validation_case or args.cases)
         require(all(math.isfinite(value) and value > 0 for value in (args.request_timeout, args.convergence_timeout, args.native_timeout,
                                            args.poll_interval, args.freshness_samples)), "Timeouts and sample counts must be positive", "INFRA_ERROR")

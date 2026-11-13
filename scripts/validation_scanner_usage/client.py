@@ -70,11 +70,29 @@ class Evidence:
 
 
 def endpoint_url(value):
-    url = parse.urlsplit(value)
-    if (url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password
-            or url.query or url.fragment or url.path not in {"", "/"}):
-        raise ValueError("endpoint must be an HTTP(S) origin without credentials, query or path")
-    return value.rstrip("/")
+    message = "endpoint must be an HTTP(S) origin without credentials, query or path"
+    try:
+        if not isinstance(value, str) or any(character.isspace() or ord(character) < 32 for character in value):
+            raise ValueError(message)
+        url = parse.urlsplit(value)
+        if (url.scheme not in {"http", "https"} or not url.hostname
+                or url.username is not None or url.password is not None
+                or url.query or url.fragment or url.path not in {"", "/"}):
+            raise ValueError(message)
+        # Force port validation here; urllib otherwise defers it until I/O.
+        _ = url.port
+    except ValueError:
+        # Parser errors can echo a malformed port or authority containing a
+        # secret. Only this fixed diagnostic may reach logs and artifacts.
+        raise ValueError(message) from None
+    return parse.urlunsplit((url.scheme, url.netloc, "", "", ""))
+
+
+class NoSignedRedirects(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A signature authorizes only the admitted origin and request path.
+        # Preserve every 3xx as HTTPError for the ordinary failure evidence.
+        return None
 
 
 class Client:
@@ -100,7 +118,7 @@ class Client:
                                 AWS_DEFAULT_REGION=region, AWS_EC2_METADATA_DISABLED="true",
                                 AWS_CONFIG_FILE=os.devnull, AWS_SHARED_CREDENTIALS_FILE=os.devnull,
                                 AWS_MAX_ATTEMPTS="1", AWS_PAGER="", NO_PROXY="*", no_proxy="*")
-        self.http = request.build_opener(request.ProxyHandler({}))
+        self.http = request.build_opener(request.ProxyHandler({}), NoSignedRedirects())
         self.last_evidence = None
 
     def _redact(self, text):
@@ -208,6 +226,8 @@ def bucket_view(snapshot, bucket):
     if not isinstance(entry, dict):
         raise ProbeError("Bucket usage is not an object")
     state = entry.get("usage_value_state")
+    if state is not None and not isinstance(state, str):
+        raise ProbeError("Bucket usage_value_state must be a string or null", "FAIL")
     known = state in {"certified", "carried", "observed"}
     certificate = entry.get("usage_certification")
     if known and certificate is not None:

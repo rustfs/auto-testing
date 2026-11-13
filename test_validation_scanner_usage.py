@@ -4,10 +4,18 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -18,7 +26,7 @@ from scripts.select_validation_cases import select_validation_cases, sweepable_c
 from scripts.validation_scanner_usage.client import Client, Evidence, ProbeError, bucket_view, endpoint_url, run_command, sha256
 from scripts.validation_scanner_usage.contracts import CASES, assertion_id, catalog_module, select_cases
 from scripts.validation_scanner_usage.native import run_native
-from scripts.validation_scanner_usage.runner import execute_case, Fixture, render_report
+from scripts.validation_scanner_usage.runner import execute_case, Fixture, main, render_report
 
 ROOT = Path(__file__).resolve().parent
 
@@ -166,10 +174,55 @@ class ValueContractTests(unittest.TestCase):
             bucket_view(snapshot({"usage_value_state": "certified", "usage_certification": cert}), "bucket")
 
     def test_endpoint_rejects_embedded_secrets_and_non_origins(self):
-        for bad in ("http://user:pass@host", "file:///etc/passwd", "http://host/path", "http://host?token=a"):
+        for bad in ("http://user:pass@host", "file:///etc/passwd", "http://host/path", "http://host?token=a",
+                    "http://@host", "http://host:65536", "http://host:secret-port", "http://host\n"):
             with self.assertRaises(ValueError):
                 endpoint_url(bad)
         self.assertEqual(endpoint_url("https://host:9001/"), "https://host:9001")
+
+    def test_usage_state_rejects_non_string_json_values(self):
+        for state in ([], {}, 1, True):
+            with self.subTest(state=state), self.assertRaisesRegex(ProbeError, "usage_value_state") as error:
+                bucket_view(snapshot({"objects_count": 1, "size": 8, "usage_value_state": state}), "bucket")
+            self.assertEqual(error.exception.verdict, "FAIL")
+
+    def test_signed_admin_requests_never_follow_redirects(self):
+        received = []
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append((self.server.server_port, self.path))
+                self.send_response(self.server.response_status)
+                self.send_header("Location", self.server.destination)
+                self.end_headers()
+                self.wfile.write(b'{"redirect":true}')
+
+            def log_message(self, *_):
+                pass
+
+        servers = [ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler) for _ in range(2)]
+        for server in servers:
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join, 2)
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            server.response_status = 200
+            server.destination = "http://127.0.0.1/unused"
+        origin = f"http://127.0.0.1:{servers[0].server_port}"
+        with tempfile.TemporaryDirectory() as directory:
+            client = Client([origin], [], Evidence(directory), environment={
+                "RUSTFS_ACCESS_KEY": "unit-access", "RUSTFS_SECRET_KEY": "unit-secret", "AWS_SESSION_TOKEN": "unit-token"})
+            for status in (301, 302, 303, 307, 308):
+                for destination in (origin + "/unexpected", f"http://127.0.0.1:{servers[1].server_port}/unexpected"):
+                    with self.subTest(status=status, destination=destination):
+                        received.clear()
+                        servers[0].response_status, servers[0].destination = status, destination
+                        with self.assertRaisesRegex(ProbeError, f"HTTP {status}") as error:
+                            client.admin()
+                        self.assertEqual(error.exception.verdict, "FAIL")
+                        self.assertEqual(received, [(servers[0].server_port, "/rustfs/admin/v3/datausageinfo")])
+                        record = json.loads((Path(directory) / client.last_evidence).read_text())
+                        self.assertEqual((record["status"], record["url"]), (status, origin + "/rustfs/admin/v3/datausageinfo"))
 
 
 class RunnerTests(unittest.TestCase):
@@ -228,6 +281,55 @@ class RunnerTests(unittest.TestCase):
         result = self.run_case(CASES[6])
         self.assertEqual(result["verdict"], "BLOCKED")
         self.assertIn("Multiple explicit", result["reason"])
+
+    def test_minimum_fixture_still_writes_through_every_endpoint(self):
+        endpoints = [f"http://endpoint-{index}.invalid:9000" for index in range(3)]
+        result = self.run_case(CASES[6], endpoints=endpoints, admin_endpoints=endpoints, objects=2)
+        self.assertEqual(result["assertions"][0]["status"], "PASS", result)
+        directory = self.directory / "evidence" / CASES[6].id
+        acknowledged = [json.loads(line) for line in (directory / "acknowledged-requests.jsonl").read_text().splitlines()]
+        puts = [row for row in acknowledged if row["operation"] == "put"]
+        self.assertEqual({row["endpoint_index"] for row in puts}, {0, 1, 2})
+        self.assertEqual(len(puts), 3)
+
+    def test_malformed_usage_state_preserves_results_and_allows_the_next_case(self):
+        class MalformedStateClient(FakeClient):
+            def admin(self, *args, **kwargs):
+                result = super().admin(*args, **kwargs)
+                for entry in result["buckets_usage"].values():
+                    entry["usage_value_state"] = []
+                return result
+        with tempfile.TemporaryDirectory() as directory:
+            first = execute_case(CASES[0], directory, options(), PROVENANCE, client_factory=MalformedStateClient)
+            second = execute_case(CASES[19], directory, options(), PROVENANCE, client_factory=FakeClient)
+            self.assertEqual(first["verdict"], "FAIL")
+            self.assertEqual([row["status"] for row in first["assertions"]], ["PASS", "FAIL", "BLOCKED"])
+            self.assertEqual(first["cleanup_status"], "PASS")
+            self.assertEqual(second["verdict"], "PASS")
+            self.assertEqual(len(list((Path(directory) / "cases").glob("*.json"))), 2)
+
+    def test_request_journal_appends_without_rewriting_ownership_or_prior_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Evidence(directory)
+            client = FakeClient(["http://example.invalid"], [], evidence)
+            fixture = Fixture(client, directory, evidence)
+            bucket = fixture.create("append-only")
+            ownership_path = Path(directory) / "owned-buckets.json"
+            original_ownership = ownership_path.read_bytes()
+            with patch.object(fixture, "persist_ownership", wraps=fixture.persist_ownership) as ownership:
+                for _ in range(512):
+                    fixture.put(bucket, "replaced", 1)
+                    fixture.delete(bucket, "replaced")
+                ownership.assert_not_called()
+            self.assertEqual(ownership_path.read_bytes(), original_ownership)
+            journal = fixture.journal_path.read_bytes()
+            rows = [json.loads(line) for line in journal.splitlines()]
+            self.assertEqual([row["sequence"] for row in rows], list(range(1, 1025)))
+            self.assertEqual([row["operation"] for row in rows], ["put", "delete"] * 512)
+            self.assertLess(len(journal), 1024 * 512, "journal bytes must be linear in acknowledgement count")
+            fixture.put(bucket, "later", 1)
+            self.assertTrue(fixture.journal_path.read_bytes().startswith(journal))
+            self.assertEqual(fixture.cleanup()[0], "PASS")
 
     def test_cleanup_never_accepts_a_foreign_bucket(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -437,8 +539,115 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(result["assertions"][0]["status"], "FAIL")
         self.assertTrue(all(row["status"] == "BLOCKED" for row in result["assertions"][1:]), result)
 
+    def test_nonexecutable_later_binary_keeps_prior_pass_and_later_blocked_records(self):
+        self.case = CASES[12]
+        all_ids = [assertion_id(self.case, index) for index in range(len(self.case.assertions))]
+        self.ids = all_ids[:1]
+        manifest = self.manifest()
+        specs = manifest["cases"][self.case.design_id]["tests"]
+        blocked_binary = self.root / "not-executable"
+        blocked_binary.write_text(Path(specs[0]["binary"]).read_text())
+        blocked_binary.chmod(0o600)
+        specs.extend({**specs[0], "binary": str(blocked_binary), "binary_sha256": sha256(blocked_binary),
+                      "assertions": [identifier]} for identifier in all_ids[1:])
+        result = execute_case(self.case, self.root, options(execution="native"), PROVENANCE, native_manifest=manifest)
+        self.assertEqual(result["verdict"], "INFRA_ERROR")
+        self.assertEqual([row["status"] for row in result["assertions"]], ["PASS", "INFRA_ERROR"] + ["BLOCKED"] * 6)
+        self.assertTrue(result["assertions"][0]["native_evidence"])
+        self.assertIn("Permission denied", result["reason"])
+
+    def test_real_signal_interrupts_native_process_and_leaves_cleanup_unverified(self):
+        manifest = self.manifest()
+        spec = manifest["cases"][self.case.design_id]["tests"][0]
+        binary, ready = Path(spec["binary"]), self.root / "native-ready.json"
+        binary.write_text("#!" + sys.executable + "\nimport json, os, pathlib, sys, time\n"
+                          + f"if '--list' in sys.argv:\n    print({(self.name + ': test')!r})\n"
+                          + "else:\n"
+                          + f"    ready = pathlib.Path({str(ready)!r})\n"
+                          + "    ready.with_suffix('.tmp').write_text(json.dumps({'pid': os.getpid()}))\n"
+                          + "    ready.with_suffix('.tmp').replace(ready)\n"
+                          + "    time.sleep(30)\n")
+        spec["binary_sha256"] = sha256(binary)
+        manifest_path, candidate_path = self.root / "native.json", self.root / "candidate.json"
+        manifest_path.write_text(json.dumps(manifest))
+        candidate_path.write_text(json.dumps({"source_sha": PROVENANCE["source_commit"],
+            "package_sha256": "a" * 64, "binary_sha256": "b" * 64, "package_url": "https://example.invalid/package"}))
+        artifacts = self.root / "interrupted-run"
+        command = [sys.executable, "-B", "-m", "scripts.validation_scanner_usage.runner", "--execution", "native",
+                   "--cases", self.case.design_id, "--native-manifest", str(manifest_path),
+                   "--candidate-manifest", str(candidate_path), "--artifacts-dir", str(artifacts),
+                   "--rc-bin", sys.executable, "--native-timeout", "20"]
+        process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "native command did not start")
+            pid = json.loads(ready.read_text())["pid"]
+            process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 1, (stdout, stderr))
+            result = json.loads((artifacts / "cases" / (self.case.id + ".json")).read_text())
+            self.assertEqual((result["verdict"], result["cleanup_status"]), ("INFRA_ERROR", "FAIL"))
+            self.assertIn("interrupted by signal", result["reason"])
+            errors = list((artifacts / "evidence" / self.case.id).glob("*-native-adapter-error.json"))
+            self.assertEqual(json.loads(errors[0].read_text())["cleanup_status"], "FAIL")
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            process.communicate()
+
+    def test_interruption_before_native_milestone_validation_cannot_report_cleanup_pass(self):
+        manifest = self.manifest()
+        original_save = Evidence.save
+        def interrupted_save(evidence, stem, value):
+            if stem == "native-execution":
+                raise ProbeError("Runner interrupted before native milestones were validated")
+            return original_save(evidence, stem, value)
+        with patch.object(Evidence, "save", interrupted_save):
+            result = execute_case(self.case, self.root, options(execution="native"), PROVENANCE, native_manifest=manifest)
+        self.assertEqual((result["verdict"], result["cleanup_status"]), ("INFRA_ERROR", "FAIL"))
+
 
 class RegistrationTests(unittest.TestCase):
+    def test_cli_rejects_endpoint_secrets_before_artifacts_in_every_mode(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+            artifacts = Path(directory) / "must-not-exist"
+            for execution in ("combined", "native"):
+                for flag in ("--endpoint", "--admin-endpoint"):
+                    for endpoint in ("http://user:private-password@host", "http://host?token=private-token",
+                                     "http://host:private-port"):
+                        with self.subTest(execution=execution, flag=flag, endpoint=endpoint):
+                            stderr = io.StringIO()
+                            with redirect_stderr(stderr):
+                                result = main(["--execution", execution, flag, endpoint, "--cases", "USAGE-14",
+                                               "--artifacts-dir", str(artifacts), "--candidate-manifest", "not-read.json"])
+                            self.assertEqual(result, 2)
+                            self.assertIn("endpoint must be", stderr.getvalue())
+                            self.assertNotIn("private-", stderr.getvalue())
+                            self.assertFalse(artifacts.exists())
+
+    def test_native_cli_records_only_normalized_endpoints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate.json"
+            candidate.write_text(json.dumps({"source_sha": "c" * 40, "package_sha256": "a" * 64,
+                                            "binary_sha256": "b" * 64, "package_url": "https://example.invalid/package"}))
+            artifacts = root / "artifacts"
+            result = main(["--execution", "native", "--cases", "USAGE-14", "--endpoint", "http://host:9000/",
+                           "--admin-endpoint", "http://host:9001/", "--artifacts-dir", str(artifacts),
+                           "--candidate-manifest", str(candidate), "--rc-bin", sys.executable])
+            self.assertEqual(result, 1, "missing native capability stays blocked")
+            config = json.loads((artifacts / "run-configuration.json").read_text())
+            self.assertEqual(config["endpoints"], ["http://host:9000"])
+            self.assertEqual(config["admin_endpoints"], ["http://host:9001"])
+
     def test_twenty_native_rows_without_capabilities_remain_blocked(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("scripts.validation_scanner_usage.runner.Client", side_effect=AssertionError("no endpoint access")) as client:
