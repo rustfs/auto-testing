@@ -129,9 +129,18 @@ cases use single-disk
 deployment. The scanner case uses the storage suite's single-node four-disk
 deployment, waits for a post-upload successful scanner cycle, and requires a
 complete usage snapshot with exactly 20 objects and 20,690 logical bytes.
-Each requires a candidate manifest with `source_sha`, `package_url`, and
-`package_sha256`. The installed binary
-SHA-256 is measured on the test node and included in result provenance:
+The separate `scanner-usage-regressions` module adds USAGE-01 through USAGE-20
+without changing that strict smoke test or the 158 source catalog cases.
+Run it explicitly with `rustfs-scanner-usage-test.sh` against existing endpoints;
+see [the usage regression contracts and evidence requirements](docs/scanner-usage-validation.md).
+Public observations cannot prove internal ACK ordering or cross-cycle races,
+so missing candidate-native hooks remain BLOCKED or UNSUPPORTED.
+The endpoint-only usage runner records operator-supplied candidate and binary
+identities; it does not independently attest the remote installed binary.
+The canonical S3, KMS, IAM, and scanner smoke deployment cases above require a
+candidate manifest with `source_sha`, `package_url`, and `package_sha256`.
+Those deployment cases measure the installed binary SHA-256 on the test node
+and include it in result provenance:
 
 ```bash
 ./rustfs-s3-compat-test.sh \

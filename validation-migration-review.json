@@ -7,7 +7,7 @@
   "scope": "Test implementation migration and candidate live acceptance are independent. This review does not rewrite original results, change migration_status semantics or relax the canonical gate. Environment procedures remain disabled by default under the accepted delivery scope.",
   "evidence_basis": "20261026-canonical-migration-ledger-7094.json plus later G01/G02 attempts and source review on 2026-10-28; historical result bytes and audit reports remain in the separate evidence store. 2026-11-10: a scoped re-review of the Rebalance activity fixture, capacity admission, Started non-zero progress, and the early-completion diagnosis; this local regression adds no product live acceptance.",
   "reviewed_files": {
-    "scripts/run_validation_case.sh": "ac51328ff860074f285999236a07ec8d2274d56607dc7c6c6389747fd7a0c498",
+    "scripts/run_validation_case.sh": "1c4afb02fc9cfba124239cd57f9fc8cfc40cea164d8093e5f41d25d7575aafef",
     "scripts/validation_heal/authority.py": "8f2225f184427674de1f45aff4c4976c812f9d70fd4bc927ce460726a4ff74a0",
     "scripts/validation_heal/authority_runner.py": "d1dce07019a37318f9fbfc9c4d7383fa259d8d6da881ebacf083a67d04fc2545",
     "scripts/validation_heal/bounded_volume.py": "56f57d2bef882af81a7bf05365fa8b5ae01f9fcdd515b3bc930e1f36cf98e944",

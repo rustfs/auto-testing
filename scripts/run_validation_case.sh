@@ -13,6 +13,8 @@ TESTING_COMMIT="$3"
 ARTIFACTS_DIR="$4"
 
 case "${CASE_ID}" in
+  scanner.usage-[0-9][0-9]-*)
+    SUITE=scripts/validation_scanner_usage/run_case.sh; EXTRA_ARGS=() ;;
   pool.*)
     SUITE=scripts/validation_pool/run_case.sh; EXTRA_ARGS=() ;;
   bucket-replication.*|site-replication.*)
@@ -36,8 +38,8 @@ case "${CASE_ID}" in
     exit 2 ;;
 esac
 
-if [[ "${CASE_ID}" == pool.* || "${CASE_ID}" == bucket-replication.* || "${CASE_ID}" == site-replication.* ]]; then
-  python3 -B -c 'import json,sys; catalog=json.load(open(sys.argv[1])); valid={case["id"] for module in catalog["modules"] for case in module["cases"]}; sys.exit(0 if sys.argv[2] in valid else 2)' \
+if [[ "${CASE_ID}" == pool.* || "${CASE_ID}" == bucket-replication.* || "${CASE_ID}" == site-replication.* || "${CASE_ID}" == scanner.usage-[0-9][0-9]-* ]]; then
+  python3 -B -c 'import json,sys; catalog=json.load(open(sys.argv[1])); valid={case["id"] for module in catalog["modules"]+catalog.get("local_modules",[]) for case in module["cases"]}; sys.exit(0 if sys.argv[2] in valid else 2)' \
     "${SCRIPT_DIR}/validation-cases.json" "${CASE_ID}" || {
       printf 'unknown canonical validation case: %s\n' "${CASE_ID}" >&2
       exit 2

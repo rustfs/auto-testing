@@ -64,6 +64,11 @@ CASE_SUITES = {
 }
 
 
+def catalog_modules(snapshot: dict) -> list[dict]:
+    """Include local executors without rewriting the immutable source snapshot."""
+    return snapshot["modules"] + snapshot.get("local_modules", [])
+
+
 def validate_snapshot(snapshot: dict) -> None:
     if snapshot.get("schema") != 1:
         raise ValueError("unsupported validation catalog schema")
@@ -100,10 +105,28 @@ def validate_snapshot(snapshot: dict) -> None:
                 raise ValueError(f"invalid reuse case IDs: {case_id}")
     if dict(statuses) != EXPECTED_STATUS_COUNTS:
         raise ValueError(f"unexpected case counts: {dict(statuses)}")
+    local_modules = snapshot.get("local_modules", [])
+    if not isinstance(local_modules, list):
+        raise ValueError("local_modules must be a list")
+    for module in local_modules:
+        if module.get("origin") != "auto-testing" or not module.get("id") or not isinstance(module.get("cases"), list):
+            raise ValueError("invalid local validation module")
+        for case in module["cases"]:
+            case_id = case.get("id")
+            if not isinstance(case_id, str) or not case_id or case_id in ids:
+                raise ValueError(f"duplicate or invalid local case ID: {case_id}")
+            ids.add(case_id)
+            if case.get("source_status") not in EXPECTED_STATUS_COUNTS or not case.get("assertions"):
+                raise ValueError(f"invalid local assertion contract: {case_id}")
+            if case.get("probes", {}).get("executionMode") != "configured-endpoint":
+                raise ValueError(f"local executor must declare explicit endpoint admission: {case_id}")
+            candidates = case.get("reuse_candidates")
+            if not isinstance(candidates, dict) or not isinstance(candidates.get("suites"), list) or not isinstance(candidates.get("case_ids"), list):
+                raise ValueError(f"missing local reuse assessment: {case_id}")
 
 
 def validate_reuse_candidates(snapshot: dict, checkout: Path) -> None:
-    for module in snapshot["modules"]:
+    for module in catalog_modules(snapshot):
         for case in module["cases"]:
             candidates = case["reuse_candidates"]
             suites = candidates["suites"]
@@ -179,6 +202,11 @@ def main() -> int:
         if args.source is None:
             parser.error("sync requires --source")
         snapshot = build_snapshot(args.source)
+        if args.catalog.is_file():
+            local_modules = json.loads(args.catalog.read_text()).get("local_modules")
+            if local_modules is not None:
+                snapshot["local_modules"] = local_modules
+                validate_snapshot(snapshot)
         args.catalog.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
         print(f"wrote {args.catalog}")
         return 0
@@ -196,7 +224,8 @@ def main() -> int:
             print(f"{module['id']}: {len(module['cases'])} {dict(statuses)}")
     else:
         source_note = "source hash matched" if args.source is not None else "source checkout not supplied"
-        print(f"validation catalog: 158 unique cases, statuses 66/84/8, {source_note}")
+        local_count = sum(len(module["cases"]) for module in snapshot.get("local_modules", []))
+        print(f"validation catalog: 158 source cases, statuses 66/84/8, {local_count} local cases, {source_note}")
     return 0
 
 

@@ -45,6 +45,11 @@ def select_validation_cases(catalog, *, case="", module="", limit=None, rotate=F
     selected = sweepable_cases(catalog)
     one_case = (case or "").strip()
     module_filter = (module or "").strip()
+    # Configured-endpoint procedures have their own admission and never enter
+    # nightly rotation implicitly. Explicit selection can still execute them.
+    if one_case or module_filter:
+        selected.extend((item["id"], local["id"]) for local in catalog.get("local_modules", [])
+                        for item in local["cases"])
     known = {case_id: module_id for case_id, module_id in selected}
     if one_case:
         if one_case not in known:
