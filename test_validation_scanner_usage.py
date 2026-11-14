@@ -18,6 +18,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+from uuid import NAMESPACE_DNS, uuid5
 from unittest.mock import patch
 
 from scripts.validation_catalog import catalog_modules, validate_snapshot
@@ -73,7 +74,8 @@ class FakeClient:
         self.malformed = False
 
     def s3(self, operation, *arguments, endpoint_index=0):
-        self.last_evidence = self.evidence.save("fake-s3", {"operation": operation, "arguments": list(map(str, arguments))})
+        self.last_evidence = self.evidence.save("fake-s3", {"operation": operation, "arguments": list(map(str, arguments)),
+                                                        "endpoint_index": endpoint_index})
         def arg(name, default=None):
             return arguments[arguments.index(name) + 1] if name in arguments else default
         bucket, key = arg("--bucket"), arg("--key")
@@ -127,6 +129,7 @@ class FakeClient:
             value["buckets_usage"][bucket] = {"objects_count": len({row["Key"] for row in rows}),
                 "size": sum(len(row["payload"]) for row in rows), "versions_count": sum(not row["marker"] for row in rows),
                 "delete_markers_count": sum(row["marker"] for row in rows),
+                "bucket_incarnation": str(uuid5(NAMESPACE_DNS, bucket)),
                 "usage_value_state": "observed" if self.observed else "certified",
                 "usage_certification": None if self.observed else certificate(self.serial)}
         self.last_evidence = self.evidence.save("fake-admin", value)
@@ -291,6 +294,124 @@ class RunnerTests(unittest.TestCase):
         puts = [row for row in acknowledged if row["operation"] == "put"]
         self.assertEqual({row["endpoint_index"] for row in puts}, {0, 1, 2})
         self.assertEqual(len(puts), 3)
+        oracles = [json.loads(path.read_text()) for path in directory.glob("*-independent-oracle.json")]
+        self.assertEqual({(row["endpoint_index"], row["endpoint"]) for row in oracles}, set(enumerate(endpoints)))
+        requests = [json.loads(path.read_text()) for path in directory.glob("*-fake-s3.json")]
+        for operation in ("list-objects-v2", "get-object"):
+            self.assertEqual({row["endpoint_index"] for row in requests if row["operation"] == operation}, {0, 1, 2})
+
+    def test_certified_and_carried_cold_values_with_exact_oracles_can_pass(self):
+        for state in ("certified", "carried"):
+            def configure(client):
+                original = client.admin
+                def admin(*args, **kwargs):
+                    value = original(*args, **kwargs)
+                    value["usage_snapshot_converged"] = False
+                    for bucket, entry in value["buckets_usage"].items():
+                        if "-cold-" in bucket:
+                            entry["usage_value_state"] = state
+                            entry["usage_certification"] = certificate(1)
+                    return value
+                client.admin = admin
+            with self.subTest(state=state):
+                result = self.run_case(CASES[4], configure=configure, convergence_timeout=0.1)
+                self.assertEqual(result["assertions"][0]["status"], "PASS", result)
+                self.assertTrue(all(row["status"] == "BLOCKED" for row in result["assertions"][1:]))
+
+    def test_oracle_propagates_endpoint_and_markers_on_every_inventory_page(self):
+        for versioned in (False, True):
+            with self.subTest(versioned=versioned), tempfile.TemporaryDirectory() as directory:
+                evidence = Evidence(directory)
+                endpoints = [f"http://endpoint-{index}.invalid:9000" for index in range(3)]
+                client = FakeClient(endpoints, endpoints, evidence)
+                fixture = Fixture(client, directory, evidence)
+                bucket = fixture.create("pages", versioned=versioned)
+                fixture.put(bucket, "first", 11)
+                fixture.put(bucket, "second", 17)
+                original = client.s3
+                requests = []
+                def paginated(operation, *arguments, endpoint_index=0):
+                    if operation not in ("list-objects-v2", "list-object-versions"):
+                        return original(operation, *arguments, endpoint_index=endpoint_index)
+                    requests.append((endpoint_index, list(arguments)))
+                    page = original(operation, *arguments, endpoint_index=endpoint_index)
+                    marker = "--key-marker" if versioned else "--continuation-token"
+                    second = marker in arguments
+                    field = "Versions" if versioned else "Contents"
+                    page[field] = [page[field][1 if second else 0]]
+                    page["IsTruncated"] = not second
+                    if not second:
+                        if versioned:
+                            page.update(NextKeyMarker="first", NextVersionIdMarker="1")
+                        else:
+                            page["NextContinuationToken"] = "opaque-token"
+                    return page
+                with patch.object(client, "s3", side_effect=paginated):
+                    for index in range(3):
+                        values, _ = fixture.oracle(bucket, verify_payloads=True, endpoint_index=index)
+                        self.assertEqual((values["count"], values["size"]), (2, 28))
+                self.assertEqual([index for index, _ in requests], [0, 0, 1, 1, 2, 2])
+                for _, arguments in requests[1::2]:
+                    marker = "--key-marker" if versioned else "--continuation-token"
+                    self.assertEqual(arguments[arguments.index(marker) + 1], "first" if versioned else "opaque-token")
+                    if versioned:
+                        self.assertEqual(arguments[arguments.index("--version-id-marker") + 1], "1")
+                self.assertEqual(fixture.cleanup()[0], "PASS")
+
+    def test_one_endpoint_with_a_different_inventory_cannot_pass(self):
+        def configure(client):
+            original = client.s3
+            def divergent(operation, *arguments, endpoint_index=0):
+                value = original(operation, *arguments, endpoint_index=endpoint_index)
+                if operation == "list-objects-v2" and endpoint_index == 1:
+                    value["Contents"] = value["Contents"][:-1]
+                return value
+            client.s3 = divergent
+        endpoints = ["http://first.invalid:9000", "http://second.invalid:9000"]
+        result = self.run_case(CASES[6], configure=configure, endpoints=endpoints, admin_endpoints=endpoints)
+        self.assertEqual(result["assertions"][0]["status"], "FAIL", result)
+        self.assertIn("Independent S3 inventory", result["reason"])
+        self.assertEqual(result["cleanup_status"], "PASS")
+
+    def test_invalid_cold_values_cannot_pass_even_with_exact_counts(self):
+        for defect in ("certificate", "observed", "identity", "changed_identity", "count", "size", "pending",
+                       "partial", "observational", "admin_projection", "complete", "missing_identity", "unknown"):
+            def configure(client):
+                original = client.admin
+                calls = 0
+                def admin(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    value = original(*args, **kwargs)
+                    for bucket, entry in value["buckets_usage"].items():
+                        if "-cold-" not in bucket:
+                            continue
+                        entry["usage_value_state"] = "carried"
+                        if defect == "certificate":
+                            entry["usage_certification"] = None
+                        elif defect in ("observed", "unknown"):
+                            entry["usage_value_state"] = "observed" if defect == "observed" else "future"
+                            entry["usage_certification"] = None
+                        elif defect == "identity":
+                            entry["bucket_incarnation"] = "00000000-0000-0000-0000-000000000000"
+                        elif defect == "changed_identity" and calls > 3:
+                            entry["bucket_incarnation"] = str(uuid5(NAMESPACE_DNS, bucket + "-successor"))
+                        elif defect == "missing_identity":
+                            entry.pop("bucket_incarnation")
+                        elif defect in ("count", "size"):
+                            entry["objects_count" if defect == "count" else "size"] += 1
+                        elif defect == "pending":
+                            value.setdefault("usage_snapshot_pending_buckets", []).append(bucket)
+                        elif defect == "complete":
+                            value["usage_snapshot_complete"] = False
+                        else:
+                            value["usage_snapshot_" + defect] = True
+                    return value
+                client.admin = admin
+            with self.subTest(defect=defect):
+                result = self.run_case(CASES[4], configure=configure, convergence_timeout=0.03)
+                self.assertEqual(result["assertions"][0]["status"], "UNSUPPORTED" if defect == "unknown" else "FAIL", result)
+                self.assertEqual(result["cleanup_status"], "PASS", result)
 
     def test_malformed_usage_state_preserves_results_and_allows_the_next_case(self):
         class MalformedStateClient(FakeClient):
