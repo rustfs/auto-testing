@@ -263,4 +263,5 @@ def bucket_view(snapshot, bucket):
             "incarnation": entry.get("bucket_incarnation"), "metadata_available": known,
             "pending": bucket in pending, "observational": snapshot.get("usage_snapshot_observational") is True,
             "partial": snapshot.get("usage_snapshot_partial") is True,
+            "admin_projection": snapshot.get("usage_snapshot_admin_projection") is True,
             "complete": snapshot.get("usage_snapshot_complete") is True}

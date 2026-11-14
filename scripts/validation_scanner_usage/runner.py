@@ -14,6 +14,7 @@ import shutil
 import signal
 import sys
 import time
+from uuid import UUID
 
 from .client import Client, Evidence, ProbeError, bucket_view, endpoint_url, integer, run_command, sha256, utc_now
 from .contracts import CASES, assertion_id, select_cases
@@ -97,12 +98,13 @@ class Fixture:
         self.record_acknowledgement({"operation": "delete", "bucket": bucket, "key": key, "response": response,
                                      "acknowledged_at": utc_now()})
 
-    def inventory(self, bucket, *, versioned=False):
+    def inventory(self, bucket, *, versioned=False, endpoint_index=0):
         require(bucket in self.owned, "refusing inventory of an unowned bucket", "INFRA_ERROR")
         records, continuation, seen = [], [], set()
         for _ in range(10000):
             operation = "list-object-versions" if versioned else "list-objects-v2"
-            value = self.client.s3(operation, "--bucket", bucket, "--max-keys", "100", "--no-paginate", *continuation)
+            value = self.client.s3(operation, "--bucket", bucket, "--max-keys", "100", "--no-paginate", *continuation,
+                                   endpoint_index=endpoint_index)
             if versioned:
                 for field, marker in (("Versions", False), ("DeleteMarkers", True)):
                     for row in value.get(field, []):
@@ -126,7 +128,7 @@ class Fixture:
 
     def oracle(self, bucket, *, verify_payloads=False, endpoint_index=0):
         versioned = self.versions[bucket] is not None
-        actual = self.inventory(bucket, versioned=versioned)
+        actual = self.inventory(bucket, versioned=versioned, endpoint_index=endpoint_index)
         expected = self.versions[bucket] if versioned else list(self.objects[bucket].values())
         fields = ("key", "version_id", "size", "marker") if versioned else ("key", "size")
         normalize = lambda rows: sorted(tuple(row[field] for field in fields) for row in rows)
@@ -148,6 +150,8 @@ class Fixture:
         if versioned:
             values.update(versions=sum(not row["marker"] for row in actual), markers=sum(row["marker"] for row in actual))
         path = self.evidence.save("independent-oracle", {"bucket": bucket, "versioned": versioned,
+                                                        "endpoint_index": endpoint_index,
+                                                        "endpoint": self.client.endpoints[endpoint_index],
                                                         "inventory": actual, "expected": values,
                                                         "payloads_verified": verify_payloads})
         return values, path
@@ -249,9 +253,13 @@ class PublicProbe:
         cold = [self.fixture.create(f"cold-{index}") for index in range(3)]
         self.seed(hot)
         targets = {}
+        oracles, incarnations, accepted = {}, {}, {}
         for bucket in cold:
             self.seed(bucket, 3)
-            targets[bucket], _ = self.fixture.oracle(bucket)
+            targets[bucket], oracles[bucket] = self.fixture.oracle(bucket, verify_payloads=True)
+            initial = self.sample(bucket)
+            if initial.get("incarnation") is not None:
+                incarnations[bucket] = initial["incarnation"]
         deadline = time.monotonic() + self.options.convergence_timeout
         done = set()
         operations = 0
@@ -260,18 +268,32 @@ class PublicProbe:
             operations += 1
             for bucket in cold:
                 view = self.sample(bucket)
-                # A cold bucket can be certified while another bucket remains
-                # pending. New per-bucket metadata is required for this claim.
-                if (view["state"] == "certified" and view["certificate"] is not None
+                incarnation = view.get("incarnation")
+                if incarnation is not None:
+                    require(isinstance(incarnation, str), "Cold-bucket incarnation is not a UUID")
+                    try:
+                        valid_identity = UUID(incarnation).int != 0
+                    except ValueError:
+                        valid_identity = False
+                    require(valid_identity, "Cold-bucket incarnation is not a non-nil UUID")
+                    require(incarnations.setdefault(bucket, incarnation) == incarnation,
+                            "Cold-bucket incarnation changed during the hot workload")
+                # A carried cold value retains its original certificate. It can
+                # satisfy this bucket probe while the hot bucket is still pending.
+                if (view["state"] in {"certified", "carried"} and view["certificate"] is not None
+                        and incarnation is not None
                         and view.get("complete") and not view.get("pending")
                         and not view.get("partial") and not view.get("observational")
+                        and not view.get("admin_projection")
                         and all(view[field] == value for field, value in targets[bucket].items())):
                     done.add(bucket)
+                    accepted[bucket] = view
             if len(done) < len(cold):
                 time.sleep(self.options.poll_interval)
         require(len(done) == len(cold), "Cold-bucket certification was not observed during the hot workload",
                 "UNSUPPORTED" if not any(row["view"].get("metadata_available") for row in self.observed) else "FAIL")
         self.check(0, {"cold_buckets": sorted(done), "hot_puts": operations,
+                       "independent_oracles": oracles, "incarnations": incarnations, "accepted_values": accepted,
                        "limits": "This public probe does not prove that a cycle budget actually expired."})
 
     def multi_endpoint(self):
