@@ -241,46 +241,66 @@ bash -n rustfs-fault-tolerance-test.sh
 python3 -B -m unittest -v test_rustfs_fault_tolerance.py
 ```
 
-## Empty-node replacement regression
+## XFS node replacement regression
 
-`scripts/node_replacement.py` creates an isolated Docker network with four
-RustFS containers, one fresh data volume per node, one pool, one four-drive
-erasure set and `EC:2`. It seeds objects, stops one node, and acknowledges
-additional PUTs while the other three nodes remain online. A fifth container
-with a new, verified-empty volume takes over the retired member's hostname
-and IP address. The retired container stays stopped and disconnected, with
-its original volume retained throughout verification.
+`scripts/node_replacement.py` exercises the XFS data-directory layout from
+backlog issue #3283. The default is four nodes with four XFS disks each,
+one 16-drive pool/set and `EC:4`. `--drives-per-node 1` selects a four-drive
+pool with `EC:2`.
 
-The case waits for automatic replacement repair before any recovered-object
-GET, then stops the servers and saves physical archives. It verifies the
-pool/set identities, the replacement disk UUID and slot, and external
-`xl.meta`/`part.1` files for every acknowledged object. Pre-outage shards must
-match the original slot's SHA-256. It then quarantines the external object
-parts on two original disks and starts verification services with healing disabled.
-Reads must fail with HTTP 503 while the replacement is offline. With the
-replacement online, all four endpoints must return every object's exact
-length and SHA-256 using the one remaining original shard and the new shard.
-Final physical checks require the quarantined parts to remain absent and
-the replacement shards to stay unchanged.
+Each disposable container mounts independent 512 MiB XFS image files on loop
+block devices at `/data/rustfs1` through `/data/rustfs4`. RustFS uses the
+`mnmd` subdirectory under each mount. Both
+`RUSTFS_UNSAFE_BYPASS_DISK_CHECK=false` and `MINIO_CI=false` are enforced in
+every service process. Filesystem UUIDs, block device identities, mount
+locations, endpoint mount status, process identities and the official binary
+SHA-256 are retained in the evidence.
 
-Run the **RustFS Empty Node Replacement Test** workflow with an image tag or
-digest, or run locally with Docker and `boto3>=1.35.76,<2` installed:
+The runner seeds 100 one-KiB objects and three large objects. It stops node 2,
+acknowledges three additional large PUTs on the survivors, archives the stopped
+node's data outside its service endpoints, and starts a fresh process with
+empty `mnmd` directories on the same XFS filesystems. This reproduces the
+report's directory-reset procedure while retaining its original disk evidence.
+
+Readability and disk recovery are independent assertions. Every replacement
+disk must recover `format.json`, `.rustfs.sys/pool.bin/xl.meta`,
+`.rustfs.sys/pool.bin.identity/xl.meta`, and the acknowledged objects' metadata
+and external parts. A ready process with missing system metadata fails the
+case. After physical repair, the runner disables healing and quarantines
+survivor external parts and inline object directories. Readback of every
+acknowledged object must then use replacement shards. A separate cold-start
+control removes survivor copies of both system objects, witnesses new-process
+metadata failures while the replacement is offline, and requires restored
+replacement metadata to participate in the startup quorum. Every recovered
+payload is checked against its acknowledged SHA-256.
+
+Run the **RustFS XFS Node Replacement Test** workflow, or build the helper
+image and run locally. Preparation requires Docker, `gh`, and `curl`; the
+runner requires Python and `boto3>=1.35.76,<2`. Docker must support privileged
+containers, loop devices and the XFS kernel driver.
 
 ```bash
-docker pull rustfs/rustfs:latest
-python3 -B scripts/node_replacement.py --image rustfs/rustfs:latest --artifacts-dir /tmp/node-replacement-evidence
+python3 -B scripts/prepare_node_replacement.py --release 1.0.5 --out /tmp/node-replacement-build --tag rustfs-node-replacement-xfs:local
+python3 -B scripts/node_replacement.py --image rustfs-node-replacement-xfs:local --artifacts-dir /tmp/node-replacement-evidence
 ```
 
-The runner freezes the image ID before creating services and records the
-image digest, PUT acknowledgments, physical file hashes, stopped disk
-archives, content checks, service logs and `result.json`. A PASS requires
-both object recovery and forced reconstruction through the replacement.
-Data lives in private Docker volumes. Containers simulate independent
-processes and network endpoints on one Docker host. The test enables
-`RUSTFS_UNSAFE_BYPASS_DISK_CHECK` for these volume-backed endpoints.
+Preparation verifies the official GNU release archive's published SHA-256
+before building the helper image. Its binary digest is rechecked before every
+service start. The helper formats exclusively created, run-owned regular
+image files and mounts actual XFS filesystems in private container mount
+namespaces. The test uses virtual block devices on one Docker host.
 
-Cleanup removes only resources carrying this run's ownership label. Recover
-an interrupted run using its saved manifest:
+`--endpoint-layout mountpoint` adds an endpoint bind mount for a control run
+with exact endpoint mountpoints. The default subdirectory layout keeps the
+same mount relationship as #3283. Each run records its layout and bypass flags;
+a control run has its own result and evidence directory.
+
+Artifacts include PUT acknowledgments, health responses, independent system
+metadata and object-shard results, stopped physical archives, service logs,
+filesystem identities and `result.json`. An unrepaired replacement retains a
+FAIL even when S3 reads succeed through surviving nodes. Cleanup stops owned
+services, unmounts their private XFS filesystems, and removes the run's labeled
+resources. An interrupted run can be recovered from its saved manifest.
 
 ```bash
 python3 -B scripts/node_replacement.py --cleanup --artifacts-dir /tmp/node-replacement-evidence

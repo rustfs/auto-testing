@@ -7,10 +7,12 @@ from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+import types
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.node_replacement import Case, LABEL, archive_files, cleanup, shard_manifest, topology
+from scripts.node_replacement import Case, LABEL, archive_files, cleanup, reconstruction_sources, shard_manifest, system_metadata_manifest, topology
+from scripts import node_replacement_node as node
 
 
 def disks(members):
@@ -19,6 +21,116 @@ def disks(members):
 
 
 class ReplacementEvidenceTests(unittest.TestCase):
+    def test_quarantine_stays_inside_the_endpoint_mount_and_preserves_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / 'mnmd'
+            part = data / 'bucket/key/generation/part.1'
+            part.parent.mkdir(parents=True)
+            part.write_bytes(b'committed shard')
+            metadata = data / 'bucket/key/xl.meta'
+            metadata.write_bytes(b'committed metadata')
+            with patch.object(node, 'process', return_value={'running': False}), patch.object(node, 'data_roots', return_value=[data]):
+                node.quarantine([['bucket/key/generation']])
+            self.assertFalse(part.exists())
+            self.assertEqual(metadata.read_bytes(), b'committed metadata')
+            archived = list(data.glob('.nr-oracle-*/0/part.1'))
+            self.assertEqual(len(archived), 1)
+            self.assertEqual(archived[0].read_bytes(), b'committed shard')
+
+    def test_cold_start_control_ignores_metadata_errors_from_earlier_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'logs').mkdir()
+            log = root / 'logs/rustfs.log'
+            log.write_text('old load_pool_meta failed\n')
+            with patch.object(node, 'BACKING', root), patch.dict('os.environ', {'RUSTFS_ACCESS_KEY': 'testaccess', 'RUSTFS_SECRET_KEY': 'testsecret'}):
+                cursor = node.log_cursors()
+                with log.open('a') as output: output.write('new harmless startup\n')
+                self.assertFalse(node.metadata_failures(cursor)['observed'])
+                with log.open('a') as output: output.write('InsufficientReadQuorum .rustfs.sys pool.bin\n')
+                self.assertTrue(node.metadata_failures(cursor)['observed'])
+                cursor = node.log_cursors()
+                with log.open('a') as output: output.write('init failed during classify_pool_meta_absence: pool.bin replica unavailable\n')
+                self.assertTrue(node.metadata_failures(cursor)['observed'])
+
+    def test_live_archive_retries_only_expected_concurrent_file_changes(self):
+        with tempfile.TemporaryDirectory() as root:
+            case = self.case(root)
+            changing = subprocess.CompletedProcess([], 1, b'', b'tar: ./key: file changed as we read it\n')
+            success = subprocess.CompletedProcess([], 0, b'archive', b'')
+            with patch('scripts.node_replacement.subprocess.run', side_effect=[changing, success]) as run, \
+                 patch('scripts.node_replacement.time.sleep'):
+                self.assertEqual(case.docker('exec', binary=True, live_archive=True), b'archive')
+                self.assertEqual(run.call_count, 2)
+            for live, error in ((False, changing), (True, subprocess.CompletedProcess([], 2, b'', b'tar: Permission denied'))):
+                with patch('scripts.node_replacement.subprocess.run', return_value=error):
+                    with self.assertRaises(RuntimeError): case.docker('exec', live_archive=live)
+
+    def test_existing_backing_file_is_rejected_before_formatting(self):
+        with tempfile.TemporaryDirectory() as root:
+            backing = Path(root)
+            image = backing / 'test-node2-disk1.xfs'
+            image.write_bytes(b'preserved evidence')
+            with patch.object(node, 'BACKING', backing), patch.object(node, 'roots', return_value=[backing / 'mount']), \
+                 patch.object(node, 'stop'), patch.object(node.signal, 'signal'), patch.object(node.os, 'mknod'), \
+                 patch.object(node, 'command') as command, \
+                 patch.dict('os.environ', {'NR_RUN_ID': 'test', 'NR_SLOT': '2'}):
+                with self.assertRaises(FileExistsError): node.serve()
+            command.assert_not_called()
+            self.assertEqual(image.read_bytes(), b'preserved evidence')
+
+    def test_mount_inventory_rejects_root_devices_wrong_filesystems_and_duplicate_devices(self):
+        for invalid in (None, 'root', 'fstype', 'duplicate'):
+            with self.subTest(invalid=invalid):
+                rows = [{'target': '/data/rustfs1', 'fstype': 'xfs', 'uuid': 'one', 'maj:min': '7:1'},
+                        {'target': '/data/rustfs2', 'fstype': 'xfs', 'uuid': 'two', 'maj:min': '7:2'}]
+                if invalid == 'fstype': rows[0]['fstype'] = 'ext4'
+                if invalid == 'duplicate': rows[1]['maj:min'] = '7:1'
+                outputs = [json.dumps({'filesystems': [row]}) for row in rows]
+                devices = [types.SimpleNamespace(st_dev=value) for value in (1, 1 if invalid == 'root' else 2, 3)]
+                with patch.object(node, 'roots', return_value=[Path(row['target']) for row in rows]), \
+                     patch.object(node, 'command', side_effect=outputs), patch.object(node.os, 'stat', side_effect=devices), \
+                     patch.object(node.subprocess, 'run', return_value=types.SimpleNamespace(returncode=1)):
+                    if invalid:
+                        with self.assertRaises(RuntimeError): node.mounts()
+                    else:
+                        observed = node.mounts()
+                        self.assertFalse(observed[0]['endpointIsMountpoint'])
+
+    def test_ready_and_complete_object_parts_cannot_hide_missing_pool_metadata(self):
+        with tempfile.TemporaryDirectory() as root:
+            case = Case('image', Path(root), 10)
+            files = {'bucket/key/xl.meta': b'meta', 'bucket/key/generation/part.1': b'shard'}
+            case.bucket = 'bucket'
+            case.scenes = lambda name: [files] * 4
+            with patch('scripts.node_replacement.time.monotonic', side_effect=[0, 11]):
+                with self.assertRaisesRegex(ValueError, 'repair deadline'):
+                    case.wait_repair('replacement', {'key': {}})
+            self.assertFalse(case.assertions['systemMetadataRecovered'])
+            self.assertTrue(case.assertions['replacementShardsPhysicallyPresent'])
+
+    def test_both_pool_metadata_objects_require_nonempty_xlmeta(self):
+        valid = {'.rustfs.sys/format.json': b'format',
+                 '.rustfs.sys/pool.bin/xl.meta': b'XL2 ' + b'x' * 64,
+                 '.rustfs.sys/pool.bin.identity/xl.meta': b'XL2 ' + b'y' * 64}
+        self.assertEqual(set(system_metadata_manifest(valid)), {'pool.bin', 'pool.bin.identity'})
+        for path in valid:
+            for replacement in (None, b'', b'XL2 ', b'broken' * 16):
+                if path.endswith('format.json') and replacement:
+                    continue
+                changed = dict(valid)
+                if replacement is None:
+                    del changed[path]
+                else:
+                    changed[path] = replacement
+                with self.subTest(path=path, replacement=replacement), self.assertRaises(ValueError):
+                    system_metadata_manifest(changed)
+
+    def test_forced_reconstruction_uses_actual_topology_quorum(self):
+        self.assertEqual(reconstruction_sources(1, 2), 1)
+        self.assertEqual(reconstruction_sources(4, 4), 2)
+        with self.assertRaises(ValueError): reconstruction_sources(4, 1)
+
     def case(self, root):
         case = Case("image", Path(root), 30)
         case.objects = {"key": {"size": 4, "sha256": hashlib.sha256(b"data").hexdigest()}}

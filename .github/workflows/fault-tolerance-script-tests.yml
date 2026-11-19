@@ -7,6 +7,9 @@ on:
       - test_rustfs_fault_tolerance.py
       - scripts/ft_s3_diagnostics.py
       - scripts/node_replacement.py
+      - scripts/node_replacement_node.py
+      - scripts/prepare_node_replacement.py
+      - scripts/node-replacement.Dockerfile
       - test_node_replacement.py
       - .github/workflows/rustfs-node-replacement-test.yml
       - .github/workflows/fault-tolerance-script-tests.yml
@@ -17,6 +20,9 @@ on:
       - test_rustfs_fault_tolerance.py
       - scripts/ft_s3_diagnostics.py
       - scripts/node_replacement.py
+      - scripts/node_replacement_node.py
+      - scripts/prepare_node_replacement.py
+      - scripts/node-replacement.Dockerfile
       - test_node_replacement.py
       - .github/workflows/rustfs-node-replacement-test.yml
       - .github/workflows/fault-tolerance-script-tests.yml

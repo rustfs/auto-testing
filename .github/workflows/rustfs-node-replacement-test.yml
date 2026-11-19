@@ -1,13 +1,22 @@
-name: RustFS Empty Node Replacement Test
+name: RustFS XFS Node Replacement Test
 
 on:
   workflow_dispatch:
     inputs:
-      image:
-        description: RustFS image tag or digest to test
+      release:
+        description: Official GNU release to test on mounted XFS data disks
         required: true
-        default: rustfs/rustfs:latest
+        default: '1.0.5'
         type: string
+      drives_per_node:
+        description: Data disks per node in one pool
+        default: '4'
+        type: choice
+        options: ['4', '1']
+
+concurrency:
+  group: rustfs-node-replacement-xfs
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -15,9 +24,11 @@ permissions:
 jobs:
   node-replacement:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
-      REPLACEMENT_IMAGE: ${{ inputs.image }}
+      REPLACEMENT_RELEASE: ${{ inputs.release }}
+      REPLACEMENT_DRIVES: ${{ inputs.drives_per_node }}
+      REPLACEMENT_IMAGE: rustfs-node-replacement-xfs:ci
       REPLACEMENT_ARTIFACTS: ${{ github.workspace }}/node-replacement-evidence
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
@@ -25,13 +36,20 @@ jobs:
           persist-credentials: false
       - name: Install S3 client
         run: python3 -m pip install 'boto3>=1.35.76,<2'
-      - name: Pull candidate image
-        run: docker pull "${REPLACEMENT_IMAGE}"
+      - name: Prepare digest-verified official GNU binary and XFS tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -B scripts/prepare_node_replacement.py
+          --release "${REPLACEMENT_RELEASE}"
+          --out "${RUNNER_TEMP}/node-replacement-build"
+          --tag "${REPLACEMENT_IMAGE}"
       - name: Replace failed node and verify reconstructed shards
         run: >-
           python3 -B scripts/node_replacement.py
           --image "${REPLACEMENT_IMAGE}"
           --artifacts-dir "${REPLACEMENT_ARTIFACTS}"
+          --drives-per-node "${REPLACEMENT_DRIVES}"
       - name: Recover run resources after interruption
         if: ${{ always() }}
         run: |
