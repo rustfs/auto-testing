@@ -1,0 +1,66 @@
+name: RustFS XFS Node Replacement Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Official GNU release to test on mounted XFS data disks
+        required: true
+        default: '1.0.5'
+        type: string
+      drives_per_node:
+        description: Data disks per node in one pool
+        default: '4'
+        type: choice
+        options: ['4', '1']
+
+concurrency:
+  group: rustfs-node-replacement-xfs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  node-replacement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      REPLACEMENT_RELEASE: ${{ inputs.release }}
+      REPLACEMENT_DRIVES: ${{ inputs.drives_per_node }}
+      REPLACEMENT_IMAGE: rustfs-node-replacement-xfs:ci
+      REPLACEMENT_ARTIFACTS: ${{ github.workspace }}/node-replacement-evidence
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
+        with:
+          persist-credentials: false
+      - name: Install S3 client
+        run: python3 -m pip install 'boto3>=1.35.76,<2'
+      - name: Prepare digest-verified official GNU binary and XFS tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -B scripts/prepare_node_replacement.py
+          --release "${REPLACEMENT_RELEASE}"
+          --out "${RUNNER_TEMP}/node-replacement-build"
+          --tag "${REPLACEMENT_IMAGE}"
+      - name: Replace failed node and verify reconstructed shards
+        run: >-
+          python3 -B scripts/node_replacement.py
+          --image "${REPLACEMENT_IMAGE}"
+          --artifacts-dir "${REPLACEMENT_ARTIFACTS}"
+          --drives-per-node "${REPLACEMENT_DRIVES}"
+      - name: Recover run resources after interruption
+        if: ${{ always() }}
+        run: |
+          if [ -f "${REPLACEMENT_ARTIFACTS}/resources.json" ]; then
+            python3 -B scripts/node_replacement.py --cleanup --artifacts-dir "${REPLACEMENT_ARTIFACTS}"
+          fi
+      - name: Upload replacement evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: node-replacement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.REPLACEMENT_ARTIFACTS }}
+          if-no-files-found: warn
+          retention-days: 7
