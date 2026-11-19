@@ -241,6 +241,52 @@ bash -n rustfs-fault-tolerance-test.sh
 python3 -B -m unittest -v test_rustfs_fault_tolerance.py
 ```
 
+## Empty-node replacement regression
+
+`scripts/node_replacement.py` creates an isolated Docker network with four
+RustFS containers, one fresh data volume per node, one pool, one four-drive
+erasure set and `EC:2`. It seeds objects, stops one node, and acknowledges
+additional PUTs while the other three nodes remain online. A fifth container
+with a new, verified-empty volume takes over the retired member's hostname
+and IP address. The retired container stays stopped and disconnected, with
+its original volume retained throughout verification.
+
+The case waits for automatic replacement repair before any recovered-object
+GET, then stops the servers and saves physical archives. It verifies the
+pool/set identities, the replacement disk UUID and slot, and external
+`xl.meta`/`part.1` files for every acknowledged object. Pre-outage shards must
+match the original slot's SHA-256. It then quarantines the external object
+parts on two original disks and starts verification services with healing disabled.
+Reads must fail with HTTP 503 while the replacement is offline. With the
+replacement online, all four endpoints must return every object's exact
+length and SHA-256 using the one remaining original shard and the new shard.
+Final physical checks require the quarantined parts to remain absent and
+the replacement shards to stay unchanged.
+
+Run the **RustFS Empty Node Replacement Test** workflow with an image tag or
+digest, or run locally with Docker and `boto3>=1.35.76,<2` installed:
+
+```bash
+docker pull rustfs/rustfs:latest
+python3 -B scripts/node_replacement.py --image rustfs/rustfs:latest --artifacts-dir /tmp/node-replacement-evidence
+```
+
+The runner freezes the image ID before creating services and records the
+image digest, PUT acknowledgments, physical file hashes, stopped disk
+archives, content checks, service logs and `result.json`. A PASS requires
+both object recovery and forced reconstruction through the replacement.
+Data lives in private Docker volumes. Containers simulate independent
+processes and network endpoints on one Docker host. The test enables
+`RUSTFS_UNSAFE_BYPASS_DISK_CHECK` for these volume-backed endpoints.
+
+Cleanup removes only resources carrying this run's ownership label. Recover
+an interrupted run using its saved manifest:
+
+```bash
+python3 -B scripts/node_replacement.py --cleanup --artifacts-dir /tmp/node-replacement-evidence
+python3 -B -m unittest -v test_node_replacement.py
+```
+
 ## Security suite diagnostics
 
 `rustfs-security-test.sh` includes STS-105 request timing, the full revoke
