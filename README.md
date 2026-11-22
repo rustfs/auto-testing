@@ -241,6 +241,72 @@ bash -n rustfs-fault-tolerance-test.sh
 python3 -B -m unittest -v test_rustfs_fault_tolerance.py
 ```
 
+## XFS node replacement regression
+
+`scripts/node_replacement.py` exercises the XFS data-directory layout from
+backlog issue #3283. The default is four nodes with four XFS disks each,
+one 16-drive pool/set and `EC:4`. `--drives-per-node 1` selects a four-drive
+pool with `EC:2`.
+
+Each disposable container mounts independent 512 MiB XFS image files on loop
+block devices at `/data/rustfs1` through `/data/rustfs4`. RustFS uses the
+`mnmd` subdirectory under each mount. Both
+`RUSTFS_UNSAFE_BYPASS_DISK_CHECK=false` and `MINIO_CI=false` are enforced in
+every service process. Filesystem UUIDs, block device identities, mount
+locations, endpoint mount status, process identities and the official binary
+SHA-256 are retained in the evidence.
+
+The runner seeds 100 one-KiB objects and three large objects. It stops node 2,
+acknowledges three additional large PUTs on the survivors, archives the stopped
+node's data outside its service endpoints, and starts a fresh process with
+empty `mnmd` directories on the same XFS filesystems. This reproduces the
+report's directory-reset procedure while retaining its original disk evidence.
+
+Readability and disk recovery are independent assertions. Every replacement
+disk must recover `format.json`, `.rustfs.sys/pool.bin/xl.meta`,
+`.rustfs.sys/pool.bin.identity/xl.meta`, and the acknowledged objects' metadata
+and external parts. A ready process with missing system metadata fails the
+case. After physical repair, the runner disables healing and quarantines
+survivor external parts and inline object directories. Readback of every
+acknowledged object must then use replacement shards. A separate cold-start
+control removes survivor copies of both system objects, witnesses new-process
+metadata failures while the replacement is offline, and requires restored
+replacement metadata to participate in the startup quorum. Every recovered
+payload is checked against its acknowledged SHA-256.
+
+Run the **RustFS XFS Node Replacement Test** workflow, or build the helper
+image and run locally. Preparation requires Docker, `gh`, and `curl`; the
+runner requires Python and `boto3>=1.35.76,<2`. Docker must support privileged
+containers, loop devices and the XFS kernel driver.
+
+```bash
+python3 -B scripts/prepare_node_replacement.py --release 1.0.5 --out /tmp/node-replacement-build --tag rustfs-node-replacement-xfs:local
+python3 -B scripts/node_replacement.py --image rustfs-node-replacement-xfs:local --artifacts-dir /tmp/node-replacement-evidence
+```
+
+Preparation verifies the official GNU release archive's published SHA-256
+before building the helper image. Its binary digest is rechecked before every
+service start. The helper formats exclusively created, run-owned regular
+image files and mounts actual XFS filesystems in private container mount
+namespaces. The test uses virtual block devices on one Docker host.
+
+`--endpoint-layout mountpoint` adds an endpoint bind mount for a control run
+with exact endpoint mountpoints. The default subdirectory layout keeps the
+same mount relationship as #3283. Each run records its layout and bypass flags;
+a control run has its own result and evidence directory.
+
+Artifacts include PUT acknowledgments, health responses, independent system
+metadata and object-shard results, stopped physical archives, service logs,
+filesystem identities and `result.json`. An unrepaired replacement retains a
+FAIL even when S3 reads succeed through surviving nodes. Cleanup stops owned
+services, unmounts their private XFS filesystems, and removes the run's labeled
+resources. An interrupted run can be recovered from its saved manifest.
+
+```bash
+python3 -B scripts/node_replacement.py --cleanup --artifacts-dir /tmp/node-replacement-evidence
+python3 -B -m unittest -v test_node_replacement.py
+```
+
 ## Security suite diagnostics
 
 `rustfs-security-test.sh` includes STS-105 request timing, the full revoke
