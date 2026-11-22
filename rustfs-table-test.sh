@@ -82,8 +82,8 @@ die()  { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 # ==================== Test harness (same shape as other suites) ====================
 run_test() {
   local id="$1" name="$2" fn="$3" rc
-  if [ -n "${SELECTED_CASES}" ]; then
-    case ",${SELECTED_CASES}," in
+  if [ -n "${SELECTED_CASES:-}" ]; then
+    case ",${SELECTED_CASES:-}," in
       *",${id},"*) ;;
       *) return 0 ;;
     esac

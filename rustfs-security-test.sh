@@ -577,8 +577,8 @@ run_test() {
   local id="$1" name="$2" fn="$3"
   local out="${TEST_TMP}/${id}.out"
   local started_at
-  if [ -n "${SELECTED_CASES}" ]; then
-    case ",${SELECTED_CASES}," in
+  if [ -n "${SELECTED_CASES:-}" ]; then
+    case ",${SELECTED_CASES:-}," in
       *",${id},"*) ;;
       *) return 0 ;;
     esac

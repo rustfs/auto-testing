@@ -1252,8 +1252,8 @@ seed_golden() {
 
 run_test() {
   local id="$1" name="$2" fn="$3" case_failed=0
-  if [ -n "${SELECTED_CASES}" ]; then
-    case ",${SELECTED_CASES}," in
+  if [ -n "${SELECTED_CASES:-}" ]; then
+    case ",${SELECTED_CASES:-}," in
       *",${id},"*) ;;
       *) return 0 ;;
     esac

@@ -1640,8 +1640,8 @@ write_case_result() {
 
 run_test() {
   local id="$1" name="$2" fn="$3" rc=0 cleanup_rc=0 status cleanup_detail started primary_excerpt log_name
-  if [ -n "${SELECTED_CASES}" ]; then
-    case ",${SELECTED_CASES}," in
+  if [ -n "${SELECTED_CASES:-}" ]; then
+    case ",${SELECTED_CASES:-}," in
       *",${id},"*) ;;
       *) return 0 ;;
     esac

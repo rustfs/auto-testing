@@ -517,8 +517,8 @@ FAILED_TESTS=()
 
 run_test() {
   local id="$1" name="$2" fn="$3" out rc
-  if [ -n "${SELECTED_CASES}" ]; then
-    case ",${SELECTED_CASES}," in
+  if [ -n "${SELECTED_CASES:-}" ]; then
+    case ",${SELECTED_CASES:-}," in
       *",${id},"*) ;;
       *) return 0 ;;
     esac
