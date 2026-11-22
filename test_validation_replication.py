@@ -9,6 +9,7 @@ from scripts.validation_replication.case_plan import (
     BUCKET_CASE_IDS, SITE_CASE_IDS, SITE_GROUP_ACTIVE_CASE_IDS,
 )
 from scripts.validation_replication.verify_result import verify
+from scripts.validation_replication.oracles import require_version_ids, version_inventory
 
 
 class ReplicationContractTest(unittest.TestCase):
@@ -37,6 +38,47 @@ class ReplicationContractTest(unittest.TestCase):
             (root / "run-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "fixture"):
                 verify(case_id, root)
+
+    def test_version_inventory_filters_one_key_and_preserves_marker_state(self) -> None:
+        response = {
+            "Versions": [
+                {"Key": "object.txt", "VersionId": "v2", "IsLatest": True, "Size": 2},
+                {"Key": "other.txt", "VersionId": "other"},
+                {"Key": "object.txt", "VersionId": "v1", "IsLatest": False, "Size": 1},
+            ],
+            "DeleteMarkers": [
+                {"Key": "object.txt", "VersionId": "m1", "IsLatest": False},
+                {"Key": "other.txt", "VersionId": "m-other"},
+            ],
+        }
+        self.assertEqual(
+            ["v1", "v2"],
+            [item["versionId"] for item in version_inventory(response, key="object.txt")["versions"]],
+        )
+        self.assertEqual(
+            ["m1"],
+            [item["versionId"] for item in version_inventory(response, key="object.txt")["deleteMarkers"]],
+        )
+
+    def test_version_inventory_rejects_extra_versions_and_markers(self) -> None:
+        response = {
+            "Versions": [{"Key": "object.txt", "VersionId": "v1"}],
+            "DeleteMarkers": [{"Key": "object.txt", "VersionId": "m1"}],
+        }
+        require_version_ids(
+            response,
+            key="object.txt",
+            versions=["v1"],
+            delete_markers=["m1"],
+        )
+        with self.assertRaisesRegex(AssertionError, "version inventory mismatch"):
+            require_version_ids(response, key="object.txt", versions=["v1", "v2"])
+        with self.assertRaisesRegex(AssertionError, "version inventory mismatch"):
+            require_version_ids(response, key="object.txt", versions=["v1"])
+
+    def test_version_inventory_rejects_truncated_listing(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "truncated"):
+            version_inventory({"IsTruncated": True}, key="object.txt")
 
 
 if __name__ == "__main__":

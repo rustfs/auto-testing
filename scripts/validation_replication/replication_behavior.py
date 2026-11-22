@@ -32,6 +32,7 @@ from case_plan import (
 )
 from rc_binary import resolve_rc_binary
 from replication_metrics import replication_metrics_ready
+from oracles import require_version_ids, version_inventory
 
 try:
     import boto3
@@ -660,9 +661,12 @@ class ReplicationHarness:
                     "bytes": len(body),
                     "sha256": hashlib.sha256(body).hexdigest(),
                     "versionId": version,
+                    "contentLength": response.get("ContentLength"),
                     "metadata": response.get("Metadata", {}),
                 }
                 matches = detail["sha256"] == expected_sha
+                if detail["contentLength"] is not None:
+                    matches = matches and detail["contentLength"] == len(expected)
                 if expected_version is not None:
                     matches = matches and version == expected_version
                 return matches, detail
@@ -1335,7 +1339,24 @@ class ReplicationHarness:
         error = (result.stdout + result.stderr).lower()
         if "version" not in error and "remote" not in error:
             raise AssertionError(f"unexpected target-versioning error: {error[:500]}")
-        return ["cases/%s/target-versioning-required.json" % safe_name(case_id)]
+        try:
+            self.client_a.get_bucket_replication(Bucket=source)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in {
+                "ReplicationConfigurationNotFoundError",
+                "NoSuchReplicationConfiguration",
+                "NoSuchConfiguration",
+            }:
+                raise
+        else:
+            raise AssertionError("rejected target acquired a replication configuration")
+        return [self.save_json(case_id, "target-versioning-required.json", {
+            "error": error[:500],
+            "source": source,
+            "target": target,
+            "configurationPersisted": False,
+        })]
 
     def case_bucket_configuration_roundtrip(self, case_id: str) -> list[str]:
         source, target, config = self.setup_bucket_replication(
@@ -1576,19 +1597,16 @@ class ReplicationHarness:
 
         def probe() -> tuple[bool, Any]:
             response = self.client_b.list_object_versions(Bucket=target, Prefix=key)
-            markers = [
-                item["VersionId"]
-                for item in response.get("DeleteMarkers", [])
-                if item["Key"] == key
-            ]
-            versions = [
-                item["VersionId"] for item in response.get("Versions", []) if item["Key"] == key
-            ]
-            return marker_id in markers and put.get("VersionId") in versions, {
-                "deleteMarkers": markers,
-                "versions": versions,
-                "expectedMarker": marker_id,
-            }
+            try:
+                inventory = require_version_ids(
+                    response,
+                    key=key,
+                    versions=[put["VersionId"]],
+                    delete_markers=[marker_id],
+                )
+            except AssertionError:
+                return False, version_inventory(response, key=key)
+            return True, inventory
 
         final = self.wait_until(case_id, "delete marker replication", probe)
         return [self.save_json(case_id, "delete-marker-final.json", final)]
@@ -1601,18 +1619,33 @@ class ReplicationHarness:
         self.wait_object(
             case_id, self.client_b, target, key, b"version-two", expected_version=second.get("VersionId")
         )
+
+        def initial_probe() -> tuple[bool, Any]:
+            response = self.client_b.list_object_versions(Bucket=target, Prefix=key)
+            try:
+                inventory = require_version_ids(
+                    response,
+                    key=key,
+                    versions=[first["VersionId"], second["VersionId"]],
+                )
+            except AssertionError:
+                return False, version_inventory(response, key=key)
+            return True, inventory
+
+        self.wait_until(case_id, "replicated versions before permanent delete", initial_probe)
         self.client_a.delete_object(Bucket=source, Key=key, VersionId=first["VersionId"])
 
         def probe() -> tuple[bool, Any]:
             response = self.client_b.list_object_versions(Bucket=target, Prefix=key)
-            versions = [
-                item["VersionId"] for item in response.get("Versions", []) if item["Key"] == key
-            ]
-            return first["VersionId"] not in versions and second["VersionId"] in versions, {
-                "versions": versions,
-                "deleted": first["VersionId"],
-                "retained": second["VersionId"],
-            }
+            try:
+                inventory = require_version_ids(
+                    response,
+                    key=key,
+                    versions=[second["VersionId"]],
+                )
+            except AssertionError:
+                return False, version_inventory(response, key=key)
+            return True, inventory
 
         final = self.wait_until(case_id, "permanent version delete replication", probe)
         return [self.save_json(case_id, "version-delete-final.json", final)]
@@ -2322,9 +2355,21 @@ class ReplicationHarness:
         time.sleep(max(2, self.args.poll_interval * 2))
         for client in (self.client_a, self.client_b):
             versions = client.list_object_versions(Bucket=bucket)
-            relevant = [item for item in versions.get("Versions", []) if item["Key"] in {"from-a.txt", "from-b.txt"}]
-            if len(relevant) != 2:
-                raise AssertionError(f"replication loop or missing version detected: {relevant}")
+            expected = {
+                "from-a.txt": observations[0]["versionId"],
+                "from-b.txt": observations[1]["versionId"],
+            }
+            for key, version_id in expected.items():
+                try:
+                    require_version_ids(
+                        versions,
+                        key=key,
+                        versions=[version_id],
+                    )
+                except AssertionError as exc:
+                    raise AssertionError(
+                        f"replication loop or missing version detected for {key}"
+                    ) from exc
         return [self.save_json(case_id, "bidirectional-final.json", observations)]
 
     def case_site_versioning_metadata(self, case_id: str) -> list[str]:
@@ -2625,20 +2670,50 @@ class ReplicationHarness:
             b"site-version-two",
             expected_version=second.get("VersionId"),
         )
+
+        def initial_probe() -> tuple[bool, Any]:
+            response = self.client_b.list_object_versions(Bucket=bucket, Prefix=key)
+            try:
+                inventory = require_version_ids(
+                    response,
+                    key=key,
+                    versions=[first["VersionId"], second["VersionId"]],
+                )
+            except AssertionError:
+                return False, version_inventory(response, key=key)
+            return True, inventory
+
+        self.wait_until(case_id, "site versions before delete convergence", initial_probe)
         marker = self.client_a.delete_object(Bucket=bucket, Key=key).get("VersionId")
 
         def marker_probe() -> tuple[bool, Any]:
             response = self.client_b.list_object_versions(Bucket=bucket, Prefix=key)
-            markers = [item["VersionId"] for item in response.get("DeleteMarkers", []) if item["Key"] == key]
-            return marker in markers, {"markers": markers, "expected": marker}
+            try:
+                inventory = require_version_ids(
+                    response,
+                    key=key,
+                    versions=[first["VersionId"], second["VersionId"]],
+                    delete_markers=[marker],
+                )
+            except AssertionError:
+                return False, version_inventory(response, key=key)
+            return True, inventory
 
         marker_final = self.wait_until(case_id, "site delete marker convergence", marker_probe)
         self.client_a.delete_object(Bucket=bucket, Key=key, VersionId=first["VersionId"])
 
         def purge_probe() -> tuple[bool, Any]:
             response = self.client_b.list_object_versions(Bucket=bucket, Prefix=key)
-            versions = [item["VersionId"] for item in response.get("Versions", []) if item["Key"] == key]
-            return first["VersionId"] not in versions and second["VersionId"] in versions, versions
+            try:
+                inventory = require_version_ids(
+                    response,
+                    key=key,
+                    versions=[second["VersionId"]],
+                    delete_markers=[marker],
+                )
+            except AssertionError:
+                return False, version_inventory(response, key=key)
+            return True, inventory
 
         purge_final = self.wait_until(case_id, "site version purge convergence", purge_probe)
         return [
@@ -2877,21 +2952,65 @@ class ReplicationHarness:
         if status != 200:
             raise AssertionError(f"site resync start returned HTTP {status}: {body!r}")
         responses["start"] = self.json_body(body)
-        status, _, body = self.admin_request(
-            self.site_a,
-            "PUT",
-            "site-replication/resync/op",
-            query="operation=status",
-            payload=peer,
-        )
-        if status != 200:
-            raise AssertionError(f"site resync status returned HTTP {status}: {body!r}")
-        responses["status"] = self.json_body(body)
-        resync_id = responses["status"].get("id") or responses["start"].get("id")
-        if not resync_id:
-            raise AssertionError(f"site resync did not return a durable ID: {responses}")
-        state = str(responses["status"].get("state", responses["status"].get("status", ""))).lower()
-        if state not in {"completed", "complete", "success", "failed", "cancelled", "canceled"}:
+        if not isinstance(responses["start"], dict):
+            raise AssertionError(f"site resync start was not an object: {responses['start']!r}")
+
+        def operation_id(document: dict[str, Any]) -> str:
+            for name in ("id", "operationId", "ID"):
+                value = document.get(name)
+                if value:
+                    return str(value)
+            return ""
+
+        resync_id = operation_id(responses["start"])
+
+        def read_status() -> tuple[int, dict[str, Any]]:
+            nonlocal resync_id
+            status_code, status_headers, status_body = self.admin_request(
+                self.site_a,
+                "PUT",
+                "site-replication/resync/op",
+                query="operation=status",
+                payload=peer,
+            )
+            if status_code != 200:
+                raise AssertionError(
+                    f"site resync status returned HTTP {status_code}: {status_body!r}"
+                )
+            document = self.required_json_object(status_body, "site resync status")
+            observed_id = operation_id(document)
+            if not observed_id:
+                raise AssertionError(f"site resync status omitted a durable ID: {document}")
+            if not resync_id:
+                resync_id = observed_id
+            elif observed_id != resync_id:
+                raise AssertionError(
+                    f"site resync status changed operation ID: {observed_id!r} != {resync_id!r}"
+                )
+            return status_code, {
+                "httpStatus": status_code,
+                "headers": status_headers,
+                "document": document,
+            }
+
+        _, initial_status = read_status()
+        responses["status"] = initial_status
+        initial_document = initial_status["document"]
+        terminal_states = {
+            "completed",
+            "complete",
+            "success",
+            "failed",
+            "cancelled",
+            "canceled",
+        }
+        initial_state = str(
+            initial_document.get("state", initial_document.get("status", ""))
+        ).lower()
+        if not initial_state:
+            raise AssertionError(f"site resync status omitted a state: {initial_document}")
+
+        if initial_state not in terminal_states:
             status, _, body = self.admin_request(
                 self.site_a,
                 "PUT",
@@ -2902,8 +3021,28 @@ class ReplicationHarness:
             if status != 200:
                 raise AssertionError(f"site resync cancel returned HTTP {status}: {body!r}")
             responses["cancel"] = self.json_body(body)
+            if not isinstance(responses["cancel"], dict):
+                raise AssertionError(f"site resync cancel was not an object: {responses['cancel']!r}")
+            cancel_id = operation_id(responses["cancel"])
+            if cancel_id and cancel_id != resync_id:
+                raise AssertionError(
+                    f"site resync cancel changed operation ID: {cancel_id!r} != {resync_id!r}"
+                )
+
+            def terminal_probe() -> tuple[bool, Any]:
+                _, detail = read_status()
+                document = detail["document"]
+                state = str(document.get("state", document.get("status", ""))).lower()
+                return state in terminal_states, detail
+
+            responses["terminal"] = self.wait_until(
+                case_id,
+                "site resync terminal state after cancellation",
+                terminal_probe,
+            )
         else:
-            responses["cancel"] = {"notRequired": True, "terminalState": state}
+            responses["cancel"] = {"notRequired": True, "terminalState": initial_state}
+            responses["terminal"] = initial_status
         return [self.save_json(case_id, "site-resync.json", responses)]
 
     def case_site_outage_recovery(self, case_id: str) -> list[str]:

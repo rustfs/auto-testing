@@ -37,12 +37,32 @@ SKIP_SMOKE=0
 PASS=0; FAIL=0; UNSUPPORTED=0
 FAILED_TESTS=()
 RUN_ID="$(date -u +%Y%m%d%H%M%S)"
+SELECTED_CASES=""
+VALIDATION_CASE=""
+VALIDATION_ARTIFACTS_DIR=""
+VALIDATION_CANDIDATE_MANIFEST=""
+VALIDATION_TESTING_COMMIT=""
+VALIDATION_BINARY_SHA256=""
 
 usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 while [ $# -gt 0 ]; do
   case "$1" in
     -y|--yes) shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --cases) SELECTED_CASES="$2"; shift 2 ;;
+    --validation-case)
+      case "$2" in
+        source-procedure.table.*) VALIDATION_CASE="$2"; SELECTED_CASES="${2##*.}"; SELECTED_CASES="${SELECTED_CASES^^}" ;;
+        *) echo "unsupported validation case: $2" >&2; exit 2 ;;
+      esac
+      shift 2 ;;
+    --candidate-manifest|--testing-commit|--validation-artifacts-dir)
+      case "$1" in
+        --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$2" ;;
+        --testing-commit) VALIDATION_TESTING_COMMIT="$2" ;;
+        --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$2" ;;
+      esac
+      shift 2 ;;
     --skip-smoke) SKIP_SMOKE=1; shift ;;
     --package-url) PACKAGE_URL="$2"; shift 2 ;;
     --endpoint) API_ENDPOINT="$2"; shift 2 ;;
@@ -62,6 +82,12 @@ die()  { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 # ==================== Test harness (same shape as other suites) ====================
 run_test() {
   local id="$1" name="$2" fn="$3" rc
+  if [ -n "${SELECTED_CASES:-}" ]; then
+    case ",${SELECTED_CASES:-}," in
+      *",${id},"*) ;;
+      *) return 0 ;;
+    esac
+  fi
   if [ "${DRY_RUN}" -eq 1 ]; then printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"; return 0; fi
   printf '\n--- %s %s ---\n' "${id}" "${name}"
   # live-tee keeps case output visible in the suite log (silent-death
@@ -83,6 +109,43 @@ run_test() {
     printf '\033[1;31m[FAIL]\033[0m %s %s\n' "${id}" "${name}"
     sed 's/^/      | /' "${TEST_TMP:-/tmp}/table-test.out" | tail -30
   fi
+}
+
+validation_write_result() {
+  local verdict="$1" reason="${2:-}" cleanup_status="${3:-PASS}"
+  local result_file="${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
+  local rc_bin
+  rc_bin="$(command -v rc || true)"
+  [ -n "${rc_bin}" ] || die "validation result requires rc client"
+  local -a args=(
+    "${SCRIPT_DIR}/scripts/validation_result.py"
+    --case-id "${VALIDATION_CASE}"
+    --profile "single-4disk"
+    --result-file "${result_file}"
+    --verdict "${verdict}"
+    --cleanup-status "${cleanup_status}"
+  )
+  [ -z "${reason}" ] || args+=(--reason "${reason}")
+  if [ "${verdict}" != RUNNING ]; then
+    args+=(--candidate-manifest "${VALIDATION_CANDIDATE_MANIFEST}"
+      --rc-bin "${rc_bin}" --testing-commit "${VALIDATION_TESTING_COMMIT}"
+      --binary-sha256 "${VALIDATION_BINARY_SHA256}"
+      --evidence "evidence/${VALIDATION_CASE}/test.log")
+  fi
+  python3 "${args[@]}"
+}
+
+validation_prepare() {
+  [ -n "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation case requires --validation-artifacts-dir"
+  [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "validation case requires --candidate-manifest"
+  [ -n "${VALIDATION_TESTING_COMMIT}" ] || die "validation case requires --testing-commit"
+  [ ! -e "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation artifacts directory already exists"
+  PACKAGE_URL="$(python3 - "${VALIDATION_CANDIDATE_MANIFEST}" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["package_url"])
+PY
+)" || die "candidate package URL missing"
+  mkdir -p "${VALIDATION_ARTIFACTS_DIR}"
 }
 
 # ==================== SigV4 REST client (plain curl + aws cli presign) ====================
@@ -413,7 +476,13 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   log "S3 Tables (Iceberg REST Catalog) suite"
   log "endpoint=${API_ENDPOINT} rest=${REST_PATH} bucket-prefix=${TEST_BUCKET_PREFIX}"
+  if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then validation_prepare; fi
   [ "${DRY_RUN}" -eq 0 ] && setup_environment
+  if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+    VALIDATION_BINARY_SHA256="$(remote "${NODES[0]}" "sha256sum /usr/bin/rustfs" | awk '{print $1}')"
+    [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed binary SHA-256 unavailable"
+    validation_write_result RUNNING "validation case started" PENDING
+  fi
 
   run_test TBL-101 "PyIcebergEndToEnd"            test_tbl101
   run_test TBL-102 "EnableAndGetTableBucket"      test_tbl102
@@ -427,5 +496,15 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   log "table suite: ${PASS} passed, ${FAIL} failed, ${UNSUPPORTED} unsupported"
   [ "${FAIL}" -eq 0 ] || printf 'failed: %s\n' "${FAILED_TESTS[*]}"
   [ "${DRY_RUN}" -eq 0 ] || exit 0
+  if [ -n "${VALIDATION_CASE}" ]; then
+    evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}"
+    mkdir -p "${evidence_dir}"
+    cp "${TEST_TMP}/table-test.out" "${evidence_dir}/test.log"
+    if [ "${FAIL}" -eq 0 ] && [ "${UNSUPPORTED}" -eq 0 ]; then
+      validation_write_result PASS "" PASS
+    else
+      validation_write_result FAIL "case failed or unsupported; inspect evidence" PASS
+    fi
+  fi
   [ "${FAIL}" -eq 0 ]
 fi

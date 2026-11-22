@@ -288,6 +288,7 @@ def verify_cohort(fleet, target, label):
 
 
 def validate_fault(before, after, target, receipt):
+    require(set(before) == set(after), "fault snapshot changed the observed node membership")
     left, right = files(before), files(after)
     identity = (target["node"], target["disk"], target["relativePath"])
     require(receipt.get("relativePath") == target["relativePath"]
@@ -307,6 +308,7 @@ def validate_fault(before, after, target, receipt):
 
 
 def validate_repaired_physical(before, after, target, *, repair_targets=None):
+    require(set(before) == set(after), "repair snapshot changed the observed node membership")
     left, right = files(before), files(after)
     repair_targets = repair_targets or [target]
     meta_paths = {f"{item['bucket']}/{item['key']}/xl.meta" for item in repair_targets}

@@ -97,6 +97,8 @@ CURRENT_TOPOLOGY=""
 ENDPOINT=""
 VOLUMES=""
 VALIDATION_CASE=""
+VALIDATION_SOURCE_CASE_ID=""
+SELECTED_CASES=""
 VALIDATION_ARTIFACTS_DIR=""
 VALIDATION_CANDIDATE_MANIFEST=""
 VALIDATION_TESTING_COMMIT=""
@@ -515,6 +517,12 @@ FAILED_TESTS=()
 
 run_test() {
   local id="$1" name="$2" fn="$3" out rc
+  if [ -n "${SELECTED_CASES:-}" ]; then
+    case ",${SELECTED_CASES:-}," in
+      *",${id},"*) ;;
+      *) return 0 ;;
+    esac
+  fi
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     return 0
@@ -1341,6 +1349,7 @@ main() {
       --ssh-port) SSH_PORT="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
       --validation-case) VALIDATION_CASE="$1"; shift ;;
+      --cases) SELECTED_CASES="${SELECTED_CASES:+${SELECTED_CASES},}$1"; shift ;;
       --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
       --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
       --testing-commit) VALIDATION_TESTING_COMMIT="$1"; shift ;;
@@ -1365,6 +1374,9 @@ main() {
     case "${VALIDATION_CASE}" in
       scanner.usage-convergence|scanner.status-readiness) ;;
       ilm.configuration-roundtrip|ilm.invalid-configuration|ilm.current-expiration|ilm.tag-filter-expiration|ilm.disabled-rule|ilm.rule-removal|ilm.versioned-current-expiration|ilm.noncurrent-expiration|ilm.newer-noncurrent-retention|ilm.delete-all-versions|ilm.delete-marker-expiration|ilm.multipart-expiration|ilm.restart-persistence|ilm.transition-and-restore) ;;
+      source-procedure.storage.*)
+        VALIDATION_SOURCE_CASE_ID="$(printf '%s' "${VALIDATION_CASE#source-procedure.storage.}" | tr '[:lower:]' '[:upper:]')"
+        SELECTED_CASES="${VALIDATION_SOURCE_CASE_ID}" ;;
       *) die "unknown validation case: ${VALIDATION_CASE}" ;;
     esac
     [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
@@ -1424,7 +1436,9 @@ main() {
       [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
     fi
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
-    if [ -n "${VALIDATION_CASE}" ]; then
+    if [[ "${VALIDATION_CASE}" == source-procedure.storage.* ]]; then
+      run_all_tests
+    elif [ -n "${VALIDATION_CASE}" ]; then
       case "${VALIDATION_CASE}" in
         scanner.usage-convergence) run_test "${VALIDATION_CASE}" "UsageConvergence" test_validation_scanner_usage_convergence ;;
         scanner.status-readiness) run_test "${VALIDATION_CASE}" "StatusReadiness" test_validation_scanner_status_readiness ;;

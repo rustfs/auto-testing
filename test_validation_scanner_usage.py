@@ -26,6 +26,7 @@ from scripts.validation_report import check_result
 from scripts.select_validation_cases import select_validation_cases, sweepable_cases
 from scripts.validation_scanner_usage.client import Client, Evidence, ProbeError, bucket_view, endpoint_url, run_command, sha256
 from scripts.validation_scanner_usage.contracts import CASES, assertion_id, catalog_module, select_cases
+from scripts.validation_scanner_usage.cycle import CycleTracker
 from scripts.validation_scanner_usage.native import run_native
 from scripts.validation_scanner_usage.runner import execute_case, Fixture, main, render_report
 
@@ -137,6 +138,23 @@ class FakeClient:
 
 
 class ValueContractTests(unittest.TestCase):
+    def test_cycle_tracker_requires_monotonic_cycle_and_stable_epoch(self):
+        tracker = CycleTracker()
+        first = tracker.observe({"scanner_cycle": 4, "scanner_epoch": "epoch-a"}, 0)
+        self.assertFalse(first["advanced"])
+        self.assertTrue(tracker.observe({"scanner_cycle": 4, "scanner_epoch": "epoch-a"}, 0)["previous_cycle"] == 4)
+        self.assertTrue(tracker.observe({"scanner_cycle": 5, "scanner_epoch": "epoch-a"}, 0)["advanced"])
+        with self.assertRaisesRegex(ProbeError, "regressed"):
+            tracker.observe({"scanner_cycle": 3, "scanner_epoch": "epoch-a"}, 0)
+        with self.assertRaisesRegex(ProbeError, "epoch"):
+            tracker.observe({"scanner_cycle": 6, "scanner_epoch": "epoch-b"}, 0)
+
+    def test_cycle_tracker_rejects_missing_and_malformed_cycle(self):
+        tracker = CycleTracker()
+        for value in (None, -1, True, "7"):
+            with self.subTest(value=value), self.assertRaisesRegex(ProbeError, "scanner cycle"):
+                tracker.observe({"scanner_cycle": value}, 0)
+
     def test_absence_and_missing_counters_do_not_become_zero(self):
         view = bucket_view({"buckets_usage": {}}, "bucket")
         self.assertEqual((view["count"], view["size"], view["state"]), (None, None, "unknown"))
@@ -263,6 +281,31 @@ class RunnerTests(unittest.TestCase):
                 if attr == "fail_cleanup":
                     self.assertEqual(result["cleanup_status"], "FAIL")
                     self.assertTrue(self.client.buckets)
+
+    def test_public_probe_rejects_missing_or_stale_cycle_evidence(self):
+        for mode in ("missing", "regressed"):
+            def configure(client):
+                original = client.admin
+                calls = 0
+                if mode == "regressed":
+                    client.pending = True
+
+                def admin(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    value = original(*args, **kwargs)
+                    if mode == "missing":
+                        value.pop("scanner_cycle", None)
+                    elif calls > 1:
+                        value["scanner_cycle"] = 0
+                    return value
+
+                client.admin = admin
+
+            with self.subTest(mode=mode):
+                result = self.run_case(configure=configure, convergence_timeout=0.02)
+                self.assertEqual(result["verdict"], "FAIL", result)
+                self.assertEqual(result["cleanup_status"], "PASS")
 
     def test_pending_and_observed_exact_values_are_not_converged(self):
         for attr in ("pending", "observed"):
@@ -810,9 +853,11 @@ class RegistrationTests(unittest.TestCase):
     def test_twenty_rows_are_registered_without_rewriting_source_counts(self):
         catalog = json.loads((ROOT / "validation-cases.json").read_text())
         validate_snapshot(catalog)
-        self.assertEqual(catalog["local_modules"], [catalog_module()])
+        local_by_id = {module["id"]: module for module in catalog["local_modules"]}
+        self.assertEqual(local_by_id["scanner-usage-regressions"], catalog_module())
         self.assertEqual(sum(len(module["cases"]) for module in catalog["modules"]), 158)
-        self.assertEqual(sum(len(module["cases"]) for module in catalog_modules(catalog)), 178)
+        self.assertEqual(sum(len(module["cases"]) for module in catalog_modules(catalog)), 418)
+        self.assertEqual(sum(len(module["cases"]) for module in catalog["local_modules"]), 260)
         self.assertEqual(len(select_cases("all")), 20)
         self.assertEqual([case.number for case in select_cases("blackbox")], [1, 20])
         self.assertNotIn(CASES[0].id, [case for case, _ in sweepable_cases(catalog)])

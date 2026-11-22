@@ -16,7 +16,8 @@ import time
 from urllib.parse import quote
 
 try:
-    from .heal_probe import Probe, canonical, compare_inventories, payload, require, save
+    from .heal_probe import (Probe, canonical, compare_inventories,
+                             compare_manifest_entries, payload, require, save)
     from .heal_workload import Recorder, RecordedCallError, seed, verify_seed
     from .healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
@@ -34,7 +35,8 @@ try:
     from .network_load_repair import source_reference as delete_source_reference, classify_deletes, recover_controls
     from .network_retention import prepare as prepare_retention, isolate as isolate_retention
 except ImportError:
-    from heal_probe import Probe, canonical, compare_inventories, payload, require, save
+    from heal_probe import (Probe, canonical, compare_inventories,
+                            compare_manifest_entries, payload, require, save)
     from heal_workload import Recorder, RecordedCallError, seed, verify_seed
     from healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
@@ -640,7 +642,7 @@ def run_branch(args, nodes, branch):
             require(version_heads(peer, fleet, bucket, expected, 'all-peer-original-version-HEAD') == original_heads,
                     'network recovery changed an original version HEAD or Last-Modified')
             subset = {**inventory, 'entries': [row for row in inventory['entries'] if row['key'] != released['key']]}
-            compare_inventories(baseline, subset)
+            compare_manifest_entries(baseline, subset)
             inventories.append(inventory)
         for inventory in inventories[1:]:
             compare_inventories(inventories[0], inventory)

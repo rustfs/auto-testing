@@ -162,6 +162,12 @@ BACKENDS=()
 KMS_BACKEND="local"
 ENDPOINT=""
 VOLUMES=""
+SELECTED_CASES=""
+VALIDATION_CASE=""
+VALIDATION_ARTIFACTS_DIR=""
+VALIDATION_CANDIDATE_MANIFEST=""
+VALIDATION_TESTING_COMMIT=""
+VALIDATION_BINARY_SHA256=""
 
 # ==================== Helpers ====================
 
@@ -1246,6 +1252,12 @@ seed_golden() {
 
 run_test() {
   local id="$1" name="$2" fn="$3" case_failed=0
+  if [ -n "${SELECTED_CASES:-}" ]; then
+    case ",${SELECTED_CASES:-}," in
+      *",${id},"*) ;;
+      *) return 0 ;;
+    esac
+  fi
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     return 0
@@ -1518,6 +1530,43 @@ record_topology_result() {
   fi
 }
 
+validation_write_result() {
+  local verdict="$1" reason="${2:-}" cleanup_status="${3:-PASS}"
+  local result_file="${VALIDATION_ARTIFACTS_DIR}/cases/${VALIDATION_CASE}.json"
+  local rc_bin
+  rc_bin="$(command -v rc || true)"
+  [ -n "${rc_bin}" ] || die "validation result requires rc client"
+  local -a args=(
+    "${SCRIPT_DIR}/scripts/validation_result.py"
+    --case-id "${VALIDATION_CASE}"
+    --profile "single-4disk"
+    --result-file "${result_file}"
+    --verdict "${verdict}"
+    --cleanup-status "${cleanup_status}"
+  )
+  [ -z "${reason}" ] || args+=(--reason "${reason}")
+  if [ "${verdict}" != RUNNING ]; then
+    args+=(--candidate-manifest "${VALIDATION_CANDIDATE_MANIFEST}"
+      --rc-bin "${rc_bin}" --testing-commit "${VALIDATION_TESTING_COMMIT}"
+      --binary-sha256 "${VALIDATION_BINARY_SHA256}"
+      --evidence "evidence/${VALIDATION_CASE}/case.log")
+  fi
+  python3 "${args[@]}"
+}
+
+validation_prepare() {
+  [ -n "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation case requires --validation-artifacts-dir"
+  [ -n "${VALIDATION_CANDIDATE_MANIFEST}" ] || die "validation case requires --candidate-manifest"
+  [ -n "${VALIDATION_TESTING_COMMIT}" ] || die "validation case requires --testing-commit"
+  [ ! -e "${VALIDATION_ARTIFACTS_DIR}" ] || die "validation artifacts directory already exists"
+  TO_URL="$(python3 - "${VALIDATION_CANDIDATE_MANIFEST}" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["package_url"])
+PY
+)" || die "candidate package URL missing"
+  mkdir -p "${VALIDATION_ARTIFACTS_DIR}"
+}
+
 final_summary() {
   printf '\n========================================\n'
   printf 'ALL RUNS SUMMARY\n'
@@ -1572,12 +1621,23 @@ main() {
       --ssh-user) SSH_USER="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
       --artifacts-dir) ARTIFACTS_DIR="$1"; shift ;;
+      --validation-case)
+        case "$1" in
+          source-procedure.upgrade.*) VALIDATION_CASE="$1"; SELECTED_CASES="${1##*.}"; SELECTED_CASES="${SELECTED_CASES^^}" ;;
+          *) die "unsupported validation case: $1" ;;
+        esac
+        shift ;;
+      --cases) SELECTED_CASES="$1"; shift ;;
+      --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
+      --testing-commit) VALIDATION_TESTING_COMMIT="$1"; shift ;;
+      --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
       --dry-run) DRY_RUN=1 ;;
       -y|--yes) ASSUME_YES=1 ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown option: ${opt} (see --help)" ;;
     esac
   done
+  if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then validation_prepare; fi
   if [ "${DRY_RUN}" -eq 0 ] && [ -n "${LOG_FILE:-}" ]; then
     mkdir -p "$(dirname "${LOG_FILE}")"
     if ! touch "${LOG_FILE}" 2>/dev/null; then
@@ -1666,6 +1726,9 @@ main() {
         record_upgrade_cleanup PENDING
         GROUP_ACTIVE=1
       fi
+      if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
+        validation_write_result RUNNING "validation case started" PENDING
+      fi
       evidence_line "[INFO] == topology: ${topo}  kms-backend: ${KMS_BACKEND} =="
       if [ "${KMS_BACKEND}" = "vault-kv2" ]; then
         vault_stop
@@ -1675,6 +1738,10 @@ main() {
       seed_golden
       CURRENT_PHASE=UPGRADE
       upgrade_in_place "${topo}"
+      if [ -n "${VALIDATION_CASE}" ]; then
+        VALIDATION_BINARY_SHA256="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODES[0]}" 'sha256sum /usr/bin/rustfs' | awk '{print $1}')"
+        [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed binary SHA-256 unavailable"
+      fi
       CURRENT_PHASE=VERIFY
       PASS=0; FAIL=0; FAILED_TESTS=()
       run_verify_cases
@@ -1687,6 +1754,18 @@ main() {
       local cleanup_failed=0
       finish_upgrade_group || cleanup_failed=1
       GROUP_INDEX=$((GROUP_INDEX+1))
+      if [ -n "${VALIDATION_CASE}" ]; then
+        evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}"
+        mkdir -p "${evidence_dir}"
+        cp "${GROUP_DIR}/${SELECTED_CASES}.log" "${evidence_dir}/case.log"
+        if [ "${FAIL}" -eq 0 ] && [ "${cleanup_failed}" -eq 0 ]; then
+          validation_write_result PASS "" PASS
+        elif [ "${cleanup_failed}" -ne 0 ]; then
+          validation_write_result INFRA_ERROR "environment teardown failed" FAIL
+        else
+          validation_write_result FAIL "case failed; inspect evidence" PASS
+        fi
+      fi
       [ "${cleanup_failed}" -eq 0 ] || die "upgrade diagnostics or cleanup failed"
       if [ "${FAIL}" -gt 0 ]; then overall_fail=1; fi
     done

@@ -37,6 +37,11 @@ from ilm_timing import (
     parse_expiry_date,
     time_budget,
 )
+from oracles import (
+    require_exact_version_ids,
+    require_single_latest_marker,
+    version_inventory,
+)
 
 from case_plan import (
     ILM_CASE_IDS as CASE_IDS,
@@ -685,7 +690,7 @@ class IlmHarness:
 
             retryable = self.rc_error_mentions(
                 result.stderr,
-                "XMinioAdminTierBackendInUse",
+                "AdminTierBackendInUse",
             )
             if not retryable or time.monotonic() >= deadline:
                 error = result.stderr.strip()
@@ -1163,6 +1168,8 @@ class IlmHarness:
                     "effectiveIntervalSeconds": schedule.get(
                         "effective_interval_seconds"
                     ),
+                    "currentCycle": metrics.get("current_cycle"),
+                    "currentStarted": metrics.get("current_started"),
                 }
                 details.append(node_detail)
                 configured = configured and (
@@ -1172,6 +1179,13 @@ class IlmHarness:
                     and start_delay.get("value") == 0
                     and start_delay.get("source") == "env"
                 )
+                effective_interval = schedule.get("effective_interval_seconds")
+                if effective_interval is not None:
+                    configured = configured and effective_interval == self.args.scanner_cycle_seconds
+                configured = configured and metrics.get("last_cycle_partial_reason") in (None, "")
+                current_cycle = metrics.get("current_cycle")
+                if current_cycle is not None:
+                    configured = configured and type(current_cycle) is int and current_cycle >= 0
                 if metrics.get("leader_lock_held_by_this_process") is True:
                     leaders.append(node_detail)
             healthy_leader = (
@@ -1214,14 +1228,19 @@ class IlmHarness:
         response = self.get_lifecycle(bucket)
         evidence.append(self.save_json(case_id, "lifecycle-get-response.json", response))
         observed = {
-            (rule.get("ID"), rule.get("Status"), rule.get("Expiration", {}).get("Days"))
+            (
+                rule.get("ID"),
+                rule.get("Status"),
+                rule.get("Filter", {}).get("Prefix"),
+                rule.get("Expiration", {}).get("Days"),
+            )
             for rule in response.get("Rules", [])
         }
         expected = {
-            ("roundtrip-expire", "Enabled", 1),
-            ("roundtrip-disabled", "Disabled", 5),
+            ("roundtrip-expire", "Enabled", "expire/", 1),
+            ("roundtrip-disabled", "Disabled", "disabled/", 5),
         }
-        if not expected.issubset(observed):
+        if observed != expected:
             raise AssertionError(
                 f"lifecycle API round-trip mismatch: expected {expected}, got {observed}"
             )
@@ -1258,6 +1277,20 @@ class IlmHarness:
             "invalid-status": """<?xml version="1.0" encoding="UTF-8"?>
 <LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Rule><ID>invalid-status</ID><Status>Sometimes</Status><Filter><Prefix/></Filter>
+    <Expiration><Days>1</Days></Expiration></Rule>
+</LifecycleConfiguration>
+""",
+            "missing-status": """<?xml version="1.0" encoding="UTF-8"?>
+<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Rule><ID>missing-status</ID><Filter><Prefix/></Filter>
+    <Expiration><Days>1</Days></Expiration></Rule>
+</LifecycleConfiguration>
+""",
+            "duplicate-rule-id": """<?xml version="1.0" encoding="UTF-8"?>
+<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Rule><ID>duplicate-id</ID><Status>Enabled</Status><Filter><Prefix>a/</Prefix></Filter>
+    <Expiration><Days>1</Days></Expiration></Rule>
+  <Rule><ID>duplicate-id</ID><Status>Enabled</Status><Filter><Prefix>b/</Prefix></Filter>
     <Expiration><Days>1</Days></Expiration></Rule>
 </LifecycleConfiguration>
 """,
@@ -1352,6 +1385,8 @@ class IlmHarness:
         return evidence
 
     def case_tag_filter_expiration(self, case_id: str, bucket: str) -> list[str]:
+        assert self.clock is not None
+        days = self.prepared_days()
         matching_key = "tag-filter/matching.txt"
         control_key = "tag-filter/control.txt"
         matching_body = b"tag-filter-matching"
@@ -1368,25 +1403,48 @@ class IlmHarness:
             Body=control_body,
             Tagging="retention=long",
         )
+        matching_due, _ = self.object_window(case_id, bucket, matching_key, days)
+        control_due, _ = self.object_window(case_id, bucket, control_key, days)
         configuration = {
             "Rules": [
                 {
                     "ID": "expire-by-tag",
                     "Status": "Enabled",
                     "Filter": {"Tag": {"Key": "retention", "Value": "short"}},
-                    "Expiration": {"Days": 1},
+                    "Expiration": {"Days": days},
                 }
             ]
         }
         evidence = self.put_lifecycle(case_id, bucket, configuration)
+        self.confirm_configuration(case_id, bucket, configuration)
+        due = DueWindow(matching_due.earliest, max(matching_due.latest, control_due.latest))
+        self.clock.require_before(due, margin=self.args.request_timeout)
 
         def expired() -> tuple[bool, Any]:
             response = self.client.list_objects_v2(Bucket=bucket, Prefix="tag-filter/")
             keys = [item["Key"] for item in response.get("Contents", [])]
+            if matching_key not in keys and self.clock.now().latest < matching_due.earliest:
+                raise AssertionError("tag-filtered object expired before its Days deadline")
             return matching_key not in keys and control_key in keys, {"keys": keys}
 
-        final = self.wait_until(case_id, "tag-filtered object to expire", expired)
+        final = self.wait_until(
+            case_id,
+            "tag-filtered object to expire",
+            expired,
+            timeout=self.clock.timeout_after(due, self.args.timeout),
+        )
         evidence.append(self.save_json(case_id, "tag-filter-final.json", final))
+        evidence.extend(
+            self.observe_protected_object(
+                case_id,
+                bucket,
+                control_key,
+                control_body,
+                due,
+                bucket,
+                matching_key,
+            )
+        )
         body = self.client.get_object(Bucket=bucket, Key=control_key)["Body"].read()
         if body != control_body:
             raise AssertionError("tag-filter control object changed")
@@ -1477,17 +1535,16 @@ class IlmHarness:
 
         def marker_created() -> tuple[bool, Any]:
             response = self.client.list_object_versions(Bucket=bucket, Prefix=key)
-            markers = [
-                item
-                for item in response.get("DeleteMarkers", [])
-                if item["Key"] == key and item["IsLatest"]
-            ]
-            versions = [
-                item for item in response.get("Versions", []) if item["Key"] == key
-            ]
-            return bool(markers) and any(
-                item["VersionId"] == put.get("VersionId") for item in versions
-            ), {"deleteMarkers": markers, "versions": versions}
+            inventory = version_inventory(response, key)
+            versions = {item["versionId"] for item in inventory["versions"]}
+            if not inventory["deleteMarkers"]:
+                return False, inventory
+            latest_marker = require_single_latest_marker(inventory)
+            return put.get("VersionId") in versions, {
+                "deleteMarkers": inventory["deleteMarkers"],
+                "versions": inventory["versions"],
+                "latestMarker": latest_marker,
+            }
 
         final = self.wait_until(
             case_id,
@@ -1507,6 +1564,18 @@ class IlmHarness:
         )["Body"].read()
         if original != b"versioned-current":
             raise AssertionError("expiration changed the retained original version")
+        final_inventory = version_inventory(
+            self.client.list_object_versions(Bucket=bucket, Prefix=key), key
+        )
+        latest_marker = require_single_latest_marker(final_inventory)
+        require_exact_version_ids(
+            final_inventory,
+            {put["VersionId"]},
+            {latest_marker},
+        )
+        if len(final_inventory["versions"]) != 1:
+            raise AssertionError("current expiration retained an unexpected version count")
+        evidence.append(self.save_json(case_id, "versioned-current-inventory.json", final_inventory))
         evidence.append(self.save_json(case_id, "versioned-current-final.json", final))
         return evidence
 
@@ -1549,16 +1618,9 @@ class IlmHarness:
 
         def old_version_removed() -> tuple[bool, Any]:
             response = self.client.list_object_versions(Bucket=bucket, Prefix=key)
-            versions = [
-                {
-                    "versionId": item["VersionId"],
-                    "isLatest": item["IsLatest"],
-                }
-                for item in response.get("Versions", [])
-                if item["Key"] == key
-            ]
-            ids = {item["versionId"] for item in versions}
-            return v1 not in ids and v2 in ids, {"versions": versions}
+            inventory = version_inventory(response, key)
+            ids = {item["versionId"] for item in inventory["versions"]}
+            return ids == {v2} and not inventory["deleteMarkers"], inventory
 
         final = self.wait_until(
             case_id, "noncurrent version to expire", old_version_removed
@@ -1567,6 +1629,9 @@ class IlmHarness:
         body = self.client.get_object(Bucket=bucket, Key=key)["Body"].read()
         if body != b"version-two":
             raise AssertionError("latest version changed during noncurrent expiration")
+        retained = self.client.get_object(Bucket=bucket, Key=key, VersionId=v2)["Body"].read()
+        if retained != b"version-two":
+            raise AssertionError("retained noncurrent version payload changed")
         return evidence
 
     def case_newer_noncurrent_retention(
@@ -1607,15 +1672,13 @@ class IlmHarness:
 
         def retained() -> tuple[bool, Any]:
             response = self.client.list_object_versions(Bucket=bucket, Prefix=key)
-            observed = {
-                item["VersionId"]
-                for item in response.get("Versions", [])
-                if item["Key"] == key
-            }
-            return observed == expected, {
+            inventory = version_inventory(response, key)
+            observed = {item["versionId"] for item in inventory["versions"]}
+            return observed == expected and not inventory["deleteMarkers"], {
                 "expected": sorted(expected),
                 "observed": sorted(observed),
                 "expired": version_ids[0],
+                "deleteMarkers": inventory["deleteMarkers"],
             }
 
         final = self.wait_until(
@@ -1627,6 +1690,10 @@ class IlmHarness:
         latest = self.client.get_object(Bucket=bucket, Key=key)["Body"].read()
         if latest != b"version-4":
             raise AssertionError("latest object changed while retaining noncurrent versions")
+        for version_id, expected_body in zip(version_ids[-3:], (b"version-2", b"version-3", b"version-4")):
+            body = self.client.get_object(Bucket=bucket, Key=key, VersionId=version_id)["Body"].read()
+            if body != expected_body:
+                raise AssertionError(f"retained version payload changed: {version_id}")
         evidence.append(self.save_json(case_id, "newer-noncurrent-final.json", final))
         return evidence
 
@@ -1714,6 +1781,11 @@ class IlmHarness:
             all_versions_removed,
             timeout=max(self.args.timeout, self.args.debug_day_seconds * 12),
         )
+        final_inventory = version_inventory(
+            self.client.list_object_versions(Bucket=bucket, Prefix=key), key
+        )
+        require_exact_version_ids(final_inventory, set())
+        evidence.append(self.save_json(case_id, "versions-final-inventory.json", final_inventory))
         evidence.append(self.save_json(case_id, "versions-final.json", final))
         return evidence
 
@@ -1765,6 +1837,11 @@ class IlmHarness:
             marker_chain_removed,
             timeout=max(self.args.timeout, self.args.debug_day_seconds * 12),
         )
+        final_inventory = version_inventory(
+            self.client.list_object_versions(Bucket=bucket, Prefix=key), key
+        )
+        require_exact_version_ids(final_inventory, set())
+        evidence.append(self.save_json(case_id, "markers-final-inventory.json", final_inventory))
         evidence.append(self.save_json(case_id, "markers-final.json", final))
         return evidence
 
@@ -1816,6 +1893,15 @@ class IlmHarness:
             upload_removed,
             timeout=max(self.args.timeout, self.args.debug_day_seconds * 12),
         )
+        if not self.object_absent(bucket, key):
+            raise AssertionError("aborted multipart upload left a visible object")
+        try:
+            self.client.list_parts(Bucket=bucket, Key=key, UploadId=upload_id)
+        except ClientError as exc:
+            if self.client_error_code(exc) not in {"NoSuchUpload", "NoSuchKey", "404", "NotFound"}:
+                raise
+        else:
+            raise AssertionError("aborted multipart upload still exposes its parts")
         evidence.append(self.save_json(case_id, "multipart-final.json", final))
         return evidence
 
