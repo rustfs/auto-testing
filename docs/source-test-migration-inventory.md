@@ -818,6 +818,15 @@ The target collection absorbs source test content and testing ideas. Observable 
 
 Benchmarks remain performance references. Build, lint, security-scan, and repository workflows remain automation references. They do not create duplicate behavior cases in the target collection.
 
+## Product migration boundary
+| Source material | Product migration decision | Target collection treatment |
+| --- | --- | --- |
+| API, functional, recovery, compatibility, and security behavior | Required | Preserve the scenario, negative branches, cleanup rules, and observable assertions in a canonical or local procedure |
+| Native implementation tests | Selective | Extract externally observable behavior and edge cases into procedures while retaining internal mechanics as source traceability |
+| Generated serialization tests | Selective | Add persistence, wire-compatibility, upgrade, or restart scenarios when the behavior is user-visible |
+| Benchmarks | Conditional | Create a performance gate only when a product SLO, capacity target, or resource budget exists |
+| Build, lint, security-scan, and repository automation | Separate | Keep as CI quality gates and do not duplicate them as behavior cases |
+
 The local catalog also indexes 215 existing procedure functions from the S3,
 security, tier, storage, and key-management suites, alongside 20 scanner
 regression procedures. These entries retain the

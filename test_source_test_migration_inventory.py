@@ -20,6 +20,8 @@ class SourceTestMigrationInventoryTests(unittest.TestCase):
         self.assertIn("source-idea-mapped", text)
         self.assertIn("one-to-one port is not required", text)
         self.assertIn("Observable behavior, negative branches, boundary values", text)
+        self.assertIn("## Product migration boundary", text)
+        self.assertIn("Create a performance gate only when a product SLO", text)
 
     def test_inventory_has_no_vendor_specific_product_name(self) -> None:
         self.assertNotRegex(INVENTORY.read_text(encoding="utf-8"), r"(?i)minio|mint|aws")
