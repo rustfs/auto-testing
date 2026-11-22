@@ -853,9 +853,11 @@ class RegistrationTests(unittest.TestCase):
     def test_twenty_rows_are_registered_without_rewriting_source_counts(self):
         catalog = json.loads((ROOT / "validation-cases.json").read_text())
         validate_snapshot(catalog)
-        self.assertEqual(catalog["local_modules"], [catalog_module()])
+        local_by_id = {module["id"]: module for module in catalog["local_modules"]}
+        self.assertEqual(local_by_id["scanner-usage-regressions"], catalog_module())
         self.assertEqual(sum(len(module["cases"]) for module in catalog["modules"]), 158)
-        self.assertEqual(sum(len(module["cases"]) for module in catalog_modules(catalog)), 178)
+        self.assertEqual(sum(len(module["cases"]) for module in catalog_modules(catalog)), 418)
+        self.assertEqual(sum(len(module["cases"]) for module in catalog["local_modules"]), 260)
         self.assertEqual(len(select_cases("all")), 20)
         self.assertEqual([case.number for case in select_cases("blackbox")], [1, 20])
         self.assertNotIn(CASES[0].id, [case for case, _ in sweepable_cases(catalog)])

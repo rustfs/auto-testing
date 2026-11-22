@@ -127,6 +127,8 @@ VOLUMES=""
 KMS_BACKEND="local"
 KMS_EXTRA_ENV="${KMS_EXTRA_ENV:-}"
 VALIDATION_CASE=""
+VALIDATION_SOURCE_CASE_ID=""
+SELECTED_CASES=""
 VALIDATION_ARTIFACTS_DIR=""
 VALIDATION_CANDIDATE_MANIFEST=""
 VALIDATION_TESTING_COMMIT=""
@@ -697,6 +699,12 @@ FAILED_TESTS=()
 
 run_test() {
   local id="$1" name="$2" fn="$3" out rc
+  if [ -n "${SELECTED_CASES}" ]; then
+    case ",${SELECTED_CASES}," in
+      *",${id},"*) ;;
+      *) return 0 ;;
+    esac
+  fi
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     return 0
@@ -739,7 +747,7 @@ validation_write_result() {
       --binary-sha256 "${VALIDATION_BINARY_SHA256}"
       --evidence "evidence/${VALIDATION_CASE}/test.log")
   fi
-  if [ "${verdict}" = PASS ]; then
+  if [ "${verdict}" = PASS ] && [ "${VALIDATION_CASE}" = "kms.sse-kms-round-trip" ]; then
     for item in validation-put.json validation-head.json validation-get.json validation-failure.txt validation-missing.txt validation-fixture.json; do
       args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
     done
@@ -2281,6 +2289,7 @@ main() {
       --log-file) LOG_FILE="$1"; shift ;;
       --dry-run) DRY_RUN=1 ;;
       --validation-case) VALIDATION_CASE="$1"; shift ;;
+      --cases) SELECTED_CASES="${SELECTED_CASES:+${SELECTED_CASES},}$1"; shift ;;
       --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
       --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
       --testing-commit) VALIDATION_TESTING_COMMIT="$1"; shift ;;
@@ -2301,7 +2310,13 @@ main() {
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}" "${TOPO_MULTI_MULTI}")
   fi
   if [ -n "${VALIDATION_CASE}" ]; then
-    [ "${VALIDATION_CASE}" = "kms.sse-kms-round-trip" ] || die "unknown validation case: ${VALIDATION_CASE}"
+    case "${VALIDATION_CASE}" in
+      kms.sse-kms-round-trip) ;;
+      source-procedure.kms.*)
+        VALIDATION_SOURCE_CASE_ID="$(printf '%s' "${VALIDATION_CASE#source-procedure.kms.}" | tr '[:lower:]' '[:upper:]')"
+        SELECTED_CASES="${VALIDATION_SOURCE_CASE_ID}" ;;
+      *) die "unknown validation case: ${VALIDATION_CASE}" ;;
+    esac
     [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
     [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its own topology"
     [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
@@ -2361,7 +2376,9 @@ main() {
       fi
       PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
       KMS_KEY_ID=""
-      if [ -n "${VALIDATION_CASE}" ]; then
+      if [[ "${VALIDATION_CASE}" == source-procedure.kms.* ]]; then
+        run_all_tests
+      elif [ -n "${VALIDATION_CASE}" ]; then
         run_test "${VALIDATION_CASE}" "SseKmsRoundTrip" test_validation_kms_sse_kms_round_trip
       else
         run_all_tests

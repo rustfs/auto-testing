@@ -66,6 +66,14 @@ if grep -q '\[DRY-RUN\] S3C-' "${TEST_TMP}/validation-dry-run.log"; then
   printf 'validation mode scheduled legacy S3C cases\n' >&2
   exit 1
 fi
+bash "${SCRIPT_DIR}/rustfs-s3-compat-test.sh" --validation-case s3.compatibility.s3c-101 \
+  --dry-run --yes --package-url https://example.invalid/rustfs.deb \
+  > "${TEST_TMP}/compatibility-dry-run.log"
+grep -q '\[DRY-RUN\] S3C-101 CreateBucket' "${TEST_TMP}/compatibility-dry-run.log"
+if grep -q '\[DRY-RUN\] S3C-201' "${TEST_TMP}/compatibility-dry-run.log"; then
+  printf 'single compatibility validation case scheduled an unrelated case\n' >&2
+  exit 1
+fi
 if "${SCRIPT_DIR}/rustfs-s3-compat-test.sh" --validation-case unknown \
   --dry-run --yes > "${TEST_TMP}/validation-bad-case.log" 2>&1; then
   printf 'unknown validation case was accepted\n' >&2

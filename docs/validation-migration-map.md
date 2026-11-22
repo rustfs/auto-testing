@@ -427,6 +427,36 @@ DELETE, payload SHA-256, metadata, ETag, and `NoSuchKey` checks on one fixture.
 It has local mock coverage and live PASS evidence in RustFS Actions run
 `38042083422`.
 
+The compatibility suite now has a local catalog entry for every existing
+`S3C`, `ENC`, and `SNW` procedure in `rustfs-s3-compat-test.sh`. The 105
+procedures reuse the existing test functions and are individually dispatchable
+through `scripts/run_validation_case.sh` as
+`s3.compatibility.<procedure-id>`. Each procedure keeps its own endpoint
+admission, candidate provenance, result evidence, and cleanup gate. This local
+catalog extension does not change the 158 source-catalog IDs.
+
+The existing storage, security, tier, and key-management suite procedures are
+also indexed as 110 local `source-procedure.*` entries. Their original suite
+functions remain the execution source, and the dispatcher now selects one
+procedure at a time with candidate and endpoint admission. Their live status
+still depends on the configured environment and is not inferred from catalog
+registration.
+
+The table-catalog suite contributes 7 additional `source-procedure.table.*`
+entries, and the upgrade suite contributes 18
+`source-procedure.upgrade.*` entries. Both suites select one existing
+procedure in dry-run mode and retain the original case-level assertions and
+diagnostics. The local catalog therefore contains 260 executable procedure
+entries in addition to the 158 canonical source scenarios.
+
+The complete source-audit crosswalk is recorded in
+`docs/source-test-migration-inventory.md`. It enumerates all 18 workflows, 17
+listed helper entries, 243 test files, and every extracted test or benchmark
+identifier. Behavior procedures are linked to canonical or local executors.
+Native implementation tests, generated serialization tests, benchmarks, and
+build or repository automation remain explicitly classified so they are not
+silently counted as black-box behavior coverage.
+
 `scanner.usage-convergence` has a dedicated executor on `single-4disk`. It
 uses the storage suite's deployment and SigV4 Admin client, accelerates the
 scanner cycle, records the 20-object fixture, and checks a successful leader

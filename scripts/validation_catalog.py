@@ -137,7 +137,13 @@ def validate_reuse_candidates(snapshot: dict, checkout: Path) -> None:
                 contents.append((checkout / suite).read_text(encoding="utf-8"))
             for old_id in candidates["case_ids"]:
                 marker = re.compile(r"\brun_test\s+" + re.escape(old_id) + r"\b")
-                if not any(marker.search(content) for content in contents):
+                upgrade_marker = re.compile(
+                    r"\bUPGRADE_IDS=\([^)]*\b" + re.escape(old_id) + r"\b"
+                )
+                if not any(
+                    marker.search(content) or upgrade_marker.search(content)
+                    for content in contents
+                ):
                     raise ValueError(f"missing reuse case for {case['id']}: {old_id}")
 
 

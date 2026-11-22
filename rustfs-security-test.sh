@@ -119,6 +119,8 @@ SELECTED_TOPOLOGIES=()
 ENDPOINT=""
 VOLUMES=""
 VALIDATION_CASE=""
+VALIDATION_SOURCE_CASE_ID=""
+SELECTED_CASES=""
 VALIDATION_ARTIFACTS_DIR=""
 VALIDATION_CANDIDATE_MANIFEST=""
 VALIDATION_TESTING_COMMIT=""
@@ -575,6 +577,12 @@ run_test() {
   local id="$1" name="$2" fn="$3"
   local out="${TEST_TMP}/${id}.out"
   local started_at
+  if [ -n "${SELECTED_CASES}" ]; then
+    case ",${SELECTED_CASES}," in
+      *",${id},"*) ;;
+      *) return 0 ;;
+    esac
+  fi
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     CASE_RESULTS+=("${id}|${name}|PASS")
@@ -606,7 +614,7 @@ run_test() {
 validation_write_evidence() {
   local evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}"
   mkdir -p "${evidence_dir}"
-  cp "${TEST_TMP}/${VALIDATION_CASE}.out" "${evidence_dir}/test.log"
+  cp "${TEST_TMP}/${VALIDATION_SOURCE_CASE_ID:-${VALIDATION_CASE}}.out" "${evidence_dir}/test.log"
   for item in validation-iam-policy.json validation-iam-observations.json; do
     if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
   done
@@ -625,7 +633,7 @@ validation_write_result() {
       --binary-sha256 "${VALIDATION_BINARY_SHA256}"
       --evidence "evidence/${VALIDATION_CASE}/test.log")
   fi
-  if [ "${verdict}" = PASS ]; then
+  if [ "${verdict}" = PASS ] && [ "${VALIDATION_CASE}" = "iam.policy-enforcement" ]; then
     args+=(--evidence "evidence/${VALIDATION_CASE}/validation-iam-policy.json"
       --evidence "evidence/${VALIDATION_CASE}/validation-iam-observations.json")
   fi
@@ -1087,6 +1095,7 @@ parse_args() {
       --version) [ "$#" -ge 2 ] || die "--version requires a value"; RUSTFS_VERSION="$2"; shift ;;
       --oidc-live) OIDC_LIVE=1 ;;
       --validation-case) [ "$#" -ge 2 ] || die "--validation-case requires a value"; VALIDATION_CASE="$2"; shift ;;
+      --cases) [ "$#" -ge 2 ] || die "--cases requires a value"; SELECTED_CASES="${SELECTED_CASES:+${SELECTED_CASES},}$2"; shift ;;
       --validation-artifacts-dir) [ "$#" -ge 2 ] || die "--validation-artifacts-dir requires a value"; VALIDATION_ARTIFACTS_DIR="$2"; shift ;;
       --candidate-manifest) [ "$#" -ge 2 ] || die "--candidate-manifest requires a value"; VALIDATION_CANDIDATE_MANIFEST="$2"; shift ;;
       --testing-commit) [ "$#" -ge 2 ] || die "--testing-commit requires a value"; VALIDATION_TESTING_COMMIT="$2"; shift ;;
@@ -1099,7 +1108,13 @@ parse_args() {
     shift
   done
   if [ -n "${VALIDATION_CASE}" ]; then
-    [ "${VALIDATION_CASE}" = iam.policy-enforcement ] || die "unknown validation case: ${VALIDATION_CASE}"
+    case "${VALIDATION_CASE}" in
+      iam.policy-enforcement) ;;
+      source-procedure.security.*)
+        VALIDATION_SOURCE_CASE_ID="$(printf '%s' "${VALIDATION_CASE#source-procedure.security.}" | tr '[:lower:]' '[:upper:]')"
+        SELECTED_CASES="${VALIDATION_SOURCE_CASE_ID}" ;;
+      *) die "unknown validation case: ${VALIDATION_CASE}" ;;
+    esac
     RUN_TOKEN="$(date -u +%y%m%d%H%M%S)-$$"
     [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its topology"
     [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
@@ -1191,7 +1206,7 @@ main() {
       RUSTFS_VERSION_INFO="$(detect_rustfs_version)"
     fi
     CASE_RESULTS=()
-    if [ -n "${VALIDATION_CASE}" ]; then
+    if [ "${VALIDATION_CASE}" = "iam.policy-enforcement" ]; then
       run_test "${VALIDATION_CASE}" "PolicyEnforcement" test_validation_iam_policy_enforcement
     else
       run_security_cases

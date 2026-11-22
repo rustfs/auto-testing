@@ -87,6 +87,7 @@ KEEP_ENV=0
 LOG_FILE=""
 SELECTED_TOPOLOGIES=()
 VALIDATION_CASE=""
+VALIDATION_SELECTED_CASE=""
 VALIDATION_ARTIFACTS_DIR=""
 VALIDATION_CANDIDATE_MANIFEST=""
 VALIDATION_TESTING_COMMIT=""
@@ -503,9 +504,11 @@ validation_write_evidence() {
   local item
   mkdir -p "${evidence_dir}"
   cp "${TEST_TMP}/test.out" "${evidence_dir}/test.log"
-  for item in validation-put.json validation-head.json validation-list.json validation-missing.txt; do
-    if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
-  done
+  if [ "${VALIDATION_CASE}" = "s3.basic-object-round-trip" ]; then
+    for item in validation-put.json validation-head.json validation-list.json validation-missing.txt; do
+      if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
+    done
+  fi
 }
 
 validation_write_result() {
@@ -532,10 +535,12 @@ validation_write_result() {
     args+=(--evidence "evidence/${VALIDATION_CASE}/test.log")
   fi
   if [ "${verdict}" = PASS ]; then
-    local item
-    for item in validation-put.json validation-head.json validation-list.json validation-missing.txt; do
-      args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
-    done
+    if [ "${VALIDATION_CASE}" = "s3.basic-object-round-trip" ]; then
+      local item
+      for item in validation-put.json validation-head.json validation-list.json validation-missing.txt; do
+        args+=(--evidence "evidence/${VALIDATION_CASE}/${item}")
+      done
+    fi
   fi
   python3 "${args[@]}"
 }
@@ -3240,7 +3245,14 @@ main() {
     SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}" "${TOPO_SINGLE_MULTI}" "${TOPO_MULTI_MULTI}")
   fi
   if [ -n "${VALIDATION_CASE}" ]; then
-    [ "${VALIDATION_CASE}" = "s3.basic-object-round-trip" ] || die "unknown validation case: ${VALIDATION_CASE}"
+    case "${VALIDATION_CASE}" in
+      s3.basic-object-round-trip) ;;
+      s3.compatibility.*)
+        VALIDATION_SELECTED_CASE="$(printf '%s' "${VALIDATION_CASE#s3.compatibility.}" | tr '[:lower:]' '[:upper:]')"
+        [ -n "${VALIDATION_SELECTED_CASE}" ] || die "unknown validation case: ${VALIDATION_CASE}"
+        ;;
+      *) die "unknown validation case: ${VALIDATION_CASE}" ;;
+    esac
     [ -z "${SELECTED_CASES}" ] || die "--validation-case cannot be combined with --suite or --cases"
     [ "${all}" -eq 0 ] || die "--validation-case cannot be combined with --all-topologies"
     [ "${#SELECTED_TOPOLOGIES[@]}" -eq 0 ] || die "--validation-case chooses its own topology"
@@ -3291,13 +3303,23 @@ main() {
     if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
       validation_write_result RUNNING "validation case started" PENDING
     fi
+    if [ "${DRY_RUN}" -eq 0 ] && [ -n "${VALIDATION_SELECTED_CASE}" ]; then
+      case ",${VALIDATION_SELECTED_CASE}," in
+        *,S3C-213,*|*,S3C-214,*|*,S3C-1306,*|*,S3C-1307,*)
+          "${S3_BULK_PYTHON}" -c 'import boto3' >/dev/null 2>&1 || die "bulk-delete regressions require Python boto3"
+          ;;
+      esac
+    fi
+    if [ -n "${VALIDATION_SELECTED_CASE}" ]; then
+      SELECTED_CASES="${VALIDATION_SELECTED_CASE}"
+    fi
     env_setup "${topo}"
     if [ -n "${VALIDATION_CASE}" ] && [ "${DRY_RUN}" -eq 0 ]; then
       VALIDATION_BINARY_SHA256="$(printf 'sha256sum /usr/bin/rustfs\n' | run_remote "${NODES[0]}" | awk '{print $1}')"
       [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
     fi
     PASS=0; FAIL=0; UNSUPPORTED=0; SCHEDULED=0; FAILED_TESTS=()
-    if [ -n "${VALIDATION_CASE}" ]; then
+    if [ "${VALIDATION_CASE}" = "s3.basic-object-round-trip" ]; then
       run_test "${VALIDATION_CASE}" "BasicObjectRoundTrip" test_validation_s3_basic_object_round_trip
     else
       run_all_tests

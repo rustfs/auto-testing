@@ -3,11 +3,11 @@
   "as_of": "2026-11-22",
   "source_commit": "524eb5b32c3236497fdd8a9271df0494fa3d9974",
   "source_sha256": "463fdd02dee43e42fef4f3aacf7506709ce87af535e1a53d91c521bc2e361cad",
-  "reviewed_testing_commit": "e82df2c84de08637513fb13674580622fcb526c5",
+  "reviewed_testing_commit": "2b89afa95134d0d3e98afc52981a5080f739a2a9",
   "scope": "Test implementation migration and candidate live acceptance are independent. This review does not rewrite original results, change migration_status semantics or relax the canonical gate. Environment procedures remain disabled by default under the accepted delivery scope.",
-  "evidence_basis": "20261026-canonical-migration-ledger-7094.json plus later G01/G02 attempts and source review on 2026-10-28; historical result bytes and audit reports remain in the separate evidence store. 2026-11-10: a scoped re-review of the Rebalance activity fixture, capacity admission, Started non-zero progress, and the early-completion diagnosis; this local regression adds no product live acceptance. 2026-11-22: reviewed the replication inventory pagination, Heal census completeness, expected-manifest comparison, ILM control survival, and exact marker oracles after automated review findings.",
+  "evidence_basis": "20261026-canonical-migration-ledger-7094.json plus later G01/G02 attempts and source review on 2026-10-28; historical result bytes and audit reports remain in the separate evidence store. 2026-11-10: a scoped re-review of the Rebalance activity fixture, capacity admission, Started non-zero progress, and the early-completion diagnosis; this local regression adds no product live acceptance. 2026-11-22: reviewed the replication inventory pagination, Heal census completeness, expected-manifest comparison, ILM control survival, and exact marker oracles after automated review findings. 2026-11-22: indexed the source-audit inventory and added individually dispatchable local compatibility and source-suite procedure entries with selector and candidate-admission checks. 2026-11-22: added table-catalog and upgrade procedure selectors with shared validation artifact wiring; dry-run selectors cover all 25 newly indexed procedures.",
   "reviewed_files": {
-    "scripts/run_validation_case.sh": "1c4afb02fc9cfba124239cd57f9fc8cfc40cea164d8093e5f41d25d7575aafef",
+    "scripts/run_validation_case.sh": "85b6aa1129dc82bfe9c794b095058fe49a39f1ef241ddb2d3fb2adba9f65c0ea",
     "scripts/validation_heal/authority.py": "8f2225f184427674de1f45aff4c4976c812f9d70fd4bc927ce460726a4ff74a0",
     "scripts/validation_heal/authority_runner.py": "d1dce07019a37318f9fbfc9c4d7383fa259d8d6da881ebacf083a67d04fc2545",
     "scripts/validation_heal/bounded_volume.py": "56f57d2bef882af81a7bf05365fa8b5ae01f9fcdd515b3bc930e1f36cf98e944",
@@ -120,7 +120,21 @@
     "test_validation_heal_availability.py": "42e394d6c00359a6cb958d294af5c4eb5602c8cdb2b7c413d07584e2c9f79acc",
     "test_validation_ilm.py": "ff06720a2ad8fda88e5e4ce57c4ab749b53abb7e8c7dab1aa90d93bf616d4a4c",
     "test_validation_replication.py": "83e1b532e8a6a352c5e38de48799356157e1fad4f1f314ea8ad256fdecf942c5",
-    "test_validation_scanner_usage.py": "6fb435e844f3ed36311db46f4dc754ab5afcd64146d270b9dc0e2e5d21193e0b"
+    "test_validation_scanner_usage.py": "874f11da750e9f84effba007e5ce672239b1ef6487113af71547fb32a3d5ffbb",
+    "rustfs-s3-compat-test.sh": "4bb1dd7a2424a078f35151e944beae0a4743d9d699ed1d74830b640fed4abc98",
+    "rustfs-security-test.sh": "c3fb75a9fee104d8fe16b71f049807bab7dab5488e35ef5f8042ca9ab72e1b0a",
+    "rustfs-tier-test.sh": "e7e138616bb7269e9f2e635ffbf2829c019ceadd4d21680ea07fd245439f8b77",
+    "rustfs-storage-test.sh": "f51efb440f148693bd750b8a3c465a100fa78052a3828dfec6d22ca8d5dd8903",
+    "rustfs-kms-test.sh": "5f8f4145027304646e11dc11256a9271554391d58799c8fd329c07b53f4f1f2a",
+    "validation-cases.json": "804a6ec2a84e65194b68b4ff8b19b8269dde92beda40fc3ad1c6fea07157e84e",
+    "docs/validation-migration-map.md": "3d38a01b792854c9e5ffb7b18462ba9c6825a11a5543a3f6076dc633a7f1ec5e",
+    "docs/source-test-migration-inventory.md": "9f8cf953b2efc89163b3b34ef3a9bc18333d98d796e465eb88e6f5e6daf06ed5",
+    "test_source_test_migration_inventory.py": "9b71531c775c9f9897db15926d5a87b5c674240b631515701c76c684b5e0fcfb",
+    "test_source_procedure_catalog.py": "ed50ad0e8a0aeef2e947b9f090ffcfd00420fe5f1ef85157b4fc8deb2280e5c7",
+    "test_validation_s3_compatibility.py": "c1978bc5eaec91c07d65ebc2460644b81f73c48b63fe382d79508d45a5b573bb",
+    "rustfs-table-test.sh": "c20e58d73e54e15ae4acb1c6022c896788241b9ee004e0f827f4e47c9b863209",
+    "rustfs-upgrade-test.sh": "d93fd83f9725c8d64d068536246defd70c2b4c90c379f58fe1ff4e034eb350cc",
+    "scripts/validation_catalog.py": "70ceb89b9739b09bce7db42673087da39087087c20f5b661b6d29ad34428a028"
   },
   "cases": [
     {

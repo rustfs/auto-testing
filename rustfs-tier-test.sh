@@ -376,6 +376,8 @@ RESULT_LOG_DIR=""
 PROVENANCE_FILE=""
 RESIDUE_FILE=""
 VALIDATION_CASE=""
+VALIDATION_SOURCE_CASE_ID=""
+SELECTED_CASES=""
 VALIDATION_ARTIFACTS_DIR=""
 VALIDATION_CANDIDATE_MANIFEST=""
 VALIDATION_TESTING_COMMIT=""
@@ -1638,6 +1640,12 @@ write_case_result() {
 
 run_test() {
   local id="$1" name="$2" fn="$3" rc=0 cleanup_rc=0 status cleanup_detail started primary_excerpt log_name
+  if [ -n "${SELECTED_CASES}" ]; then
+    case ",${SELECTED_CASES}," in
+      *",${id},"*) ;;
+      *) return 0 ;;
+    esac
+  fi
   if [ "${DRY_RUN}" -eq 1 ]; then
     printf '  [DRY-RUN] %s %s\n' "${id}" "${name}"
     return 0
@@ -1693,7 +1701,7 @@ validation_write_evidence() {
   local evidence_dir="${VALIDATION_ARTIFACTS_DIR}/evidence/${VALIDATION_CASE}" item
   mkdir -p "${evidence_dir}"
   cp "${TEST_TMP}/test.out" "${evidence_dir}/test.log"
-  cp "${RESULTS_DIR}/${CURRENT_TOPOLOGY}--${VALIDATION_CASE}.json" "${evidence_dir}/suite-result.json"
+  cp "${RESULTS_DIR}/${CURRENT_TOPOLOGY}--${VALIDATION_SOURCE_CASE_ID:-${VALIDATION_CASE}}.json" "${evidence_dir}/suite-result.json"
   for item in $(validation_evidence_items); do
     if [ -f "${TEST_TMP}/${item}" ]; then cp "${TEST_TMP}/${item}" "${evidence_dir}/${item}"; fi
   done
@@ -3269,6 +3277,7 @@ main() {
       --expected-rc-sha256) RUSTFS_EXPECTED_RC_SHA256="$1"; shift ;;
       --artifacts-dir) ARTIFACTS_DIR="$1"; shift ;;
       --validation-case) VALIDATION_CASE="$1"; shift ;;
+      --cases) SELECTED_CASES="${SELECTED_CASES:+${SELECTED_CASES},}$1"; shift ;;
       --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
       --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
       --testing-commit) VALIDATION_TESTING_COMMIT="$1"; shift ;;
@@ -3288,6 +3297,9 @@ main() {
   if [ -n "${VALIDATION_CASE}" ]; then
     case "${VALIDATION_CASE}" in
       tiering.transition-and-restore|events.delivery|audit.request-correlation) ;;
+      source-procedure.tier.*)
+        VALIDATION_SOURCE_CASE_ID="$(printf '%s' "${VALIDATION_CASE#source-procedure.tier.}" | tr '[:lower:]' '[:upper:]')"
+        SELECTED_CASES="${VALIDATION_SOURCE_CASE_ID}" ;;
       *) die "unknown validation case: ${VALIDATION_CASE}" ;;
     esac
     [ "${all}" -eq 0 ] || die "--validation-case cannot run all topologies"
@@ -3355,7 +3367,9 @@ main() {
       [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
     fi
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
-    if [ -n "${VALIDATION_CASE}" ]; then
+    if [[ "${VALIDATION_CASE}" == source-procedure.tier.* ]]; then
+      run_all_tests
+    elif [ -n "${VALIDATION_CASE}" ]; then
       case "${VALIDATION_CASE}" in
         tiering.transition-and-restore) run_test "${VALIDATION_CASE}" "TransitionAndRestore" test_validation_tiering_transition_and_restore ;;
         events.delivery) run_test "${VALIDATION_CASE}" "ObjectEventDelivery" test_validation_events_delivery ;;

@@ -21,6 +21,20 @@ case "${CASE_ID}" in
     SUITE=scripts/validation_replication/run_case.sh; EXTRA_ARGS=() ;;
   s3.basic-object-round-trip)
     SUITE=rustfs-s3-compat-test.sh; EXTRA_ARGS=() ;;
+  s3.compatibility.*)
+    SUITE=rustfs-s3-compat-test.sh; EXTRA_ARGS=() ;;
+  source-procedure.security.*)
+    SUITE=rustfs-security-test.sh; EXTRA_ARGS=() ;;
+  source-procedure.tier.*)
+    SUITE=rustfs-tier-test.sh; EXTRA_ARGS=(--topology single-single) ;;
+  source-procedure.storage.*)
+    SUITE=rustfs-storage-test.sh; EXTRA_ARGS=() ;;
+  source-procedure.kms.*)
+    SUITE=rustfs-kms-test.sh; EXTRA_ARGS=() ;;
+  source-procedure.table.*)
+    SUITE=rustfs-table-test.sh; EXTRA_ARGS=() ;;
+  source-procedure.upgrade.*)
+    SUITE=rustfs-upgrade-test.sh; EXTRA_ARGS=(--topology single-single --backends local) ;;
   scanner.usage-convergence|scanner.status-readiness|ilm.configuration-roundtrip|ilm.invalid-configuration|ilm.current-expiration|ilm.tag-filter-expiration|ilm.disabled-rule|ilm.rule-removal|ilm.versioned-current-expiration|ilm.noncurrent-expiration|ilm.newer-noncurrent-retention|ilm.delete-all-versions|ilm.delete-marker-expiration|ilm.multipart-expiration|ilm.restart-persistence|ilm.transition-and-restore)
     SUITE=rustfs-storage-test.sh; EXTRA_ARGS=() ;;
   kms.sse-kms-round-trip)
@@ -38,7 +52,7 @@ case "${CASE_ID}" in
     exit 2 ;;
 esac
 
-if [[ "${CASE_ID}" == pool.* || "${CASE_ID}" == bucket-replication.* || "${CASE_ID}" == site-replication.* || "${CASE_ID}" == scanner.usage-[0-9][0-9]-* ]]; then
+if [[ "${CASE_ID}" == pool.* || "${CASE_ID}" == bucket-replication.* || "${CASE_ID}" == site-replication.* || "${CASE_ID}" == scanner.usage-[0-9][0-9]-* || "${CASE_ID}" == s3.compatibility.* || "${CASE_ID}" == source-procedure.* ]]; then
   python3 -B -c 'import json,sys; catalog=json.load(open(sys.argv[1])); valid={case["id"] for module in catalog["modules"]+catalog.get("local_modules",[]) for case in module["cases"]}; sys.exit(0 if sys.argv[2] in valid else 2)' \
     "${SCRIPT_DIR}/validation-cases.json" "${CASE_ID}" || {
       printf 'unknown canonical validation case: %s\n' "${CASE_ID}" >&2
