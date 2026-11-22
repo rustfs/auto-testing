@@ -20,6 +20,20 @@ The goal is not only to prove that "GET still works after a disk goes bad", but 
 4. Objects, historical versions, delete semantics, concurrent successful writes, and persisted responsibility are correct.
 5. The raw evidence is complete, temporary faults have been cleared, and the environment can be handed back safely.
 
+### Availability and census invariants
+
+All reusable external-shard cases apply the same availability checks before
+and after a fault. The observed node set must remain identical, so a missing
+or silently added node cannot hide an unavailable member. Physical repair
+checks apply the same membership rule before comparing files, formats,
+metadata, sidecars, and rebuilt shards.
+
+Every S3 census validates its object/version identities, object-and-marker
+count, logical bytes, version-list page sizes, and current-list page sizes.
+Recovery comparisons accept an empty bucket when its counters and pagination
+prove that state. A census with missing, inconsistent, duplicated, or
+truncated summary evidence cannot authorize a recovery result.
+
 ## Versions and verified product boundaries
 
 Interface references come from the RustFS and rc commits recorded in the source design, and the source links below are retained for traceability. Each execution batch is still governed by the exact source, package, installed-binary digest, and auto-testing/rc digest in the current candidate manifest. A pass for this candidate is not inferred from the validation results of a historical version.

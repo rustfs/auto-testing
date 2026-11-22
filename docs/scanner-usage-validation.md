@@ -74,6 +74,15 @@ static/version accounting probes. Metadata-specific probes return
 `UNSUPPORTED`; a missing carried/observed sampling window is `BLOCKED`.
 The adapter never derives a certificate from `last_update` or collection time.
 
+Every public Admin sample now carries a scanner-cycle observation in the
+evidence record. The sample must contain a non-negative `scanner_cycle`; cycle
+values may stay equal while a bucket is being polled, but they may never move
+backwards. When `scanner_epoch` is exposed, the epoch must remain stable for
+the probe. A missing cycle, a malformed epoch, a cycle regression, or an epoch
+change is a product failure and cannot be retried into a pass. This binds the
+public usage result to a real scanner snapshot without claiming private
+frontier or acknowledgement evidence.
+
 Default request timeout is 30 seconds, convergence timeout 600 seconds, and
 poll interval 5 seconds. `--objects` defaults to 32 and is bounded at 100000.
 These are test deadlines and fixture controls, not RustFS runtime changes.
@@ -233,3 +242,30 @@ bash test_validation_scanner_usage.sh
 
 The local test doubles verify error handling and assertion gates; their PASS
 results are not product or VM acceptance results.
+
+## First-batch ILM branch coverage
+
+The accelerated ILM harness keeps one canonical case per lifecycle behavior
+and records the exact version inventory for versioned cases. The first batch
+now enforces these additional boundaries:
+
+- Configuration round-trip requires exactly the requested rules, including
+  status, prefix, and expiration days. Unknown or silently rewritten rules
+  fail the case.
+- Invalid configuration covers negative days, invalid status, missing status,
+  and duplicate rule identifiers. Each request must be rejected before any
+  configuration is persisted.
+- Tag filtering derives an independent due window for both the matching and
+  control objects. Early deletion fails, and the control object must remain
+  readable after the matching object expires.
+- Versioned current expiration requires one latest delete marker and exactly
+  one retained data version. Noncurrent expiration checks the exact retained
+  IDs, the absence of extra markers, and the retained payload bytes.
+- Newer-noncurrent retention checks all retained payloads. Delete-all-versions
+  and delete-marker expiration require an empty version and marker inventory.
+- Incomplete multipart expiration requires the upload to disappear, its parts
+  to be inaccessible, and no visible object to remain.
+
+Pure inventory checks live in `scripts/validation_ilm/oracles.py` and are
+covered by `test_validation_ilm.py`. The live harness writes each inventory
+and timing observation as evidence under the selected case directory.

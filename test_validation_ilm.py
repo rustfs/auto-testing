@@ -6,10 +6,40 @@ import unittest
 from pathlib import Path
 
 from scripts.validation_ilm.case_plan import ILM_CASE_IDS, ilm_harness_scored_cases
+from scripts.validation_ilm.oracles import (
+    require_exact_version_ids,
+    require_single_latest_marker,
+    version_inventory,
+)
 from scripts.validation_ilm.verify_result import verify
 
 
 class IlmContractTest(unittest.TestCase):
+    def test_version_inventory_rejects_extra_versions_and_markers(self) -> None:
+        response = {
+            "Versions": [
+                {"Key": "object", "VersionId": "v2", "IsLatest": True, "Size": 2},
+                {"Key": "object", "VersionId": "v1", "IsLatest": False, "Size": 1},
+            ],
+            "DeleteMarkers": [
+                {"Key": "object", "VersionId": "m1", "IsLatest": False},
+            ],
+        }
+        inventory = version_inventory(response, "object")
+        self.assertEqual([item["versionId"] for item in inventory["versions"]], ["v2", "v1"])
+        with self.assertRaisesRegex(AssertionError, "differs"):
+            require_exact_version_ids(inventory, {"v2"})
+        with self.assertRaisesRegex(AssertionError, "one latest"):
+            require_single_latest_marker(inventory)
+
+    def test_version_inventory_requires_one_latest_marker(self) -> None:
+        inventory = version_inventory(
+            {"DeleteMarkers": [{"Key": "object", "VersionId": "m1", "IsLatest": True}]},
+            "object",
+        )
+        self.assertEqual(require_single_latest_marker(inventory), "m1")
+        require_exact_version_ids(inventory, set(), {"m1"})
+
     def test_catalog_drives_case_selection(self) -> None:
         self.assertEqual(15, len(ILM_CASE_IDS))
         self.assertEqual(("ilm.configuration-roundtrip",), ilm_harness_scored_cases(["ilm.configuration-roundtrip"]))

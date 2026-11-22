@@ -410,6 +410,14 @@ Together with the earlier four mixed-branch audits, sixteen branch instances now
 | Heal | 84 | `rustfs_heal_test.sh`, `rustfs-fault-tolerance-test.sh` | Existing fault flows are useful helpers, but each A-J procedure requires its own fixture, fault, public assertion, and cleanup evidence. |
 | Planned | 8 | KMS, Tier/Event/Audit, Security, S3, Storage suites | Existing tests may implement the behavior; compare each source assertion before promoting it. |
 
+The second migration batch adds shared availability gates to the existing Heal
+executors. Physical fault and repair snapshots must retain exactly the same
+observed node membership. S3 recovery comparisons now validate unique
+object/version identities, object-and-marker counts, logical bytes, and both
+version-list and current-list pagination summaries. Empty censuses are valid
+only when their completeness counters and page summaries prove that state.
+The 84-case dispatch table and its source branches remain unchanged.
+
 `s3.basic-object-round-trip` now has a dedicated executor on `single-1disk`.
 Its Bash function combines bucket creation/removal, object PUT/HEAD/GET/LIST/
 DELETE, payload SHA-256, metadata, ETag, and `NoSuchKey` checks on one fixture.
@@ -428,6 +436,27 @@ auto-testing nodes, each with four disks. It checks both nodes' accelerated
 scanner runtime settings and requires exactly one leader to finish a new
 successful cycle within 120 seconds. Its live candidate run passed in RustFS
 Actions run `38044125099`.
+
+The first-batch follow-up also validates the public usage snapshot identity.
+Each Admin sample must expose a non-negative scanner cycle, must not regress
+within an endpoint, and must keep a stable scanner epoch when one is exposed.
+The ILM harness now checks exact version and delete-marker inventories for
+current expiration, noncurrent retention, delete-all-versions, and marker
+expiration. It also checks strict rule round-trips, four invalid-configuration
+branches, independent tag-filter due windows, and incomplete multipart cleanup.
+These checks are implemented in `scripts/validation_scanner_usage/cycle.py`,
+`scripts/validation_ilm/oracles.py`, and their focused unit tests. They do not
+replace the required live candidate evidence.
+
+The third-batch replication follow-up strengthens the existing bucket and site
+executors without duplicating their case dispatch. Rejected target-versioning
+configuration now proves that no usable rule persisted. Delete-marker,
+permanent-version-delete, bidirectional-object, and site-delete cases require
+an exact target inventory with no extra versions or markers. Object convergence
+also checks the advertised content length, and resync now retains a stable
+operation ID through cancellation or a terminal status. The pure inventory
+oracle lives in `scripts/validation_replication/oracles.py` with focused
+regression tests in `test_validation_replication.py`.
 
 The 14 remaining ILM IDs now dispatch to the source ILM black-box behavior
 checks under `scripts/validation_ilm`. The Storage suite deploys the same

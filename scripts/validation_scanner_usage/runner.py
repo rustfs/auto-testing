@@ -18,6 +18,7 @@ from uuid import UUID
 
 from .client import Client, Evidence, ProbeError, bucket_view, endpoint_url, integer, run_command, sha256, utc_now
 from .contracts import CASES, assertion_id, select_cases
+from .cycle import CycleTracker
 from .native import run_native
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -185,15 +186,18 @@ class PublicProbe:
         self.client, self.fixture, self.evidence, self.options = client, fixture, evidence, options
         self.passed = {}
         self.observed = []
+        self.cycles = CycleTracker()
 
     def check(self, index, facts):
         self.passed[index] = self.evidence.save("assertion", facts)
 
     def sample(self, bucket, endpoint_index=0):
         snapshot = self.client.admin(endpoint_index=endpoint_index)
+        cycle = self.cycles.observe(snapshot, endpoint_index)
         view = bucket_view(snapshot, bucket)
         row = {"collected_at": utc_now(), "bucket": bucket, "view": view,
                "scanner_cycle": snapshot.get("scanner_cycle"), "scanner_epoch": snapshot.get("scanner_epoch"),
+               "cycle_observation": cycle,
                "raw_evidence": self.client.last_evidence}
         self.observed.append(row)
         return view

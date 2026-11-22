@@ -440,11 +440,60 @@ class Probe:
                 "pagination": pagination}
 
 
+def validate_inventory_shape(inventory: dict, *, label: str = "inventory") -> dict:
+    """Validate the completeness counters and pagination summary of one S3 census."""
+
+    require(isinstance(inventory, dict) and isinstance(inventory.get("entries"), list),
+            f"{label} has no complete entry list")
+    identities = [(entry.get("key"), entry.get("versionId")) for entry in inventory["entries"]]
+    require(all(isinstance(key, str) and isinstance(version, str) for key, version in identities),
+            f"{label} contains an invalid object/version identity")
+    require(len(identities) == len(set(identities)), f"{label} contains duplicate object/version identities")
+    if not any(name in inventory for name in ("objectsAndMarkers", "bytesRead", "pagination")):
+        return {"entries": len(identities), "summaryChecked": False}
+    count = inventory.get("objectsAndMarkers")
+    byte_count = inventory.get("bytesRead")
+    pagination = inventory.get("pagination")
+    require(type(count) is int and count >= 0 and type(byte_count) is int and byte_count >= 0,
+            f"{label} has invalid completeness counters")
+    require(count == len(identities), f"{label} object/marker count differs from its entries")
+    expected_bytes = 0
+    for entry in inventory["entries"]:
+        if entry.get("deleteMarker"):
+            continue
+        payload_info = entry.get("payload")
+        require(isinstance(payload_info, dict) and type(payload_info.get("size")) is int
+                and payload_info["size"] >= 0,
+                f"{label} contains an invalid payload size")
+        expected_bytes += payload_info["size"]
+    require(byte_count == expected_bytes, f"{label} byte count differs from its payload entries")
+    require(isinstance(pagination, dict), f"{label} has no pagination summary")
+    version_pages = pagination.get("versionPageSizes")
+    current_pages = pagination.get("currentPageSizes")
+    require(isinstance(version_pages, list) and isinstance(current_pages, list)
+            and all(type(size) is int and size >= 0 for size in version_pages + current_pages),
+            f"{label} has invalid pagination sizes")
+    require(sum(version_pages) == count and sum(current_pages) <= count,
+            f"{label} pagination summary omits entries")
+    return {"entries": count, "bytesRead": byte_count, "summaryChecked": True,
+            "versionPages": len(version_pages), "currentPages": len(current_pages)}
+
+
 def compare_inventories(before: dict, after: dict) -> dict:
-    require(before["bucket"] == after["bucket"] and bool(before["entries"]), "wrong or empty baseline")
-    require(canonical(before["entries"]) == canonical(after["entries"]), "S3 versions/content/metadata/tags changed")
+    require(isinstance(before, dict) and isinstance(after, dict)
+            and before.get("bucket") == after.get("bucket"), "wrong inventory bucket")
+    before_shape = validate_inventory_shape(before, label="baseline inventory")
+    after_shape = validate_inventory_shape(after, label="recovery inventory")
+    require(canonical(before["entries"]) == canonical(after["entries"]),
+            "S3 versions/content/metadata/tags changed")
+    if before_shape["summaryChecked"] or after_shape["summaryChecked"]:
+        require(before_shape["summaryChecked"] and after_shape["summaryChecked"]
+                and before_shape["entries"] == after_shape["entries"]
+                and before_shape["bytesRead"] == after_shape["bytesRead"],
+                "S3 inventory completeness evidence is missing or changed")
     return {"equal": True, "objectsAndMarkers": len(before["entries"]),
-            "proof": "full-version-content-and-public-metadata", "physicalRepairProved": False}
+            "proof": "full-version-content-and-public-metadata", "physicalRepairProved": False,
+            "availability": {"baseline": before_shape, "recovery": after_shape}}
 
 
 def main() -> int:
