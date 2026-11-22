@@ -34,6 +34,13 @@ Recovery comparisons accept an empty bucket when its counters and pagination
 prove that state. A census with missing, inconsistent, duplicated, or
 truncated summary evidence cannot authorize a recovery result.
 
+An empty legacy manifest is accepted only when its completeness counters and
+pagination summaries prove that the census was actually collected. Version
+and current-object page summaries must be present and must equal the complete
+manifest totals. Expected ACK-derived manifests use a separate entry-only
+comparison so their intentionally changed counters cannot bypass validation of
+an observed census.
+
 ## Versions and verified product boundaries
 
 Interface references come from the RustFS and rc commits recorded in the source design, and the source links below are retained for traceability. Each execution batch is still governed by the exact source, package, installed-binary digest, and auto-testing/rc digest in the current candidate manifest. A pass for this candidate is not inferred from the validation results of a historical version.

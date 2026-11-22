@@ -23,7 +23,8 @@ from urllib.parse import quote
 import uuid
 
 try:
-    from .heal_probe import Probe, canonical, compare_inventories, payload, require, save
+    from .heal_probe import (Probe, canonical, compare_inventories,
+                             compare_manifest_entries, payload, require, save)
     from .heal_workload import Recorder, seed as seed_workload, verify_seed
     from .healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from .inspector import verify as verify_inspector
@@ -38,7 +39,8 @@ try:
     from .status_keepalive import KeepAliveStatusProbe
     from .fleet_node import endpoint_resolution
 except ImportError:
-    from heal_probe import Probe, canonical, compare_inventories, payload, require, save
+    from heal_probe import (Probe, canonical, compare_inventories,
+                            compare_manifest_entries, payload, require, save)
     from heal_workload import Recorder, seed as seed_workload, verify_seed
     from healthy import BASE_OPTIONS, Fleet, physical_content, validate_topology
     from inspector import verify as verify_inspector
@@ -982,7 +984,7 @@ def run_branch(args, topology, nodes, branch):
         for endpoint in binding["endpoints"]:
             current = fleet.record("all-peer-final-S3", {"endpoint": endpoint, **Probe(binding, endpoint).inventory(
                 bucket, unversioned_current_tags=branch in (*G01_BRANCHES, *G06_BRANCHES))})
-            compare_inventories(final, current)
+            compare_manifest_entries(final, current)
             if branch in G03_BRANCHES:
                 negative = fleet.record("all-peer-deleted-version-GET", Probe(binding, endpoint).s3("get_object", plan[0]["params"]))
                 response = negative.get("response") or {}

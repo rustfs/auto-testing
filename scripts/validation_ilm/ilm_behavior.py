@@ -1434,6 +1434,17 @@ class IlmHarness:
             timeout=self.clock.timeout_after(due, self.args.timeout),
         )
         evidence.append(self.save_json(case_id, "tag-filter-final.json", final))
+        evidence.extend(
+            self.observe_protected_object(
+                case_id,
+                bucket,
+                control_key,
+                control_body,
+                due,
+                bucket,
+                matching_key,
+            )
+        )
         body = self.client.get_object(Bucket=bucket, Key=control_key)["Body"].read()
         if body != control_body:
             raise AssertionError("tag-filter control object changed")
@@ -1556,7 +1567,13 @@ class IlmHarness:
         final_inventory = version_inventory(
             self.client.list_object_versions(Bucket=bucket, Prefix=key), key
         )
-        if len(final_inventory["versions"]) != 1 or require_single_latest_marker(final_inventory) == "":
+        latest_marker = require_single_latest_marker(final_inventory)
+        require_exact_version_ids(
+            final_inventory,
+            {put["VersionId"]},
+            {latest_marker},
+        )
+        if len(final_inventory["versions"]) != 1:
             raise AssertionError("current expiration retained an unexpected version count")
         evidence.append(self.save_json(case_id, "versioned-current-inventory.json", final_inventory))
         evidence.append(self.save_json(case_id, "versioned-current-final.json", final))

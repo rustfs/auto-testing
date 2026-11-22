@@ -450,6 +450,7 @@ def validate_inventory_shape(inventory: dict, *, label: str = "inventory") -> di
             f"{label} contains an invalid object/version identity")
     require(len(identities) == len(set(identities)), f"{label} contains duplicate object/version identities")
     if not any(name in inventory for name in ("objectsAndMarkers", "bytesRead", "pagination")):
+        require(bool(identities), f"{label} empty legacy inventory lacks completeness evidence")
         return {"entries": len(identities), "summaryChecked": False}
     count = inventory.get("objectsAndMarkers")
     byte_count = inventory.get("bytesRead")
@@ -473,10 +474,29 @@ def validate_inventory_shape(inventory: dict, *, label: str = "inventory") -> di
     require(isinstance(version_pages, list) and isinstance(current_pages, list)
             and all(type(size) is int and size >= 0 for size in version_pages + current_pages),
             f"{label} has invalid pagination sizes")
-    require(sum(version_pages) == count and sum(current_pages) <= count,
+    require(version_pages and current_pages, f"{label} pagination summary is empty")
+    current_entries = sum(
+        entry.get("isLatest") is True and not entry.get("deleteMarker")
+        for entry in inventory["entries"]
+    )
+    require(sum(version_pages) == count and sum(current_pages) == current_entries,
             f"{label} pagination summary omits entries")
     return {"entries": count, "bytesRead": byte_count, "summaryChecked": True,
             "versionPages": len(version_pages), "currentPages": len(current_pages)}
+
+
+def compare_manifest_entries(expected: dict, observed: dict) -> dict:
+    """Compare an expected manifest with an observed inventory entry list."""
+
+    require(isinstance(expected, dict) and isinstance(observed, dict)
+            and expected.get("bucket") == observed.get("bucket"), "wrong inventory bucket")
+    require(isinstance(expected.get("entries"), list)
+            and isinstance(observed.get("entries"), list),
+            "expected manifest or observed inventory has no entry list")
+    require(canonical(expected["entries"]) == canonical(observed["entries"]),
+            "S3 versions/content/metadata/tags differ from the expected manifest")
+    return {"equal": True, "entries": len(expected["entries"]),
+            "proof": "expected-manifest-content-and-public-metadata"}
 
 
 def compare_inventories(before: dict, after: dict) -> dict:
@@ -484,8 +504,7 @@ def compare_inventories(before: dict, after: dict) -> dict:
             and before.get("bucket") == after.get("bucket"), "wrong inventory bucket")
     before_shape = validate_inventory_shape(before, label="baseline inventory")
     after_shape = validate_inventory_shape(after, label="recovery inventory")
-    require(canonical(before["entries"]) == canonical(after["entries"]),
-            "S3 versions/content/metadata/tags changed")
+    compare_manifest_entries(before, after)
     if before_shape["summaryChecked"] or after_shape["summaryChecked"]:
         require(before_shape["summaryChecked"] and after_shape["summaryChecked"]
                 and before_shape["entries"] == after_shape["entries"]

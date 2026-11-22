@@ -76,6 +76,10 @@ class ReplicationContractTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "version inventory mismatch"):
             require_version_ids(response, key="object.txt", versions=["v1"])
 
+    def test_version_inventory_rejects_truncated_listing(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "truncated"):
+            version_inventory({"IsTruncated": True}, key="object.txt")
+
 
 if __name__ == "__main__":
     unittest.main()

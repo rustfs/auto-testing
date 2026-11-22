@@ -416,6 +416,9 @@ observed node membership. S3 recovery comparisons now validate unique
 object/version identities, object-and-marker counts, logical bytes, and both
 version-list and current-list pagination summaries. Empty censuses are valid
 only when their completeness counters and page summaries prove that state.
+Empty legacy manifests are rejected without completeness evidence, truncated
+version listings are rejected, and ACK-derived expected manifests use a
+separate entry comparison from collected census validation.
 The 84-case dispatch table and its source branches remain unchanged.
 
 `s3.basic-object-round-trip` now has a dedicated executor on `single-1disk`.

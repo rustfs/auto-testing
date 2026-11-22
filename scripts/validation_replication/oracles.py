@@ -13,6 +13,8 @@ def version_inventory(
 ) -> dict[str, list[dict[str, Any]]]:
     """Return the complete version and delete-marker inventory for one key."""
 
+    if response.get("IsTruncated") is True:
+        raise AssertionError("version listing is truncated")
     versions: list[dict[str, Any]] = []
     for item in response.get("Versions", []) or []:
         if item.get("Key") == key:

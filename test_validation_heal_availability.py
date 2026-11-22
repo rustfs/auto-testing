@@ -5,7 +5,11 @@ from __future__ import annotations
 import copy
 import unittest
 
-from scripts.validation_heal.heal_probe import compare_inventories, validate_inventory_shape
+from scripts.validation_heal.heal_probe import (
+    compare_inventories,
+    compare_manifest_entries,
+    validate_inventory_shape,
+)
 from scripts.validation_heal.shards import validate_fault, validate_repaired_physical
 
 
@@ -57,6 +61,25 @@ class InventoryAvailabilityTests(unittest.TestCase):
         self.assertFalse(validate_inventory_shape(legacy)["summaryChecked"])
         with self.assertRaisesRegex(ValueError, "completeness"):
             compare_inventories(legacy, inventory())
+
+    def test_empty_legacy_census_requires_completeness_evidence(self):
+        with self.assertRaisesRegex(ValueError, "completeness evidence"):
+            validate_inventory_shape({"bucket": "owned-bucket", "entries": []})
+
+    def test_current_pages_must_match_latest_live_entries(self):
+        value = inventory(current=(0,))
+        with self.assertRaisesRegex(ValueError, "pagination"):
+            validate_inventory_shape(value)
+
+    def test_expected_manifest_comparison_does_not_reuse_census_counters(self):
+        expected = inventory()
+        observed = inventory()
+        expected["objectsAndMarkers"] = 99
+        expected["bytesRead"] = 99
+        expected["pagination"] = {"versionPageSizes": [99], "currentPageSizes": [99]}
+        self.assertTrue(compare_manifest_entries(expected, observed)["equal"])
+        with self.assertRaisesRegex(ValueError, "differ"):
+            compare_inventories(expected, observed)
 
 
 class SnapshotAvailabilityTests(unittest.TestCase):

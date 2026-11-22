@@ -40,6 +40,10 @@ class IlmContractTest(unittest.TestCase):
         self.assertEqual(require_single_latest_marker(inventory), "m1")
         require_exact_version_ids(inventory, set(), {"m1"})
 
+    def test_version_inventory_rejects_truncated_listing(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "truncated"):
+            version_inventory({"IsTruncated": True}, "object")
+
     def test_catalog_drives_case_selection(self) -> None:
         self.assertEqual(15, len(ILM_CASE_IDS))
         self.assertEqual(("ilm.configuration-roundtrip",), ilm_harness_scored_cases(["ilm.configuration-roundtrip"]))

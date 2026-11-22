@@ -10,6 +10,8 @@ def version_inventory(response: dict[str, Any], key: str) -> dict[str, list[dict
 
     if not isinstance(response, dict):
         raise AssertionError("version listing is not an object")
+    if response.get("IsTruncated") is True:
+        raise AssertionError("version listing is truncated")
     inventory: dict[str, list[dict[str, Any]]] = {"versions": [], "deleteMarkers": []}
     source_fields = {"versions": "Versions", "deleteMarkers": "DeleteMarkers"}
     for field, source_field in source_fields.items():
