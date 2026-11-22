@@ -690,7 +690,7 @@ class IlmHarness:
 
             retryable = self.rc_error_mentions(
                 result.stderr,
-                "XMinioAdminTierBackendInUse",
+                "AdminTierBackendInUse",
             )
             if not retryable or time.monotonic() >= deadline:
                 error = result.stderr.strip()
