@@ -1645,17 +1645,17 @@ class IlmHarness:
                 Key=key,
                 Body=f"version-{number}".encode("ascii"),
             )["VersionId"]
-            for number in range(1, 5)
+            for number in range(1, 11)
         ]
         configuration = {
             "Rules": [
                 {
-                    "ID": "retain-two-newer-noncurrent",
+                    "ID": "retain-three-newer-noncurrent",
                     "Status": "Enabled",
                     "Filter": {"Prefix": "newer-noncurrent/"},
                     "NoncurrentVersionExpiration": {
                         "NoncurrentDays": 1,
-                        "NewerNoncurrentVersions": 2,
+                        "NewerNoncurrentVersions": 3,
                     },
                 }
             ]
@@ -1668,7 +1668,7 @@ class IlmHarness:
                 self.client.list_object_versions(Bucket=bucket, Prefix=key),
             )
         )
-        expected = set(version_ids[-3:])
+        expected = set(version_ids[-4:])
 
         def retained() -> tuple[bool, Any]:
             response = self.client.list_object_versions(Bucket=bucket, Prefix=key)
@@ -1677,7 +1677,7 @@ class IlmHarness:
             return observed == expected and not inventory["deleteMarkers"], {
                 "expected": sorted(expected),
                 "observed": sorted(observed),
-                "expired": version_ids[0],
+                "expired": sorted(set(version_ids) - expected),
                 "deleteMarkers": inventory["deleteMarkers"],
             }
 
@@ -1688,13 +1688,18 @@ class IlmHarness:
             timeout=max(self.args.timeout, self.args.debug_day_seconds * 12),
         )
         latest = self.client.get_object(Bucket=bucket, Key=key)["Body"].read()
-        if latest != b"version-4":
+        if latest != b"version-10":
             raise AssertionError("latest object changed while retaining noncurrent versions")
-        for version_id, expected_body in zip(version_ids[-3:], (b"version-2", b"version-3", b"version-4")):
+        final_inventory = version_inventory(
+            self.client.list_object_versions(Bucket=bucket, Prefix=key), key
+        )
+        require_exact_version_ids(final_inventory, expected)
+        for version_id, number in zip(version_ids[-4:], range(7, 11)):
             body = self.client.get_object(Bucket=bucket, Key=key, VersionId=version_id)["Body"].read()
-            if body != expected_body:
+            if body != f"version-{number}".encode("ascii"):
                 raise AssertionError(f"retained version payload changed: {version_id}")
         evidence.append(self.save_json(case_id, "newer-noncurrent-final.json", final))
+        evidence.append(self.save_json(case_id, "newer-noncurrent-final-inventory.json", final_inventory))
         return evidence
 
     def case_delete_all_versions(self, case_id: str, bucket: str) -> list[str]:

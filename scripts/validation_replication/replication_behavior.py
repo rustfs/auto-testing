@@ -1632,23 +1632,59 @@ class ReplicationHarness:
                 return False, version_inventory(response, key=key)
             return True, inventory
 
-        self.wait_until(case_id, "replicated versions before permanent delete", initial_probe)
-        self.client_a.delete_object(Bucket=source, Key=key, VersionId=first["VersionId"])
+        target_before = self.wait_until(
+            case_id, "replicated versions before permanent delete", initial_probe
+        )
+        source_before = self.client_a.list_object_versions(Bucket=source, Prefix=key)
+        deleted = self.client_a.delete_object(
+            Bucket=source, Key=key, VersionId=first["VersionId"]
+        )
 
         def probe() -> tuple[bool, Any]:
-            response = self.client_b.list_object_versions(Bucket=target, Prefix=key)
+            target_response = self.client_b.list_object_versions(Bucket=target, Prefix=key)
+            source_response = self.client_a.list_object_versions(Bucket=source, Prefix=key)
             try:
-                inventory = require_version_ids(
-                    response,
+                target_inventory = require_version_ids(
+                    target_response,
+                    key=key,
+                    versions=[second["VersionId"]],
+                )
+                source_inventory = require_version_ids(
+                    source_response,
                     key=key,
                     versions=[second["VersionId"]],
                 )
             except AssertionError:
-                return False, version_inventory(response, key=key)
-            return True, inventory
+                return False, {
+                    "source": version_inventory(source_response, key=key),
+                    "target": version_inventory(target_response, key=key),
+                }
+            return True, {
+                "source": source_inventory,
+                "target": target_inventory,
+                "deleted": first["VersionId"],
+                "retained": second["VersionId"],
+            }
 
         final = self.wait_until(case_id, "permanent version delete replication", probe)
-        return [self.save_json(case_id, "version-delete-final.json", final)]
+        target_body = self.client_b.get_object(
+            Bucket=target, Key=key, VersionId=second["VersionId"]
+        )["Body"].read()
+        if target_body != b"version-two":
+            raise AssertionError("replication version delete changed the retained target payload")
+        source_body = self.client_a.get_object(
+            Bucket=source, Key=key, VersionId=second["VersionId"]
+        )["Body"].read()
+        if source_body != b"version-two":
+            raise AssertionError("replication version delete changed the retained source payload")
+        return [
+            self.save_json(case_id, "version-delete-request.json", deleted),
+            self.save_json(case_id, "version-delete-before.json", {
+                "source": source_before,
+                "target": target_before,
+            }),
+            self.save_json(case_id, "version-delete-final.json", final),
+        ]
 
     def case_bucket_existing_object_enabled(self, case_id: str) -> list[str]:
         key = "existing/before-rule.txt"
