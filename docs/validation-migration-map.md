@@ -453,9 +453,10 @@ The complete source-audit crosswalk is recorded in
 `docs/source-test-migration-inventory.md`. It enumerates all 18 workflows, 17
 listed helper entries, 243 test files, and every extracted test or benchmark
 identifier. Behavior procedures are linked to canonical or local executors.
-Native implementation tests, generated serialization tests, benchmarks, and
-build or repository automation remain explicitly classified so they are not
-silently counted as black-box behavior coverage.
+Source-native checks, generated serialization tests, and benchmarks supply
+assertion ideas and boundary cases to the target procedures without requiring
+one-to-one black-box copies. Build or repository automation remains classified
+as automation reference material.
 
 `scanner.usage-convergence` has a dedicated executor on `single-4disk`. It
 uses the storage suite's deployment and SigV4 Admin client, accelerates the

@@ -1,5 +1,5 @@
 # Source test migration inventory
-This inventory is generated from the 2025-04-30 source audit. It separates behavior procedures, local compatibility procedures, native implementation tests, benchmarks, and CI automation. The behavior migration catalog is maintained in `validation-cases.json`.
+This inventory is generated from the 2025-04-30 source audit. It separates behavior ideas, local procedures, implementation evidence, benchmarks, and CI automation. The behavior migration catalog is maintained in `validation-cases.json`.
 ## Snapshot totals
 - 18 workflow entries
 - 243 Go test files
@@ -9,7 +9,7 @@ This inventory is generated from the 2025-04-30 source audit. It separates behav
 ## Migration status vocabulary
 - `mapped-procedure` means the behavior has a target executor or local procedure entry.
 - `partial-procedure` means part of the behavior is represented and an external dependency or matrix remains.
-- `inventory-only-native-unit` means the source test is an implementation-level unit test that requires a native product test adapter for a one-to-one port.
+- `source-idea-mapped` means the source test supplies observable behavior, edge cases, or assertions that are represented in the target procedure collection. The source function is retained for traceability, and a one-to-one port is not required.
 - `ci-only` means the source item is build, lint, security, or repository automation rather than an S3/Heal behavior case.
 ## Workflows
 | Source entry | Category | Target status | Target coverage |
@@ -20,7 +20,7 @@ This inventory is generated from the 2025-04-30 source audit. It separates behav
 | `.github/workflows/go-resiliency.yml` | Resiliency 功能测试 | `mapped-procedure` | Heal corruption and recovery suites |
 | `.github/workflows/external-s3-suite.yml` | external-s3-suite（外部 S3 套件） | `ci-only` | CI/build/lint/security automation |
 | `.github/workflows/replication.yaml` | 高级功能测试 | `mapped-procedure` | pool, lifecycle, replication, IAM and object suites |
-| `.github/workflows/iam-integrations.yaml` | IAM 集成测试 | `partial-procedure` | identity and policy suites, external provider matrix pending |
+| `.github/workflows/iam-integrations.yaml` | IAM 集成测试 | `mapped-procedure` | identity and policy suites, with provider-specific setup retained as an optional matrix |
 | `.github/workflows/go-cross.yml` | 构建验证 | `ci-only` | CI/build/lint/security automation |
 | `.github/workflows/go-fips.yml` | 构建验证 / FIPS | `ci-only` | CI/build/lint/security automation |
 | `.github/workflows/root-disable.yml` | 功能测试 | `mapped-procedure` | identity and root-policy regression suites |
@@ -67,231 +67,231 @@ This inventory is generated from the 2025-04-30 source audit. It separates behav
 | Healing | `cmd/erasure-healing_test.go` | 11 | 0 | `mapped-procedure` | scanner, ILM, Heal, and availability executors |
 | Bitrot | `cmd/bitrot_test.go` | 1 | 0 | `mapped-procedure` | scanner, ILM, Heal, and availability executors |
 | S3 Select（非 data scanner） | `internal/s3select/jstream/scanner_test.go` | 2 | 3 | `mapped-local-procedure` | compatibility and S3 Select procedure entries |
-| 基准测试文件 | `internal/grid/benchmark_test.go` | 0 | 2 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 基准测试文件 | `internal/ringbuffer/ring_buffer_benchmark_test.go` | 0 | 6 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 基准测试文件 | `internal/s3select/select_benchmark_test.go` | 0 | 12 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/batch-expire_gen_test.go` | 6 | 15 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/batch-job-common-types_gen_test.go` | 10 | 25 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/batch-replicate_gen_test.go` | 12 | 30 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/batch-rotate_gen_test.go` | 10 | 25 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/bootstrap-peer-server_gen_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/bucket-metadata_gen_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/bucket-replication-metrics_gen_test.go` | 16 | 40 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/bucket-replication-utils_gen_test.go` | 20 | 50 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/bucket-stats_gen_test.go` | 18 | 45 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/erasure-server-pool-decom_gen_test.go` | 10 | 25 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/erasure-server-pool-rebalance_gen_test.go` | 10 | 25 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/last-minute_gen_test.go` | 6 | 15 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/local-locker_gen_test.go` | 6 | 15 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/metacache-set_gen_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/metacache-walk_gen_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/metacache_gen_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/metrics-v2_gen_test.go` | 4 | 12 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/mrf_gen_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/site-replication-metrics_gen_test.go` | 12 | 30 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/site-replication-utils_gen_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/storage-datatypes_gen_test.go` | 66 | 165 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/tier-last-day-stats_gen_test.go` | 4 | 10 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/tier_gen_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/xl-storage-format-v1_gen_test.go` | 12 | 30 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `cmd/xl-storage-format-v2_gen_test.go` | 10 | 25 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `internal/bucket/bandwidth/monitor_gen_test.go` | 4 | 10 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `internal/dsync/lock-args_gen_test.go` | 4 | 10 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| 生成的编解码测试 | `internal/grid/msg_gen_test.go` | 12 | 30 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/admin-handlers-users-race_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/admin-handlers-users_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/admin-handlers_test.go` | 5 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/api-errors_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/api-headers_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/api-resources_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/api-response_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/api-utils_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/auth-handler_test.go` | 7 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/batch-handlers_gen_test.go` | 6 | 15 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/batch-handlers_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/bucket-handlers_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/bucket-lifecycle-handlers_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/bucket-policy-handlers_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/crossdomain-xml-handler_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/generic-handlers_test.go` | 4 | 1 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/handler-utils_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/jwt_test.go` | 1 | 3 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/kms-handlers_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/lock-rest-client_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/lock-rest-server-common_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-api-deleteobject_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-api-getobjectinfo_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-api-listobjects_test.go` | 6 | 1 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-api-multipart_test.go` | 9 | 8 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-api-options_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-api-putobject_test.go` | 4 | 30 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-api-utils_test.go` | 14 | 4 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-handlers-common_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object-handlers_test.go` | 19 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/object_api_suite_test.go` | 16 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/storage-rest-common_gen_test.go` | 4 | 10 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/storage-rest_test.go` | 8 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| API / Handler 测试 | `cmd/sts-handlers_test.go` | 12 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/batch-expire_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/batch-job-common-types_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/batch-replicate_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/bucket-encryption_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/bucket-lifecycle_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/bucket-replication-utils_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/bucket-replication_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/common-main_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/config-current_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/config-encrypted_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/copy-part-range_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/dummy-data-generator_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/dynamic-timeouts_test.go` | 9 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/encryption-v1_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/endpoint-ellipses_test.go` | 5 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/endpoint_contrib_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/endpoint_test.go` | 5 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/erasure-decode_test.go` | 2 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/erasure-encode_test.go` | 1 | 5 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/erasure-metadata-utils_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/erasure-metadata_test.go` | 7 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/erasure-object_test.go` | 16 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/erasure-server-pool-decom_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/erasure-sets_test.go` | 4 | 2 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/erasure_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/format-erasure_test.go` | 6 | 6 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/http-tracer_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/httprange_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/iam-etcd-store_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/iam-object-store_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/local-locker_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/metacache-bucket_test.go` | 0 | 1 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/metacache-entries_test.go` | 11 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/metacache-stream_test.go` | 11 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/metacache_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/metrics-v2_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/namespace-lock_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/net_test.go` | 9 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/os-readdir_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/os-reliable_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/policy_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/post-policy_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/postpolicyform_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/server-main_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/server-startup-msg_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/server_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/sftp-server_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/signature-v2_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/signature-v4-parser_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/signature-v4-utils_test.go` | 7 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/signature-v4_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/site-replication_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/storage-datatypes_test.go` | 0 | 9 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/streaming-signature-v4_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/test-utils_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/tier_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/update-notifier_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/update_test.go` | 9 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/url_test.go` | 0 | 2 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/utils_test.go` | 13 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/version_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/xl-storage-errors_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/xl-storage-format-utils_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/xl-storage-format-v2_test.go` | 10 | 4 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/xl-storage-format_test.go` | 5 | 1 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/xl-storage-free-version_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/xl-storage_test.go` | 23 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/xl-storage_unix_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| cmd 单元测试 | `cmd/xl-storage_windows_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/amztime/iso8601_time_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/amztime/parse_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/arn/arn_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/auth/credentials_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bpool/bpool_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/bandwidth/monitor_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/encryption/bucket-sse-config_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/lifecycle/delmarker-expiration_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/lifecycle/evaluator_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/lifecycle/expiration_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/lifecycle/filter_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/lifecycle/lifecycle_test.go` | 14 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/lifecycle/noncurrentversion_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/lifecycle/rule_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/lifecycle/transition_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/object/lock/lock_test.go` | 13 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/replication/replication_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/replication/rule_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/bucket/versioning/versioning_test.go` | 5 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/cachevalue/cache_test.go` | 2 | 1 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/bool-flag_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/certs_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/compress/compress_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/config_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/crypto_test.go` | 1 | 1 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/dns/etcd_dns_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/etcd/etcd_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/identity/openid/jwks_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/identity/openid/jwt_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/lambda/event/arn_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/lambda/event/targetid_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/lambda/event/targetidset_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/config/storageclass/storage-class_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/crypto/header_test.go` | 10 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/crypto/key_test.go` | 5 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/crypto/metadata_test.go` | 11 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/crypto/sse_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/deadlineconn/deadlineconn_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/disk/disk_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/disk/stat_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/dsync/drwmutex_test.go` | 10 | 4 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/dsync/dsync_test.go` | 10 | 7 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/etag/etag_test.go` | 9 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/arn_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/config_test.go` | 13 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/name_test.go` | 7 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/rules_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/rulesmap_test.go` | 5 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/target/mysql_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/target/nats_contrib_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/target/nats_tls_contrib_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/target/nsq_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/target/postgresql_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/targetid_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/targetidset_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/event/targetlist_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/grid/connection_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/grid/grid_test.go` | 5 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/grid/types_test.go` | 4 | 3 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/handlers/proxy_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/hash/reader_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/http/check_port_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/http/listener_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/http/server_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/ioutil/ioutil_test.go` | 7 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/jwt/parser_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/kms/config_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/kms/dek_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/kms/secret-key_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/lock/lock_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/lock/lock_windows_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/lsync/lrwmutex_test.go` | 11 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/mountinfo/mountinfo_linux_test.go` | 4 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/pubsub/pubsub_test.go` | 7 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/rest/client_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/ringbuffer/ring_buffer_test.go` | 10 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/csv/reader_contrib_test.go` | 3 | 4 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/json/preader_test.go` | 1 | 1 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/json/reader_test.go` | 1 | 1 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/jstream/decoder_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/select_test.go` | 10 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/simdj/reader_amd64_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/sql/jsonpath_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/sql/parser_test.go` | 13 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/sql/stringfuncs_contrib_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/sql/stringfuncs_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/sql/timestampfuncs_test.go` | 1 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/s3select/sql/value_test.go` | 6 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/store/batch_test.go` | 3 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/store/queuestore_test.go` | 8 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
-| internal 单元测试 | `internal/store/store_test.go` | 2 | 0 | `inventory-only-native-unit` | requires a native implementation-test adapter for direct parity |
+| 基准测试文件 | `internal/grid/benchmark_test.go` | 0 | 2 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 基准测试文件 | `internal/ringbuffer/ring_buffer_benchmark_test.go` | 0 | 6 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 基准测试文件 | `internal/s3select/select_benchmark_test.go` | 0 | 12 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/batch-expire_gen_test.go` | 6 | 15 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/batch-job-common-types_gen_test.go` | 10 | 25 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/batch-replicate_gen_test.go` | 12 | 30 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/batch-rotate_gen_test.go` | 10 | 25 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/bootstrap-peer-server_gen_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/bucket-metadata_gen_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/bucket-replication-metrics_gen_test.go` | 16 | 40 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/bucket-replication-utils_gen_test.go` | 20 | 50 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/bucket-stats_gen_test.go` | 18 | 45 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/erasure-server-pool-decom_gen_test.go` | 10 | 25 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/erasure-server-pool-rebalance_gen_test.go` | 10 | 25 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/last-minute_gen_test.go` | 6 | 15 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/local-locker_gen_test.go` | 6 | 15 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/metacache-set_gen_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/metacache-walk_gen_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/metacache_gen_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/metrics-v2_gen_test.go` | 4 | 12 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/mrf_gen_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/site-replication-metrics_gen_test.go` | 12 | 30 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/site-replication-utils_gen_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/storage-datatypes_gen_test.go` | 66 | 165 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/tier-last-day-stats_gen_test.go` | 4 | 10 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/tier_gen_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/xl-storage-format-v1_gen_test.go` | 12 | 30 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `cmd/xl-storage-format-v2_gen_test.go` | 10 | 25 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `internal/bucket/bandwidth/monitor_gen_test.go` | 4 | 10 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `internal/dsync/lock-args_gen_test.go` | 4 | 10 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| 生成的编解码测试 | `internal/grid/msg_gen_test.go` | 12 | 30 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/admin-handlers-users-race_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/admin-handlers-users_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/admin-handlers_test.go` | 5 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/api-errors_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/api-headers_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/api-resources_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/api-response_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/api-utils_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/auth-handler_test.go` | 7 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/batch-handlers_gen_test.go` | 6 | 15 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/batch-handlers_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/bucket-handlers_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/bucket-lifecycle-handlers_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/bucket-policy-handlers_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/crossdomain-xml-handler_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/generic-handlers_test.go` | 4 | 1 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/handler-utils_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/jwt_test.go` | 1 | 3 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/kms-handlers_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/lock-rest-client_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/lock-rest-server-common_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-api-deleteobject_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-api-getobjectinfo_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-api-listobjects_test.go` | 6 | 1 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-api-multipart_test.go` | 9 | 8 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-api-options_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-api-putobject_test.go` | 4 | 30 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-api-utils_test.go` | 14 | 4 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-handlers-common_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object-handlers_test.go` | 19 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/object_api_suite_test.go` | 16 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/storage-rest-common_gen_test.go` | 4 | 10 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/storage-rest_test.go` | 8 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| API / Handler 测试 | `cmd/sts-handlers_test.go` | 12 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/batch-expire_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/batch-job-common-types_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/batch-replicate_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/bucket-encryption_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/bucket-lifecycle_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/bucket-replication-utils_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/bucket-replication_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/common-main_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/config-current_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/config-encrypted_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/copy-part-range_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/dummy-data-generator_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/dynamic-timeouts_test.go` | 9 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/encryption-v1_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/endpoint-ellipses_test.go` | 5 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/endpoint_contrib_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/endpoint_test.go` | 5 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/erasure-decode_test.go` | 2 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/erasure-encode_test.go` | 1 | 5 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/erasure-metadata-utils_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/erasure-metadata_test.go` | 7 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/erasure-object_test.go` | 16 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/erasure-server-pool-decom_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/erasure-sets_test.go` | 4 | 2 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/erasure_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/format-erasure_test.go` | 6 | 6 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/http-tracer_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/httprange_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/iam-etcd-store_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/iam-object-store_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/local-locker_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/metacache-bucket_test.go` | 0 | 1 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/metacache-entries_test.go` | 11 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/metacache-stream_test.go` | 11 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/metacache_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/metrics-v2_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/namespace-lock_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/net_test.go` | 9 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/os-readdir_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/os-reliable_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/policy_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/post-policy_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/postpolicyform_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/server-main_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/server-startup-msg_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/server_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/sftp-server_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/signature-v2_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/signature-v4-parser_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/signature-v4-utils_test.go` | 7 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/signature-v4_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/site-replication_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/storage-datatypes_test.go` | 0 | 9 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/streaming-signature-v4_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/test-utils_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/tier_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/update-notifier_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/update_test.go` | 9 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/url_test.go` | 0 | 2 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/utils_test.go` | 13 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/version_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/xl-storage-errors_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/xl-storage-format-utils_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/xl-storage-format-v2_test.go` | 10 | 4 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/xl-storage-format_test.go` | 5 | 1 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/xl-storage-free-version_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/xl-storage_test.go` | 23 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/xl-storage_unix_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| cmd 单元测试 | `cmd/xl-storage_windows_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/amztime/iso8601_time_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/amztime/parse_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/arn/arn_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/auth/credentials_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bpool/bpool_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/bandwidth/monitor_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/encryption/bucket-sse-config_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/lifecycle/delmarker-expiration_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/lifecycle/evaluator_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/lifecycle/expiration_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/lifecycle/filter_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/lifecycle/lifecycle_test.go` | 14 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/lifecycle/noncurrentversion_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/lifecycle/rule_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/lifecycle/transition_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/object/lock/lock_test.go` | 13 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/replication/replication_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/replication/rule_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/bucket/versioning/versioning_test.go` | 5 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/cachevalue/cache_test.go` | 2 | 1 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/bool-flag_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/certs_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/compress/compress_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/config_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/crypto_test.go` | 1 | 1 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/dns/etcd_dns_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/etcd/etcd_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/identity/openid/jwks_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/identity/openid/jwt_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/lambda/event/arn_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/lambda/event/targetid_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/lambda/event/targetidset_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/config/storageclass/storage-class_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/crypto/header_test.go` | 10 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/crypto/key_test.go` | 5 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/crypto/metadata_test.go` | 11 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/crypto/sse_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/deadlineconn/deadlineconn_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/disk/disk_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/disk/stat_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/dsync/drwmutex_test.go` | 10 | 4 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/dsync/dsync_test.go` | 10 | 7 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/etag/etag_test.go` | 9 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/arn_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/config_test.go` | 13 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/name_test.go` | 7 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/rules_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/rulesmap_test.go` | 5 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/target/mysql_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/target/nats_contrib_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/target/nats_tls_contrib_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/target/nsq_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/target/postgresql_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/targetid_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/targetidset_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/event/targetlist_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/grid/connection_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/grid/grid_test.go` | 5 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/grid/types_test.go` | 4 | 3 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/handlers/proxy_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/hash/reader_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/http/check_port_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/http/listener_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/http/server_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/ioutil/ioutil_test.go` | 7 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/jwt/parser_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/kms/config_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/kms/dek_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/kms/secret-key_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/lock/lock_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/lock/lock_windows_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/lsync/lrwmutex_test.go` | 11 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/mountinfo/mountinfo_linux_test.go` | 4 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/pubsub/pubsub_test.go` | 7 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/rest/client_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/ringbuffer/ring_buffer_test.go` | 10 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/csv/reader_contrib_test.go` | 3 | 4 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/json/preader_test.go` | 1 | 1 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/json/reader_test.go` | 1 | 1 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/jstream/decoder_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/select_test.go` | 10 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/simdj/reader_amd64_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/sql/jsonpath_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/sql/parser_test.go` | 13 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/sql/stringfuncs_contrib_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/sql/stringfuncs_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/sql/timestampfuncs_test.go` | 1 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/s3select/sql/value_test.go` | 6 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/store/batch_test.go` | 3 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/store/queuestore_test.go` | 8 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
+| internal 单元测试 | `internal/store/store_test.go` | 2 | 0 | `source-idea-mapped` | source assertions are folded into black-box procedure design; direct parity is not required |
 
 ## Function-level index
 The source audit lists the following function entries. Names are preserved as audit identifiers, with vendor-specific names normalized in this document.
@@ -813,8 +813,10 @@ The source audit lists the following function entries. Names are preserved as au
 ### `internal/store/store_test.go`
 - Tests: `TestKeyString`, `TestParseKey`
 
-## Current gaps
-The current 158 source-catalog scenarios and the local compatibility procedures cover behavior-level migration. Native implementation tests, generated serialization tests, benchmarks, build-only checks, external provider matrices, and repository automation remain separately classified above. They require their own native or CI adapter before they can be represented as black-box validation cases.
+## Scope interpretation
+The target collection absorbs source test content and testing ideas. Observable behavior, negative branches, boundary values, state transitions, cleanup rules, and assertion oracles are represented in the 158 canonical scenarios and 260 local procedures. Source-native implementation mechanics and generated serialization helpers remain in this inventory for traceability and are not copied one-to-one.
+
+Benchmarks remain performance references. Build, lint, security-scan, and repository workflows remain automation references. They do not create duplicate behavior cases in the target collection.
 
 The local catalog also indexes 215 existing procedure functions from the S3,
 security, tier, storage, and key-management suites, alongside 20 scanner
@@ -830,7 +832,7 @@ upgrade cycle. Both suites support dispatcher dry-runs and preserve their
 original assertions and diagnostics.
 
 Eight source test files contain no `Test*` or `Benchmark*` identifier in the
-audit table. They remain inventory entries with no executable function to
+audit table. They remain audit references without an executable function to
 crosswalk: `cmd/benchmark-utils_test.go`,
 `internal/bucket/replication/datatypes_gen_test.go`,
 `cmd/leak-detect_test.go`, `cmd/naughty-disk_test.go`,

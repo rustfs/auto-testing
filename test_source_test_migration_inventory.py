@@ -17,6 +17,9 @@ class SourceTestMigrationInventoryTests(unittest.TestCase):
         self.assertIn("872 benchmark entries", text)
         self.assertIn("cmd/data-scanner_test.go", text)
         self.assertIn("internal/store/store_test.go", text)
+        self.assertIn("source-idea-mapped", text)
+        self.assertIn("one-to-one port is not required", text)
+        self.assertIn("Observable behavior, negative branches, boundary values", text)
 
     def test_inventory_has_no_vendor_specific_product_name(self) -> None:
         self.assertNotRegex(INVENTORY.read_text(encoding="utf-8"), r"(?i)minio|mint|aws")
