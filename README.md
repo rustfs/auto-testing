@@ -86,6 +86,12 @@ per-key failures, request ids, GET results and residue before/after cleanup.
 Cleanup runs in `finally`; an incomplete cleanup aborts the remaining cases.
 The caller must hold the environment's test lock throughout this probe.
 
+## UploadPart client-read timeout
+
+Run the `upload-part-client-read-timeout` case with `python3 scripts/s3_upload_part_timeout.py --rustfs-bin /absolute/path/to/rustfs` with Python 3 and `boto3>=1.36,<2`. The runner starts one RustFS process on loopback with a temporary volume and a two-second request-body idle timeout. A signed UploadPart sends a prefix and keeps the connection open until the server answers HTTP 400 with S3 code `RequestTimeout`. A complete HTTP request carrying fewer S3 bytes than declared must return HTTP 400 with `IncompleteBody`. ListParts checks that the timeout left the slot empty and the short overwrite preserved the retry's ETag and size. Completing the upload and reading the object verifies the retry bytes.
+
+Run `python3 -m unittest test_s3_upload_part_timeout.py` to check the client's wire framing and response assertions.
+
 ## Bulk-delete regressions
 
 The complete S3 topology suite includes bulk-delete regressions `S3C-213`, `S3C-214`, `S3C-1306` and `S3C-1307`. They cover batch boundaries, duplicate keys, immutable GET load and finite same-key PUT contention in off/on/suspended versioning modes. Python boto3 is required. Each subcase retains JSON, phase/request timing, HTTP 503 and per-object error counts, version/marker cleanup receipts and a Chinese Markdown summary under `--bulk-delete-results-dir`. The standalone runner accepts existing endpoints and does not deploy nodes; its caller must hold the environment lock. See [the case contracts and usage](docs/s3-bulk-delete-regressions.zh-CN.md).
