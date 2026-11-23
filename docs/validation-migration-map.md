@@ -446,7 +446,7 @@ The table-catalog suite contributes 7 additional `source-procedure.table.*`
 entries, and the upgrade suite contributes 18
 `source-procedure.upgrade.*` entries. Both suites select one existing
 procedure in dry-run mode and retain the original case-level assertions and
-diagnostics. The local catalog therefore contains 260 executable procedure
+diagnostics. The local catalog therefore contains 261 executable procedure
 entries in addition to the 158 canonical source scenarios.
 
 The complete source-audit crosswalk is recorded in

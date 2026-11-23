@@ -4718,6 +4718,32 @@
             ],
             "case_ids": []
           }
+        },
+        {
+          "id": "scanner.usage-21-retired-local-drive",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "s3-api",
+            "native-test"
+          ],
+          "assertions": [
+            "After the local wrapper retires before the first object, the scanner retries once on the current wrapper with the same format identity and persists a complete cache with exact object and byte totals."
+          ],
+          "probes": {
+            "designCode": "USAGE-21",
+            "procedure": "docs/scanner-usage-validation.md",
+            "executionMode": "configured-endpoint",
+            "runner": "scripts/validation_scanner_usage/run_case.sh",
+            "publicScenario": null
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-scanner-usage-test.sh"
+            ],
+            "case_ids": []
+          }
         }
       ]
     },
