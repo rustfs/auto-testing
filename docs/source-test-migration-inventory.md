@@ -814,7 +814,7 @@ The source audit lists the following function entries. Names are preserved as au
 - Tests: `TestKeyString`, `TestParseKey`
 
 ## Scope interpretation
-The target collection absorbs source test content and testing ideas. Observable behavior, negative branches, boundary values, state transitions, cleanup rules, and assertion oracles are represented in the 158 canonical scenarios and 260 local procedures. Source-native implementation mechanics and generated serialization helpers remain in this inventory for traceability and are not copied one-to-one.
+The target collection absorbs source test content and testing ideas. Observable behavior, negative branches, boundary values, state transitions, cleanup rules, and assertion oracles are represented in the 158 canonical scenarios and 261 local procedures. Source-native implementation mechanics and generated serialization helpers remain in this inventory for traceability and are not copied one-to-one.
 
 Benchmarks remain performance references. Build, lint, security-scan, and repository workflows remain automation references. They do not create duplicate behavior cases in the target collection.
 
@@ -828,7 +828,7 @@ Benchmarks remain performance references. Build, lint, security-scan, and reposi
 | Build, lint, security-scan, and repository automation | Separate | Keep as CI quality gates and do not duplicate them as behavior cases |
 
 The local catalog also indexes 215 existing procedure functions from the S3,
-security, tier, storage, and key-management suites, alongside 20 scanner
+security, tier, storage, and key-management suites, alongside 21 scanner
 regression procedures. These entries retain the
 original suite function and can be selected individually through the validation
 dispatcher. A registered procedure still requires a live candidate run before

@@ -1,4 +1,4 @@
-"""Keep the twenty design acceptance rows distinct from black-box probes."""
+"""Keep scanner usage acceptance contracts distinct from black-box probes."""
 
 from __future__ import annotations
 
@@ -104,6 +104,8 @@ CASES = (
     Case(20, "versions-and-prefix-keys", "Object/prefix collisions, versions and markers", "versions", (
         ("public", "An object key that is also a prefix and nested encoding fixtures retain every acknowledged version and payload."),
         ("public", "Usage matches the independent version inventory's object, version, marker and logical-byte accounting exactly."))),
+    Case(21, "retired-local-drive", "Recover a local drive retired before the first object", None, (
+        ("native", "After the local wrapper retires before the first object, the scanner retries once on the current wrapper with the same format identity and persists a complete cache with exact object and byte totals."),)),
 )
 
 

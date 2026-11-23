@@ -843,22 +843,22 @@ class RegistrationTests(unittest.TestCase):
                 results = [execute_case(case, directory, options(execution="native", endpoints=[]), PROVENANCE, client_factory=client)
                            for case in select_cases("all")]
                 client.assert_not_called()
-            self.assertEqual(len(results), 20)
+            self.assertEqual(len(results), 21)
             self.assertTrue(all(result["verdict"] == "BLOCKED" for result in results))
             self.assertTrue(all(result["profile"] == "native-test" and result["hit_count"] == 0 for result in results))
             self.assertTrue(all(result["cleanup_status"] == "PASS" for result in results))
             self.assertTrue(all(assertion["status"] == "BLOCKED" for result in results for assertion in result["assertions"]))
-            self.assertEqual(len(list((Path(directory) / "cases").glob("*.json"))), 20)
+            self.assertEqual(len(list((Path(directory) / "cases").glob("*.json"))), 21)
 
-    def test_twenty_rows_are_registered_without_rewriting_source_counts(self):
+    def test_usage_rows_are_registered_without_rewriting_source_counts(self):
         catalog = json.loads((ROOT / "validation-cases.json").read_text())
         validate_snapshot(catalog)
         local_by_id = {module["id"]: module for module in catalog["local_modules"]}
         self.assertEqual(local_by_id["scanner-usage-regressions"], catalog_module())
         self.assertEqual(sum(len(module["cases"]) for module in catalog["modules"]), 158)
-        self.assertEqual(sum(len(module["cases"]) for module in catalog_modules(catalog)), 418)
-        self.assertEqual(sum(len(module["cases"]) for module in catalog["local_modules"]), 260)
-        self.assertEqual(len(select_cases("all")), 20)
+        self.assertEqual(sum(len(module["cases"]) for module in catalog_modules(catalog)), 419)
+        self.assertEqual(sum(len(module["cases"]) for module in catalog["local_modules"]), 261)
+        self.assertEqual(len(select_cases("all")), 21)
         self.assertEqual([case.number for case in select_cases("blackbox")], [1, 20])
         self.assertNotIn(CASES[0].id, [case for case, _ in sweepable_cases(catalog)])
         self.assertEqual(select_validation_cases(catalog, case=CASES[0].id), [(CASES[0].id, "scanner-usage-regressions")])
@@ -881,7 +881,7 @@ class RegistrationTests(unittest.TestCase):
                                   "--cases", "all", "--artifacts-dir", str(destination),
                                   "--candidate-manifest", str(Path(directory) / "not-a-manifest")], 10)
             self.assertEqual(result["exit_code"], 0, result)
-            self.assertEqual(len(json.loads(result["stdout"])["cases"]), 20)
+            self.assertEqual(len(json.loads(result["stdout"])["cases"]), 21)
             self.assertFalse(destination.exists())
 
 

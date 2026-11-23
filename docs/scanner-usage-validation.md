@@ -1,6 +1,6 @@
 # Scanner usage regression suite
 
-This suite registers the twenty USAGE acceptance contracts from backlog issue #3178 and implements public probes plus a strict adapter for candidate-native tests. Registration alone is not test implementation or acceptance: each native assertion needs an executable, reviewed candidate binding before the complete case is available.
+This suite registers the twenty USAGE acceptance contracts from backlog issue #3178 and the local-drive retirement regression from rustfs/rustfs#9469. It implements public probes and a strict adapter for candidate-native tests. Registration alone is not test implementation or acceptance: each native assertion needs an executable, reviewed candidate binding before the complete case is available.
 It runs against **explicitly configured endpoints**. It never installs RustFS,
 changes scanner settings, restarts a node, acquires a VM deployment lock, or
 deletes system metadata. It creates random `usage-<run-id>-*` buckets and deletes
@@ -151,10 +151,10 @@ is retained and the uncovered assertions remain UNSUPPORTED; the case cannot pas
 1. Build the reviewed native tests from the candidate's committed checkout. Retain the source SHA, clean checkout status, lockfile digest, toolchain, features and build command beside the executables. A dirty working tree is development evidence and must not be labelled as a build of its unchanged HEAD.
 2. Obtain executable paths from the build's structured output, enumerate each binding with `BINARY EXACT_TEST --exact --list`, and calculate its SHA-256. Review each test's assertions against `contracts.py`; similar names or related unit tests do not establish complete coverage.
 3. Write the manifest using those exact paths, hashes, source SHA and reviewed assertion IDs. Include only available bindings. The adapter compares provenance fields but cannot reconstruct or attest the compilation, so the build receipt remains part of the acceptance evidence.
-4. Run `--execution native --cases all` to produce the full twenty-row capability report. Keep partial PASS assertions, BLOCKED/UNSUPPORTED rows and cleanup failures in the report. This profile proves candidate-local regressions only; it does not establish S3 endpoint or distributed VM acceptance.
+4. Run `--execution native --cases all` to produce the full capability report. Keep partial PASS assertions, BLOCKED/UNSUPPORTED rows and cleanup failures in the report. This profile proves candidate-local regressions only; it does not establish S3 endpoint or distributed VM acceptance.
 5. After the environment owner verifies deployment identity and admits the shared environment, run the relevant public and combined cases with that same candidate identity. Preserve the native report and VM report as separate results. Rebuild and regenerate hashes whenever the candidate source or test binaries change.
 
-Native-only execution still requires the candidate manifest and `rc` for the shared report's client provenance. It does not require endpoints, AWS credentials or a deployment. Without a native manifest, all twenty native-profile rows remain BLOCKED and no public fixture is created. A partial manifest never supplies missing capabilities by implication.
+Native-only execution still requires the candidate manifest and `rc` for the shared report's client provenance. It does not require endpoints, AWS credentials or a deployment. Without a native manifest, all native-profile rows remain BLOCKED and no public fixture is created. A partial manifest never supplies missing capabilities by implication.
 
 After the real assertions and durable fences have been checked, the native
 test emits one line for each claimed assertion and one cleanup line:
@@ -174,7 +174,7 @@ lease/epoch loss, root CAS failure, companion failure, sealed-candidate
 immutability and durable-root ACK into eight assertion IDs. The example above
 covers only A01; A02 through A08 still need their own reviewed tests and markers.
 
-## Twenty-row acceptance mapping
+## Acceptance mapping
 
 The public-probe column identifies executable probes in this repository. The additional-evidence column states the remaining contract, not a claim that a native test already implements it. USAGE-01 and USAGE-20 have complete public probes; every other case requires candidate-native implementation and bindings for all of its native assertions. A missing binding is an implementation/integration gap even when the report correctly records BLOCKED or UNSUPPORTED.
 
@@ -200,6 +200,9 @@ The public-probe column identifies executable probes in this repository. The add
 | USAGE-18 | Per-bucket metadata with separate collection timestamps | Metrics failures and admin/quota/cache/writer separation |
 | USAGE-19 | None | Quota v1/v2 and legacy fallback decisions |
 | USAGE-20 | Object/prefix collision, versions, markers and payloads | Marker-only keys remain an explicit follow-up fixture |
+| USAGE-21 | None | Same-format local wrapper retirement before the first object, one recovery retry and exact durable totals |
+
+Bind `USAGE-21-A01` to `scanner_io::tests::local_drive_recovery::issue_9469_recovers_retired_wrapper_before_first_object` in the candidate's `rustfs-scanner` test binary. The test replaces the retired wrapper with one that has the same persisted format identity. It requires two total attempts, reloads a completed bucket cache with three objects and 21 logical bytes, and emits the cleanup milestone after removing its temporary data. Select this case with `--execution native --cases USAGE-21` and the candidate and native manifests described above.
 
 USAGE-02 remains open until C5 and VM acceptance. Default-disabled quantum is
 not completion. Independent prefix certification/replace/ACK is deferred.
