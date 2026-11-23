@@ -92,6 +92,21 @@ Run the `upload-part-client-read-timeout` case with `python3 scripts/s3_upload_p
 
 Run `python3 -m unittest test_s3_upload_part_timeout.py` to check the client's wire framing and response assertions.
 
+## Strict SSE contract cases
+
+`ENC-201` to `ENC-210` in `rustfs-s3-compat-test.sh` and `KMS-601` to `KMS-609` in `rustfs-kms-test.sh` state what a client must observe from server-side encryption, exactly: a response carries the SSE headers of its scheme and no other SSE header, a refusal has the expected HTTP status and S3 error code, and a HEAD after a refused write answers 404. The older `S3C-90x`, `ENC-1xx` and `KMS-3xx` cases mostly accept a successful command with matching bytes and match a refusal against a loose pattern; they stay as they are.
+
+Both suites run the cases through `scripts/sse_contract_cases.py`, which needs Python 3.8 or newer and no third-party package, talks only to the suite's endpoint, and deploys nothing. The `ENC-2xx` cases rely on the S3 compatibility suite's server having `RUSTFS_SSE_S3_MASTER_KEY` and no KMS; the `KMS-6xx` cases rely on the KMS suite's default key and create the keys `sse-contract-key-1` and `sse-contract-key-2` through the admin API. The helper can also be pointed at any existing endpoint:
+
+```bash
+RUSTFS_ACCESS_KEY=... RUSTFS_SECRET_KEY=... \
+  python3 scripts/sse_contract_cases.py --endpoint http://node:9000 --case ENC-204
+```
+
+It exits 0 when the case holds and 1 when it does not, an unreachable endpoint included; a wrong command line exits 64, never 2, which the suites read as UNSUPPORTED. See [the case contracts](docs/sse-contract-cases.md) ([中文](docs/sse-contract-cases.zh-CN.md)).
+
+`python3 -B -m unittest -v test_sse_contract_cases.py` runs every case against an in-memory S3 that behaves as required, then again with one behavior wrong at a time and requires the matching case to fail. This validates the oracles and the suite wiring, not RustFS.
+
 ## Bulk-delete regressions
 
 The complete S3 topology suite includes bulk-delete regressions `S3C-213`, `S3C-214`, `S3C-1306` and `S3C-1307`. They cover batch boundaries, duplicate keys, immutable GET load and finite same-key PUT contention in off/on/suspended versioning modes. Python boto3 is required. Each subcase retains JSON, phase/request timing, HTTP 503 and per-object error counts, version/marker cleanup receipts and a Chinese Markdown summary under `--bulk-delete-results-dir`. The standalone runner accepts existing endpoints and does not deploy nodes; its caller must hold the environment lock. See [the case contracts and usage](docs/s3-bulk-delete-regressions.zh-CN.md).
