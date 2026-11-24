@@ -1121,6 +1121,18 @@ test_s3c101() {
     assert_aws_fails_with "BucketAlreadyOwnedByYou" || return 1
   fi
   rm_bucket "s3c101-b1"
+
+  # CreateBucket carrying x-amz-bucket-namespace: global must succeed (backlog#3193).
+  local ns_code
+  ns_code="$(s3_signed_curl PUT "/s3c101-b2" -H "x-amz-bucket-namespace: global")"
+  if [ "${ns_code}" != "200" ]; then
+    rm_bucket "s3c101-b2"
+    echo "CreateBucket with x-amz-bucket-namespace: global returned HTTP ${ns_code}, expected 200: $(head -c 200 "${TEST_TMP}/curl.out")"
+    return 1
+  fi
+  aws_run s3api head-bucket --bucket "s3c101-b2"
+  assert_aws_ok "head bucket created with global namespace" || { rm_bucket "s3c101-b2"; return 1; }
+  rm_bucket "s3c101-b2"
 }
 
 test_s3c102() {
@@ -1229,6 +1241,47 @@ test_s3c104() {
   assert_aws_ok || return 1
   aws_run s3api delete-bucket --bucket "s3c104-b2"
   assert_aws_ok || return 1
+
+  # x-minio-force-delete accepts True/False while rejecting all-caps TRUE (backlog#3196).
+  local fd_code
+  new_bucket "s3c104-b3" || return 1
+  aws_run s3api put-object --bucket "s3c104-b3" --key f --body "${TEST_TMP}/s3c104-source"
+  assert_aws_ok || { rm_bucket "s3c104-b3"; return 1; }
+
+  fd_code="$(s3_signed_curl DELETE "/s3c104-b3" -H "x-minio-force-delete: TRUE")"
+  if [ "${fd_code}" != "400" ] || ! grep -q "InvalidArgument" "${TEST_TMP}/curl.out"; then
+    rm_bucket "s3c104-b3"
+    echo "x-minio-force-delete: TRUE returned HTTP ${fd_code}, expected 400 InvalidArgument: $(head -c 200 "${TEST_TMP}/curl.out")"
+    return 1
+  fi
+  aws_run s3api get-object --bucket "s3c104-b3" --key f "${TEST_TMP}/s3c104-after-upper"
+  assert_aws_ok "object survives rejected TRUE force-delete" || { rm_bucket "s3c104-b3"; return 1; }
+
+  fd_code="$(s3_signed_curl DELETE "/s3c104-b3" -H "x-minio-force-delete: False")"
+  if [ "${fd_code}" != "409" ] || ! grep -q "BucketNotEmpty" "${TEST_TMP}/curl.out"; then
+    rm_bucket "s3c104-b3"
+    echo "x-minio-force-delete: False on non-empty bucket returned HTTP ${fd_code}, expected 409 BucketNotEmpty: $(head -c 200 "${TEST_TMP}/curl.out")"
+    return 1
+  fi
+
+  fd_code="$(s3_signed_curl DELETE "/s3c104-b3" -H "x-minio-force-delete: True")"
+  if [ "${fd_code}" != "204" ]; then
+    rm_bucket "s3c104-b3"
+    echo "x-minio-force-delete: True on non-empty bucket returned HTTP ${fd_code}, expected 204: $(head -c 200 "${TEST_TMP}/curl.out")"
+    return 1
+  fi
+  aws_run s3api head-bucket --bucket "s3c104-b3"
+  assert_aws_fails_with "404" "bucket removed by x-minio-force-delete: True" || return 1
+
+  new_bucket "s3c104-b4" || return 1
+  fd_code="$(s3_signed_curl DELETE "/s3c104-b4" -H "x-minio-force-delete: False")"
+  if [ "${fd_code}" != "204" ]; then
+    rm_bucket "s3c104-b4"
+    echo "x-minio-force-delete: False on empty bucket returned HTTP ${fd_code}, expected 204: $(head -c 200 "${TEST_TMP}/curl.out")"
+    return 1
+  fi
+  aws_run s3api head-bucket --bucket "s3c104-b4"
+  assert_aws_fails_with "404" "empty bucket removed with x-minio-force-delete: False" || return 1
 }
 
 test_s3c105() {

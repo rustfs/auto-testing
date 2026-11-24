@@ -104,6 +104,10 @@ Run `python3 scripts/s3_request_id_parity.py --rustfs-bin /absolute/path/to/rust
 
 The S3 script tests run the same live case when `RUSTFS_BIN` points to a candidate binary. Without a binary, CI runs the completion matching and error response tests.
 
+## MRF long-root refresh compatibility
+
+Run `python3 scripts/mrf_long_root_refresh.py --rustfs-bin /absolute/path/to/rustfs` with Python 3.10+ and boto3. The `admin.mrf-long-root-refresh` case starts a four-disk instance with a 257-byte root access key, seeds a committed unbound MRF snapshot, verifies that `POST /rustfs/admin/v4/heal/mrf/responsibilities/actions` `refresh` returns 200 `refreshed`, and checks that `acceptUnverifiedRisk` still caps persisted operator identities at 256 bytes.
+
 ## Strict SSE contract cases
 
 `ENC-201` to `ENC-210` in `rustfs-s3-compat-test.sh` and `KMS-601` to `KMS-609` in `rustfs-kms-test.sh` state what a client must observe from server-side encryption, exactly: a response carries the SSE headers of its scheme and no other SSE header, a refusal has the expected HTTP status and S3 error code, and a HEAD after a refused write answers 404. The older `S3C-90x`, `ENC-1xx` and `KMS-3xx` cases mostly accept a successful command with matching bytes and match a refusal against a loose pattern; they stay as they are.
