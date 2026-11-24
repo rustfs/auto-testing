@@ -1378,6 +1378,18 @@ test_s3c208() {
   rm_bucket "s3c208-b1"
 }
 
+# Dates bracket the Last-Modified time of the source just written by the case.
+copy_date_past='Sat, 01 Jan 2000 00:00:00 GMT'
+copy_date_future='Fri, 01 Jan 2100 00:00:00 GMT'
+
+assert_copy_precondition_failed() {
+  local target="$1" source="$2" status
+  shift 2
+  status="$(s3_signed_curl PUT "${target}" -H "x-amz-copy-source: ${source}" "$@")" || return 1
+  [ "${status}" = 412 ] && grep -q '<Code>PreconditionFailed</Code>' "${TEST_TMP}/curl.out" \
+    || { echo "copy to ${target%%\?*} expected HTTP 412 PreconditionFailed, got HTTP ${status}"; return 1; }
+}
+
 test_s3c209() {
   new_bucket "s3c209-b1" || return 1
   new_bucket "s3c209-b2" || return 1
@@ -1394,6 +1406,32 @@ test_s3c209() {
   assert_aws_ok || return 1
   aws_run s3api head-object --bucket "s3c209-b2" --key f
   printf '%s' "${AWS_OUT}" | jq -e '.Metadata.dst == "1"' >/dev/null || { echo "REPLACE metadata failed: ${AWS_OUT}"; return 1; }
+  local etag condition
+  aws_run s3api head-object --bucket "s3c209-b1" --key f
+  assert_aws_ok || return 1
+  etag="$(jq -er '.ETag' <<< "${AWS_OUT}")" || return 1
+  printf 'original destination' > "${TEST_TMP}/s3c-original"
+  aws_run s3api put-object --bucket "s3c209-b2" --key guarded --body "${TEST_TMP}/s3c-original"
+  assert_aws_ok || return 1
+  for condition in "x-amz-copy-source-if-unmodified-since: ${copy_date_past}" \
+                   "x-amz-copy-source-if-modified-since: ${copy_date_future}"; do
+    assert_copy_precondition_failed "/s3c209-b2/guarded" "/s3c209-b1/f" -H "${condition}" || return 1
+    aws_run s3api get-object --bucket "s3c209-b2" --key guarded "${TEST_TMP}/s3c-dl"
+    assert_aws_ok || return 1
+    cmp -s "${TEST_TMP}/s3c-original" "${TEST_TMP}/s3c-dl" || { echo "rejected copy changed destination"; return 1; }
+  done
+  aws_run s3api copy-object --bucket "s3c209-b2" --key guarded --copy-source "s3c209-b1/f" \
+    --copy-source-if-modified-since "${copy_date_past}" --copy-source-if-unmodified-since "${copy_date_future}"
+  assert_aws_ok "copy with satisfied dates" || return 1
+  aws_run s3api get-object --bucket "s3c209-b2" --key guarded "${TEST_TMP}/s3c-dl"
+  assert_aws_ok || return 1
+  cmp -s "${TEST_TMP}/s3c-file" "${TEST_TMP}/s3c-dl" || { echo "date-conditional copy content mismatch"; return 1; }
+  aws_run s3api copy-object --bucket "s3c209-b2" --key matched --copy-source "s3c209-b1/f" \
+    --copy-source-if-match "${etag}" --copy-source-if-unmodified-since "${copy_date_past}"
+  assert_aws_ok "matching source ETag takes precedence over date" || return 1
+  aws_run s3api get-object --bucket "s3c209-b2" --key matched "${TEST_TMP}/s3c-dl"
+  assert_aws_ok || return 1
+  cmp -s "${TEST_TMP}/s3c-file" "${TEST_TMP}/s3c-dl" || { echo "conditional copy content mismatch"; return 1; }
   rm_bucket "s3c209-b1"; rm_bucket "s3c209-b2"
 }
 
@@ -1519,19 +1557,48 @@ test_s3c302() {
   make_test_file ${TEST_TMP}/s3c-mp 10485760
   aws_run s3api put-object --bucket "s3c302-b1" --key src --body ${TEST_TMP}/s3c-mp
   assert_aws_ok || return 1
-  local upload_id etag
+  local upload_id etag source_etag condition copy_target second_etag
+  source_etag="$(jq -er '.ETag' <<< "${AWS_OUT}")" || return 1
   aws_run s3api create-multipart-upload --bucket "s3c302-b1" --key dst
-  upload_id="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
+  assert_aws_ok || return 1
+  upload_id="$(jq -er '.UploadId' <<< "${AWS_OUT}")" || return 1
   aws_run s3api upload-part-copy --bucket "s3c302-b1" --key dst --upload-id "${upload_id}" --part-number 1 \
     --copy-source "s3c302-b1/src" --copy-source-range "bytes=0-5242879"
   assert_aws_ok || return 1
   etag="$(printf '%s' "${AWS_OUT}" | jq -r '.CopyPartResult.ETag')"
+  copy_target="/s3c302-b1/dst?partNumber=1&uploadId=$(jq -rn --arg id "${upload_id}" '$id | @uri')"
+  for condition in "x-amz-copy-source-if-unmodified-since: ${copy_date_past}" \
+                   "x-amz-copy-source-if-modified-since: ${copy_date_future}"; do
+    assert_copy_precondition_failed "${copy_target}" "/s3c302-b1/src" -H "${condition}" \
+      -H 'x-amz-copy-source-range: bytes=5242880-10485759' || return 1
+    aws_run s3api list-parts --bucket "s3c302-b1" --key dst --upload-id "${upload_id}"
+    assert_aws_ok || return 1
+    jq -e --arg etag "${etag}" '.Parts | length == 1 and .[0].PartNumber == 1 and .[0].Size == 5242880 and .[0].ETag == $etag' \
+      <<< "${AWS_OUT}" >/dev/null || { echo "rejected copy replaced the existing part"; return 1; }
+  done
+  aws_run s3api upload-part-copy --bucket "s3c302-b1" --key dst --upload-id "${upload_id}" --part-number 1 \
+    --copy-source "s3c302-b1/src" --copy-source-range "bytes=5242880-10485759" \
+    --copy-source-if-modified-since "${copy_date_past}" --copy-source-if-unmodified-since "${copy_date_future}"
+  assert_aws_ok "copy part with satisfied dates" || return 1
+  tail -c 5242880 "${TEST_TMP}/s3c-mp" > "${TEST_TMP}/s3c-second-part"
+  second_etag="\"$(md5_of_file "${TEST_TMP}/s3c-second-part")\""
+  aws_run s3api list-parts --bucket "s3c302-b1" --key dst --upload-id "${upload_id}"
+  assert_aws_ok || return 1
+  jq -e --arg etag "${second_etag}" '.Parts | length == 1 and .[0].ETag == $etag' <<< "${AWS_OUT}" >/dev/null \
+    || { echo "date-conditional part copy did not store the second range"; return 1; }
+  aws_run s3api upload-part-copy --bucket "s3c302-b1" --key dst --upload-id "${upload_id}" --part-number 1 \
+    --copy-source "s3c302-b1/src" --copy-source-range "bytes=0-5242879" \
+    --copy-source-if-match "${source_etag}" --copy-source-if-unmodified-since "${copy_date_past}"
+  assert_aws_ok "matching source ETag takes precedence over date" || return 1
+  etag="$(jq -er '.CopyPartResult.ETag' <<< "${AWS_OUT}")" || return 1
   aws_run s3api complete-multipart-upload --bucket "s3c302-b1" --key dst --upload-id "${upload_id}" \
     --multipart-upload "{\"Parts\":[{\"ETag\":${etag},\"PartNumber\":1}]}"
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c302-b1" --key dst ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
   [ "$(wc -c < ${TEST_TMP}/s3c-dl)" = "5242880" ] || { echo "upload-part-copy size mismatch"; return 1; }
+  head -c 5242880 "${TEST_TMP}/s3c-mp" > "${TEST_TMP}/s3c-first-part"
+  cmp -s "${TEST_TMP}/s3c-first-part" "${TEST_TMP}/s3c-dl" || { echo "conditional part-copy content mismatch"; return 1; }
   rm_bucket "s3c302-b1"
 }
 

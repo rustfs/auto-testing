@@ -121,7 +121,7 @@
     "test_validation_ilm.py": "51a5931c02da95943b87bdb865ff2dff7d71f1df8d38e532664b3c0424395bdf",
     "test_validation_replication.py": "83e1b532e8a6a352c5e38de48799356157e1fad4f1f314ea8ad256fdecf942c5",
     "test_validation_scanner_usage.py": "dc62124ea779b5bb6acbd628284bead0216ad9b0ed6bee88a7192568edb5798d",
-    "rustfs-s3-compat-test.sh": "b3ed78b7b6febee974d7072a82bbab1ba8d5bf9a8bb0676545078d377ac01d19",
+    "rustfs-s3-compat-test.sh": "46358c27f4c9ea30f30485b85299511a9dfa257ca836733523193f60499f711d",
     "rustfs-security-test.sh": "02cddd15636df1e74210c172ee898dba9b3adf83943da45d874d6c827583d9d2",
     "rustfs-tier-test.sh": "51fa273d4bb91e026aaa12e3793575f29a5c7f3e7e895fc04e5b3612d4f664f2",
     "rustfs-storage-test.sh": "ff345001e4d1313e49d6aa185188f43dc946ae4316a07a4911a34888c4786d9d",
@@ -3262,5 +3262,5 @@
       }
     }
   ],
-  "review_notes": "All source implementation gaps recorded in this review are closed. See docs/validation-migration-implementation-review.md for source semantics, exact candidate prerequisites and separate native/fleet proof scopes. Counts describe the accepted migration delivery scope; the 13 default-disabled environment procedures still require reviewed external resource adapters. Accepted live results remain historical independent audits across multiple candidates, never a single-candidate product certification. No historical FAIL is rewritten. Re-reviewed S3C-203 on 2026-11-24. Its 1 MiB GET still checks the body MD5 and now also checks that GET returns the Expires value supplied to PUT. Re-reviewed S3C-1204 on 2026-11-24. The AWS CLI writes and reads Enabled and Suspended, requires MalformedXML for Fast, and checks that the rejected update leaves Enabled in place. The request payment checks read back both supported payers and require HTTP 400 InvalidArgument for Nobody with Requester retained."
+  "review_notes": "All source implementation gaps recorded in this review are closed. See docs/validation-migration-implementation-review.md for source semantics, exact candidate prerequisites and separate native/fleet proof scopes. Counts describe the accepted migration delivery scope; the 13 default-disabled environment procedures still require reviewed external resource adapters. Accepted live results remain historical independent audits across multiple candidates, never a single-candidate product certification. No historical FAIL is rewritten. Re-reviewed S3C-203 on 2026-11-24. Its 1 MiB GET still checks the body MD5 and now also checks that GET returns the Expires value supplied to PUT. Re-reviewed S3C-1204 on 2026-11-24. The AWS CLI writes and reads Enabled and Suspended, requires MalformedXML for Fast, and checks that the rejected update leaves Enabled in place. The request payment checks read back both supported payers and require HTTP 400 InvalidArgument for Nobody with Requester retained. Re-reviewed S3C-209 and S3C-302. CopyObject and UploadPartCopy require valid source date conditions to return HTTP 412 PreconditionFailed when false, preserve the destination or part, honor satisfied dates and give a matching source ETag precedence over a stale unmodified date."
 }
