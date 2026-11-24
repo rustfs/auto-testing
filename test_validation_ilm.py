@@ -56,6 +56,14 @@ class IlmContractTest(unittest.TestCase):
         leader["cycle_schedule"]["effective_interval_seconds"] = 5
         self.assertFalse(scanner_node_configuration_matches(leader, 2))
 
+    def test_scanner_configuration_accepts_unknown_partial_reason(self) -> None:
+        node = self.scanner_node(
+            leader=True, available=True, effective_interval=2, partial_reason="unknown"
+        )
+        self.assertTrue(scanner_node_configuration_matches(node, 2))
+        node["metrics"]["last_cycle_partial_reason"] = "objects"
+        self.assertFalse(scanner_node_configuration_matches(node, 2))
+
     def test_scanner_configuration_rejects_invalid_runtime(self) -> None:
         disabled = self.scanner_node(
             leader=True, available=True, effective_interval=2, enabled=False

@@ -80,13 +80,17 @@ def scanner_node_configuration_matches(
     cycle = runtime.get("cycle_interval_seconds", {})
     start_delay = runtime.get("start_delay_seconds", {})
     schedule = data.get("cycle_schedule", {})
+    # The product serializes "unknown" (ScanCyclePartialReason::Unknown) when
+    # a cycle completed without a budget-driven partial reason; that is the
+    # normal sentinel, not a partial cycle.
+    partial_reason = str(metrics.get("last_cycle_partial_reason") or "").strip().lower()
     if (
         data.get("enabled") is not True
         or cycle.get("value") != expected_interval
         or cycle.get("source") != "env"
         or start_delay.get("value") != 0
         or start_delay.get("source") != "env"
-        or metrics.get("last_cycle_partial_reason") not in (None, "")
+        or partial_reason not in ("", "unknown")
     ):
         return False
     current_cycle = metrics.get("current_cycle")
