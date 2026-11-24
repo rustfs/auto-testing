@@ -1267,10 +1267,12 @@ test_s3c203() {
   make_test_file ${TEST_TMP}/s3c-file 1048576
   local exp
   exp="$(md5_of_file ${TEST_TMP}/s3c-file)"
-  aws_run s3api put-object --bucket "s3c203-b1" --key f --body ${TEST_TMP}/s3c-file
+  aws_run s3api put-object --bucket "s3c203-b1" --key f --body "${TEST_TMP}/s3c-file" --expires "Tue, 01 Jan 2030 00:00:00 GMT"
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c203-b1" --key f ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e '.Expires == "2030-01-01T00:00:00+00:00" or .Expires == "Tue, 01 Jan 2030 00:00:00 GMT"' >/dev/null \
+    || { echo "get-object did not return the stored Expires header: ${AWS_OUT}"; return 1; }
   [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "${exp}" ] || { echo "get-object MD5 mismatch"; return 1; }
   rm_bucket "s3c203-b1"
 }
