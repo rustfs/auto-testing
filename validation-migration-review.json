@@ -121,7 +121,7 @@
     "test_validation_ilm.py": "51a5931c02da95943b87bdb865ff2dff7d71f1df8d38e532664b3c0424395bdf",
     "test_validation_replication.py": "83e1b532e8a6a352c5e38de48799356157e1fad4f1f314ea8ad256fdecf942c5",
     "test_validation_scanner_usage.py": "dc62124ea779b5bb6acbd628284bead0216ad9b0ed6bee88a7192568edb5798d",
-    "rustfs-s3-compat-test.sh": "037f69d82edb44c0293ca685d4c1e4bb5cdda0eb22d4c3810673b9468b8f9f0c",
+    "rustfs-s3-compat-test.sh": "5bea5b1ebd5492d61863762ee4ad561892f187a1a867b7a7d9b10426f66e8234",
     "rustfs-security-test.sh": "02cddd15636df1e74210c172ee898dba9b3adf83943da45d874d6c827583d9d2",
     "rustfs-tier-test.sh": "51fa273d4bb91e026aaa12e3793575f29a5c7f3e7e895fc04e5b3612d4f664f2",
     "rustfs-storage-test.sh": "d3bc35aec7cc3cf0ecaec9fdccc4de6c90b0890a78740e24737cffaedf46aa0a",
@@ -3262,5 +3262,5 @@
       }
     }
   ],
-  "review_notes": "All source implementation gaps recorded in this review are closed. See docs/validation-migration-implementation-review.md for source semantics, exact candidate prerequisites and separate native/fleet proof scopes. Counts describe the accepted migration delivery scope; the 13 default-disabled environment procedures still require reviewed external resource adapters. Accepted live results remain historical independent audits across multiple candidates, never a single-candidate product certification. No historical FAIL is rewritten. Re-reviewed S3C-203 on 2026-11-24. Its 1 MiB GET still checks the body MD5 and now also checks that GET returns the Expires value supplied to PUT."
+  "review_notes": "All source implementation gaps recorded in this review are closed. See docs/validation-migration-implementation-review.md for source semantics, exact candidate prerequisites and separate native/fleet proof scopes. Counts describe the accepted migration delivery scope; the 13 default-disabled environment procedures still require reviewed external resource adapters. Accepted live results remain historical independent audits across multiple candidates, never a single-candidate product certification. No historical FAIL is rewritten. Re-reviewed S3C-203 on 2026-11-24. Its 1 MiB GET still checks the body MD5 and now also checks that GET returns the Expires value supplied to PUT. Re-reviewed S3C-1204 on 2026-11-24. The AWS CLI writes and reads Enabled and Suspended, requires MalformedXML for Fast, and checks that the rejected update leaves Enabled in place."
 }
