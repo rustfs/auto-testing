@@ -105,7 +105,8 @@ CASES = (
         ("public", "An object key that is also a prefix and nested encoding fixtures retain every acknowledged version and payload."),
         ("public", "Usage matches the independent version inventory's object, version, marker and logical-byte accounting exactly."))),
     Case(21, "retired-local-drive", "Recover a local drive retired before the first object", None, (
-        ("native", "After the local wrapper retires before the first object, the scanner retries once on the current wrapper with the same format identity and persists a complete cache with exact object and byte totals."),)),
+        ("native", "After the local wrapper retires before the first object, the scanner retries once on the current wrapper with the same format identity and persists a complete cache with exact object and byte totals."),
+        ("native", "Distributed erasure startup keeps the registered local drive's scan token active and retires only a distinct input wrapper that it replaces."))),
 )
 
 

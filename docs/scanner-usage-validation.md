@@ -200,9 +200,13 @@ The public-probe column identifies executable probes in this repository. The add
 | USAGE-18 | Per-bucket metadata with separate collection timestamps | Metrics failures and admin/quota/cache/writer separation |
 | USAGE-19 | None | Quota v1/v2 and legacy fallback decisions |
 | USAGE-20 | Object/prefix collision, versions, markers and payloads | Marker-only keys remain an explicit follow-up fixture |
-| USAGE-21 | None | Same-format local wrapper retirement before the first object, one recovery retry and exact durable totals |
+| USAGE-21 | None | Local wrapper identity at distributed startup, recovery after retirement and exact durable totals |
 
-Bind `USAGE-21-A01` to `scanner_io::tests::local_drive_recovery::issue_9469_recovers_retired_wrapper_before_first_object` in the candidate's `rustfs-scanner` test binary. The test replaces the retired wrapper with one that has the same persisted format identity. It requires two total attempts, reloads a completed bucket cache with three objects and 21 logical bytes, and emits the cleanup milestone after removing its temporary data. Select this case with `--execution native --cases USAGE-21` and the candidate and native manifests described above.
+Bind `USAGE-21-A01` to `scanner_io::tests::local_drive_recovery::issue_9469_recovers_retired_wrapper_before_first_object` in the candidate's `rustfs-scanner` test binary. The test replaces the retired wrapper with one that has the same persisted format identity. It requires two total attempts, reloads a completed bucket cache with three objects and 21 logical bytes, and emits the cleanup milestone after removing its temporary data.
+
+Bind `USAGE-21-A02` to `core::sets::tests::distributed_set_retires_only_displaced_local_disk_wrappers` in the same candidate's `rustfs-ecstore` test binary. Distributed set startup must keep the registered wrappers active and retire the distinct wrapper it replaces. The test reports the active slot count and confirms cleanup of its formatted test disks.
+
+Select this case with `--execution native --cases USAGE-21` and the candidate and native manifests described above.
 
 USAGE-02 remains open until C5 and VM acceptance. Default-disabled quantum is
 not completion. Independent prefix certification/replace/ACK is deferred.

@@ -126,7 +126,7 @@
     "rustfs-tier-test.sh": "51fa273d4bb91e026aaa12e3793575f29a5c7f3e7e895fc04e5b3612d4f664f2",
     "rustfs-storage-test.sh": "d3bc35aec7cc3cf0ecaec9fdccc4de6c90b0890a78740e24737cffaedf46aa0a",
     "rustfs-kms-test.sh": "8054b46fa6e5de305b484c6db18a5e0f6819f4dcc98cefb330977274df2d4b53",
-    "validation-cases.json": "7d114ae82c6e16f17403d214c55638799a7cf314c4991b537555c9e26dd2ceca",
+    "validation-cases.json": "bc1a8eb88216656d5edb30170ce70828ac2cd04652f6e2d7bb72c2be4b2f6bf8",
     "docs/validation-migration-map.md": "b9e2d86a6d46ee8597c2d5b25faa718fff1e7127e18fea8be5abe3b447d7955d",
     "docs/source-test-migration-inventory.md": "e2fb6ff49835f61e0e38ed327f41f50eac07587ce2b7beb8e31fddc1751ad53d",
     "test_source_test_migration_inventory.py": "5c0122c6940ea224e7bde57fa1159536ab9ef132cf9d34517fe27c053a56b972",
