@@ -4729,7 +4729,8 @@
             "native-test"
           ],
           "assertions": [
-            "After the local wrapper retires before the first object, the scanner retries once on the current wrapper with the same format identity and persists a complete cache with exact object and byte totals."
+            "After the local wrapper retires before the first object, the scanner retries once on the current wrapper with the same format identity and persists a complete cache with exact object and byte totals.",
+            "Distributed erasure startup keeps the registered local drive's scan token active and retires only a distinct input wrapper that it replaces."
           ],
           "probes": {
             "designCode": "USAGE-21",

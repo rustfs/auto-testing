@@ -92,6 +92,18 @@ Run the `upload-part-client-read-timeout` case with `python3 scripts/s3_upload_p
 
 Run `python3 -m unittest test_s3_upload_part_timeout.py` to check the client's wire framing and response assertions.
 
+## Veeam SOSAPI capacity
+
+Run `python3 scripts/s3_veeam_sosapi_capacity.py --rustfs-bin /absolute/path/to/rustfs` with Python 3.10+ and `boto3>=1.36,<2`. The `s3.veeam-sosapi-capacity` case starts the supplied binary on loopback with the scanner disabled, writes a known payload, and requires the first signed `capacity.xml` GET to return 200 with numeric cluster capacity and free space and `Used=-1`. It then restarts the same disposable volume with scanning enabled and waits for the exact payload size and a new ETag. Both representations must have a body-derived ETag and Last-Modified. The runner emits one JSON result and cleans up both processes and their volume.
+
+Run `python3 -B -m unittest test_s3_veeam_sosapi_capacity.py` to check the response assertions without a RustFS process.
+
+## S3 request ID parity
+
+Run `python3 scripts/s3_request_id_parity.py --rustfs-bin /absolute/path/to/rustfs` with Python 3.10+ and boto3. The case checks the two request ID headers on a successful GET and a missing object, the ID in the error XML, and the matching HTTP completion event for each request.
+
+The S3 script tests run the same live case when `RUSTFS_BIN` points to a candidate binary. Without a binary, CI runs the completion matching and error response tests.
+
 ## Strict SSE contract cases
 
 `ENC-201` to `ENC-210` in `rustfs-s3-compat-test.sh` and `KMS-601` to `KMS-609` in `rustfs-kms-test.sh` state what a client must observe from server-side encryption, exactly: a response carries the SSE headers of its scheme and no other SSE header, a refusal has the expected HTTP status and S3 error code, and a HEAD after a refused write answers 404. The older `S3C-90x`, `ENC-1xx` and `KMS-3xx` cases mostly accept a successful command with matching bytes and match a refusal against a loose pattern; they stay as they are.

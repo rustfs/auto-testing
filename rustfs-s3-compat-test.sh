@@ -1106,7 +1106,13 @@ test_validation_s3_basic_object_round_trip() {
 # ---------- 1. Bucket basics ----------
 
 test_s3c101() {
-  new_bucket "s3c101-b1" || return 1
+  aws_run s3api create-bucket --bucket "s3c101-b1" --output json
+  assert_aws_ok || return 1
+  if [ "${REGION}" = "us-east-1" ] && ! jq -e '.Location == "/s3c101-b1"' >/dev/null <<< "${AWS_OUT}"; then
+    rm_bucket "s3c101-b1"
+    echo "CreateBucket did not return Location /s3c101-b1"
+    return 1
+  fi
   # duplicate create -> BucketAlreadyOwnedByYou (AWS); this server is idempotent
   aws_run s3api create-bucket --bucket "s3c101-b1"
   if [ "${AWS_CODE}" -eq 0 ]; then
@@ -1291,10 +1297,12 @@ test_s3c203() {
   make_test_file ${TEST_TMP}/s3c-file 1048576
   local exp
   exp="$(md5_of_file ${TEST_TMP}/s3c-file)"
-  aws_run s3api put-object --bucket "s3c203-b1" --key f --body ${TEST_TMP}/s3c-file
+  aws_run s3api put-object --bucket "s3c203-b1" --key f --body "${TEST_TMP}/s3c-file" --expires "Tue, 01 Jan 2030 00:00:00 GMT"
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c203-b1" --key f ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e '.Expires == "2030-01-01T00:00:00+00:00" or .Expires == "Tue, 01 Jan 2030 00:00:00 GMT"' >/dev/null \
+    || { echo "get-object did not return the stored Expires header: ${AWS_OUT}"; return 1; }
   [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "${exp}" ] || { echo "get-object MD5 mismatch"; return 1; }
   rm_bucket "s3c203-b1"
 }
@@ -1331,12 +1339,13 @@ test_s3c205() {
 test_s3c206() {
   new_bucket "s3c206-b1" || return 1
   make_test_file ${TEST_TMP}/s3c-file 1024
-  aws_run s3api put-object --bucket "s3c206-b1" --key f --body ${TEST_TMP}/s3c-file --metadata k=v
+  aws_run s3api put-object --bucket "s3c206-b1" --key f --body "${TEST_TMP}/s3c-file" \
+    --metadata '{"k":"v","caption":"=?UTF-8?B?5Lit?=   =?UTF-8?B?5paH?="}'
   assert_aws_ok || return 1
   aws_run s3api head-object --bucket "s3c206-b1" --key f
   assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '.Metadata.k == "v"' >/dev/null \
-    || { echo "metadata k=v missing: ${AWS_OUT}"; return 1; }
+  printf '%s' "${AWS_OUT}" | jq -e '.Metadata.k == "v" and .Metadata.caption == "=?UTF-8?B?5Lit5paH?="' >/dev/null \
+    || { echo "unexpected object metadata: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c206-b1"
 }
 
@@ -2153,14 +2162,28 @@ test_s3c804() {
   rm_bucket "s3c804-b1"
 }
 
+assert_owner_full_control_acl() {
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e '
+    .Owner.ID as $owner |
+    ($owner | type == "string" and length > 0) and
+    (.Grants | length == 1) and
+    (.Grants[0] | .Permission == "FULL_CONTROL" and
+      .Grantee.Type == "CanonicalUser" and .Grantee.ID == $owner)
+  ' >/dev/null || { echo "ACL grant does not identify its owner: ${AWS_OUT}"; return 1; }
+}
+
 test_s3c805() {
   new_bucket "s3c805-b1" || return 1
   make_test_file ${TEST_TMP}/s3c-v 512
   aws_run s3api put-object --bucket "s3c805-b1" --key f --body ${TEST_TMP}/s3c-v --acl private
   assert_aws_ok || return 1
+  aws_run s3api get-bucket-acl --bucket "s3c805-b1"
+  assert_owner_full_control_acl || return 1
   aws_run s3api get-object-acl --bucket "s3c805-b1" --key f
+  assert_owner_full_control_acl || return 1
+  aws_run s3api delete-object --bucket "s3c805-b1" --key f
   assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '.Owner != null' >/dev/null || { echo "acl owner missing: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c805-b1"
 }
 
