@@ -4,14 +4,11 @@
 import argparse
 import base64
 import binascii
-from contextlib import closing, contextmanager
+from contextlib import closing
 from http.client import HTTPConnection
 import json
-import os
 from pathlib import Path
 import secrets
-import socket
-import subprocess
 import tempfile
 import time
 from urllib.parse import urlencode
@@ -24,13 +21,12 @@ from botocore.config import Config
 from botocore.credentials import Credentials
 
 if __package__:
-    from .sts_root_regression import stop_process
+    from .local_rustfs import HOST, local_rustfs
 else:
-    from sts_root_regression import stop_process
+    from local_rustfs import HOST, local_rustfs
 
 
 REGION = "us-east-1"
-HOST = "127.0.0.1"
 BUCKET = "upload-part-regression"
 KEY = "object"
 IDLE_SECONDS = 2
@@ -39,44 +35,6 @@ IDLE_SECONDS = 2
 def require(ok, message):
     if not ok:
         raise RuntimeError(message)
-
-
-@contextmanager
-def candidate(binary, credentials):
-    with tempfile.TemporaryDirectory(prefix="rustfs-upload-part-") as temporary:
-        root = Path(temporary)
-        with socket.socket() as listener:
-            listener.bind((HOST, 0))
-            port = listener.getsockname()[1]
-        (root / "data").mkdir()
-        env = {
-            "PATH": os.environ.get("PATH", os.defpath),
-            "RUSTFS_ADDRESS": f"{HOST}:{port}", "RUSTFS_VOLUMES": str(root / "data"),
-            "RUSTFS_ACCESS_KEY": credentials.access_key, "RUSTFS_SECRET_KEY": credentials.secret_key,
-            "RUSTFS_CONSOLE_ENABLE": "false", "RUSTFS_CONSOLE_ADDRESS": f"{HOST}:0",
-            "RUSTFS_OBS_LOG_DIRECTORY": str(root / "logs"), "RUSTFS_OBS_LOGGER_LEVEL": "warn",
-            "RUSTFS_HTTP_REQUEST_BODY_READ_TIMEOUT": str(IDLE_SECONDS),
-        }
-        with (root / "server.log").open("wb") as log:
-            process = subprocess.Popen([str(binary.resolve())], env=env, cwd=root, start_new_session=True,
-                                       stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-        try:
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                require(process.poll() is None, f"RustFS exited during startup ({process.returncode})")
-                try:
-                    with closing(HTTPConnection(HOST, port, timeout=1)) as conn:
-                        conn.request("GET", "/health/ready")
-                        if conn.getresponse().status == 200:
-                            break
-                except OSError:
-                    pass
-                time.sleep(0.2)
-            else:
-                raise RuntimeError("RustFS readiness deadline expired")
-            yield port
-        finally:
-            stop_process(process)
 
 
 def short_body(payload):
@@ -142,7 +100,9 @@ def main():
     parser.add_argument("--rustfs-bin", type=Path, required=True)
     args = parser.parse_args()
     credentials = Credentials("local-upload-test", secrets.token_hex(24))
-    with candidate(args.rustfs_bin, credentials) as port:
+    with tempfile.TemporaryDirectory(prefix="rustfs-upload-part-") as temporary, local_rustfs(
+        args.rustfs_bin, credentials, Path(temporary), {"RUSTFS_HTTP_REQUEST_BODY_READ_TIMEOUT": str(IDLE_SECONDS)}
+    ) as port:
         config = Config(signature_version="s3v4", s3={"addressing_style": "path"}, proxies={},
                         retries={"total_max_attempts": 1}, connect_timeout=3, read_timeout=12,
                         request_checksum_calculation="when_required")
