@@ -2738,9 +2738,26 @@ test_s3c1204() {
   assert_aws_ok || return 1
   aws_run s3api get-bucket-logging --bucket "s3c1204-b1"
   assert_aws_ok || return 1
-  # accelerate + requestPayment
-  aws_run s3api get-bucket-accelerate --bucket "s3c1204-b1" 2>/dev/null \
-    || aws_run s3api get-bucket-accelerate --bucket "s3c1204-b1" >/dev/null 2>&1
+  # Accelerate configuration must reject unknown status values without changing the stored setting.
+  aws_run s3api put-bucket-accelerate-configuration --bucket "s3c1204-b1" --accelerate-configuration Status=Enabled
+  assert_aws_ok "enable bucket acceleration" || return 1
+  aws_run s3api get-bucket-accelerate-configuration --bucket "s3c1204-b1"
+  assert_aws_ok "read enabled acceleration" || return 1
+  jq -e '.Status == "Enabled"' <<< "${AWS_OUT}" >/dev/null || { echo "acceleration was not enabled"; return 1; }
+
+  aws_run s3api put-bucket-accelerate-configuration --bucket "s3c1204-b1" --accelerate-configuration Status=Fast
+  assert_aws_fails_with '\(MalformedXML\)' "invalid acceleration status" || return 1
+  aws_run s3api get-bucket-accelerate-configuration --bucket "s3c1204-b1"
+  assert_aws_ok "read acceleration after rejected update" || return 1
+  jq -e '.Status == "Enabled"' <<< "${AWS_OUT}" >/dev/null || { echo "rejected update changed acceleration"; return 1; }
+
+  aws_run s3api put-bucket-accelerate-configuration --bucket "s3c1204-b1" --accelerate-configuration Status=Suspended
+  assert_aws_ok "suspend bucket acceleration" || return 1
+  aws_run s3api get-bucket-accelerate-configuration --bucket "s3c1204-b1"
+  assert_aws_ok "read suspended acceleration" || return 1
+  jq -e '.Status == "Suspended"' <<< "${AWS_OUT}" >/dev/null || { echo "acceleration was not suspended"; return 1; }
+
+  # Request payment
   aws_run s3api put-bucket-request-payment --bucket "s3c1204-b1" --request-payment-configuration Payer=Requester
   assert_aws_ok || return 1
   aws_run s3api get-bucket-request-payment --bucket "s3c1204-b1"
