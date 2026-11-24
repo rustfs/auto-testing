@@ -1076,7 +1076,13 @@ test_validation_s3_basic_object_round_trip() {
 # ---------- 1. Bucket basics ----------
 
 test_s3c101() {
-  new_bucket "s3c101-b1" || return 1
+  aws_run s3api create-bucket --bucket "s3c101-b1" --output json
+  assert_aws_ok || return 1
+  if [ "${REGION}" = "us-east-1" ] && ! jq -e '.Location == "/s3c101-b1"' >/dev/null <<< "${AWS_OUT}"; then
+    rm_bucket "s3c101-b1"
+    echo "CreateBucket did not return Location /s3c101-b1"
+    return 1
+  fi
   # duplicate create -> BucketAlreadyOwnedByYou (AWS); this server is idempotent
   aws_run s3api create-bucket --bucket "s3c101-b1"
   if [ "${AWS_CODE}" -eq 0 ]; then
