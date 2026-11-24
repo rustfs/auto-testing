@@ -754,6 +754,7 @@ run_all_tests() {
   run_test STOR-132 "CompressedPhysicalVsLogical"   test_stor132
   run_test STOR-133 "InlineCapacity"                test_stor133
   run_test STOR-134 "AdminUsageConverges"           test_stor134
+  run_test STOR-135 "DeepKeyListingResilience"      test_stor135
 }
 
 test_stor134() { # admin usage APIs must respond promptly and converge to actual object counts (#1858 #2232 #5116)
@@ -808,6 +809,55 @@ test_stor134() { # admin usage APIs must respond promptly and converge to actual
   echo "usage never accounted for the 20 seeded objects (stale/zero usage signature)"
   rm_bucket "${bucket}"
   return 1
+}
+
+test_stor135() { # deep key listing must not crash the server (backlog#2809 backlog#3293)
+  local bucket="stor135-deep" deep_key
+  # 300 one-character segments + a leaf keeps the key within the S3 1024-byte
+  # limit while creating a directory tree deep enough to overflow a 2 MiB
+  # worker stack if the walk recurses without a depth bound.
+  deep_key="$(printf 'a/%.0s' $(seq 1 300))payload"
+  new_bucket "${bucket}" || return 1
+
+  make_test_file "${TEST_TMP}/stor135-payload" 100
+  aws_run s3api put-object --bucket "${bucket}" --key "${deep_key}" --body "${TEST_TMP}/stor135-payload"
+  assert_aws_ok || { echo "put-object of the deep key failed: ${AWS_OUT}"; rm_bucket "${bucket}"; return 1; }
+
+  # The listing must answer (with the key or a controlled error) without
+  # aborting the server process. A stack-overflow abort shows up as a
+  # connection failure here and an "overflowed its stack" line in the journal.
+  aws_run s3api list-objects-v2 --bucket "${bucket}"
+  if [ "${AWS_CODE}" -ne 0 ]; then
+    echo "list-objects-v2 failed (exit ${AWS_CODE}): ${AWS_OUT}"
+    echo "checking that the server is still alive after the listing failure"
+    aws_run s3api head-object --bucket "${bucket}" --key "normal-absent-key" 2>/dev/null
+    [ "${AWS_CODE}" -ne 0 ] || { echo "server accepted a head-object that should not exist"; rm_bucket "${bucket}"; return 1; }
+    # If the server is reachable the listing failure is a controlled error,
+    # which is acceptable; a crash would leave the endpoint unreachable.
+    aws_run s3api list-objects-v2 --bucket "${bucket}" --max-keys 1
+    if [ "${AWS_CODE}" -ne 0 ]; then
+      echo "server is unreachable after the deep-key listing (crash signature)"
+      rm_bucket "${bucket}"
+      return 1
+    fi
+    echo "listing returned a controlled error and the server survived"
+    rm_bucket "${bucket}"
+    return 0
+  fi
+
+  # The listing succeeded: the deep key must be present.
+  printf '%s' "${AWS_OUT}" | grep -q "${deep_key}" \
+    || { echo "listing did not return the deep key"; rm_bucket "${bucket}"; return 1; }
+
+  # GET of the deep key must still work after the listing.
+  aws_run s3api get-object --bucket "${bucket}" --key "${deep_key}" "${TEST_TMP}/stor135-get"
+  assert_aws_ok || { echo "get-object of the deep key failed after listing: ${AWS_OUT}"; rm_bucket "${bucket}"; return 1; }
+  cmp -s "${TEST_TMP}/stor135-payload" "${TEST_TMP}/stor135-get" \
+    || { echo "GET bytes differ from what was PUT"; rm_bucket "${bucket}"; return 1; }
+
+  aws_run s3api delete-object --bucket "${bucket}" --key "${deep_key}"
+  rm_bucket "${bucket}"
+  return 0
 }
 
 validation_scanner_usage_matches() {
