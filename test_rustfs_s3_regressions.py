@@ -13,10 +13,76 @@ source "$RUNNER"
 rc_run() { RC_CODE=0; RC_OUT='s3c103-b1'; }
 VERSION_PRESENT=0
 MARKER_PRESENT=0
+s3_signed_curl() {
+  printf 'curl %s\n' "$*" >> "$CALL_LOG"
+  local method="$1" path="$2" header="" previous="" argument
+  for argument in "$@"; do
+    if [ "$previous" = -H ]; then header="$argument"; fi
+    previous="$argument"
+  done
+  : > "${TEST_TMP}/curl.out"
+  case "$CASE:$method:$path:$header" in
+    101:PUT:/s3c101-b2:"x-amz-bucket-namespace: global")
+      if [ "$SCENARIO" = rejects-global-ns ]; then
+        printf '<Error><Code>InternalError</Code></Error>' > "${TEST_TMP}/curl.out"
+        printf '500'
+      else
+        [ "$SCENARIO" = head-global-ns-fails ] || : > "${TEST_TMP}/created-s3c101-b2"
+        printf '200'
+      fi
+      ;;
+    104:DELETE:/s3c104-b3:"x-minio-force-delete: TRUE")
+      case "$SCENARIO" in
+        accepts-allcaps-true) printf '204' ;;
+        wrong-allcaps-error)
+          printf '<Error><Code>InternalError</Code></Error>' > "${TEST_TMP}/curl.out"
+          printf '400'
+          ;;
+        *)
+          printf '<Error><Code>InvalidArgument</Code></Error>' > "${TEST_TMP}/curl.out"
+          printf '400'
+          ;;
+      esac
+      ;;
+    104:DELETE:/s3c104-b3:"x-minio-force-delete: False")
+      case "$SCENARIO" in
+        rejects-cap-false)
+          printf '<Error><Code>InvalidArgument</Code></Error>' > "${TEST_TMP}/curl.out"
+          printf '400'
+          ;;
+        false-deletes-nonempty) printf '204' ;;
+        *)
+          printf '<Error><Code>BucketNotEmpty</Code></Error>' > "${TEST_TMP}/curl.out"
+          printf '409'
+          ;;
+      esac
+      ;;
+    104:DELETE:/s3c104-b3:"x-minio-force-delete: True")
+      if [ "$SCENARIO" = rejects-cap-true ]; then
+        printf '<Error><Code>InvalidArgument</Code></Error>' > "${TEST_TMP}/curl.out"
+        printf '400'
+      else
+        [ "$SCENARIO" = true-leaves-bucket ] || : > "${TEST_TMP}/deleted-s3c104-b3"
+        printf '204'
+      fi
+      ;;
+    104:DELETE:/s3c104-b4:"x-minio-force-delete: False")
+      if [ "$SCENARIO" = rejects-empty-cap-false ]; then
+        printf '<Error><Code>InvalidArgument</Code></Error>' > "${TEST_TMP}/curl.out"
+        printf '400'
+      else
+        [ "$SCENARIO" = false-leaves-empty-bucket ] || : > "${TEST_TMP}/deleted-s3c104-b4"
+        printf '204'
+      fi
+      ;;
+    *) echo "unexpected curl call: $*" >&2; return 1 ;;
+  esac
+}
 aws_run() {
   printf '%s\n' "$*" >> "$CALL_LOG"
-  local method="$2" version="" key="" previous="" argument
+  local method="$2" bucket="" version="" key="" previous="" argument
   for argument in "$@"; do
+    if [ "$previous" = --bucket ]; then bucket="$argument"; fi
     if [ "$previous" = --version-id ]; then version="$argument"; fi
     if [ "$previous" = --key ]; then key="$argument"; fi
     previous="$argument"
@@ -43,6 +109,19 @@ aws_run() {
   case "$method" in
     create-bucket|put-bucket-versioning|upload-part)
       [ "$method" != upload-part ] || AWS_OUT='{"ETag":"\"part\""}'
+      if [ "$method" = create-bucket ] && [ "$CASE" = 101 ]; then
+        AWS_OUT="{\"Location\":\"/${bucket}\"}"
+        [ "$SCENARIO" != missing-location ] || AWS_OUT='{}'
+      fi
+      ;;
+    head-bucket)
+      if [ -f "${TEST_TMP}/deleted-${bucket}" ]; then
+        AWS_CODE=254
+        AWS_OUT='An error occurred (404) when calling the HeadBucket operation: Not Found'
+      elif [ "$CASE" = 101 ] && [ "$bucket" = s3c101-b2 ] && [ ! -f "${TEST_TMP}/created-s3c101-b2" ]; then
+        AWS_CODE=254
+        AWS_OUT='An error occurred (404) when calling the HeadBucket operation: Not Found'
+      fi
       ;;
     put-object)
       if [ "$CASE" = 1407 ]; then
@@ -84,7 +163,12 @@ aws_run() {
       ;;
     get-object)
       case "$CASE" in
-        104) cp "${TEST_TMP}/s3c104-source" "${@: -1}" ;;
+        104)
+          if [ "$bucket" = s3c104-b3 ] && [ "$SCENARIO" = upper-deletes-object ]; then
+            AWS_CODE=255; AWS_OUT='NoSuchKey'; return 0
+          fi
+          cp "${TEST_TMP}/s3c104-source" "${@: -1}"
+          ;;
         212) cp "${TEST_TMP}/s3c212-source" "${@: -1}" ;;
         301)
           cp "${TEST_TMP}/s3c-mp" "${@: -1}"
@@ -187,12 +271,17 @@ class HistoricalS3RegressionTest(unittest.TestCase):
         return calls
 
     def test_valid_responses(self):
-        for case in (103, 104, 212, 301, 401, 1407):
+        for case in (101, 103, 104, 212, 301, 401, 1407):
             with self.subTest(case=case):
                 self.assert_case(case, "success", True)
         for scenario in ("fractional-date", "offset-date"):
             with self.subTest(scenario=scenario):
                 self.assert_case(103, scenario, True)
+
+    def test_create_bucket_global_namespace_and_location(self):
+        for scenario in ("missing-location", "rejects-global-ns", "head-global-ns-fails"):
+            with self.subTest(scenario=scenario):
+                self.assert_case(101, scenario, False)
 
     def test_reject_invalid_creation_dates(self):
         for scenario in ("year-one", "invalid-date", "stale-date", "missing-date", "future-date"):
@@ -200,7 +289,19 @@ class HistoricalS3RegressionTest(unittest.TestCase):
                 self.assert_case(103, scenario, False)
 
     def test_rejection_preserves_current_object(self):
-        for scenario in ("corrupt-body", "get-failure"):
+        for scenario in (
+            "corrupt-body",
+            "get-failure",
+            "accepts-allcaps-true",
+            "wrong-allcaps-error",
+            "upper-deletes-object",
+            "rejects-cap-false",
+            "false-deletes-nonempty",
+            "rejects-cap-true",
+            "true-leaves-bucket",
+            "rejects-empty-cap-false",
+            "false-leaves-empty-bucket",
+        ):
             with self.subTest(scenario=scenario):
                 self.assert_case(104, scenario, False)
 
