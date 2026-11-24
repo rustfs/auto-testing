@@ -1301,12 +1301,13 @@ test_s3c205() {
 test_s3c206() {
   new_bucket "s3c206-b1" || return 1
   make_test_file ${TEST_TMP}/s3c-file 1024
-  aws_run s3api put-object --bucket "s3c206-b1" --key f --body ${TEST_TMP}/s3c-file --metadata k=v
+  aws_run s3api put-object --bucket "s3c206-b1" --key f --body "${TEST_TMP}/s3c-file" \
+    --metadata '{"k":"v","caption":"=?UTF-8?B?5Lit?=   =?UTF-8?B?5paH?="}'
   assert_aws_ok || return 1
   aws_run s3api head-object --bucket "s3c206-b1" --key f
   assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '.Metadata.k == "v"' >/dev/null \
-    || { echo "metadata k=v missing: ${AWS_OUT}"; return 1; }
+  printf '%s' "${AWS_OUT}" | jq -e '.Metadata.k == "v" and .Metadata.caption == "=?UTF-8?B?5Lit5paH?="' >/dev/null \
+    || { echo "unexpected object metadata: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c206-b1"
 }
 
