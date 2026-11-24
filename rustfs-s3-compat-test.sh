@@ -2789,14 +2789,27 @@ test_s3c1204() {
 
   # Request payment
   aws_run s3api put-bucket-request-payment --bucket "s3c1204-b1" --request-payment-configuration Payer=Requester
-  assert_aws_ok || return 1
+  assert_aws_ok "set requester pays" || return 1
   aws_run s3api get-bucket-request-payment --bucket "s3c1204-b1"
-  local payer
-  payer="$(printf '%s' "${AWS_OUT}" | jq -r '.Payer // "unknown"')"
-  if [ "${payer}" != "Requester" ]; then
-    echo "note: request-payment put accepted but get returns Payer=${payer} (server config-read inconsistency)"
-  fi
+  assert_aws_ok "read requester pays" || return 1
+  jq -e '.Payer == "Requester"' <<< "${AWS_OUT}" >/dev/null || { echo "requester pays was not stored"; return 1; }
+
+  local payment_xml="${TEST_TMP}/s3c1204-payment.xml" payment_md5 payment_status
+  printf '%s' '<RequestPaymentConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Payer>Nobody</Payer></RequestPaymentConfiguration>' > "${payment_xml}"
+  payment_md5="$(openssl dgst -md5 -binary "${payment_xml}" | openssl base64 -A)" || return 1
+  payment_status="$(s3_signed_curl PUT '/s3c1204-b1?requestPayment' --data "${payment_xml}" \
+    -H 'Content-Type: application/xml' -H "Content-MD5: ${payment_md5}")" || return 1
+  [ "${payment_status}" = 400 ] && grep -q '<Code>InvalidArgument</Code>' "${TEST_TMP}/curl.out" \
+    || { echo "unknown payer expected HTTP 400 InvalidArgument, got HTTP ${payment_status}"; return 1; }
+  aws_run s3api get-bucket-request-payment --bucket "s3c1204-b1"
+  assert_aws_ok "read payer after rejected update" || return 1
+  jq -e '.Payer == "Requester"' <<< "${AWS_OUT}" >/dev/null || { echo "rejected update changed payer"; return 1; }
+
   aws_run s3api put-bucket-request-payment --bucket "s3c1204-b1" --request-payment-configuration Payer=BucketOwner
+  assert_aws_ok "set bucket owner pays" || return 1
+  aws_run s3api get-bucket-request-payment --bucket "s3c1204-b1"
+  assert_aws_ok "read bucket owner pays" || return 1
+  jq -e '.Payer == "BucketOwner"' <<< "${AWS_OUT}" >/dev/null || { echo "bucket owner pays was not stored"; return 1; }
   rm_bucket "s3c1204-b1"
 }
 
