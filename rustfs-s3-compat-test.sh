@@ -2123,14 +2123,28 @@ test_s3c804() {
   rm_bucket "s3c804-b1"
 }
 
+assert_owner_full_control_acl() {
+  assert_aws_ok || return 1
+  printf '%s' "${AWS_OUT}" | jq -e '
+    .Owner.ID as $owner |
+    ($owner | type == "string" and length > 0) and
+    (.Grants | length == 1) and
+    (.Grants[0] | .Permission == "FULL_CONTROL" and
+      .Grantee.Type == "CanonicalUser" and .Grantee.ID == $owner)
+  ' >/dev/null || { echo "ACL grant does not identify its owner: ${AWS_OUT}"; return 1; }
+}
+
 test_s3c805() {
   new_bucket "s3c805-b1" || return 1
   make_test_file ${TEST_TMP}/s3c-v 512
   aws_run s3api put-object --bucket "s3c805-b1" --key f --body ${TEST_TMP}/s3c-v --acl private
   assert_aws_ok || return 1
+  aws_run s3api get-bucket-acl --bucket "s3c805-b1"
+  assert_owner_full_control_acl || return 1
   aws_run s3api get-object-acl --bucket "s3c805-b1" --key f
+  assert_owner_full_control_acl || return 1
+  aws_run s3api delete-object --bucket "s3c805-b1" --key f
   assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '.Owner != null' >/dev/null || { echo "acl owner missing: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c805-b1"
 }
 
