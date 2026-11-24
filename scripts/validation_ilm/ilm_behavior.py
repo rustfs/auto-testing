@@ -40,6 +40,7 @@ from ilm_timing import (
 from oracles import (
     require_exact_version_ids,
     require_single_latest_marker,
+    scanner_node_configuration_matches,
     version_inventory,
 )
 
@@ -1172,20 +1173,9 @@ class IlmHarness:
                     "currentStarted": metrics.get("current_started"),
                 }
                 details.append(node_detail)
-                configured = configured and (
-                    data.get("enabled") is True
-                    and cycle.get("value") == self.args.scanner_cycle_seconds
-                    and cycle.get("source") == "env"
-                    and start_delay.get("value") == 0
-                    and start_delay.get("source") == "env"
+                configured = configured and scanner_node_configuration_matches(
+                    data, self.args.scanner_cycle_seconds
                 )
-                effective_interval = schedule.get("effective_interval_seconds")
-                if effective_interval is not None:
-                    configured = configured and effective_interval == self.args.scanner_cycle_seconds
-                configured = configured and metrics.get("last_cycle_partial_reason") in (None, "")
-                current_cycle = metrics.get("current_cycle")
-                if current_cycle is not None:
-                    configured = configured and type(current_cycle) is int and current_cycle >= 0
                 if metrics.get("leader_lock_held_by_this_process") is True:
                     leaders.append(node_detail)
             healthy_leader = (

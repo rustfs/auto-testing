@@ -60,3 +60,40 @@ def require_single_latest_marker(inventory: dict[str, list[dict[str, Any]]]) -> 
     if len(latest) != 1:
         raise AssertionError(f"expected one latest delete marker, got {latest!r}")
     return latest[0]
+
+
+def scanner_node_configuration_matches(
+    data: dict[str, Any], expected_interval: int
+) -> bool:
+    """Return whether one scanner status node has the configured runtime.
+
+    Only the leader schedules cycles, so followers report
+    ``effective_interval_available=false`` with a zero effective interval by
+    design. Comparing that zero with the configured interval makes a healthy
+    cluster look permanently unconfigured; the effective interval is checked
+    on the leader, which is also the node whose cycle the readiness gate waits
+    for.
+    """
+
+    metrics = data.get("metrics", {})
+    runtime = data.get("runtime_config", {})
+    cycle = runtime.get("cycle_interval_seconds", {})
+    start_delay = runtime.get("start_delay_seconds", {})
+    schedule = data.get("cycle_schedule", {})
+    if (
+        data.get("enabled") is not True
+        or cycle.get("value") != expected_interval
+        or cycle.get("source") != "env"
+        or start_delay.get("value") != 0
+        or start_delay.get("source") != "env"
+        or metrics.get("last_cycle_partial_reason") not in (None, "")
+    ):
+        return False
+    current_cycle = metrics.get("current_cycle")
+    if current_cycle is not None and (
+        type(current_cycle) is not int or current_cycle < 0
+    ):
+        return False
+    if metrics.get("leader_lock_held_by_this_process") is True:
+        return schedule.get("effective_interval_seconds") == expected_interval
+    return True
