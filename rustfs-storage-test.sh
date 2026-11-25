@@ -198,7 +198,11 @@ EOF
   if [ "${VALIDATION_CASE}" = "scanner.usage-convergence" ] || [ "${VALIDATION_CASE}" = "scanner.status-readiness" ]; then
     printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=5\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
   elif [[ "${VALIDATION_CASE}" == ilm.* ]]; then
-    printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=2\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
+    if [ "${VALIDATION_CASE}" = ilm.immediate-transition-and-restore ]; then
+      printf 'RUSTFS_SCANNER_ENABLED=false\n'
+    else
+      printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=2\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
+    fi
     printf 'RUSTFS_DATA_USAGE_UPDATE_DIR_CYCLES=1\nRUSTFS_ILM_DEBUG_DAY_SECS=10\nRUSTFS_ILM_PROCESS_TIME=1\n'
     printf 'RUSTFS_API_STALE_UPLOADS_CLEANUP_INTERVAL=2s\n'
     printf 'HTTP_PROXY=\nHTTPS_PROXY=\nALL_PROXY=\nhttp_proxy=\nhttps_proxy=\nall_proxy=\n'
@@ -283,6 +287,13 @@ volume_dirs() {
 
 # ==================== Topology / environment ====================
 
+ilm_case_uses_tier() {
+  case "${VALIDATION_CASE}" in
+    ilm.transition-and-restore|ilm.immediate-transition-and-restore) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 resolve_topology() {
   case "$1" in
     "${TOPO_SINGLE_SINGLE}") ENDPOINT="${ENDPOINT_SINGLE_SINGLE}"; VOLUMES="${VOLUMES_SINGLE_SINGLE}"; return 0 ;;
@@ -297,7 +308,7 @@ topology_nodes() {
   case "$1" in
     "${TOPO_SINGLE_SINGLE}"|"${TOPO_SINGLE_MULTI}") printf '%s' "${NODES[0]}" ;;
     "${TOPO_ILM_2X4}")
-      if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+      if ilm_case_uses_tier; then
         printf '%s %s %s' "${NODES[0]}" "${NODES[1]}" "${NODES[2]}"
       else
         printf '%s %s' "${NODES[0]}" "${NODES[1]}"
@@ -341,7 +352,7 @@ EOF
   for node in "${nodes[@]}"; do printf '%s\n' "${script}" | run_remote "${node}"; done
 
   for node in "${nodes[@]}"; do
-    if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ] && [ "${node}" = "${NODES[2]}" ]; then
+    if ilm_case_uses_tier && [ "${node}" = "${NODES[2]}" ]; then
       VALIDATION_CASE="" write_rustfs_config "${node}" "${VOLUMES_SINGLE_SINGLE}"
       ensure_volume_dirs "${node}" "${VOLUMES_SINGLE_SINGLE}"
     else
@@ -361,7 +372,7 @@ EOF
       sleep 5; waited=$((waited+5))
     done
     [ "${waited}" -lt "${SERVICE_TIMEOUT}" ] || die "S3 endpoint ${ENDPOINT} not ready"
-    if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+    if ilm_case_uses_tier; then
       waited=0
       while [ "${waited}" -lt "${SERVICE_TIMEOUT}" ]; do
         if curl --noproxy '*' -fsS --max-time 5 "${ILM_TIER_ENDPOINT}/minio/health/live" >/dev/null 2>&1; then
@@ -598,11 +609,11 @@ validation_write_result() {
 test_validation_ilm_case() {
   local harness_dir="${TEST_TMP}/ilm-evidence" harness_rc=0
   local -a ilm_args=()
-  if [ "${VALIDATION_CASE}" = ilm.restart-persistence ]; then
+  if [ "${VALIDATION_CASE}" = ilm.restart-persistence ] || [ "${VALIDATION_CASE}" = ilm.immediate-transition-and-restore ]; then
     ilm_args+=(--restart-hook "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \
       bash "${SCRIPT_DIR}/scripts/validation_ilm/restart_cluster.sh" "${NODES[0]}" "${NODES[1]}")")
   fi
-  if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
+  if ilm_case_uses_tier; then
     ilm_args+=(--tier-endpoint "${ILM_TIER_ENDPOINT}"
       --tier-access-key "${ACCESS_KEY}" --tier-secret-key "${SECRET_KEY}")
   fi
@@ -1423,7 +1434,10 @@ main() {
   if [ -n "${VALIDATION_CASE}" ]; then
     case "${VALIDATION_CASE}" in
       scanner.usage-convergence|scanner.status-readiness) ;;
-      ilm.configuration-roundtrip|ilm.invalid-configuration|ilm.current-expiration|ilm.tag-filter-expiration|ilm.disabled-rule|ilm.rule-removal|ilm.versioned-current-expiration|ilm.noncurrent-expiration|ilm.newer-noncurrent-retention|ilm.delete-all-versions|ilm.delete-marker-expiration|ilm.multipart-expiration|ilm.restart-persistence|ilm.transition-and-restore) ;;
+      ilm.*)
+        need_cmd python3 "ILM case selection"
+        python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); from scripts.validation_ilm.case_plan import ILM_SELECTABLE_CASE_IDS; sys.exit(sys.argv[2] not in ILM_SELECTABLE_CASE_IDS)' \
+          "${SCRIPT_DIR}" "${VALIDATION_CASE}" || die "unknown validation case: ${VALIDATION_CASE}" ;;
       source-procedure.storage.*)
         VALIDATION_SOURCE_CASE_ID="$(printf '%s' "${VALIDATION_CASE#source-procedure.storage.}" | tr '[:lower:]' '[:upper:]')"
         SELECTED_CASES="${VALIDATION_SOURCE_CASE_ID}" ;;
@@ -1434,9 +1448,9 @@ main() {
     [ "${KEEP_ENV}" -eq 0 ] || die "--validation-case requires environment teardown"
     if [ "${VALIDATION_CASE}" = scanner.status-readiness ] || [[ "${VALIDATION_CASE}" == ilm.* ]]; then
       SELECTED_TOPOLOGIES=("${TOPO_ILM_2X4}")
-      [ "${#NODES[@]}" -ge 2 ] || die "scanner.status-readiness needs two test nodes"
-      if [ "${VALIDATION_CASE}" = ilm.transition-and-restore ]; then
-        [ "${#NODES[@]}" -ge 3 ] || die "ilm.transition-and-restore needs three test nodes"
+      [ "${#NODES[@]}" -ge 2 ] || die "${VALIDATION_CASE} needs two test nodes"
+      if ilm_case_uses_tier; then
+        [ "${#NODES[@]}" -ge 3 ] || die "${VALIDATION_CASE} needs three test nodes"
       fi
     else
       SELECTED_TOPOLOGIES=("${TOPO_SINGLE_MULTI}")

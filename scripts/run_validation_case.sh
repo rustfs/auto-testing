@@ -35,7 +35,7 @@ case "${CASE_ID}" in
     SUITE=rustfs-table-test.sh; EXTRA_ARGS=() ;;
   source-procedure.upgrade.*)
     SUITE=rustfs-upgrade-test.sh; EXTRA_ARGS=(--topology single-single --backends local) ;;
-  scanner.usage-convergence|scanner.status-readiness|ilm.configuration-roundtrip|ilm.invalid-configuration|ilm.current-expiration|ilm.tag-filter-expiration|ilm.disabled-rule|ilm.rule-removal|ilm.versioned-current-expiration|ilm.noncurrent-expiration|ilm.newer-noncurrent-retention|ilm.delete-all-versions|ilm.delete-marker-expiration|ilm.multipart-expiration|ilm.restart-persistence|ilm.transition-and-restore)
+  scanner.usage-convergence|scanner.status-readiness|ilm.*)
     SUITE=rustfs-storage-test.sh; EXTRA_ARGS=() ;;
   kms.sse-kms-round-trip)
     SUITE=rustfs-kms-test.sh; EXTRA_ARGS=() ;;
@@ -52,7 +52,7 @@ case "${CASE_ID}" in
     exit 2 ;;
 esac
 
-if [[ "${CASE_ID}" == pool.* || "${CASE_ID}" == bucket-replication.* || "${CASE_ID}" == site-replication.* || "${CASE_ID}" == scanner.usage-[0-9][0-9]-* || "${CASE_ID}" == s3.compatibility.* || "${CASE_ID}" == source-procedure.* ]]; then
+if [[ "${CASE_ID}" == pool.* || "${CASE_ID}" == bucket-replication.* || "${CASE_ID}" == site-replication.* || "${CASE_ID}" == scanner.usage-[0-9][0-9]-* || "${CASE_ID}" == ilm.* || "${CASE_ID}" == s3.compatibility.* || "${CASE_ID}" == source-procedure.* ]]; then
   python3 -B -c 'import json,sys; catalog=json.load(open(sys.argv[1])); valid={case["id"] for module in catalog["modules"]+catalog.get("local_modules",[]) for case in module["cases"]}; sys.exit(0 if sys.argv[2] in valid else 2)' \
     "${SCRIPT_DIR}/validation-cases.json" "${CASE_ID}" || {
       printf 'unknown canonical validation case: %s\n' "${CASE_ID}" >&2

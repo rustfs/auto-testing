@@ -393,6 +393,29 @@ test_version_delete_checks_individual_results() (
   done
 )
 
+test_remote_tier_inventory_requires_complete_unique_keys() (
+  reset_harness
+  local response
+  aws_target_run_with_timeout() {
+    assert_eq list-objects-v2 "$3" "remote tier inventory operation"
+    assert_contains '<--no-paginate>' "$(joined_args "$@")" "explicit truncation check"
+    AWS_CODE=0
+    AWS_OUT="${response}"
+  }
+  response='{"IsTruncated":false,"KeyCount":2,"Contents":[{"Key":"v2"},{"Key":"v1"}]}'
+  read_remote_tier_keys remote || fail "valid remote inventory should pass"
+  assert_eq '["v1","v2"]' "${REMOTE_TIER_KEYS}" "sorted remote identities"
+  for response in '{"IsTruncated":true,"KeyCount":1,"Contents":[{"Key":"v1"}]}' \
+    '{"IsTruncated":false,"KeyCount":2,"Contents":[{"Key":"v1"},{"Key":"v1"}]}' \
+    '{"IsTruncated":false,"KeyCount":0,"Contents":false}' \
+    '{"IsTruncated":false,"KeyCount":2,"Contents":[{"Key":"v1"}]}' \
+    '{"IsTruncated":false,"KeyCount":1,"Contents":[{}]}'; do
+    if read_remote_tier_keys remote >/dev/null 2>&1; then
+      fail "invalid remote tier inventory passed: ${response}"
+    fi
+  done
+)
+
 test_cleanup_tier_remove_retries_only_expected_conflict() (
   reset_harness
   case_resources_reset
@@ -1394,6 +1417,7 @@ run_versioned_cleanup_contract_tests() {
   test_admin_api_empty_payload_is_safe_under_nounset
   test_versioned_inventory_requires_complete_exact_lists
   test_version_delete_checks_individual_results
+  test_remote_tier_inventory_requires_complete_unique_keys
   test_cleanup_tier_remove_retries_only_expected_conflict
   test_cleanup_tier_remove_rejects_unexpected_responses
   test_cleanup_tier_remove_deadline_and_absence_proof
