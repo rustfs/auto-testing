@@ -550,10 +550,34 @@ class BulkDeleteTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 1)
         self.assertIn("NOT_RUN", (directory / "summary.md").read_text())
 
+    def test_cli_forwards_selected_profile_key_shape_and_version_mode(self):
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
+        directory = self.root / "profile"
+        with patch.dict(os.environ, {"RUSTFS_ACCESS_KEY": "key", "RUSTFS_SECRET_KEY": "secret"}), \
+                patch.object(probe, "run_case", return_value={"verdict": "PASS", "cleanup": "PASS"}) as runner:
+            code = probe.main(["--endpoint", "http://node.invalid", "--result-dir", str(directory),
+                               "--case", "S3C-213", "--mode", "off", "--batch-sizes", "128",
+                               "--profile", "client-10s", "--key-shape", "long-deep", "--key-bytes", "512",
+                               "--observation-budget", "90"])
+        self.assertEqual(code, 0)
+        runner.assert_called_once()
+        self.assertEqual(runner.call_args.args[:3], ("S3C-213", "off", 128))
+        self.assertEqual(runner.call_args.kwargs["profile"], "client-10s")
+        self.assertEqual(runner.call_args.kwargs["key_shape"], "long-deep")
+        self.assertEqual(runner.call_args.kwargs["key_bytes"], 512)
+        self.assertEqual(runner.call_args.kwargs["observation_budget"], 90)
+
     def test_invalid_options_do_not_create_artifacts_or_contact_a_server(self):
         invalid = [["--endpoint", "http://user:secret@node.invalid"],
                    ["--endpoint", "ftp://node.invalid"], ["--endpoint", "http://node.invalid", "--workers", "0"],
-                   ["--endpoint", "http://node.invalid", "--batch-sizes", "1001"]]
+                   ["--endpoint", "http://node.invalid", "--batch-sizes", "1001"],
+                   ["--endpoint", "http://node.invalid", "--observation-budget", "0"],
+                   ["--endpoint", "http://node.invalid", "--mode", "on", "--mode", "on"],
+                   ["--endpoint", "http://node.invalid", "--case", "S3C-1307", "--key-shape", "long-deep"],
+                   ["--endpoint", "http://node.invalid", "--key-bytes", "512"],
+                   ["--endpoint", "http://node.invalid", "--case", "S3C-213", "--key-shape", "short-shallow", "--key-bytes", "128"],
+                   ["--endpoint", "http://node.invalid", "--case", "S3C-213", "--key-shape", "long-shallow", "--key-bytes", "127"],
+                   ["--endpoint", "http://node.invalid", "--case", "S3C-213", "--key-shape", "long-deep", "--key-bytes", "1025"]]
         with patch.object(probe, "run_case") as runner:
             for options in invalid:
                 with self.subTest(options=options), self.assertRaises(SystemExit) as error:
@@ -588,6 +612,9 @@ ENDPOINT=http://primary.invalid:9000
 NODES=(configured-a configured-b configured-c configured-d)
 CURRENT_TOPOLOGY=multi-multi
 S3_BULK_RESULTS_DIR="$RESULT_ROOT"
+S3_BULK_PROFILE="client-10s"
+S3_BULK_KEY_SHAPE="long-deep"
+S3_BULK_KEY_BYTES="512"
 ACCESS_KEY=test-access
 SECRET_KEY=must-not-appear-in-arguments
 python3() { printf '%s\n' "$@" > "$CALL_LOG"; }
@@ -598,6 +625,9 @@ test_s3c213
                  "CALL_LOG": str(self.root / "call-log")})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         arguments = (self.root / "call-log").read_text()
+        self.assertIn("--profile\nclient-10s\n", arguments)
+        self.assertIn("--key-shape\nlong-deep\n", arguments)
+        self.assertIn("--key-bytes\n512\n", arguments)
         self.assertIn("http://primary.invalid:9000", arguments)
         for node in ("configured-b", "configured-c", "configured-d"):
             self.assertIn(f"http://{node}:9000", arguments)
