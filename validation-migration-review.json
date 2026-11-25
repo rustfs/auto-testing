@@ -121,7 +121,7 @@
     "test_validation_ilm.py": "51a5931c02da95943b87bdb865ff2dff7d71f1df8d38e532664b3c0424395bdf",
     "test_validation_replication.py": "83e1b532e8a6a352c5e38de48799356157e1fad4f1f314ea8ad256fdecf942c5",
     "test_validation_scanner_usage.py": "dc62124ea779b5bb6acbd628284bead0216ad9b0ed6bee88a7192568edb5798d",
-    "rustfs-s3-compat-test.sh": "1fb83a5a366d386e82a733deae4e616bcff258558df9ba9dcb8adc3397743008",
+    "rustfs-s3-compat-test.sh": "31f986f574484da43f36fcc1ee74b0a088d83574202a91945a3473b49cab82aa",
     "rustfs-security-test.sh": "02cddd15636df1e74210c172ee898dba9b3adf83943da45d874d6c827583d9d2",
     "rustfs-tier-test.sh": "2407c1e3d4b2bc768d400bb721a56ad99a18433283935833f4e60e70f4b4c508",
     "rustfs-storage-test.sh": "ff345001e4d1313e49d6aa185188f43dc946ae4316a07a4911a34888c4786d9d",

@@ -125,7 +125,7 @@ It exits 0 when the case holds and 1 when it does not, an unreachable endpoint i
 
 ## Bulk-delete regressions
 
-The complete S3 topology suite includes bulk-delete regressions `S3C-213`, `S3C-214`, `S3C-1306` and `S3C-1307`. They cover batch boundaries, duplicate keys, immutable GET load and finite same-key PUT contention in off/on/suspended versioning modes. Python boto3 is required. Each subcase retains JSON, phase/request timing, HTTP 503 and per-object error counts, version/marker cleanup receipts and a Chinese Markdown summary under `--bulk-delete-results-dir`. The standalone runner accepts existing endpoints and does not deploy nodes; its caller must hold the environment lock. See [the case contracts and usage](docs/s3-bulk-delete-regressions.zh-CN.md).
+The complete S3 topology suite includes bulk-delete regressions `S3C-213`, `S3C-214`, `S3C-1306` and `S3C-1307`. They cover batch boundaries, duplicate keys, immutable GET load and finite same-key PUT contention in off/on/suspended versioning modes. Python boto3 is required. Each subcase retains JSON, phase/request timing, HTTP 503 and per-object error counts, version/marker cleanup receipts and a Chinese Markdown summary under `--bulk-delete-results-dir`. The standalone runner accepts existing endpoints and does not deploy nodes; its caller must hold the environment lock. S3C-213 and S3C-1306 distinguish per-key S3 results from the historical ten-second client timeout and can compare short and long keys at controlled depths. See [the case contracts and usage](docs/s3-bulk-delete-regressions.zh-CN.md).
 
 ## Release validation migration
 
