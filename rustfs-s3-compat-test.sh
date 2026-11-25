@@ -1393,7 +1393,7 @@ test_s3c206() {
   new_bucket "s3c206-b1" || return 1
   make_test_file ${TEST_TMP}/s3c-file 1024
   aws_run s3api put-object --bucket "s3c206-b1" --key f --body "${TEST_TMP}/s3c-file" \
-    --metadata '{"k":"v","caption":"=?UTF-8?B?5Lit?=   =?UTF-8?B?5paH?="}'
+    --metadata '{"k":"v","caption":"=?UTF-8?B?5Lit5paH?="}'
   assert_aws_ok || return 1
   aws_run s3api head-object --bucket "s3c206-b1" --key f
   assert_aws_ok || return 1

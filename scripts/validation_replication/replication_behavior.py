@@ -2652,6 +2652,21 @@ class ReplicationHarness:
             return observed == source_policy, observed
 
         replicated = self.wait_until(case_id, "bucket policy replication", policy_probe)
+        for invalid in ("{", "[]", '["","2012-10-17",[]]'):
+            try:
+                self.client_a.put_bucket_policy(Bucket=bucket, Policy=invalid)
+            except ClientError as exc:
+                code = exc.response["Error"]["Code"]
+                status = exc.response["ResponseMetadata"]["HTTPStatusCode"]
+                if (status, code) != (400, "MalformedPolicy"):
+                    raise AssertionError(f"invalid bucket policy returned {status} {code}") from exc
+            else:
+                raise AssertionError("invalid bucket policy was accepted")
+            observed = json.loads(self.client_a.get_bucket_policy(Bucket=bucket)["Policy"])
+            if observed != source_policy:
+                raise AssertionError("a rejected write changed the source bucket policy")
+        if not policy_probe()[0]:
+            raise AssertionError("the peer no longer has the original bucket policy")
         self.client_a.delete_bucket_policy(Bucket=bucket)
 
         def delete_probe() -> tuple[bool, Any]:

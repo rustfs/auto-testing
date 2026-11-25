@@ -3152,6 +3152,7 @@ test_aud102() {
 }
 
 test_aud103() {
+  local denied_path="/aud103-b1/private%20key%2B" headers="${TEST_TMP}/aud103-headers" status request_id
   new_bucket "aud103-b1" || return 1
   events_reset
   aws_run s3api get-object --bucket aud103-b1 --key missing ${TEST_TMP}/tier-nope
@@ -3159,6 +3160,19 @@ test_aud103() {
   # wait for the failed GET entry specifically (requestPath contains the key)
   wait_audit 1 "aud103-b1/missing" || return 1
   audit_grep "aud103-b1/missing" | grep -q "404" || { echo "failed request audited without status_code 404: $(audit_grep 'aud103-b1/missing')"; return 1; }
+  # The early authorization denial must identify the original encoded S3 path.
+  printf '%s' 'private audit fixture' > "${TEST_TMP}/aud103-private"
+  aws_run s3api put-object --bucket aud103-b1 --key 'private key+' --body "${TEST_TMP}/aud103-private"
+  assert_aws_ok || return 1
+  status="$(curl -sS --noproxy '*' --path-as-is --max-time "${API_REQUEST_TIMEOUT}" -D "${headers}" -o /dev/null -w '%{http_code}' "${ENDPOINT%/}${denied_path}")" || return 1
+  [ "${status}" = 403 ] || { echo "private object GET returned ${status}, expected 403"; return 1; }
+  request_id="$(awk 'tolower($1) == "x-amz-request-id:" { sub(/\r$/, "", $2); print $2 }' "${headers}")"
+  [ -n "${request_id}" ] || { echo "private object GET lacks a request ID"; return 1; }
+  wait_audit 1 "${request_id}" >/dev/null || { echo "denied GET audit did not arrive"; return 1; }
+  jq -es --arg id "${request_id}" --arg path "${denied_path}" '
+    [.[] | (.Records // [.])[] | select(.requestID == $id)]
+    | length == 1 and (.[0] | .api.name == "s3:GetObject" and .api.status_code == 403 and .requestPath == $path)
+  ' "${AUDIT_EVENTS}" >/dev/null || { echo "denied GET audit has the wrong count, operation, status or path"; return 1; }
   rm_bucket aud103-b1
 }
 
