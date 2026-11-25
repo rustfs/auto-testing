@@ -855,9 +855,17 @@ class RegistrationTests(unittest.TestCase):
         validate_snapshot(catalog)
         local_by_id = {module["id"]: module for module in catalog["local_modules"]}
         self.assertEqual(local_by_id["scanner-usage-regressions"], catalog_module())
-        self.assertEqual(sum(len(module["cases"]) for module in catalog["modules"]), 158)
-        self.assertEqual(sum(len(module["cases"]) for module in catalog_modules(catalog)), 438)
-        self.assertEqual(sum(len(module["cases"]) for module in catalog["local_modules"]), 280)
+        self.assertEqual(158, sum(len(module["cases"]) for module in catalog["modules"]))
+        source_and_local_ids = [
+            case["id"]
+            for group in ("modules", "local_modules")
+            for module in catalog[group]
+            for case in module["cases"]
+        ]
+        self.assertCountEqual(
+            [case["id"] for module in catalog_modules(catalog) for case in module["cases"]],
+            source_and_local_ids,
+        )
         self.assertEqual(len(select_cases("all")), 21)
         self.assertEqual([case.number for case in select_cases("blackbox")], [1, 20])
         self.assertNotIn(CASES[0].id, [case for case, _ in sweepable_cases(catalog)])

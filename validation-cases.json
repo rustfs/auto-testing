@@ -4149,6 +4149,55 @@
   ],
   "local_modules": [
     {
+      "id": "ilm-regressions",
+      "origin": "auto-testing",
+      "target_environments": [
+        "ilm-2x4"
+      ],
+      "required_capabilities": [
+        "lifecycle",
+        "versioning",
+        "object-lock",
+        "remote-tier"
+      ],
+      "cases": [
+        {
+          "id": "ilm.worm-expiration",
+          "source_status": "procedure-ready",
+          "priority": "P0",
+          "channels": ["s3-api", "rc"],
+          "assertions": [
+            "Current and historical versions under legal hold retain their exact identities and original data while matching unlocked controls expire and the scanner completes new cycles.",
+            "After the holds are released, current expiration creates one latest delete marker and historical expiration removes only the previously held historical version."
+          ],
+          "probes": {
+            "executionMode": "configured-endpoint"
+          },
+          "reuse_candidates": {
+            "suites": ["rustfs-storage-test.sh", "rustfs-s3-compat-test.sh"],
+            "case_ids": ["S3C-605"]
+          }
+        },
+        {
+          "id": "ilm.immediate-transition-and-restore",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": ["s3-api", "rc"],
+          "assertions": [
+            "After restarting the empty source with the scanner disabled and a zero-day rule persisted, a matching PUT reaches the dedicated remote tier without a manual transition job.",
+            "RestoreObject completes for the transitioned object and the restored bytes match the original upload."
+          ],
+          "probes": {
+            "executionMode": "configured-endpoint"
+          },
+          "reuse_candidates": {
+            "suites": ["rustfs-storage-test.sh", "rustfs-tier-test.sh"],
+            "case_ids": ["TIER-107"]
+          }
+        }
+      ]
+    },
+    {
       "id": "scanner-usage-regressions",
       "origin": "auto-testing",
       "target_environments": [

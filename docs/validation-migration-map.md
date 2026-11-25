@@ -449,7 +449,7 @@ procedure in dry-run mode and retain the original case-level assertions and
 diagnostics. The strict SSE contract cases add 10 `s3.compatibility.enc-2xx`
 and 9 `source-procedure.kms.kms-6xx` entries, executed by
 `scripts/sse_contract_cases.py` through the same two suites. The local catalog
-therefore contains 280 executable procedure entries in addition to the 158
+therefore contains 282 executable procedure entries in addition to the 158
 canonical source scenarios.
 
 The complete source-audit crosswalk is recorded in

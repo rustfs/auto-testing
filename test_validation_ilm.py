@@ -5,9 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.validation_ilm.case_plan import ILM_CASE_IDS, ilm_harness_scored_cases
+from scripts.select_validation_cases import select_validation_cases
+from scripts.validation_ilm.case_plan import (
+    ILM_CASE_IDS, IMMEDIATE_TRANSITION_CASE, WORM_EXPIRATION_CASE, ilm_harness_scored_cases,
+)
 from scripts.validation_ilm.oracles import (
     require_exact_version_ids,
+    require_scanner_disabled,
     require_single_latest_marker,
     scanner_node_configuration_matches,
     version_inventory,
@@ -78,6 +82,15 @@ class IlmContractTest(unittest.TestCase):
         )
         self.assertFalse(scanner_node_configuration_matches(partial, 2))
 
+    def test_immediate_transition_requires_all_source_scanners_disabled(self) -> None:
+        disabled = {"status": {"data": {"enabled": False}}}
+        require_scanner_disabled({"nodes": [disabled, disabled]})
+        for second in ({"status": {"data": {"enabled": True}}}, {"error": "offline"}, {"status": {}}):
+            with self.subTest(second=second), self.assertRaisesRegex(RuntimeError, "every source scanner"):
+                require_scanner_disabled({"nodes": [disabled, second]})
+        with self.assertRaises(RuntimeError):
+            require_scanner_disabled({"nodes": []})
+
     def test_version_inventory_rejects_extra_versions_and_markers(self) -> None:
         response = {
             "Versions": [
@@ -112,6 +125,19 @@ class IlmContractTest(unittest.TestCase):
         self.assertEqual(("ilm.configuration-roundtrip",), ilm_harness_scored_cases(["ilm.configuration-roundtrip"]))
         with self.assertRaises(ValueError):
             ilm_harness_scored_cases(["missing.case"])
+
+    def test_ilm_regressions_require_explicit_selection_and_isolate_scanner_mode(self) -> None:
+        catalog_path = Path(__file__).with_name("validation-cases.json")
+        catalog = json.loads(catalog_path.read_text())
+        cases = (WORM_EXPIRATION_CASE, IMMEDIATE_TRANSITION_CASE)
+        self.assertEqual([(case, "ilm-regressions") for case in cases],
+                         select_validation_cases(catalog, module="ilm-regressions"))
+        self.assertTrue(set(cases).isdisjoint(case for case, _ in select_validation_cases(catalog)))
+        self.assertEqual(ILM_CASE_IDS, ilm_harness_scored_cases(None))
+        for case in cases:
+            self.assertEqual((case,), ilm_harness_scored_cases([case]))
+        with self.assertRaisesRegex(ValueError, "isolated scanner-disabled run"):
+            ilm_harness_scored_cases(cases)
 
     def test_result_requires_selected_case_evidence_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

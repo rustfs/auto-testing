@@ -62,6 +62,15 @@ def require_single_latest_marker(inventory: dict[str, list[dict[str, Any]]]) -> 
     return latest[0]
 
 
+def require_scanner_disabled(cluster: dict[str, Any]) -> None:
+    nodes = cluster.get("nodes", [])
+    if not nodes or any(
+        node.get("status", {}).get("data", {}).get("enabled") is not False
+        for node in nodes
+    ):
+        raise RuntimeError("the immediate transition case requires every source scanner to be disabled")
+
+
 def scanner_node_configuration_matches(
     data: dict[str, Any], expected_interval: int
 ) -> bool:
