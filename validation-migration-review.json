@@ -120,7 +120,7 @@
     "test_validation_heal_availability.py": "42e394d6c00359a6cb958d294af5c4eb5602c8cdb2b7c413d07584e2c9f79acc",
     "test_validation_ilm.py": "f4d361850f278a5be965f05ff8950d91347907be2253bfa31a1864ae5b2a730c",
     "test_validation_replication.py": "83e1b532e8a6a352c5e38de48799356157e1fad4f1f314ea8ad256fdecf942c5",
-    "test_validation_scanner_usage.py": "046ac1c6741bb5be8664565f33c2924fd9274d31508b18f7706bd703823011d7",
+    "test_validation_scanner_usage.py": "cd5cb785184586cf90824c347bf584642545acffdf6302ad361de39773d4732e",
     "rustfs-s3-compat-test.sh": "8182128d5b58ed5d6b59b4db6680c3a197eeeb1ba66709976ce773e07230de7a",
     "rustfs-security-test.sh": "02cddd15636df1e74210c172ee898dba9b3adf83943da45d874d6c827583d9d2",
     "rustfs-tier-test.sh": "3b37a6b26a4af862d7f2d178872900f314c8328ffd3db6a3e769928a5d1b3964",
