@@ -98,6 +98,7 @@ VOLUMES=""
 S3_BULK_RESULTS_DIR="${RUSTFS_S3_BULK_RESULTS_DIR:-}"
 S3_BULK_PROFILE="compatibility"
 S3_BULK_KEY_SHAPE="short"
+S3_BULK_KEY_BYTES=""
 S3_BULK_PYTHON="${RUSTFS_S3_BULK_PYTHON:-python3}"
 
 # ==================== Helpers ====================
@@ -895,7 +896,10 @@ bulk_delete_regression() {
   local id="$1" index=1 node
   local args=(--case "${id}" --endpoint "${ENDPOINT}")
   case "${id}" in
-    S3C-213|S3C-1306) args+=(--profile "${S3_BULK_PROFILE}" --key-shape "${S3_BULK_KEY_SHAPE}") ;;
+    S3C-213|S3C-1306)
+      args+=(--profile "${S3_BULK_PROFILE}" --key-shape "${S3_BULK_KEY_SHAPE}")
+      if [ -n "${S3_BULK_KEY_BYTES}" ]; then args+=(--key-bytes "${S3_BULK_KEY_BYTES}"); fi
+      ;;
   esac
   if [ -z "${S3_BULK_RESULTS_DIR}" ]; then
     S3_BULK_RESULTS_DIR="$(mktemp -d "${LOG_FILE:+$(dirname "${LOG_FILE}")/}rustfs-s3-bulk.XXXXXX")"
@@ -3354,6 +3358,7 @@ Options:
   --bulk-delete-results-dir DIR  Retain bulk-delete JSON, request traces and Markdown
   --bulk-delete-profile NAME     S3C-213/1306: compatibility (default) or client-10s
   --bulk-delete-key-shape NAME   S3C-213/1306: short (default), short-shallow, long-shallow or long-deep
+  --bulk-delete-key-bytes N      Long shapes only: UTF-8 key length (128 to 1024)
   --validation-case ID       Run only s3.basic-object-round-trip (single-single)
   --validation-artifacts-dir DIR  Write canonical validation result and evidence
   --candidate-manifest FILE  Immutable candidate manifest for validation results
@@ -3408,6 +3413,10 @@ main() {
           *) die "invalid bulk delete profile (see --help)" ;;
         esac
         ;;
+      --bulk-delete-key-bytes)
+        [[ "${1:-}" =~ ^[1-9][0-9]{2,3}$ ]] && (( $1 >= 128 && $1 <= 1024 )) || die "bulk delete key length must be 128 through 1024 bytes"
+        S3_BULK_KEY_BYTES="$1"; shift
+        ;;
       --bulk-delete-key-shape)
         case "${1:-}" in
           short|short-shallow|long-shallow|long-deep) S3_BULK_KEY_SHAPE="$1"; shift ;;
@@ -3425,6 +3434,9 @@ main() {
     esac
   done
   [ "${suite_set}" -eq 0 ] || [ "${cases_set}" -eq 0 ] || die "--suite cannot be combined with --cases"
+  if [ -n "${S3_BULK_KEY_BYTES}" ] && [[ "${S3_BULK_KEY_SHAPE}" != long-* ]]; then
+    die "--bulk-delete-key-bytes requires a long key shape"
+  fi
   if [ -n "${LOG_FILE}" ]; then
     mkdir -p "$(dirname "${LOG_FILE}")"
     if ! touch "${LOG_FILE}" 2>/dev/null; then

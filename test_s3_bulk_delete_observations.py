@@ -24,6 +24,7 @@ class DeleteObservationsTests(unittest.TestCase):
         self.assertEqual(result["delete_observation"]["entries"], {"complete": True, "deleted_count": 3, "error_count": 0})
         self.assertEqual(result["delete_observation"]["read_timeout_seconds"], 180)
         self.assertEqual(result["key_shape_stats"]["max_utf8_bytes"], 1024)
+        self.assertEqual(result["key_bytes"], 1024)
         for view in result["seed_inventory"]["views"]:
             self.assertEqual(view["visible"], 3)
             self.assertEqual(view["pages"], 1)
@@ -32,6 +33,20 @@ class DeleteObservationsTests(unittest.TestCase):
         self.assertEqual([v["visible"] for v in views["rounds"][0]], [0, 0])
         self.assertEqual(views["first_all_absent_at"], max(v["finished_at"] for v in views["rounds"][0]))
         self.assertEqual(result["physical_completion"], "not_measured")
+
+    def test_custom_long_key_length_is_used_in_put_delete_inventory_and_results(self):
+        for shape in ("long-shallow", "long-deep"):
+            with self.subTest(shape=shape):
+                fake = VersionedS3()
+                result = self.run_probe(fake, key_shape=shape, key_bytes=129)
+                self.assertEqual(result["verdict"], "PASS", result)
+                self.assertEqual(result["key_bytes"], 129)
+                self.assertEqual(result["key_shape_stats"]["min_utf8_bytes"], 129)
+                self.assertEqual(result["key_shape_stats"]["max_utf8_bytes"], 129)
+                manifest = [key for operation, key in fake.calls if operation == "put" and key.startswith("target/")]
+                self.assertEqual([len(key.encode()) for key in manifest], [129] * 3)
+                primary = next(rows for operation, rows in fake.calls if operation == "delete")
+                self.assertEqual([row["Key"] for row in primary], manifest)
 
     def test_success_after_ten_seconds_keeps_complete_ack_and_reference(self):
         offset = [0]

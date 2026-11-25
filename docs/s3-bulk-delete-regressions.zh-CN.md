@@ -42,7 +42,7 @@ The topology suite uses the `compatibility` profile for S3C-213 and S3C-1306. It
 
 Use the `client-10s` profile on a fresh bucket to reproduce the original SDK read timeout and single attempt. Both profiles keep the request trace and separate cleanup from the primary request. Connection and read timeouts apply to socket operations. The observation budget is independent of the seed and visibility budgets. S3C-214 and S3C-1307 retain their original client settings.
 
-The original `short` shape uses keys such as `target/0000`. Compare `short-shallow` with `long-shallow` to vary length at fixed depth, then compare `long-shallow` with `long-deep` to vary depth at a fixed 1,024 UTF-8 bytes. Each request explicitly names the seeded keys. Timed, paginated seed inventory is reported separately from sending the manifest. For a recursive client that deletes a prefix, include the client's own LIST and pagination time separately.
+The original `short` shape uses keys such as `target/0000`. Compare `short-shallow` with `long-shallow` to vary length at fixed depth, then compare `long-shallow` with `long-deep` to vary depth at a fixed 1,024 UTF-8 bytes. Long shapes also accept `--key-bytes` from 128 to 1024. Start below the boundary if a service rejects the initial PUT, and retain that preparation failure separately. Each request explicitly names the seeded keys. Timed, paginated seed inventory is reported separately from sending the manifest. For a recursive client that deletes a prefix, include the client's own LIST and pagination time separately.
 
 With an isolated deployment and test credentials already in the environment, run each profile and key shape in its own result directory. Add one `--endpoint` per node to check its first post-response view.
 
@@ -54,11 +54,11 @@ for profile in compatibility client-10s; do
     --profile "$profile" --result-dir "$results/$profile"
 done
 python3 scripts/s3_bulk_delete_regressions.py --endpoint "$S3_ENDPOINT" \
-  --case S3C-213 --mode off --batch-sizes 128 --key-shape long-deep \
+  --case S3C-213 --mode off --batch-sizes 128 --key-shape long-deep --key-bytes 512 \
   --observation-budget 180 --result-dir "$results/deep"
 ```
 
-The topology entry point accepts `--bulk-delete-profile` and `--bulk-delete-key-shape` for S3C-213 and S3C-1306. The standalone runner also accepts `--mode off|on|suspended` (repeatable). Each run creates new receipt-owned buckets. Supply a new results directory even when repeating the same settings.
+The topology entry point accepts `--bulk-delete-profile`, `--bulk-delete-key-shape` and `--bulk-delete-key-bytes` for S3C-213 and S3C-1306. The standalone runner also accepts `--mode off|on|suspended` (repeatable). Each run creates new receipt-owned buckets. Supply a new results directory even when repeating the same settings.
 
 每个子场景保留 `result.json`、`s3-events.jsonl` 和 `bucket.s3.json`。结果包含第一失败阶段、后续失败列表、各阶段耗时、请求 ID、SDK 重试次数、各阶段 HTTP 503 响应数、逐对象错误条目、内容校验和清理结果。`summary.json` 和中文 `summary.md` 汇总全部计划子场景及未执行项。结果目录必须全新，禁止用后续运行覆盖原始证据。
 

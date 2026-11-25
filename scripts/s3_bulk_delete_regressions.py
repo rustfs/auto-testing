@@ -21,10 +21,10 @@ from urllib.parse import urlsplit
 
 try:
     from .performance_s3 import Session, RequestFailure, RETRYABLE, abort_uploads, prepare, read_state, save
-    from .s3_bulk_delete_keys import KEY_SHAPES, make_keys
+    from .s3_bulk_delete_keys import KEY_SHAPES, long_key_bytes, make_keys
 except ImportError:
     from performance_s3 import Session, RequestFailure, RETRYABLE, abort_uploads, prepare, read_state, save
-    from s3_bulk_delete_keys import KEY_SHAPES, make_keys
+    from s3_bulk_delete_keys import KEY_SHAPES, long_key_bytes, make_keys
 
 GROUPS = {"S3C-213": "batch", "S3C-214": "duplicates",
           "S3C-1306": "get-load", "S3C-1307": "put-delete"}
@@ -388,9 +388,9 @@ def target_view(session, bucket, expected=None, sdk_finished=None):
 
 def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=None,
              prepare_budget=300, request_budget=60, load_budget=30, cleanup_budget=180, *,
-             profile="compatibility", key_shape="short", observation_budget=180):
+             profile="compatibility", key_shape="short", observation_budget=180, key_bytes=None):
     require(profile in ("compatibility", "client-10s") and 0 < observation_budget < float("inf"), "InvalidObservationProfile")
-    keys = make_keys(count, key_shape)
+    keys = make_keys(count, key_shape, key_bytes)
     require(bool(keys), "InvalidDeleteBatchSize")
     observed = case_id in ("S3C-213", "S3C-1306")
     extended = observed and profile == "compatibility"
@@ -399,7 +399,8 @@ def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=Non
     state, events = directory / "bucket.s3.json", directory / "s3-events.jsonl"
     result = {"case_id": case_id, "mode": mode, "batch_size": count, "endpoints": endpoints,
               "verdict": "RUNNING", "recovery": "NOT_RUN", "cleanup": "NOT_RUN", "started_at": now(), "phases": [],
-              "profile": profile, "key_shape": key_shape, "observation_budget_seconds": observation_budget,
+              "profile": profile, "key_shape": key_shape, "key_bytes": len(keys[0].encode("utf-8")),
+              "observation_budget_seconds": observation_budget,
               "key_shape_stats": {"min_utf8_bytes": min(len(key.encode()) for key in keys),
                                   "max_utf8_bytes": max(len(key.encode()) for key in keys),
                                   "min_components": min(key.count("/") + 1 for key in keys),
@@ -667,6 +668,8 @@ def main(argv=None):
                         help="observe the S3 response or reproduce the original ten-second client")
     parser.add_argument("--key-shape", choices=KEY_SHAPES, default="short",
                         help="key layout for S3C-213 and S3C-1306")
+    parser.add_argument("--key-bytes", type=int, metavar="BYTES",
+                        help="exact UTF-8 key length for long-shallow or long-deep (128 through 1024, default: 1024)")
     parser.add_argument("--mode", choices=MODES, action="append",
                         help="versioning mode to exercise (default: all three)")
     parser.add_argument("--observation-budget", type=int, default=180,
@@ -677,6 +680,10 @@ def main(argv=None):
     parser.add_argument("--load-budget", type=int, default=30)
     parser.add_argument("--cleanup-budget", type=int, default=180)
     args = parser.parse_args(argv)
+    try:
+        long_key_bytes(args.key_shape, args.key_bytes)
+    except ValueError as exc:
+        parser.error(str(exc))
     try:
         sizes = [int(value) for value in args.batch_sizes.split(",")]
         endpoints = [urlsplit(value) for value in args.endpoint]
@@ -715,7 +722,8 @@ def main(argv=None):
             result = run_case(case_id, mode, count, args.endpoint, args.result_dir / name, args.workers,
                               prepare_budget=args.prepare_budget, request_budget=args.request_budget,
                               load_budget=args.load_budget, cleanup_budget=args.cleanup_budget,
-                              profile=args.profile, key_shape=args.key_shape, observation_budget=args.observation_budget)
+                              profile=args.profile, key_shape=args.key_shape, observation_budget=args.observation_budget,
+                              key_bytes=args.key_bytes)
             aborted = result["cleanup"] != "PASS" or result.get("interrupted", False)
         results.append(result)
         print(json.dumps(result), flush=True)
@@ -729,11 +737,11 @@ def main(argv=None):
              "http_503_responses", "service_unavailable_entries")) + " |")
     observed = [row for row in results if "visibility_observation" in row]
     if observed:
-        lines.extend(["", "| Case | Mode | Keys | Profile | Shape | SDK seconds | SDK response | Per-key outcome | First all absent (UTC) |",
-                      "|---|---|---:|---|---|---:|---|---|---|"])
+        lines.extend(["", "| Case | Mode | Keys | Profile | Shape | Key bytes | SDK seconds | SDK response | Per-key outcome | First all absent (UTC) |",
+                      "|---|---|---:|---|---|---:|---:|---|---|---|"])
         for row in observed:
             reply = row["delete_observation"]
-            cells = (row["case_id"], row["mode"], row["batch_size"], row["profile"], row["key_shape"],
+            cells = (row["case_id"], row["mode"], row["batch_size"], row["profile"], row["key_shape"], row["key_bytes"],
                      reply["seconds"], reply["sdk_response"], reply["logical_outcome"],
                      row["visibility_observation"]["first_all_absent_at"])
             lines.append("| " + " | ".join("—" if value is None else str(value) for value in cells) + " |")

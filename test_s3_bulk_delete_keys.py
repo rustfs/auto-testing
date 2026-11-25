@@ -34,6 +34,27 @@ class BulkDeleteKeysTest(unittest.TestCase):
                 self.assertEqual(make_keys(32, shape), keys[:32])
                 self.assertEqual(make_keys(0, shape), [])
 
+    def test_every_supported_length_preserves_depth_and_leaf_suffix(self):
+        for shape, depth in (("long-shallow", 4), ("long-deep", 32)):
+            for length in range(128, 1025):
+                first, second = make_keys(2, shape, length)
+                components = first.split("/")
+                self.assertEqual(len(first.encode("utf-8")), length)
+                self.assertEqual(len(components), depth + 1)
+                self.assertEqual(components[0], "target")
+                self.assertTrue(all(1 <= len(component.encode("utf-8")) <= 255 for component in components))
+                self.assertTrue(first.endswith("0000"))
+                self.assertEqual(second, first[:-4] + "0001")
+            self.assertEqual(make_keys(1000, shape, 1024), make_keys(1000, shape))
+
+    def test_invalid_length_overrides_are_rejected(self):
+        for shape in ("short", "short-shallow"):
+            with self.assertRaisesRegex(ValueError, "requires long"):
+                make_keys(1, shape, 512)
+        for length in (127, 1025, 512.0, True):
+            with self.assertRaisesRegex(ValueError, "between 128 and 1024"):
+                make_keys(1, "long-deep", length)
+
     def test_unsupported_shapes_and_batch_sizes(self):
         for count in (-1, 1001, 1.5, True):
             with self.subTest(count=count), self.assertRaises(ValueError):
