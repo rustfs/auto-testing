@@ -36,9 +36,29 @@ python3 scripts/s3_bulk_delete_regressions.py \
   --result-dir /absolute/path/to/new-results
 ```
 
-默认准备预算 300 秒，请求/验证/恢复各阶段预算 60 秒，负载预算 30 秒，清理预算 180 秒；通过 `--prepare-budget`、`--request-budget`、`--load-budget`、`--cleanup-budget` 调整。每阶段各端点共用一个截止时间，不允许后续请求重新获得完整预算。客户端连接和读取设置有界超时，负载线程执行有限轮次；网络读取超时是 socket 读取超时，不应解读为逐字节流的硬墙钟限制。
+### Observing response latency and key layout
 
-每个负载线程复用自己的客户端与连接池；剩余预算不足其 10 秒读取超时后才重建并收紧超时。共享性能工具仍保持原有 60 秒读取超时。
+The topology suite uses the `compatibility` profile for S3C-213 and S3C-1306. It allows a longer, bounded observation of the single DeleteObjects call (default 180 seconds). A slow response can still provide a valid result. Each successful item must pass the first cross-endpoint visibility check, and HTTP 200 with per-item errors still fails the normal all-success fixture. A client read timeout leaves the result of the mutation unknown. A later empty LIST cannot turn a missing response into a pass. The probe measures the S3 namespace; physical reclamation and any internal queue require separate server-side evidence.
+
+Use the `client-10s` profile on a fresh bucket to reproduce the original SDK read timeout and single attempt. Both profiles keep the request trace and separate cleanup from the primary request. Connection and read timeouts apply to socket operations. The observation budget is independent of the seed and visibility budgets. S3C-214 and S3C-1307 retain their original client settings.
+
+The original `short` shape uses keys such as `target/0000`. Compare `short-shallow` with `long-shallow` to vary length at fixed depth, then compare `long-shallow` with `long-deep` to vary depth at a fixed 1,024 UTF-8 bytes. Each request explicitly names the seeded keys. Timed, paginated seed inventory is reported separately from sending the manifest. For a recursive client that deletes a prefix, include the client's own LIST and pagination time separately.
+
+With an isolated deployment and test credentials already in the environment, run each profile and key shape in its own result directory. Add one `--endpoint` per node to check its first post-response view.
+
+```bash
+results=$(mktemp -d)
+for profile in compatibility client-10s; do
+  python3 scripts/s3_bulk_delete_regressions.py --endpoint "$S3_ENDPOINT" \
+    --case S3C-213 --mode off --batch-sizes 1000 --key-shape short \
+    --profile "$profile" --result-dir "$results/$profile"
+done
+python3 scripts/s3_bulk_delete_regressions.py --endpoint "$S3_ENDPOINT" \
+  --case S3C-213 --mode off --batch-sizes 128 --key-shape long-deep \
+  --observation-budget 180 --result-dir "$results/deep"
+```
+
+The topology entry point accepts `--bulk-delete-profile` and `--bulk-delete-key-shape` for S3C-213 and S3C-1306. The standalone runner also accepts `--mode off|on|suspended` (repeatable). Each run creates new receipt-owned buckets. Supply a new results directory even when repeating the same settings.
 
 每个子场景保留 `result.json`、`s3-events.jsonl` 和 `bucket.s3.json`。结果包含第一失败阶段、后续失败列表、各阶段耗时、请求 ID、SDK 重试次数、各阶段 HTTP 503 响应数、逐对象错误条目、内容校验和清理结果。`summary.json` 和中文 `summary.md` 汇总全部计划子场景及未执行项。结果目录必须全新，禁止用后续运行覆盖原始证据。
 

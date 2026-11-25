@@ -96,6 +96,8 @@ VALIDATION_BINARY_SHA256=""
 ENDPOINT=""
 VOLUMES=""
 S3_BULK_RESULTS_DIR="${RUSTFS_S3_BULK_RESULTS_DIR:-}"
+S3_BULK_PROFILE="compatibility"
+S3_BULK_KEY_SHAPE="short"
 S3_BULK_PYTHON="${RUSTFS_S3_BULK_PYTHON:-python3}"
 
 # ==================== Helpers ====================
@@ -892,6 +894,9 @@ worm_object_lock_tests() {
 bulk_delete_regression() {
   local id="$1" index=1 node
   local args=(--case "${id}" --endpoint "${ENDPOINT}")
+  case "${id}" in
+    S3C-213|S3C-1306) args+=(--profile "${S3_BULK_PROFILE}" --key-shape "${S3_BULK_KEY_SHAPE}") ;;
+  esac
   if [ -z "${S3_BULK_RESULTS_DIR}" ]; then
     S3_BULK_RESULTS_DIR="$(mktemp -d "${LOG_FILE:+$(dirname "${LOG_FILE}")/}rustfs-s3-bulk.XXXXXX")"
   fi
@@ -3347,6 +3352,8 @@ Options:
   --ssh-port PORT            SSH port for the nodes (default 22)
   --log-file FILE            Append all output to FILE
   --bulk-delete-results-dir DIR  Retain bulk-delete JSON, request traces and Markdown
+  --bulk-delete-profile NAME     S3C-213/1306: compatibility (default) or client-10s
+  --bulk-delete-key-shape NAME   S3C-213/1306: short (default), short-shallow, long-shallow or long-deep
   --validation-case ID       Run only s3.basic-object-round-trip (single-single)
   --validation-artifacts-dir DIR  Write canonical validation result and evidence
   --candidate-manifest FILE  Immutable candidate manifest for validation results
@@ -3395,6 +3402,18 @@ main() {
       --ssh-port) SSH_PORT="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
       --bulk-delete-results-dir) S3_BULK_RESULTS_DIR="$1"; shift ;;
+      --bulk-delete-profile)
+        case "${1:-}" in
+          compatibility|client-10s) S3_BULK_PROFILE="$1"; shift ;;
+          *) die "invalid bulk delete profile (see --help)" ;;
+        esac
+        ;;
+      --bulk-delete-key-shape)
+        case "${1:-}" in
+          short|short-shallow|long-shallow|long-deep) S3_BULK_KEY_SHAPE="$1"; shift ;;
+          *) die "invalid bulk delete key shape (see --help)" ;;
+        esac
+        ;;
       --validation-case) VALIDATION_CASE="$1"; shift ;;
       --validation-artifacts-dir) VALIDATION_ARTIFACTS_DIR="$1"; shift ;;
       --candidate-manifest) VALIDATION_CANDIDATE_MANIFEST="$1"; shift ;;
