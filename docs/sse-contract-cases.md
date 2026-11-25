@@ -69,6 +69,10 @@ The catalog ids are `s3.compatibility.enc-2xx` and `source-procedure.kms.kms-6xx
 
 The cases have not run on the fleet yet. Multi-node topologies and the packaged binary are covered only once the scheduled suites pick the cases up.
 
+## Server versions
+
+The cases describe the behavior of current `main`. `ENC-207` fails against a server built before rustfs/rustfs#9575: such a server answers CreateMultipartUpload and CompleteMultipartUpload of an SSE-C upload with an extra `x-amz-server-side-encryption: AES256`, and the case reports exactly that header set. A run against an older release tag should read this failure as the known defect of that release.
+
 ## What is deliberately not here
 
 The cases were taken from a suite that drives a bare server binary. Parts of it need things a deployed cluster cannot give and were left out: starting the server with other key sources (none at all, an invalid master key, Vault Transit, the Static backend), comparing two binaries, checking the stored form of objects on the drives, and searching whole runs for key material. Per-key authorization with separate identities is covered loosely by `KMS-401` and `KMS-402` and is not tightened here.
