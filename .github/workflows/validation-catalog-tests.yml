@@ -73,6 +73,8 @@ on:
       - scripts/run_validation_case.sh
       - rustfs-replication-test.sh
       - rustfs-storage-test.sh
+      - rustfs-tier-test.sh
+      - test_rustfs_tier.sh
       - test_validation_scanner_usage.sh
       - test_validation_scanner_usage.py
       - rustfs-scanner-usage-test.sh
@@ -152,6 +154,8 @@ on:
       - scripts/run_validation_case.sh
       - rustfs-replication-test.sh
       - rustfs-storage-test.sh
+      - rustfs-tier-test.sh
+      - test_rustfs_tier.sh
       - test_validation_scanner_usage.sh
       - test_validation_scanner_usage.py
       - rustfs-scanner-usage-test.sh
@@ -195,5 +199,6 @@ jobs:
       - run: bash -n scripts/run_validation_case.sh scripts/validation_heal/run_case.sh scripts/validation_oidc/run_case.sh
       - run: bash -n rustfs-storage-test.sh rustfs_pool_expand.sh rustfs-replication-test.sh scripts/validation_pool/run_case.sh scripts/validation_replication/run_case.sh test_validation_scanner_usage.sh
       - run: bash test_validation_scanner_usage.sh
+      - run: RUSTFS_TIER_TEST_MODE=versioned-cleanup bash test_rustfs_tier.sh
       - run: python3 -B -m unittest -v test_validation_scanner_usage.py
       - run: bash -n rustfs-scanner-usage-test.sh scripts/validation_scanner_usage/run_case.sh

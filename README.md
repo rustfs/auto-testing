@@ -159,6 +159,9 @@ Public observations cannot prove internal ACK ordering or cross-cycle races,
 so missing candidate-native hooks remain BLOCKED or UNSUPPORTED.
 The endpoint-only usage runner records operator-supplied candidate and binary
 identities; it does not independently attest the remote installed binary.
+
+Select the extra ILM cases through the validation workflow's `ilm-regressions` module or by case ID. `ilm.worm-expiration` follows current and historical versions through legal hold, expiry of unlocked controls, and expiration after release. `ilm.immediate-transition-and-restore` restarts the empty source with both scanners disabled to clear the rule-installation walk. The case verifies that a matching PUT reaches the dedicated remote tier, then waits for restore completion and reads back the original payload.
+
 The canonical S3, KMS, IAM, and scanner smoke deployment cases above require a
 candidate manifest with `source_sha`, `package_url`, and `package_sha256`.
 Those deployment cases measure the installed binary SHA-256 on the test node
@@ -420,12 +423,6 @@ RUSTFS_TIER_TEST_MODE=versioned-cleanup ./test_rustfs_tier.sh
 python3 -m unittest -v test_rustfs_tier_report.py
 ```
 
-`TIER-115` (`VersionedTierDeleteCleanup`) runs in both topologies. It transitions
-both versions of one key into a fresh unversioned remote bucket, removes the lifecycle rule, and confirms that an
-ordinary delete hides the key while historical versions still block even a
-forced tier removal. Both versions must remain readable. After deleting every
-version and delete marker (checking per-object `DeleteObjects` errors), the case
-requires natural remote cleanup and successful ordinary tier removal. The source
-bucket and remote objects stay untouched by teardown until these assertions
-finish. Cleanup and removal each have a 180-second deadline; only the expected
-in-use response is retried after the remote namespace becomes empty.
+`TIER-115` (`VersionedTierDeleteCleanup`) runs in both topologies. It transitions three versions of one key into a fresh unversioned remote bucket and records each new remote key. An ordinary delete creates a marker, with the three historical versions still readable and forced tier removal rejected. A targeted delete must remove the first source version and its exact remote key while preserving both other versions, their bytes, and the marker.
+
+The case then deletes both remaining versions and the marker in one batch, checks per-object results, waits for natural remote cleanup, and removes the tier. Remote cleanup and tier removal each have a 180-second deadline.

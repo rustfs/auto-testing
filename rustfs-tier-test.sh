@@ -2081,6 +2081,21 @@ wait_remote_state() {
   return 1
 }
 
+read_remote_tier_keys() {
+  local bucket="$1"
+  REMOTE_TIER_KEYS=""
+  aws_target_run_with_timeout "${REMOTE_PROBE_TIMEOUT}" s3api list-objects-v2 \
+    --bucket "${bucket}" --max-keys 4 --output json --no-paginate
+  assert_aws_ok || return 1
+  REMOTE_TIER_KEYS="$(jq -ce '
+    (if has("Contents") then .Contents else [] end) as $items |
+    if .IsTruncated == false and ($items | type) == "array" and .KeyCount == ($items | length)
+      and all($items[]; .Key | type == "string" and length > 0)
+      and ([$items[].Key] | unique | length) == ($items | length)
+    then [$items[].Key] | sort
+    else error("incomplete or malformed remote tier inventory") end' <<< "${AWS_OUT}")"
+}
+
 # An empty current listing is insufficient for a versioned bucket. Compare the
 # complete user-visible inventory, including delete markers, without pagination.
 assert_versioned_bucket_state() {
@@ -2849,7 +2864,9 @@ test_tier114() { # force=true must override a lifecycle-only tier reference; non
 
 test_tier115() {
   local topo_tag token source remote tier key=versioned.txt out job version marker body status i
-  local v1 v2 versions markers objects
+  local versions markers objects first_version first_remote_key first_remote_keys
+  local remote_keys='[]' expected_remote_keys retained
+  local -a version_ids=()
   # Recovery scans may take over a minute after lifecycle removal.
   local REMOTE_STATE_TIMEOUT=180
   token="${RUN_TOKEN//-/}"
@@ -2872,12 +2889,12 @@ test_tier115() {
   rc_run ilm rule add "local/${source}" --storage-class "${tier}" --transition-days 0
   assert_rc_ok || return 1
 
-  for i in 1 2; do
+  for i in 1 2 3; do
     make_test_file "${TEST_TMP}/tier115-v${i}" 1048576
     aws_run s3api put-object --bucket "${source}" --key "${key}" --body "${TEST_TMP}/tier115-v${i}"
     assert_aws_ok || return 1
     version="$(printf '%s' "${AWS_OUT}" | jq -er '.VersionId | select(type == "string" and length > 0 and . != "null")')" || return 1
-    if [ "${i}" -eq 1 ]; then v1="${version}"; else v2="${version}"; fi
+    version_ids+=("${version}")
     out="$(run_transition "${source}")" || return 1
     job="$(printf '%s' "${out}" | jq -r '.job_id // empty')" || return 1
     if [ -n "${job}" ]; then wait_transition_job "${job}" >/dev/null || return 1; fi
@@ -2886,31 +2903,57 @@ test_tier115() {
     assert_aws_ok || return 1
     printf '%s' "${AWS_OUT}" | jq -e --arg tier "${tier}" --arg version "${version}" \
       '.StorageClass == $tier and .VersionId == $version' >/dev/null || return 1
+    # Each serial transition must add one remote identity and preserve the earlier ones.
+    read_remote_tier_keys "${remote}" || return 1
+    jq -e --argjson previous "${remote_keys}" --argjson count "${i}" \
+      'length == $count and ($previous - .) == []' <<< "${REMOTE_TIER_KEYS}" >/dev/null \
+      || { echo "version ${version} did not add exactly one remote key: ${REMOTE_TIER_KEYS}"; return 1; }
+    remote_keys="${REMOTE_TIER_KEYS}"
+    if [ "${i}" -eq 1 ]; then first_remote_keys="${remote_keys}"; fi
+    printf 'Transitioned version %s, remote inventory %s\n' "${version}" "${remote_keys}"
   done
-  [ "${v1}" != "${v2}" ] || { echo "overwrites did not create distinct versions"; return 1; }
-  wait_remote_state "${remote}" "" nonempty || return 1
+  first_version="${version_ids[0]}"
+  first_remote_key="$(jq -er '.[0]' <<< "${first_remote_keys}")" || return 1
+  expected_remote_keys="$(jq -c --argjson first "${first_remote_keys}" '. - $first' <<< "${remote_keys}")" || return 1
   delete_lifecycle_and_assert_absent "${source}" || return 1
 
-  # A Console-style ordinary delete hides the key, but preserves both versions.
+  # A Console-style ordinary delete hides the key while preserving its history.
   aws_run s3api delete-object --bucket "${source}" --key "${key}"
   assert_aws_ok || return 1
   marker="$(printf '%s' "${AWS_OUT}" | jq -er 'select(.DeleteMarker == true) | .VersionId | select(type == "string" and length > 0 and . != "null")')" || return 1
-  versions="$(jq -nc --arg key "${key}" --arg v1 "${v1}" --arg v2 "${v2}" '[{Key:$key,VersionId:$v1},{Key:$key,VersionId:$v2}]')"
+  versions="$(jq -nec --arg key "${key}" --args \
+    '$ARGS.positional | if (unique | length) == 3 then map({Key:$key,VersionId:.}) else error("duplicate version IDs") end' \
+    "${version_ids[@]}")" || return 1
   markers="$(jq -nc --arg key "${key}" --arg marker "${marker}" '[{Key:$key,VersionId:$marker}]')"
   assert_versioned_bucket_state "${source}" "${versions}" "${markers}" || return 1
   body="$(admin_api DELETE "/rustfs/admin/v3/tier/${tier}" "force=true")"; status="$(admin_api_code)"
   [ "${status}" = "409" ] && [ "$(xml_error_code "${body}")" = "XMinioAdminTierBackendInUse" ] \
     || { echo "force remove did not protect historical versions: HTTP ${status}"; return 1; }
   assert_tier_present "${tier}" || return 1
-  for i in 1 2; do
-    if [ "${i}" -eq 1 ]; then version="${v1}"; else version="${v2}"; fi
+  for i in 1 2 3; do
+    version="${version_ids[i-1]}"
     aws_run s3api get-object --bucket "${source}" --key "${key}" --version-id "${version}" "${TEST_TMP}/tier115-get${i}"
     assert_aws_ok || return 1
     cmp "${TEST_TMP}/tier115-v${i}" "${TEST_TMP}/tier115-get${i}" || return 1
   done
 
-  printf 'Ordinary delete: current listing empty; both historical versions protected and readable.\n'
-  objects="$(jq -nc --argjson versions "${versions}" --argjson markers "${markers}" '$versions + $markers')"
+  aws_run s3api delete-object --bucket "${source}" --key "${key}" --version-id "${first_version}"
+  assert_aws_ok || return 1
+  retained="$(jq -c --arg id "${first_version}" 'map(select(.VersionId != $id))' <<< "${versions}")" || return 1
+  assert_versioned_bucket_state "${source}" "${retained}" "${markers}" || return 1
+  wait_remote_state "${remote}" "${first_remote_key}" empty || return 1
+  read_remote_tier_keys "${remote}" || return 1
+  [ "${REMOTE_TIER_KEYS}" = "${expected_remote_keys}" ] \
+    || { echo "targeted deletion changed a retained remote key: expected ${expected_remote_keys}, observed ${REMOTE_TIER_KEYS}"; return 1; }
+  for i in 2 3; do
+    version="${version_ids[i-1]}"
+    aws_run s3api get-object --bucket "${source}" --key "${key}" --version-id "${version}" "${TEST_TMP}/tier115-get${i}"
+    assert_aws_ok || return 1
+    cmp "${TEST_TMP}/tier115-v${i}" "${TEST_TMP}/tier115-get${i}" || return 1
+  done
+  printf 'Deleted version %s only, retained remote inventory %s\n' "${first_version}" "${REMOTE_TIER_KEYS}"
+
+  objects="$(jq -nc --argjson versions "${retained}" --argjson markers "${markers}" '$versions + $markers')"
   delete_object_versions_and_assert "${source}" "${objects}" || return 1
   assert_versioned_bucket_state "${source}" '[]' '[]' || return 1
   printf 'All user versions and delete markers removed; waiting for natural remote cleanup.\n'

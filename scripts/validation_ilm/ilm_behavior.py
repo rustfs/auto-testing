@@ -39,13 +39,16 @@ from ilm_timing import (
 )
 from oracles import (
     require_exact_version_ids,
+    require_scanner_disabled,
     require_single_latest_marker,
     scanner_node_configuration_matches,
     version_inventory,
 )
 
 from case_plan import (
-    ILM_CASE_IDS as CASE_IDS,
+    ILM_SELECTABLE_CASE_IDS as CASE_IDS,
+    IMMEDIATE_TRANSITION_CASE,
+    WORM_EXPIRATION_CASE,
     ilm_harness_scored_cases,
 )
 from rc_binary import resolve_rc_binary
@@ -117,6 +120,15 @@ class CaseResult:
     evidence: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class WormFixture:
+    current_key: str
+    current_version: str
+    history_key: str
+    historical_version: str
+    successor_version: str
+
+
 class CaseExecutionAndCleanupError(Exception):
     def __init__(
         self,
@@ -162,6 +174,7 @@ class IlmHarness:
         self.results: list[CaseResult] = []
         self.created_buckets: set[str] = set()
         self.uncertain_buckets: set[str] = set()
+        self.fixture_legal_holds: dict[str, set[tuple[str, str]]] = {}
         self.state_lock = threading.Lock()
         self.rc_home = Path(tempfile.mkdtemp(prefix="rustfs-ilm-rc-"))
         alias_base = f"ilm-{safe_name(args.run_id)[-16:]}"
@@ -298,10 +311,11 @@ class IlmHarness:
         prefix = safe_name(self.args.bucket_prefix.lower()).strip("-")[:45]
         return f"{prefix}-{digest}"
 
-    def create_bucket(self, bucket: str) -> None:
+    def create_bucket(self, bucket: str, *, object_lock: bool = False) -> None:
         self.events.record("bucket.create.start", bucket=bucket)
         try:
-            self.client.create_bucket(Bucket=bucket)
+            options = {"ObjectLockEnabledForBucket": True} if object_lock else {}
+            self.client.create_bucket(Bucket=bucket, **options)
         except Exception:
             # A lost response can leave a remote creation in progress. Do not
             # claim clean isolation or continue to another fixture in this run.
@@ -1062,6 +1076,14 @@ class IlmHarness:
             }:
                 raise
 
+        for key, version in sorted(self.fixture_legal_holds.get(bucket, ())):
+            try:
+                self.set_fixture_legal_hold(bucket, key, version, enabled=False)
+            except ClientError as exc:
+                if self.client_error_code(exc) not in {"NoSuchBucket", "NoSuchKey", "NoSuchVersion"}:
+                    raise
+        self.fixture_legal_holds.pop(bucket, None)
+
         try:
             uploads = self.client.list_multipart_uploads(Bucket=bucket).get(
                 "Uploads", []
@@ -1578,6 +1600,116 @@ class IlmHarness:
         if observed != "Enabled":
             raise AssertionError(f"versioning did not become enabled: {observed!r}")
 
+    def set_fixture_legal_hold(self, bucket: str, key: str, version: str, *, enabled: bool) -> None:
+        if bucket not in self.created_buckets:
+            raise RuntimeError("legal hold changes require a run-owned bucket")
+        holds = self.fixture_legal_holds.setdefault(bucket, set())
+        identity = (key, version)
+        if enabled:
+            # Record intent before the request to clean up after an ambiguous response.
+            holds.add(identity)
+        elif identity not in holds:
+            raise RuntimeError("refusing to release an untracked legal hold")
+        self.client.put_object_legal_hold(
+            Bucket=bucket, Key=key, VersionId=version,
+            LegalHold={"Status": "ON" if enabled else "OFF"},
+        )
+        if not enabled:
+            holds.remove(identity)
+
+    def case_worm_expiration(self, case_id: str, bucket: str) -> list[str]:
+        assert self.clock is not None
+        self.enable_versioning(bucket)
+        days = self.prepared_days()
+        current_body = b"current-version"
+        historical_body = b"historical-version"
+        successor_body = b"historical-version-successor"
+
+        def write_fixture(suffix: str) -> WormFixture:
+            current_key = f"current/{suffix}"
+            history_key = f"history/{suffix}"
+            current = self.client.put_object(Bucket=bucket, Key=current_key, Body=current_body)["VersionId"]
+            history = self.client.put_object(Bucket=bucket, Key=history_key, Body=historical_body)["VersionId"]
+            successor = self.client.put_object(Bucket=bucket, Key=history_key, Body=successor_body)["VersionId"]
+            if history == successor or any(not version or version == "null" for version in (current, history, successor)):
+                raise AssertionError("WORM fixture did not create addressable versions")
+            return WormFixture(current_key, current, history_key, history, successor)
+
+        protected = write_fixture("held")
+        holds = [(protected.current_key, protected.current_version), (protected.history_key, protected.historical_version)]
+        for key, version in holds:
+            self.set_fixture_legal_hold(bucket, key, version, enabled=True)
+            observed = self.client.get_object_legal_hold(Bucket=bucket, Key=key, VersionId=version)
+            if observed.get("LegalHold", {}).get("Status") != "ON":
+                raise AssertionError(f"legal hold was not applied to {key}/{version}")
+        control = write_fixture("control")
+        configuration = {"Rules": [
+            {"ID": "expire-current", "Status": "Enabled", "Filter": {"Prefix": "current/"},
+             "Expiration": {"Days": days}},
+            {"ID": "expire-history", "Status": "Enabled", "Filter": {"Prefix": "history/"},
+             "NoncurrentVersionExpiration": {"NoncurrentDays": days}},
+        ]}
+        windows = [
+            self.object_window(case_id, bucket, key, days)[0]
+            for fixture in (protected, control)
+            for key in (fixture.current_key, fixture.history_key)
+        ]
+        due = DueWindow(min(window.earliest for window in windows), max(window.latest for window in windows))
+        evidence = self.put_lifecycle(case_id, bucket, configuration)
+        self.confirm_configuration(case_id, bucket, configuration)
+        self.clock.require_before(due, margin=self.args.request_timeout)
+
+        def inventories(fixture: WormFixture) -> dict[str, Any]:
+            return {
+                group: version_inventory(self.client.list_object_versions(Bucket=bucket, Prefix=key), key)
+                for group, key in (("current", fixture.current_key), ("history", fixture.history_key))
+            }
+
+        def expiry_observation(fixture: WormFixture) -> tuple[bool, Any]:
+            state = inventories(fixture)
+            current, history = state["current"], state["history"]
+            marker = require_single_latest_marker(current) if current["deleteMarkers"] else None
+            require_exact_version_ids(current, {fixture.current_version}, {marker} if marker else set())
+            remaining = {entry["versionId"] for entry in history["versions"]}
+            version_expired = fixture.historical_version not in remaining
+            expected = {fixture.successor_version}
+            if not version_expired:
+                expected.add(fixture.historical_version)
+            require_exact_version_ids(history, expected)
+            if [entry["versionId"] for entry in history["versions"] if entry["isLatest"]] != [fixture.successor_version]:
+                raise AssertionError("noncurrent expiration changed the latest data version")
+            return marker is not None and version_expired, state
+
+        progress = CycleProgress()
+
+        def held_through_expiry() -> tuple[bool, Any]:
+            protected_state = inventories(protected)
+            require_exact_version_ids(protected_state["current"], {protected.current_version})
+            require_exact_version_ids(protected_state["history"], {protected.historical_version, protected.successor_version})
+            control_expired, control_state = expiry_observation(control)
+            cycles = 0
+            if self.clock.passed(due):
+                cycles = progress.observe(self.rc_scanner_status(case_id, "worm-scanner-latest.json"))
+            return control_expired and cycles >= 2, {
+                "protected": protected_state, "control": control_state, "newSuccessfulCycles": cycles,
+            }
+
+        held = self.wait_until(case_id, "held versions to survive expiration of the controls",
+                               held_through_expiry, timeout=self.clock.timeout_after(due, self.args.timeout))
+        self.assert_body(bucket, protected.current_key, current_body)
+        self.assert_body(bucket, protected.history_key, historical_body, VersionId=protected.historical_version)
+        evidence.append(self.save_json(case_id, "worm-protected.json", held))
+
+        for key, version in holds:
+            self.set_fixture_legal_hold(bucket, key, version, enabled=False)
+        released = self.wait_until(case_id, "expiration after releasing legal holds", lambda: expiry_observation(protected))
+        if not self.object_absent(bucket, protected.current_key):
+            raise AssertionError("the latest delete marker did not hide the expired current version")
+        self.assert_body(bucket, protected.current_key, current_body, VersionId=protected.current_version)
+        self.assert_body(bucket, protected.history_key, successor_body)
+        evidence.append(self.save_json(case_id, "worm-after-release.json", released))
+        return evidence
+
     def case_noncurrent_expiration(self, case_id: str, bucket: str) -> list[str]:
         self.enable_versioning(bucket)
         key = "versioned/object.txt"
@@ -1914,6 +2046,7 @@ class IlmHarness:
         body = (b"rustfs-transition-restore-" * 4096) + secrets.token_bytes(32)
         tier_created = False
         tier_added = False
+        immediate = case_id == IMMEDIATE_TRANSITION_CASE
         evidence: list[str] = []
         phase = "remote-tier-bucket-create"
         primary_error: Exception | None = None
@@ -1953,20 +2086,34 @@ class IlmHarness:
                     )
                 )
             )
-            phase = "source-put"
-            put = self.client.put_object(Bucket=bucket, Key=key, Body=body)
             configuration = {
                 "Rules": [
                     {
                         "ID": "transition-to-real-tier",
                         "Status": "Enabled",
                         "Filter": {"Prefix": "transition/"},
-                        "Transitions": [{"Days": 1, "StorageClass": tier_name}],
+                        "Transitions": [{"Days": 0 if immediate else 1, "StorageClass": tier_name}],
                     }
                 ]
             }
-            phase = "lifecycle-put"
-            evidence.extend(self.put_lifecycle(case_id, bucket, configuration))
+            if immediate:
+                phase = "lifecycle-before-source-put"
+                evidence.extend(self.put_lifecycle(case_id, bucket, configuration))
+                # Installing a rule schedules an existing-object walk. Restart
+                # the empty source so that walk cannot claim the subsequent PUT.
+                phase = "restart-empty-source"
+                evidence.append(self.restart_cluster(case_id))
+                require_scanner_disabled(self.rc_scanner_status(case_id, "scanner-after-empty-restart.json"))
+                self.confirm_configuration(case_id, bucket, configuration)
+                empty = self.client.list_objects_v2(Bucket=bucket)
+                if empty.get("IsTruncated") is not False or empty.get("KeyCount") != 0 or empty.get("Contents"):
+                    raise AssertionError("the source bucket must still be empty after restart")
+                evidence.append(self.save_json(case_id, "source-before-immediate-put.json", empty))
+            phase = "source-put"
+            put = self.client.put_object(Bucket=bucket, Key=key, Body=body)
+            if not immediate:
+                phase = "lifecycle-put"
+                evidence.extend(self.put_lifecycle(case_id, bucket, configuration))
             evidence.append(
                 self.save_json(
                     case_id,
@@ -2014,6 +2161,8 @@ class IlmHarness:
             remote_objects = self.tier_client.list_objects_v2(Bucket=tier_bucket)
             if not remote_objects.get("Contents"):
                 raise AssertionError("remote tier bucket contains no transitioned object")
+            if immediate and (remote_objects.get("IsTruncated") is not False or len(remote_objects["Contents"]) != 1):
+                raise AssertionError("the immediate PUT must create exactly one remote object")
             evidence.append(
                 self.save_json(case_id, "tier-remote-objects.json", remote_objects)
             )
@@ -2076,8 +2225,9 @@ class IlmHarness:
             try:
                 try:
                     self.client.delete_bucket_lifecycle(Bucket=bucket)
-                except ClientError:
-                    pass
+                except ClientError as exc:
+                    if self.client_error_code(exc) not in {"NoSuchBucket", "NoSuchLifecycleConfiguration", "NoSuchLifecycle"}:
+                        raise
                 if tier_added:
                     # A transitioned object is an authoritative reference to its tier.
                     # Remove the source object and wait for its remote payload cleanup
@@ -2175,8 +2325,9 @@ class IlmHarness:
                                 },
                             )
                         self.tier_client.delete_bucket(Bucket=tier_bucket)
-                    except ClientError:
-                        pass
+                    except ClientError as exc:
+                        if self.client_error_code(exc) != "NoSuchBucket":
+                            raise
             except Exception as exc:
                 cleanup_error = exc
                 evidence.append(
@@ -2201,24 +2352,9 @@ class IlmHarness:
             raise cleanup_error
         return evidence
 
-    def case_restart_persistence(self, case_id: str, bucket: str) -> list[str]:
-        assert self.clock is not None
+    def restart_cluster(self, case_id: str) -> str:
         if not self.args.restart_hook:
-            raise RuntimeError("restart-persistence requires --restart-hook")
-        days = self.prepared_days(self.args.restart_timeout + self.args.setup_budget)
-        key = "restart/expire.txt"
-        body = b"survive-restart-then-expire"
-        configuration = {"Rules": [{
-            "ID": "restart-expiry", "Status": "Enabled",
-            "Filter": {"Prefix": "restart/"}, "Expiration": {"Days": days},
-        }]}
-        evidence = self.put_lifecycle(case_id, bucket, configuration)
-        self.confirm_configuration(case_id, bucket, configuration)
-        self.client.put_object(Bucket=bucket, Key=key, Body=body)
-        due, before = self.object_window(case_id, bucket, key, days)
-        self.assert_body(bucket, key, body)
-        self.clock.require_before(due, margin=self.args.restart_timeout + self.args.setup_budget)
-        evidence.append(self.save_json(case_id, "object-before-restart.json", before))
+            raise RuntimeError(f"{case_id} requires --restart-hook")
         command = json.loads(self.args.restart_hook)
         if not isinstance(command, list) or not command or not all(
             isinstance(item, str) and item for item in command
@@ -2248,14 +2384,35 @@ class IlmHarness:
                     pass
                 output, _ = process.communicate(timeout=5)
             except Exception as cleanup_error:
-                evidence.append(self.save_json(case_id, "restart-hook-termination-error.json", {
+                self.save_json(case_id, "restart-hook-termination-error.json", {
                     "errorType": type(cleanup_error).__name__,
                     "message": self.redact(str(cleanup_error)),
-                }))
+                })
             raise
         finally:
-            evidence.append(self.save_text(case_id, "restart-hook.log", self.redact(output)))
+            restart_log = self.save_text(case_id, "restart-hook.log", self.redact(output))
         self.events.record("cluster.restart.complete", case=case_id)
+        return restart_log
+
+    def case_restart_persistence(self, case_id: str, bucket: str) -> list[str]:
+        assert self.clock is not None
+        if not self.args.restart_hook:
+            raise RuntimeError("restart-persistence requires --restart-hook")
+        days = self.prepared_days(self.args.restart_timeout + self.args.setup_budget)
+        key = "restart/expire.txt"
+        body = b"survive-restart-then-expire"
+        configuration = {"Rules": [{
+            "ID": "restart-expiry", "Status": "Enabled",
+            "Filter": {"Prefix": "restart/"}, "Expiration": {"Days": days},
+        }]}
+        evidence = self.put_lifecycle(case_id, bucket, configuration)
+        self.confirm_configuration(case_id, bucket, configuration)
+        self.client.put_object(Bucket=bucket, Key=key, Body=body)
+        due, before = self.object_window(case_id, bucket, key, days)
+        self.assert_body(bucket, key, body)
+        self.clock.require_before(due, margin=self.args.restart_timeout + self.args.setup_budget)
+        evidence.append(self.save_json(case_id, "object-before-restart.json", before))
+        evidence.append(self.restart_cluster(case_id))
         self.calibrate_clock(case_id)
         self.confirm_configuration(case_id, bucket, configuration)
         self.clock.require_before(due, margin=self.args.request_timeout)
@@ -2317,10 +2474,12 @@ class IlmHarness:
         )
         try:
             with time_budget(self.args.case_timeout, f"case {case_id}"):
-                self.rc_scanner_status(case_id, "scanner-before.json")
+                scanner = self.rc_scanner_status(case_id, "scanner-before.json")
+                if case_id == IMMEDIATE_TRANSITION_CASE:
+                    require_scanner_disabled(scanner)
                 self.calibrate_clock(case_id)
                 if create_bucket:
-                    self.create_bucket(bucket)
+                    self.create_bucket(bucket, object_lock=case_id == WORM_EXPIRATION_CASE)
                 evidence.extend(function(case_id, bucket))
         except Exception as exc:  # retain the failure before inspecting cleanup
             state = self.classify_exception(exc)
@@ -2343,7 +2502,9 @@ class IlmHarness:
             )
         finally:
             try:
-                self.rc_scanner_status(case_id, "scanner-after.json")
+                scanner = self.rc_scanner_status(case_id, "scanner-after.json")
+                if case_id == IMMEDIATE_TRANSITION_CASE:
+                    require_scanner_disabled(scanner)
             except Exception as status_exc:
                 if state == "pass":
                     state = "infra_error"
@@ -2604,8 +2765,14 @@ class IlmHarness:
                 self.wait_for_s3_connectivity()
                 self.configure_rc()
                 self.calibrate_clock("fixture.scanner-readiness")
-                self.case_scanner_status_readiness("fixture.scanner-readiness", "")
-            self.readiness = {"state": "pass", "message": "clock and new scanner cycle verified"}
+                if IMMEDIATE_TRANSITION_CASE in selected_cases:
+                    scanner = self.rc_scanner_status("fixture.scanner-readiness", "scanner-disabled.json")
+                    require_scanner_disabled(scanner)
+                    readiness = "clock and disabled scanners verified"
+                else:
+                    self.case_scanner_status_readiness("fixture.scanner-readiness", "")
+                    readiness = "clock and new scanner cycle verified"
+            self.readiness = {"state": "pass", "message": readiness}
         except Exception as exc:
             message = self.redact(f"precondition_error: {type(exc).__name__}: {exc}")
             self.readiness = {"state": self.classify_exception(exc), "message": message}
@@ -2630,6 +2797,8 @@ class IlmHarness:
             "ilm.delete-marker-expiration": self.case_delete_marker_expiration,
             "ilm.multipart-expiration": self.case_multipart_expiration,
             "ilm.transition-and-restore": self.case_transition_and_restore,
+            IMMEDIATE_TRANSITION_CASE: self.case_transition_and_restore,
+            WORM_EXPIRATION_CASE: self.case_worm_expiration,
             "ilm.restart-persistence": self.case_restart_persistence,
         }
         for case_id in selected_cases:
@@ -2699,6 +2868,12 @@ def parse_args() -> argparse.Namespace:
         help="delete failed-case buckets instead of preserving them for diagnosis",
     )
     args = parser.parse_args()
+    try:
+        ilm_harness_scored_cases(args.case)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if IMMEDIATE_TRANSITION_CASE in (args.case or ()) and not args.restart_hook:
+        parser.error("immediate transition requires --restart-hook to drain the rule-installation walk")
     if not args.endpoint or not args.access_key or not args.secret_key:
         parser.error("endpoint, access key, and secret key are required")
     tier_values = (args.tier_endpoint, args.tier_access_key, args.tier_secret_key)
@@ -2722,6 +2897,8 @@ def parse_args() -> argparse.Namespace:
     args.scanner_endpoint = list(
         dict.fromkeys(args.scanner_endpoint or [args.endpoint])
     )
+    if IMMEDIATE_TRANSITION_CASE in (args.case or ()) and args.endpoint not in args.scanner_endpoint:
+        parser.error("the PUT endpoint must be included in the scanner-disabled check")
     scanner_hosts: list[str] = []
     for endpoint in args.scanner_endpoint:
         scanner_parsed = urlparse(endpoint)
