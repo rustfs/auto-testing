@@ -914,6 +914,26 @@ bulk_delete_regression() {
     "${S3_BULK_PYTHON}" "${SCRIPT_DIR}/scripts/s3_bulk_delete_regressions.py" "${args[@]}"
 }
 
+# Strict SSE contract: exact SSE response headers, exact refusal codes, and no
+# object left behind by a refused write. The helper talks to the endpoint only;
+# this suite's server has RUSTFS_SSE_S3_MASTER_KEY and no KMS, which ENC-204
+# relies on.
+sse_contract_case() {
+  RUSTFS_ACCESS_KEY="${ACCESS_KEY}" RUSTFS_SECRET_KEY="${SECRET_KEY}" \
+    python3 "${SCRIPT_DIR}/scripts/sse_contract_cases.py" --endpoint "${ENDPOINT}" --case "$1"
+}
+
+test_enc201() { sse_contract_case ENC-201; }
+test_enc202() { sse_contract_case ENC-202; }
+test_enc203() { sse_contract_case ENC-203; }
+test_enc204() { sse_contract_case ENC-204; }
+test_enc205() { sse_contract_case ENC-205; }
+test_enc206() { sse_contract_case ENC-206; }
+test_enc207() { sse_contract_case ENC-207; }
+test_enc208() { sse_contract_case ENC-208; }
+test_enc209() { sse_contract_case ENC-209; }
+test_enc210() { sse_contract_case ENC-210; }
+
 test_s3c213()  { bulk_delete_regression S3C-213; }
 test_s3c214()  { bulk_delete_regression S3C-214; }
 test_s3c1306() { bulk_delete_regression S3C-1306; }
@@ -980,6 +1000,16 @@ run_all_tests() {
   run_test ENC-111 "SseChecksum"             test_enc111
   run_test ENC-114 "PresignedUrlSseS3"       test_enc114
   run_test ENC-117 "SnowballSse"             test_enc117
+  run_test ENC-201 "SseS3ExactHeaders"       test_enc201
+  run_test ENC-202 "SseCExactHeaders"        test_enc202
+  run_test ENC-203 "BucketDefaultExact"      test_enc203
+  run_test ENC-204 "SseKmsNotDowngraded"     test_enc204
+  run_test ENC-205 "SseCTripleNegatives"     test_enc205
+  run_test ENC-206 "SseCCopySourceKey"       test_enc206
+  run_test ENC-207 "SseCMultipartExact"      test_enc207
+  run_test ENC-208 "SseCPartKeyMismatch"     test_enc208
+  run_test ENC-209 "SseReadHeaderMismatch"   test_enc209
+  run_test ENC-210 "ListingEtagNotPlaintextMd5" test_enc210
   run_test S3C-1001 "SigV4Basics"            test_s3c1001
   run_test S3C-1002 "SigV2Compatibility"     test_s3c1002
   run_test S3C-1003 "PresignedUrl"           test_s3c1003
@@ -3491,6 +3521,7 @@ main() {
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4)"
   need_cmd python3 "Python 3 (archive fixtures)"
+  [ -f "${SCRIPT_DIR}/scripts/sse_contract_cases.py" ] || die "missing scripts/sse_contract_cases.py"
   need_cmd tar "tar archive tool"
   if [ "${DRY_RUN}" -eq 0 ] && [ -z "${VALIDATION_CASE}" ]; then
     case ",${SELECTED_CASES}," in

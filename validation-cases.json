@@ -6448,6 +6448,266 @@
           }
         },
         {
+          "id": "s3.compatibility.enc-201",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "SseS3ExactHeaders: SSE-S3 objects of 0, 1 and 71680 bytes answer PUT, GET and HEAD with exactly x-amz-server-side-encryption: AES256, read back byte-identical, and are listed with their plaintext size.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-201",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-201"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-202",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "SseCExactHeaders: SSE-C objects of 0, 1 and 71680 bytes answer PUT, GET and HEAD with exactly the customer algorithm and key-MD5 headers, and a GET without the customer key is refused with 400 InvalidRequest.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-202",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-202"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-203",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "BucketDefaultExact: A bucket default of AES256 encrypts a PUT that names no scheme, leaves an SSE-C PUT as SSE-C, and after its removal new objects carry no SSE header while earlier ones still read back as SSE-S3.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-203",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-203"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-204",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "SseKmsNotDowngraded: Without KMS an SSE-KMS PUT is refused with 400 InvalidRequest and stores nothing, while SSE-S3 under the master key still round-trips.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-204",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-204"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-205",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "SseCTripleNegatives: Seven incomplete or inconsistent SSE-C header triples are each refused with 400 InvalidRequest, and a HEAD of each key answers 404.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-205",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-205"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-206",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "SseCCopySourceKey: CopyObject from an SSE-C source without or with a wrong source key is refused with an explicit 400 and stores nothing; with the right key the destination opens only with its own key.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-206",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-206"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-207",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "SseCMultipartExact: An SSE-C multipart upload answers CreateMultipartUpload and CompleteMultipartUpload with exactly the customer headers, reads back byte-identical with the key, and is refused without it.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-207",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-207"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-208",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "SseCPartKeyMismatch: UploadPart without the key, with another key, or with a key on a plaintext upload is refused with 400 InvalidRequest, and the SSE-C upload still completes afterwards.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-208",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-208"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-209",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "SseReadHeaderMismatch: Six GET requests whose SSE headers do not match how the object was stored are refused with the exact error code and return no object bytes.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-209",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-209"
+            ]
+          }
+        },
+        {
+          "id": "s3.compatibility.enc-210",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "ListingEtagNotPlaintextMd5: ListObjectsV2, ListObjects and ListObjectVersions never report the MD5 of the plaintext as the ETag of an SSE-S3 or SSE-C object, with a plaintext object as the control.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "ENC-210",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-s3-compat-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-s3-compat-test.sh"
+            ],
+            "case_ids": [
+              "ENC-210"
+            ]
+          }
+        },
+        {
           "id": "s3.compatibility.s3c-1001",
           "source_status": "procedure-ready",
           "priority": "P1",
@@ -10330,6 +10590,249 @@
             ],
             "case_ids": [
               "KMS-318"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-601",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "SseS3KeyNotNamed: SSE-S3 under KMS round-trips with exactly AES256, and no response of eight operations carries a KMS key id header or names the default key.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-601",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-601"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-602",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "SseKmsKeyResolutionExact: SSE-KMS without a key id answers with the default key id, and with an explicit non-default key answers with that key id on PUT, GET and HEAD for 0, 1 and 71680 bytes.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-602",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-602"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-603",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "SseKmsRangeExact: Four range reads of an SSE-KMS object answer 206 with the exact Content-Range, the plaintext slice and the exact SSE-KMS headers.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-603",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-603"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-604",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "BucketDefaultKmsExact: A bucket default of aws:kms without a key id pins the default key, leaves SSE-C as SSE-C, and an explicit AES256 PUT does not inherit the bucket's KMS key.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-604",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-604"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-605",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "CopySchemeMatrix: Six CopyObject combinations across plaintext, SSE-S3, SSE-KMS and SSE-C produce exactly the destination scheme's headers on GET and HEAD and byte-identical data.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-605",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-605"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-606",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "MultipartSseKmsExact: A three-part SSE-KMS upload answers create, complete, GET and HEAD with exactly the SSE-KMS headers of its key, the full length and a three-part ETag.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-606",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-606"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-607",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "SsePutHeaderNegatives: Ten malformed SSE header combinations are refused with 400 InvalidArgument and a missing KMS key with 400 KMS.NotFoundException; a HEAD of each key answers 404.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-607",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-607"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-608",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "SseReadHeaderMismatch: Seven GET requests whose SSE headers do not match how the object was stored, an SSE-KMS object included, are refused with the exact error code and return no object bytes.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-608",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-608"
+            ]
+          }
+        },
+        {
+          "id": "source-procedure.kms.kms-609",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "ContextAndEtagNotEchoed: PUT, GET and HEAD of an object written with an encryption context do not repeat the context, and no listing reports the plaintext MD5 as the ETag of an encrypted object.",
+            "The helper scripts/sse_contract_cases.py reports every expectation that does not hold; exact SSE header sets, exact error codes and residue checks fail the case."
+          ],
+          "probes": {
+            "sourceCase": "KMS-609",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-kms-test.sh",
+            "topology": "configured-suite"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-kms-test.sh"
+            ],
+            "case_ids": [
+              "KMS-609"
             ]
           }
         },

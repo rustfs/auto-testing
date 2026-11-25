@@ -814,7 +814,7 @@ The source audit lists the following function entries. Names are preserved as au
 - Tests: `TestKeyString`, `TestParseKey`
 
 ## Scope interpretation
-The target collection absorbs source test content and testing ideas. Observable behavior, negative branches, boundary values, state transitions, cleanup rules, and assertion oracles are represented in the 158 canonical scenarios and 261 local procedures. Source-native implementation mechanics and generated serialization helpers remain in this inventory for traceability and are not copied one-to-one.
+The target collection absorbs source test content and testing ideas. Observable behavior, negative branches, boundary values, state transitions, cleanup rules, and assertion oracles are represented in the 158 canonical scenarios and 282 local procedures. Source-native implementation mechanics and generated serialization helpers remain in this inventory for traceability and are not copied one-to-one.
 
 Benchmarks remain performance references. Build, lint, security-scan, and repository workflows remain automation references. They do not create duplicate behavior cases in the target collection.
 

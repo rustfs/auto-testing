@@ -5,6 +5,8 @@ on:
     paths:
       - rustfs-kms-test.sh
       - test_rustfs_kms_presign.py
+      - scripts/sse_contract_cases.py
+      - test_sse_contract_cases.py
       - test_validation_kms.sh
       - .github/workflows/kms-script-tests.yml
   push:
@@ -12,6 +14,8 @@ on:
     paths:
       - rustfs-kms-test.sh
       - test_rustfs_kms_presign.py
+      - scripts/sse_contract_cases.py
+      - test_sse_contract_cases.py
       - test_validation_kms.sh
       - .github/workflows/kms-script-tests.yml
 
@@ -30,5 +34,7 @@ jobs:
         run: bash -n rustfs-kms-test.sh
       - name: Test presigned KMS case without a server
         run: python3 -m unittest test_rustfs_kms_presign.py
+      - name: Test strict SSE contract cases without a server
+        run: python3 -B -m unittest test_sse_contract_cases.py
       - name: Test canonical KMS round trip without a server
         run: bash test_validation_kms.sh

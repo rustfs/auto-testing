@@ -23,6 +23,8 @@ on:
       - test_s3_bulk_delete_regressions.py
       - test_s3_bulk_delete_keys.py
       - test_s3_bulk_delete_observations.py
+      - scripts/sse_contract_cases.py
+      - test_sse_contract_cases.py
       - test_rustfs_worm_object_lock.py
       - test_validation_s3_basic.sh
       - .github/workflows/s3-script-tests.yml
@@ -49,6 +51,8 @@ on:
       - test_s3_bulk_delete_regressions.py
       - test_s3_bulk_delete_keys.py
       - test_s3_bulk_delete_observations.py
+      - scripts/sse_contract_cases.py
+      - test_sse_contract_cases.py
       - test_rustfs_worm_object_lock.py
       - test_validation_s3_basic.sh
       - .github/workflows/s3-script-tests.yml
@@ -69,7 +73,7 @@ jobs:
       - name: Install independent SigV4 verifier
         run: python3 -m pip install botocore==1.43.19 'boto3>=1.43.19,<1.43.20'
       - name: Test S3 cases and signatures without a cluster
-        run: python3 -B -m unittest test_rustfs_s3_usage.py test_rustfs_s3_signing.py test_rustfs_s3_regressions.py test_rustfs_worm_object_lock.py test_s3_bulk_delete_regressions.py test_s3_bulk_delete_keys.py test_s3_bulk_delete_observations.py
+        run: python3 -B -m unittest test_rustfs_s3_usage.py test_rustfs_s3_signing.py test_rustfs_s3_regressions.py test_rustfs_worm_object_lock.py test_s3_bulk_delete_regressions.py test_s3_bulk_delete_keys.py test_s3_bulk_delete_observations.py test_sse_contract_cases.py
       - name: Test standalone S3 probe oracles
         run: python3 -B -m unittest test_mrf_long_root_refresh.py test_s3_request_id_parity.py test_s3_upload_part_timeout.py test_s3_veeam_sosapi_capacity.py
       - name: Test validation S3 round trip without a cluster

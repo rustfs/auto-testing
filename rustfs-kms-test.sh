@@ -905,6 +905,15 @@ run_all_tests() {
   run_test KMS-316 "S3SelectCross"          test_kms316
   run_test KMS-317 "PresignedUrl"           test_kms317
   run_test KMS-318 "FrameCompat"            test_kms318
+  run_test KMS-601 "SseS3KeyNotNamed"       test_kms601
+  run_test KMS-602 "SseKmsKeyResolutionExact" test_kms602
+  run_test KMS-603 "SseKmsRangeExact"       test_kms603
+  run_test KMS-604 "BucketDefaultKmsExact"  test_kms604
+  run_test KMS-605 "CopySchemeMatrix"       test_kms605
+  run_test KMS-606 "MultipartSseKmsExact"   test_kms606
+  run_test KMS-607 "SsePutHeaderNegatives"  test_kms607
+  run_test KMS-608 "SseReadHeaderMismatch"  test_kms608
+  run_test KMS-609 "ContextAndEtagNotEchoed" test_kms609
   run_test KMS-401 "PerKeySseAuthz"         test_kms401
   run_test KMS-402 "AnonymousEnforcement"   test_kms402
   run_test KMS-403 "AdminActionAuthz"       test_kms403
@@ -917,6 +926,27 @@ run_all_tests() {
     run_test KMS-307 "KmsUnavailable"       test_kms307_local
   fi
 }
+
+# Strict SSE contract: exact SSE response headers, exact refusal codes, and no
+# object left behind by a refused write. The helper talks to the endpoint only
+# and creates the keys sse-contract-key-1/2 through the admin API. The cases run
+# before the per-key authorization and fault cases, while the default key and
+# the KMS service are as the environment setup left them.
+sse_contract_case() {
+  RUSTFS_ACCESS_KEY="${ACCESS_KEY}" RUSTFS_SECRET_KEY="${SECRET_KEY}" \
+    python3 "${SCRIPT_DIR}/scripts/sse_contract_cases.py" --endpoint "${ENDPOINT}" --case "$1" \
+      --kms-default-key "${KMS_DEFAULT_KEY_ID}"
+}
+
+test_kms601() { sse_contract_case KMS-601; }
+test_kms602() { sse_contract_case KMS-602; }
+test_kms603() { sse_contract_case KMS-603; }
+test_kms604() { sse_contract_case KMS-604; }
+test_kms605() { sse_contract_case KMS-605; }
+test_kms606() { sse_contract_case KMS-606; }
+test_kms607() { sse_contract_case KMS-607; }
+test_kms608() { sse_contract_case KMS-608; }
+test_kms609() { sse_contract_case KMS-609; }
 
 test_kms101() {
   rc_run admin kms status local --json
@@ -2352,7 +2382,8 @@ main() {
   need_cmd jq "JSON processor"
   need_cmd curl "HTTP client"
   need_cmd openssl "OpenSSL (SigV4)"
-  if [ -n "${VALIDATION_CASE}" ]; then need_cmd python3 "validation result writer"; fi
+  need_cmd python3 "Python 3 (SSE contract cases, validation result writer)"
+  [ -f "${SCRIPT_DIR}/scripts/sse_contract_cases.py" ] || die "missing scripts/sse_contract_cases.py"
   log "nodes: ${NODES[*]}  package: $(resolve_package_url)"
   log "backends: ${BACKENDS[*]}  topologies: ${SELECTED_TOPOLOGIES[*]}"
 
