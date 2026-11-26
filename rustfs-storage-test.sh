@@ -577,6 +577,7 @@ validation_evidence_items() {
 validation_write_result() {
   local verdict="$1" reason="$2" cleanup_status="$3" item
   local profile=single-4disk
+  if [ "${VALIDATION_SOURCE_CASE_ID}" = STOR-136 ]; then profile=single-1disk; fi
   if [ "${VALIDATION_CASE}" = scanner.status-readiness ] || [[ "${VALIDATION_CASE}" == ilm.* ]]; then
     profile=ilm-2x4
   fi
@@ -766,6 +767,7 @@ run_all_tests() {
   run_test STOR-133 "InlineCapacity"                test_stor133
   run_test STOR-134 "AdminUsageConverges"           test_stor134
   run_test STOR-135 "DeepKeyListingResilience"      test_stor135
+  run_test STOR-136 "BoundedCompressedRangeGet"    test_stor136
 }
 
 test_stor134() { # admin usage APIs must respond promptly and converge to actual object counts (#1858 #2232 #5116)
@@ -1113,6 +1115,121 @@ test_stor106() {
   rm_bucket "stor106-b1"
 }
 
+# Capture bytes returned by read syscalls, including page-cache hits. The
+# single-node fixture prevents internode traffic from inflating this counter.
+stor136_read_counter() {
+  run_remote "${NODES[0]}" <<'REMOTE'
+set -eu
+pid=$(systemctl show --property MainPID --value rustfs)
+test "${pid}" -gt 1
+sudo_cmd=()
+if [ "$(id -u)" -ne 0 ]; then sudo_cmd=(sudo -n); fi
+bytes=$("${sudo_cmd[@]}" awk '$1 == "rchar:" { print $2 }' "/proc/${pid}/io")
+printf '%s %s\n' "${pid}" "${bytes}"
+REMOTE
+}
+
+stor136_check_range() {
+  local bucket="$1" key="$2" source="$3" spec="$4" start="$5" source_start="$6" total="$7"
+  local length=16384 budget=$((16 * 1024 * 1024)) first_pid last_pid first_bytes last_bytes code
+  local content_range="bytes ${start}-$((start + length - 1))/${total}"
+  local body="${TEST_TMP}/stor136-body" headers="${TEST_TMP}/stor136-headers" snapshot
+  snapshot="$(stor136_read_counter)" || return 1
+  read -r first_pid first_bytes <<<"${snapshot}" || return 1
+  code="$(curl --noproxy '*' -sS --max-time "${API_REQUEST_TIMEOUT}" \
+    --aws-sigv4 "aws:amz:${REGION}:s3" --user "${ACCESS_KEY}:${SECRET_KEY}" \
+    -H "Range: bytes=${spec}" -D "${headers}" -o "${body}" -w '%{http_code}' \
+    "${ENDPOINT}/${bucket}/${key}")" || return 1
+  snapshot="$(stor136_read_counter)" || return 1
+  read -r last_pid last_bytes <<<"${snapshot}" || return 1
+  [ "${code}" = 206 ] || { echo "${key} bytes=${spec} returned HTTP ${code}, expected 206"; return 1; }
+  tr -d '\r' < "${headers}" | grep -Fixq "Content-Range: ${content_range}" \
+    || { echo "${key} bytes=${spec} returned the wrong Content-Range"; return 1; }
+  if ! dd if="${source}" iflag=skip_bytes,count_bytes bs=65536 skip="${source_start}" count="${length}" 2>/dev/null | cmp -s - "${body}"; then
+    echo "${key} bytes=${spec} returned different plaintext"
+    return 1
+  fi
+  if [[ "${first_pid}" != "${last_pid}" || ! "${first_pid}" =~ ^[0-9]+$ || \
+        ! "${first_bytes}" =~ ^[0-9]+$ || ! "${last_bytes}" =~ ^[0-9]+$ ]]; then
+    echo "RustFS process identity or read counter is unavailable"
+    return 1
+  fi
+  local read_bytes=$((last_bytes - first_bytes))
+  echo "${key} bytes=${spec} HTTP ${code}, ${content_range}, read bytes ${read_bytes}, budget ${budget}"
+  if [ "${read_bytes}" -le 0 ] || [ "${read_bytes}" -ge "${budget}" ]; then
+    echo "Range read must observe positive read bytes below the budget"
+    return 1
+  fi
+}
+
+test_stor136() (
+  if [ "${CURRENT_TOPOLOGY}" != "${TOPO_SINGLE_SINGLE}" ]; then
+    echo "Compressed range read accounting requires the single-node, single-disk topology"
+    return 2
+  fi
+  local bucket status=0 single="${TEST_TMP}/stor136-single"
+  bucket="stor136-range-$(date +%s)-$$"
+  local block="${TEST_TMP}/stor136-block" first="${TEST_TMP}/stor136-first" last="${TEST_TMP}/stor136-last"
+  local mib=1048576 tail=32768 single_size=$((512 * 1048576 + 32768))
+  local part_size=$((64 * 1048576)) last_size=$((64 * 1048576 + 32768)) range_size=16384
+  local i start upload_id="" etag1 etag2 stored single_stored
+  # Half of each block is incompressible. This keeps a whole-part scan well
+  # above the read budget even though the object is actually disk-compressed.
+  head -c "$((mib / 2))" /dev/urandom > "${block}" || return 1
+  truncate -s "${mib}" "${block}" || return 1
+  for ((i = 0; i < 512; i++)); do cat "${block}" || return 1; done > "${single}"
+  head -c "${tail}" /dev/urandom >> "${single}" || return 1
+  head -c "${part_size}" "${single}" > "${first}" || return 1
+  tail -c "${last_size}" "${single}" > "${last}" || return 1
+  new_bucket "${bucket}" || return 1
+  trap '
+    status=$?
+    if [ -n "${upload_id}" ]; then
+      aws_run s3api abort-multipart-upload --bucket "${bucket}" --key multipart.txt --upload-id "${upload_id}"
+      assert_aws_ok "abort multipart upload" || status=1
+    fi
+    aws_run s3 rb "s3://${bucket}" --force
+    assert_aws_ok "remove range test bucket" || status=1
+    exit "${status}"
+  ' EXIT
+
+  aws_run s3api put-object --bucket "${bucket}" --key single.txt --body "${single}"
+  assert_aws_ok "put compressed object" || return 1
+  single_stored="$(bucket_physical_bytes "${bucket}")" || return 1
+  if [ "${single_stored}" -le "$((single_size / 3))" ] || [ "${single_stored}" -ge "$((single_size * 3 / 4))" ]; then
+    echo "Unexpected disk-compressed single PUT size: ${single_stored}"
+    return 1
+  fi
+  for start in 1000 9999; do
+    stor136_check_range "${bucket}" single.txt "${single}" "${start}-$((start + range_size - 1))" \
+      "${start}" "${start}" "${single_size}" || return 1
+  done
+  start=$((single_size - range_size))
+  stor136_check_range "${bucket}" single.txt "${single}" "-${range_size}" "${start}" "${start}" "${single_size}" || return 1
+
+  aws_run s3api create-multipart-upload --bucket "${bucket}" --key multipart.txt
+  assert_aws_ok "create multipart upload" || return 1
+  upload_id="$(jq -er '.UploadId' <<<"${AWS_OUT}")" || return 1
+  aws_run s3api upload-part --bucket "${bucket}" --key multipart.txt --upload-id "${upload_id}" --part-number 1 --body "${first}"
+  assert_aws_ok "upload part one" || return 1
+  etag1="$(jq -cer '.ETag' <<<"${AWS_OUT}")" || return 1
+  aws_run s3api upload-part --bucket "${bucket}" --key multipart.txt --upload-id "${upload_id}" --part-number 2 --body "${last}"
+  assert_aws_ok "upload part two" || return 1
+  etag2="$(jq -cer '.ETag' <<<"${AWS_OUT}")" || return 1
+  aws_run s3api complete-multipart-upload --bucket "${bucket}" --key multipart.txt --upload-id "${upload_id}" \
+    --multipart-upload "{\"Parts\":[{\"ETag\":${etag1},\"PartNumber\":1},{\"ETag\":${etag2},\"PartNumber\":2}]}"
+  assert_aws_ok "complete multipart upload" || return 1
+  upload_id=""
+  stored="$(bucket_physical_bytes "${bucket}")" || return 1
+  stored=$((stored - single_stored))
+  if [ "${stored}" -le "$(((part_size + last_size) / 3))" ] || [ "${stored}" -ge "$(((part_size + last_size) * 3 / 4))" ]; then
+    echo "Unexpected disk-compressed multipart size: ${stored}"
+    return 1
+  fi
+  stor136_check_range "${bucket}" multipart.txt "${last}" "-${range_size}" \
+    "$((part_size + last_size - range_size))" "$((last_size - range_size))" "$((part_size + last_size))"
+)
+
 test_stor107() {
   new_bucket "stor107-b1" || return 1
   make_compressible_file "${TEST_TMP}/stor107-v" 1048576
@@ -1452,6 +1569,8 @@ main() {
       if ilm_case_uses_tier; then
         [ "${#NODES[@]}" -ge 3 ] || die "${VALIDATION_CASE} needs three test nodes"
       fi
+    elif [ "${VALIDATION_SOURCE_CASE_ID}" = STOR-136 ]; then
+      SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}")
     else
       SELECTED_TOPOLOGIES=("${TOPO_SINGLE_MULTI}")
     fi
