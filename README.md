@@ -396,7 +396,7 @@ python3 scripts/sts_root_regression.py --endpoint http://127.0.0.1:9000
 
 ### Static musl CPU-affinity regression (rustfs/rustfs#9625)
 
-The standalone `runtime.musl-cpu-affinity` case runs on native x86_64 Linux with at least two allowed CPU IDs below 128, four from 128 through 1023, and a cgroup CPU quota of at least four cores (or no quota). It starts the candidate on loopback with a fresh volume for each four-CPU mask, one high-only and one mixed. Each instance must reach `/health/ready`. Matching ECStore tests check fsync dispatch and scheduler width, ILM expiry and transition defaults, and an expiry worker's handling of queued recovery work. Inadequate CPU affinity fails preflight.
+The standalone `runtime.musl-cpu-affinity` case runs on native x86_64 Linux with at least two allowed CPU IDs below 128, four from 128 through 1023, and a cgroup CPU quota of at least four cores (or no quota). It starts the candidate on loopback with a fresh volume for each four-CPU mask, one high-only and one mixed. Each instance must reach `/health/ready`. Matching ECStore tests check fsync dispatch and scheduler width, ILM expiry and transition defaults, expiry queue progress, and batch-delete results and accounting across two sets. Inadequate CPU affinity fails preflight.
 
 Provide the static x86_64-musl candidate and the ECStore unit-test executable built from the same RustFS commit. From the RustFS checkout, `cargo test --locked -p rustfs-ecstore --lib --target x86_64-unknown-linux-musl --no-run` prints the test executable path.
 

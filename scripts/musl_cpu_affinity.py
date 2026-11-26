@@ -21,6 +21,7 @@ CASE_ID = "runtime.musl-cpu-affinity"
 LIFECYCLE_TESTS = "bucket::lifecycle::bucket_lifecycle_ops::tests::"
 ECSTORE_TESTS = (
     "disk::os::tests::disk_blocking_queue_bounds_concurrency_and_recovers_from_panic",
+    "store::object::tests::batch_delete_preserves_results_and_accounting_across_sets",
     LIFECYCLE_TESTS + "expiry_worker_count_resolves_all_env_states",
     LIFECYCLE_TESTS + "resolve_transition_worker_count_uses_fallback_when_env_missing",
     LIFECYCLE_TESTS + "resize_workers_wires_recovery_notify_to_worker_failures",
