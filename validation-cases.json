@@ -9541,6 +9541,32 @@
           }
         },
         {
+          "id": "source-procedure.storage.stor-136",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api"
+          ],
+          "assertions": [
+            "Disk-compressed single PUT and multipart objects return HTTP 206, the exact Content-Range, and byte-identical plaintext at early offsets and at the tail.",
+            "The RustFS process stays the same between observations and its Linux read-byte counter advances by less than 16 MiB per 16 KiB range."
+          ],
+          "probes": {
+            "sourceCase": "STOR-136",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-storage-test.sh",
+            "topology": "single-1disk"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-storage-test.sh"
+            ],
+            "case_ids": [
+              "STOR-136"
+            ]
+          }
+        },
+        {
           "id": "source-procedure.kms.kms-101",
           "source_status": "procedure-ready",
           "priority": "P1",
