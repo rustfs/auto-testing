@@ -44,6 +44,10 @@ def snapshot(entry=None, **changes):
     return value
 
 
+def unpublished_snapshot():
+    return {"last_update": None, "usage_snapshot_complete": False, "buckets_usage": {}}
+
+
 def options(**changes):
     value = dict(endpoints=["http://example.invalid:9000"], admin_endpoints=[],
                  execution="combined", aws_bin="aws", region="us-east-1", request_timeout=1,
@@ -124,7 +128,7 @@ class FakeClient:
     def admin(self, path="/rustfs/admin/v3/datausageinfo", endpoint_index=0):
         if self.malformed:
             raise ProbeError("Admin returned invalid JSON")
-        value = {"scanner_cycle": self.serial, "usage_snapshot_complete": True,
+        value = {"scanner_cycle": self.serial, "scanner_epoch": 1, "usage_snapshot_complete": True,
                  "usage_snapshot_converged": not self.pending, "buckets_usage": {}}
         for bucket, rows in self.buckets.items():
             value["buckets_usage"][bucket] = {"objects_count": len({row["Key"] for row in rows}),
@@ -140,20 +144,42 @@ class FakeClient:
 class ValueContractTests(unittest.TestCase):
     def test_cycle_tracker_requires_monotonic_cycle_and_stable_epoch(self):
         tracker = CycleTracker()
-        first = tracker.observe({"scanner_cycle": 4, "scanner_epoch": "epoch-a"}, 0)
+        first = tracker.observe({"scanner_cycle": 4, "scanner_epoch": 1}, 0)
         self.assertFalse(first["advanced"])
-        self.assertTrue(tracker.observe({"scanner_cycle": 4, "scanner_epoch": "epoch-a"}, 0)["previous_cycle"] == 4)
-        self.assertTrue(tracker.observe({"scanner_cycle": 5, "scanner_epoch": "epoch-a"}, 0)["advanced"])
+        self.assertEqual(tracker.observe({"scanner_cycle": 4, "scanner_epoch": 1}, 0)["previous_cycle"], 4)
+        self.assertTrue(tracker.observe({"scanner_cycle": 5, "scanner_epoch": 1}, 0)["advanced"])
         with self.assertRaisesRegex(ProbeError, "regressed"):
-            tracker.observe({"scanner_cycle": 3, "scanner_epoch": "epoch-a"}, 0)
+            tracker.observe({"scanner_cycle": 3, "scanner_epoch": 1}, 0)
         with self.assertRaisesRegex(ProbeError, "epoch"):
-            tracker.observe({"scanner_cycle": 6, "scanner_epoch": "epoch-b"}, 0)
+            tracker.observe({"scanner_cycle": 6, "scanner_epoch": 2}, 0)
+
+    def test_unpublished_snapshot_preserves_the_last_observed_cycle_and_epoch(self):
+        tracker = CycleTracker()
+        tracker.observe({"scanner_cycle": 4, "scanner_epoch": 1}, 0)
+        pending = tracker.observe(unpublished_snapshot(), 0)
+        self.assertIsNone(pending["scanner_cycle"])
+        self.assertEqual(pending["previous_cycle"], 4)
+        self.assertFalse(pending["advanced"])
+        with self.assertRaisesRegex(ProbeError, "regressed"):
+            tracker.observe({"scanner_cycle": 3, "scanner_epoch": 1}, 0)
+        with self.assertRaisesRegex(ProbeError, "changed scanner epoch"):
+            tracker.observe({"scanner_cycle": 5, "scanner_epoch": 2}, 0)
 
     def test_cycle_tracker_rejects_missing_and_malformed_cycle(self):
         tracker = CycleTracker()
-        for value in (None, -1, True, "7"):
+        for value in (None, -1, True, "7", 1.0):
             with self.subTest(value=value), self.assertRaisesRegex(ProbeError, "scanner cycle"):
-                tracker.observe({"scanner_cycle": value}, 0)
+                tracker.observe(unpublished_snapshot() | {"scanner_cycle": value}, 0)
+        for changes in ({"usage_snapshot_complete": True}, {"last_update": certificate()["certified_at"]},
+                        {"buckets_usage": {"bucket": {"objects_count": 0}}}, {"scanner_epoch": 1}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ProbeError, "scanner cycle"):
+                tracker.observe(unpublished_snapshot() | changes, 0)
+
+    def test_cycle_tracker_rejects_malformed_epoch(self):
+        tracker = CycleTracker()
+        for epoch in (-1, True, "1", 1.0):
+            with self.subTest(epoch=epoch), self.assertRaisesRegex(ProbeError, "invalid scanner epoch"):
+                tracker.observe({"scanner_cycle": 1, "scanner_epoch": epoch}, 0)
 
     def test_absence_and_missing_counters_do_not_become_zero(self):
         view = bucket_view({"buckets_usage": {}}, "bucket")
@@ -272,6 +298,39 @@ class RunnerTests(unittest.TestCase):
         oracles = list((self.directory / "evidence" / CASES[19].id).glob("*-independent-oracle.json"))
         expected = json.loads(oracles[0].read_text())["expected"]
         self.assertEqual((expected["count"], expected["versions"], expected["markers"]), (6, 8, 1))
+
+    def test_blackbox_cases_wait_for_the_first_published_snapshot(self):
+        def configure(client):
+            original = client.admin
+            initial = iter(range(2))
+
+            def admin(*args, **kwargs):
+                if next(initial, None) is None:
+                    return original(*args, **kwargs)
+                value = unpublished_snapshot()
+                client.last_evidence = client.evidence.save("fake-admin", value)
+                return value
+
+            client.admin = admin
+
+        for case in select_cases("blackbox"):
+            with self.subTest(case=case.design_id):
+                result = self.run_case(case, configure=configure, convergence_timeout=0.2)
+                self.assertEqual(result["verdict"], "PASS", result)
+                sample_path, = (self.directory / "evidence" / case.id).glob("*-usage-samples.json")
+                samples = json.loads(sample_path.read_text())
+                self.assertEqual([sample["scanner_cycle"] for sample in samples[:2]], [None, None])
+                self.assertFalse(any(sample["view"]["converged"] for sample in samples[:2]))
+                self.assertTrue(samples[-1]["view"]["converged"])
+
+    def test_unpublished_usage_cannot_pass_without_convergence(self):
+        def configure(client):
+            client.admin = lambda **_: unpublished_snapshot()
+
+        result = self.run_case(CASES[19], configure=configure)
+        self.assertEqual(result["verdict"], "FAIL", result)
+        self.assertIn("did not converge", result["reason"])
+        self.assertEqual(result["cleanup_status"], "PASS")
 
     def test_product_error_and_cleanup_failure_cannot_pass(self):
         for attr, verdict in (("fail_put", "FAIL"), ("fail_cleanup", "INFRA_ERROR"), ("malformed", "INFRA_ERROR")):
