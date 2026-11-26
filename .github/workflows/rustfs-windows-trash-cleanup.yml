@@ -1,0 +1,65 @@
+name: RustFS Windows Trash Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      rustfs_commit:
+        description: Full commit SHA from rustfs/rustfs
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  trash-cleanup:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Validate the RustFS revision
+        env:
+          RUSTFS_COMMIT: ${{ inputs.rustfs_commit }}
+        run: |
+          if ($env:RUSTFS_COMMIT -notmatch '^[0-9a-f]{40}$') {
+            throw 'A full RustFS commit SHA is required.'
+          }
+
+      - name: Check out RustFS
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
+        with:
+          repository: rustfs/rustfs
+          ref: ${{ inputs.rustfs_commit }}
+          persist-credentials: false
+
+      - name: Set up stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Run the native trash cleanup regression group
+        env:
+          RUSTFS_COMMIT: ${{ inputs.rustfs_commit }}
+        run: |
+          $actualCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -ne $env:RUSTFS_COMMIT) {
+            throw 'The checked-out RustFS commit does not match the requested revision.'
+          }
+
+          cargo +stable test --locked --color never -p rustfs-ecstore --lib windows_trash_cleanup:: -- --nocapture |
+            Tee-Object -Variable testOutput
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cargo test failed with exit code $LASTEXITCODE."
+          }
+
+          $requiredCases = @(
+            'issue_8734_concurrent_deletes_are_idempotent',
+            'already_missing_entry_is_successful',
+            'locked_file_deletion_error_is_preserved'
+          )
+          foreach ($case in $requiredCases) {
+            $pattern = '^test .*::windows_trash_cleanup::' + [regex]::Escape($case) + '\s+\.\.\.\s+ok\s*$'
+            if (-not ($testOutput -match $pattern)) {
+              throw "Required Windows trash cleanup case did not pass: $case"
+            }
+          }
