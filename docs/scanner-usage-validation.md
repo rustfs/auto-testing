@@ -74,14 +74,7 @@ static/version accounting probes. Metadata-specific probes return
 `UNSUPPORTED`; a missing carried/observed sampling window is `BLOCKED`.
 The adapter never derives a certificate from `last_update` or collection time.
 
-Every public Admin sample now carries a scanner-cycle observation in the
-evidence record. The sample must contain a non-negative `scanner_cycle`; cycle
-values may stay equal while a bucket is being polled, but they may never move
-backwards. When `scanner_epoch` is exposed, the epoch must remain stable for
-the probe. A missing cycle, a malformed epoch, a cycle regression, or an epoch
-change is a product failure and cannot be retried into a pass. This binds the
-public usage result to a real scanner snapshot without claiming private
-frontier or acknowledgement evidence.
+Every public Admin sample records its scanner-cycle observation. An explicitly incomplete view with no bucket values, update time or scan identity can be observed while waiting for publication. It carries no cycle, leaves the last observed cycle and epoch intact, and cannot satisfy convergence. Other views must include a non-negative integer `scanner_cycle`, and any supplied `scanner_epoch` must be a non-negative integer. Cycle regression, epoch changes and malformed identities fail immediately. An unpublished view that persists past the existing convergence deadline also fails the probe.
 
 Default request timeout is 30 seconds, convergence timeout 600 seconds, and
 poll interval 5 seconds. `--objects` defaults to 32 and is bounded at 100000.
