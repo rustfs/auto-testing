@@ -13,12 +13,15 @@ on:
       - scripts/performance_delete_probe.py
       - test_performance_s3.py
       - scripts/check_execution_environment.py
+      - scripts/local_rustfs.py
+      - scripts/musl_cpu_affinity.py
       - scripts/check_shell_syntax.py
       - scripts/prepare_table_smoke.py
       - test_check_shell_syntax.py
       - .github/workflows/rustfs-table-test.yml
       - scripts/lib/**
       - test_check_execution_environment.py
+      - test_musl_cpu_affinity.py
       - test_rustfs_table.py
       - test_rustfs_performance_testing.py
       - test_rustfs_replication.py
@@ -36,12 +39,15 @@ on:
       - scripts/performance_delete_probe.py
       - test_performance_s3.py
       - scripts/check_execution_environment.py
+      - scripts/local_rustfs.py
+      - scripts/musl_cpu_affinity.py
       - scripts/check_shell_syntax.py
       - scripts/prepare_table_smoke.py
       - test_check_shell_syntax.py
       - .github/workflows/rustfs-table-test.yml
       - scripts/lib/**
       - test_check_execution_environment.py
+      - test_musl_cpu_affinity.py
       - test_rustfs_table.py
       - test_rustfs_performance_testing.py
       - test_rustfs_replication.py
@@ -70,6 +76,7 @@ jobs:
           python3 -B -m unittest -v
           test_check_execution_environment.py
           test_check_shell_syntax.py
+          test_musl_cpu_affinity.py
           test_rustfs_table.py
           test_rustfs_performance_testing.py
           test_performance_s3.py

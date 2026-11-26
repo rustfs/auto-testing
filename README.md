@@ -394,6 +394,17 @@ python3 scripts/sts_root_regression.py --rustfs-bin /absolute/path/to/rustfs --c
 python3 scripts/sts_root_regression.py --endpoint http://127.0.0.1:9000
 ```
 
+### Static musl CPU-affinity regression (rustfs/rustfs#9625)
+
+The standalone `runtime.musl-cpu-affinity` case runs on native x86_64 Linux with at least two allowed CPU IDs below 128, four from 128 through 1023, and a cgroup CPU quota of at least four cores (or no quota). It starts the candidate on loopback with a fresh volume for each four-CPU mask, one high-only and one mixed. Each instance must reach `/health/ready`. Matching ECStore tests check fsync dispatch and scheduler width, ILM expiry and transition defaults, and an expiry worker's handling of queued recovery work. Inadequate CPU affinity fails preflight.
+
+Provide the static x86_64-musl candidate and the ECStore unit-test executable built from the same RustFS commit. From the RustFS checkout, `cargo test --locked -p rustfs-ecstore --lib --target x86_64-unknown-linux-musl --no-run` prints the test executable path.
+
+```bash
+python3 -B scripts/musl_cpu_affinity.py --rustfs-bin /path/to/rustfs \
+  --ecstore-test-bin /path/to/rustfs_ecstore-test
+```
+
 ## Tier suite artifacts
 
 The full Tier suite requires `mosquitto_sub` and `mosquitto_pub`. Before changing any RustFS node, it checks MQTT publish/subscribe delivery through `${RUSTFS_HEAL_IP}:1883`. An existing broker is reused. If the endpoint is local and has no listener, the suite starts an isolated `eclipse-mosquitto:2` Docker container and removes only that container on exit, including failed setup. Docker must be available directly or through `sudo -n`. Set `RUSTFS_TIER_MQTT_MODE=external` to require an already running broker without creating one; use `RUSTFS_MQTT_PORT` to override port 1883. Remote brokers must be provisioned separately. Canonical tiering, events, and audit validation cases do not require MQTT.
