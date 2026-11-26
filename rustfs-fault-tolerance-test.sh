@@ -157,7 +157,7 @@ CASES_C=(C1/read C1/write C2/read C2/write C3/read C3/write)
 CASES_C2=(C2-1/read C2-1/write C2-2/read C2-2/write C2-3/read C2-3/write)
 CASES_D=(D1/read D1/write D2/read D2/write D3/read D3/write)
 CASES_E=(E1/read E1/write E2/read E2/write E3/read E3/write)
-CASES_F=(F1/read F1/write F2/ready F2/ready-fresh F2/ready-untouched F2/read F2/write F3/read F3/write)
+CASES_F=(F1/rolling-put-readback F1/read F1/write F2/rolling-put-readback F2/ready F2/ready-fresh F2/ready-untouched F2/read F2/write F3/read F3/write)
 
 register_expected_cases() {
   local case_id
@@ -610,6 +610,45 @@ dump_service_diagnostics() { # best-effort journal tail after a failed service s
 }
 
 stop_node()  { log "stopping ${RUSTFS_SERVICE} on $1"; run_remote "$1" "sudo -n systemctl stop ${RUSTFS_SERVICE}"; }
+
+stop_node_and_probe_put() { # <case-id> <departing-node> <surviving-endpoint>
+  local case_id="$1" node="$2" ep="$3" phase="${1%/*}"
+  local payload="${TMP}/ft-small-16k.bin" downloaded="${TMP}/${phase}-rolling-get.bin"
+  local url="${ep}/${BASELINE_BUCKET}/${PROBE_PREFIX}-${phase}-rolling" response put_time
+  local -a curl_args=(--disable --silent --show-error --noproxy '*' --retry 0
+    --aws-sigv4 "aws:amz:${REGION}:s3" --user "${ACCESS_KEY}:${SECRET_KEY}" --write-out '%{http_code} %{time_total}')
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    log "DRY-RUN: ${case_id} stops ${node}, then checks a no-retry PUT within 2.5s and immediate GET @ ${ep}"
+    return 0
+  fi
+  # Wait for systemd to begin terminating the process, without the normal
+  # settling delay that gives survivors time to mark the drive offline.
+  if ! run_remote "${node}" "set -e; systemctl is-active --quiet ${RUSTFS_SERVICE};
+      sudo -n systemctl stop --no-block ${RUSTFS_SERVICE};
+      timeout 5 sh -c 'while :; do
+        case \$(systemctl show -p SubState --value ${RUSTFS_SERVICE}) in
+          stop-sigterm|stop-sigkill|stop-post|final-sigterm|final-sigkill|dead|failed) exit 0 ;;
+        esac
+        sleep 0.05
+      done'"; then
+    record "HARNESS_ERROR" "${case_id}" "could not observe the departing service begin to stop"
+    return 0
+  fi
+
+  if ! response="$(curl "${curl_args[@]}" --max-time 2.5 --upload-file "${payload}" --output /dev/null "${url}")" ||
+    [[ "${response%% *}" != 200 ]]; then
+    record "UNEXPECTED" "${case_id}" "single PUT did not return HTTP 200 within 2.5s: ${response}"
+    return 0
+  fi
+  put_time="${response#* }"
+  if ! response="$(curl "${curl_args[@]}" --max-time 4 --output "${downloaded}" "${url}")" ||
+    [[ "${response%% *}" != 200 ]] || ! cmp -s "${payload}" "${downloaded}"; then
+    record "UNEXPECTED" "${case_id}" "PUT took ${put_time}s, but immediate same-key GET failed or returned different bytes: ${response}"
+    return 0
+  fi
+  record "pass" "${case_id}" "single PUT took ${put_time}s and immediate same-key GET matched the payload"
+}
+
 start_nodes() {
   local pids=() i=0 fail=0 node pid
   for node in "$@"; do
@@ -751,6 +790,7 @@ scenario_f() {
   install_and_start "${VOLUMES_4X1}"
   seed_baseline "${EP1}"
   # F1: restart one member and let it rejoin fully.
+  stop_node_and_probe_put "F1/rolling-put-readback" "${NODES[1]}" "${EP1}"
   stop_node "${NODES[1]}"; settle
   start_nodes "${NODES[1]}"
   await_write_quorum "F1" "${EP1}"
@@ -761,6 +801,7 @@ scenario_f() {
   # F2: stop the next member IMMEDIATELY after F1's restart converged.
   # NODES[1] maps to rustfs-node2 (EP2, freshly restarted), NODES[2] to
   # rustfs-node3, NODES[3] to rustfs-node4 (untouched).
+  stop_node_and_probe_put "F2/rolling-put-readback" "${NODES[2]}" "${EP2}"
   stop_node "${NODES[2]}"; settle
   capture_health "F2" "${EP1}"
   expect_ready_stable "F2/ready"           "${EP1}"
