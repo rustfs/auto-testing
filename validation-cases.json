@@ -9567,6 +9567,34 @@
           }
         },
         {
+          "id": "source-procedure.storage.stor-137",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "s3-api",
+            "admin-api"
+          ],
+          "assertions": [
+            "A warm v1 PUT on the four-node fleet acquires the bucket ledger for admission, the commit marker, and settlement exactly once each, correlated by the S3 request ID.",
+            "Record all response statuses and RustFS error causes from 64 concurrent single PUTs of 32 MiB each with ample quota. The burst must make progress and return only HTTP 200 or 503.",
+            "A separate one-byte hard quota admits exactly one byte and rejects a subsequent positive-growth PUT without publishing the second object."
+          ],
+          "probes": {
+            "sourceCase": "STOR-137",
+            "executionMode": "configured-endpoint",
+            "runner": "rustfs-storage-test.sh",
+            "topology": "multi-4x4"
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-storage-test.sh"
+            ],
+            "case_ids": [
+              "STOR-137"
+            ]
+          }
+        },
+        {
           "id": "source-procedure.kms.kms-101",
           "source_status": "procedure-ready",
           "priority": "P1",

@@ -195,6 +195,10 @@ RUSTFS_CONSOLE_ENABLE=${RUSTFS_CONSOLE_ENABLE}
 RUSTFS_OBS_LOGGER_LEVEL=${RUSTFS_OBS_LOGGER_LEVEL}
 RUSTFS_OBS_LOG_DIRECTORY="${RUSTFS_OBS_LOG_DIRECTORY}"
 EOF
+  if [ "${VALIDATION_SOURCE_CASE_ID}" = STOR-137 ]; then
+    printf '%s\n' 'RUSTFS_OBJECT_LOCK_DIAG_ENABLE=true' 'RUSTFS_OBS_LOG_STDOUT_ENABLED=true' \
+      'RUST_LOG=info,rustfs_ecstore::object_lock_diag=trace'
+  fi
   if [ "${VALIDATION_CASE}" = "scanner.usage-convergence" ] || [ "${VALIDATION_CASE}" = "scanner.status-readiness" ]; then
     printf 'RUSTFS_SCANNER_ENABLED=true\nRUSTFS_SCANNER_CYCLE=5\nRUSTFS_SCANNER_START_DELAY_SECS=0\n'
   elif [[ "${VALIDATION_CASE}" == ilm.* ]]; then
@@ -571,6 +575,8 @@ validation_evidence_items() {
       printf '%s\n' validation-fixture.json validation-list.json validation-baseline-usage.json validation-scanner.json validation-usage.json ;;
     scanner.status-readiness)
       printf '%s\n' validation-scanner-node1.json validation-scanner-node2.json validation-scanner-contract.json ;;
+    source-procedure.storage.stor-137)
+      printf '%s\n' quota-v1-ledger.json quota-v1-put-status.tsv ;;
   esac
 }
 
@@ -578,6 +584,7 @@ validation_write_result() {
   local verdict="$1" reason="$2" cleanup_status="$3" item
   local profile=single-4disk
   if [ "${VALIDATION_SOURCE_CASE_ID}" = STOR-136 ]; then profile=single-1disk; fi
+  if [ "${VALIDATION_SOURCE_CASE_ID}" = STOR-137 ]; then profile="multi-4x4"; fi
   if [ "${VALIDATION_CASE}" = scanner.status-readiness ] || [[ "${VALIDATION_CASE}" == ilm.* ]]; then
     profile=ilm-2x4
   fi
@@ -768,6 +775,113 @@ run_all_tests() {
   run_test STOR-134 "AdminUsageConverges"           test_stor134
   run_test STOR-135 "DeepKeyListingResilience"      test_stor135
   run_test STOR-136 "BoundedCompressedRangeGet"    test_stor136
+}
+
+quota_v1_put() {
+  local bucket="$1" key="$2" body="$3" sha="$4" output="$5"
+  curl --silent --show-error --noproxy '*' --max-time "${API_REQUEST_TIMEOUT}" \
+    --aws-sigv4 "aws:amz:${REGION}:s3" --user "${ACCESS_KEY}:${SECRET_KEY}" \
+    --header "x-amz-content-sha256: ${sha}" --upload-file "${body}" \
+    --dump-header "${output}.headers" --output "${output}.xml" --write-out '%{http_code}' \
+    "${ENDPOINT}/${bucket}/${key}" > "${output}.status"
+}
+
+quota_v1_seed() {
+  local bucket="$1" limit="$2" body="$3" sha="$4" output="$5" deadline
+  new_bucket "${bucket}" || return 1
+  API_ENDPOINT="${ENDPOINT}" admin_api PUT "/rustfs/admin/v3/quota/${bucket}" "" \
+    "{\"quota\":${limit},\"quota_type\":\"HARD\",\"reservation_protocol\":1}" >/dev/null || return 1
+  [ "$(admin_api_code)" = 200 ] || { echo "setting the v1 hard quota failed"; return 1; }
+  deadline=$((SECONDS + 90))
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    quota_v1_put "${bucket}" seed "${body}" "${sha}" "${output}" || return 1
+    case "$(cat "${output}.status")" in
+      200) return 0 ;;
+      503) grep -q '<Code>SlowDown</Code>' "${output}.xml" || return 1 ;;
+      *) echo "seeding the v1 ledger failed with HTTP $(cat "${output}.status")"; return 1 ;;
+    esac
+    sleep 1
+  done
+  echo "v1 ledger bootstrap did not finish within 90 seconds"
+  return 1
+}
+
+quota_v1_ledger_events() {
+  local request="$1" object="$2"
+  jq -Rsc --arg request "${request}" --arg object "${object}" '
+    {request_id:$request, acquisitions:[split("\n")[] | fromjson? | select(.request_id == $request and .object == $object
+      and .target == "rustfs_ecstore::object_lock_diag" and .state == "acquired")
+      | {op, acquire_ms}]}'
+}
+
+test_stor137() {
+  local fixture="${TEST_TMP}/quota-v1" bucket=stor137-load hard_bucket=stor137-hard
+  local i pid result status cause request small_sha payload_sha started deadline elapsed successes=0
+  local pids=() burst_failed=0 events="${TEST_TMP}/quota-v1-ledger.json"
+  mkdir -p "${fixture}" || return 1
+  printf x > "${fixture}/byte" || return 1
+  make_test_file "${fixture}/payload" $((32 * 1024 * 1024)) || return 1
+  small_sha="$(sha256sum "${fixture}/byte" | awk '{print $1}')" || return 1
+  payload_sha="$(sha256sum "${fixture}/payload" | awk '{print $1}')" || return 1
+  quota_v1_seed "${bucket}" 17179869184 "${fixture}/byte" "${small_sha}" "${fixture}/seed" || return 1
+
+  # Use one quiet request to make the lock count independent of orphan recovery
+  # and use the burst to measure contention separately.
+  started="$(printf 'date +%%s\n' | run_remote "${NODES[0]}")" || return 1
+  [[ "${started}" =~ ^[0-9]+$ ]] || return 1
+  quota_v1_put "${bucket}" lock-count "${fixture}/byte" "${small_sha}" "${fixture}/witness" || return 1
+  [ "$(cat "${fixture}/witness.status")" = 200 ] || return 1
+  request="$(awk 'tolower($1) == "x-amz-request-id:" {sub(/\r$/, "", $2); print $2}' "${fixture}/witness.headers")"
+  [ -n "${request}" ] || { echo "witness response is missing its request ID"; return 1; }
+  deadline=$((SECONDS + 30))
+  while :; do
+    printf 'sudo -n journalctl -u rustfs --since "@%s" --no-pager -o cat\n' "${started}" |
+      run_remote "${NODES[0]}" |
+      quota_v1_ledger_events "${request}" "config/quota-ledger/${bucket}.json" > "${events}" || return 1
+    if jq -e '.acquisitions | map(.op) | sort == ["quota_ledger_admission", "quota_ledger_mark_commit_started", "quota_ledger_settlement"]' \
+      "${events}" >/dev/null; then
+      break
+    fi
+    if [ "${SECONDS}" -ge "${deadline}" ]; then
+      echo "unexpected v1 ledger acquisitions for the witness request"
+      cat "${events}"
+      return 1
+    fi
+    sleep 1
+  done
+
+  started=${SECONDS}
+  for i in {1..64}; do
+    quota_v1_put "${bucket}" "object-${i}" "${fixture}/payload" "${payload_sha}" "${fixture}/put-${i}" &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "${pid}" || burst_failed=1; done
+  elapsed=$((SECONDS - started))
+  result="${TEST_TMP}/quota-v1-put-status.tsv"
+  printf 'key\tstatus\tcause\n' > "${result}"
+  for i in {1..64}; do
+    status="$(cat "${fixture}/put-${i}.status")"
+    cause="$(awk 'tolower($1) == "x-rustfs-error-cause:" {sub(/\r$/, "", $2); print $2}' "${fixture}/put-${i}.headers")"
+    printf 'object-%s\t%s\t%s\n' "${i}" "${status}" "${cause}" >> "${result}"
+    case "${status}" in
+      200) successes=$((successes + 1)) ;;
+      503) ;;
+      *) burst_failed=1 ;;
+    esac
+  done
+  printf '64 concurrent PUTs in %ss, HTTP 200=%s, HTTP 503=%s\n' "${elapsed}" "${successes}" \
+    "$(awk -F '\t' '$2 == 503 {n++} END {print n+0}' "${result}")"
+  [ "${burst_failed}" -eq 0 ] && [ "${successes}" -gt 0 ] || return 1
+
+  quota_v1_seed "${hard_bucket}" 1 "${fixture}/byte" "${small_sha}" "${fixture}/hard-seed" || return 1
+  quota_v1_put "${hard_bucket}" denied "${fixture}/byte" "${small_sha}" "${fixture}/denied" || return 1
+  if [ "$(cat "${fixture}/denied.status")" != 400 ] ||
+    ! grep -Fq 'Bucket quota exceeded. Current usage: 1 bytes, limit: 1 bytes' "${fixture}/denied.xml"; then
+    echo "hard quota did not reject a one-byte write above the cap"
+    return 1
+  fi
+  aws_run s3api list-objects-v2 --bucket "${hard_bucket}"
+  assert_aws_ok && jq -e '.KeyCount == 1 and .Contents[0].Key == "seed" and .Contents[0].Size == 1' <<<"${AWS_OUT}"
 }
 
 test_stor134() { # admin usage APIs must respond promptly and converge to actual object counts (#1858 #2232 #5116)
@@ -1571,6 +1685,9 @@ main() {
       fi
     elif [ "${VALIDATION_SOURCE_CASE_ID}" = STOR-136 ]; then
       SELECTED_TOPOLOGIES=("${TOPO_SINGLE_SINGLE}")
+    elif [ "${VALIDATION_SOURCE_CASE_ID}" = STOR-137 ]; then
+      SELECTED_TOPOLOGIES=("${TOPO_MULTI_MULTI}")
+      [ "${#NODES[@]}" -eq 4 ] || die "STOR-137 requires four test nodes"
     else
       SELECTED_TOPOLOGIES=("${TOPO_SINGLE_MULTI}")
     fi
@@ -1619,7 +1736,9 @@ main() {
       [[ "${VALIDATION_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die "installed RustFS binary SHA-256 unavailable"
     fi
     PASS=0; FAIL=0; UNSUPPORTED=0; FAILED_TESTS=()
-    if [[ "${VALIDATION_CASE}" == source-procedure.storage.* ]]; then
+    if [ "${VALIDATION_SOURCE_CASE_ID}" = STOR-137 ]; then
+      run_test STOR-137 "ConcurrentQuotaV1Put" test_stor137
+    elif [[ "${VALIDATION_CASE}" == source-procedure.storage.* ]]; then
       run_all_tests
     elif [ -n "${VALIDATION_CASE}" ]; then
       case "${VALIDATION_CASE}" in
