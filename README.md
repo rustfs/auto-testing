@@ -166,10 +166,7 @@ cases use single-disk
 deployment. The scanner case uses the storage suite's single-node four-disk
 deployment, waits for a post-upload successful scanner cycle, and requires a
 complete usage snapshot with exactly 20 objects and 20,690 logical bytes.
-The separate `scanner-usage-regressions` module adds USAGE-01 through USAGE-20
-without changing that strict smoke test or the 158 source catalog cases.
-Run it explicitly with `rustfs-scanner-usage-test.sh` against existing endpoints;
-see [the usage regression contracts and evidence requirements](docs/scanner-usage-validation.md).
+The `scanner-usage-regressions` module includes endpoint probes, native scanner tests and USAGE-22, which checks Helm checkpoint recovery in a disposable Kubernetes namespace. Select a case with `rustfs-scanner-usage-test.sh`. [Scanner usage cases and prerequisites](docs/scanner-usage-validation.md).
 Public observations cannot prove internal ACK ordering or cross-cycle races,
 so missing candidate-native hooks remain BLOCKED or UNSUPPORTED.
 The endpoint-only usage runner records operator-supplied candidate and binary

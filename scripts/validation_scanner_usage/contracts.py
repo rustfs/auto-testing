@@ -107,6 +107,8 @@ CASES = (
     Case(21, "retired-local-drive", "Recover a local drive retired before the first object", None, (
         ("native", "After the local wrapper retires before the first object, the scanner retries once on the current wrapper with the same format identity and persists a complete cache with exact object and byte totals."),
         ("native", "Distributed erasure startup keeps the registered local drive's scan token active and retires only a distinct input wrapper that it replaces."))),
+    Case(22, "helm-checkpoint-restore", "Publish usage after a large checkpoint restore with a read-only root", None, (
+        ("helm", "The chart's non-root container restores a paged checkpoint larger than 1 MiB and publishes a fresh snapshot matching the fixture's one object and 16 logical bytes."),)),
 )
 
 
@@ -131,7 +133,7 @@ def catalog_module() -> dict:
             "target_environments": ["configured-endpoint", "native-test"],
             "required_capabilities": ["explicit-endpoint", "candidate-provenance"],
             "cases": [{"id": case.id, "source_status": "procedure-ready", "priority": "P1",
-                       "channels": ["admin-api", "s3-api", "native-test"],
+                       "channels": ["admin-api", "kubernetes"] if case.number == 22 else ["admin-api", "s3-api", "native-test"],
                        "assertions": [text for _, text in case.assertions],
                        "probes": {"designCode": case.design_id,
                                   "procedure": "docs/scanner-usage-validation.md",

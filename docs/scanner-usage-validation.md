@@ -1,10 +1,8 @@
 # Scanner usage regression suite
 
-This suite registers the twenty USAGE acceptance contracts from backlog issue #3178 and the local-drive retirement regression from rustfs/rustfs#9469. It implements public probes and a strict adapter for candidate-native tests. Registration alone is not test implementation or acceptance: each native assertion needs an executable, reviewed candidate binding before the complete case is available.
-It runs against **explicitly configured endpoints**. It never installs RustFS,
-changes scanner settings, restarts a node, acquires a VM deployment lock, or
-deletes system metadata. It creates random `usage-<run-id>-*` buckets and deletes
-only buckets that this invocation successfully created. `owned-buckets.json`
+This suite registers the twenty USAGE acceptance contracts from backlog issue #3178, the local-drive retirement regression from rustfs/rustfs#9469 and the Helm checkpoint restore regression from rustfs/rustfs#9672. Native assertions require an executable candidate binding. USAGE-22 runs in its own Kubernetes namespace.
+
+The public S3 probes run against **explicitly configured endpoints**. They leave the deployment, scanner settings, nodes, VM locks and system metadata alone. They create random `usage-<run-id>-*` buckets and delete only buckets that this invocation successfully created. `owned-buckets.json`
 retains the exact names and create intents if cleanup fails. A separate
 `acknowledged-requests.jsonl` appends each acknowledged PUT and DELETE without
 rewriting previous requests. An unacknowledged create remains in `unconfirmed_creates` and forces
@@ -91,6 +89,22 @@ duration and error. That duration includes AWS CLI startup. It is **not** a
 saturation benchmark or a matched A/B throughput claim; its comparison/native
 assertion remains blocked without the corresponding evidence.
 
+## Helm checkpoint restore (USAGE-22)
+
+Run this case with Helm, kubectl, `rc`, a packaged RustFS chart and an explicitly selected disposable Kubernetes context. The chart's image must match the candidate manifest. The runner checks the SHA-256 of the running binary.
+
+```bash
+bash rustfs-scanner-usage-test.sh \
+  --cases USAGE-22 --helm-chart ./rustfs-1.0.7.tgz --kube-context kind-usage \
+  --candidate-manifest ./candidate.json --artifacts-dir ./usage-22-results
+```
+
+For the four-argument canonical runner, select `scanner.usage-22-helm-checkpoint-restore` and export `RUSTFS_USAGE_HELM_CHART` and `RUSTFS_USAGE_KUBE_CONTEXT`.
+
+The case starts the standalone chart's pod spec in a new namespace. An init container seeds its data volume with a 2,085,052-byte paged checkpoint and one 16-byte object. The checkpoint describes 4,096 old entries and the disk has no published usage snapshot. The RustFS process runs as non-root with a read-only root and the chart's own temporary mounts. The case passes when the Admin API publishes a complete, converged snapshot with exactly one object and 16 bytes at both bucket and cluster level. The runner deletes the test namespace on exit.
+
+The [seed archive](../testdata/scanner-usage/paged-checkpoint-1.0.7.tgz) was written by RustFS 1.0.7. To rebuild it, append the [fixture generator](../testdata/scanner-usage/generate_checkpoint.rs) to `crates/scanner/src/scanner/tests/paged_checkpoint.rs` in a scratch checkout of that tag. Set `USAGE_22_OUTPUT` to a new directory and run `cargo test --locked -p rustfs-scanner --lib -- scanner::tests::paged_checkpoint::seed_helm_checkpoint_restore --exact --nocapture`. From `$USAGE_22_OUTPUT/pool0/disk0`, archive only `.rustfs.sys/format.json`, `.rustfs.sys/pool.bin`, `.rustfs.sys/pool.bin.identity`, `.rustfs.sys/buckets/bucket` and `bucket/item`. Each new fixture has its own disk and bucket identities. When replacing the archive, update its SHA-256 in `scripts/validation_scanner_usage/helm_checkpoint.py` and rerun both charts.
+
 ## Native capability adapter
 
 Public APIs cannot prove a scanned frontier, a budget-stop reason, an epoch
@@ -169,7 +183,7 @@ covers only A01; A02 through A08 still need their own reviewed tests and markers
 
 ## Acceptance mapping
 
-The public-probe column identifies executable probes in this repository. The additional-evidence column states the remaining contract, not a claim that a native test already implements it. USAGE-01 and USAGE-20 have complete public probes; every other case requires candidate-native implementation and bindings for all of its native assertions. A missing binding is an implementation/integration gap even when the report correctly records BLOCKED or UNSUPPORTED.
+The public-probe column identifies executable probes in this repository. USAGE-01 and USAGE-20 have complete endpoint probes. USAGE-22 uses a disposable Kubernetes context. The other cases need candidate-native bindings for their native assertions. A missing binding leaves the case BLOCKED or UNSUPPORTED.
 
 | Design case | Public probe | Additional native or controlled-fleet evidence |
 | --- | --- | --- |
@@ -194,6 +208,7 @@ The public-probe column identifies executable probes in this repository. The add
 | USAGE-19 | None | Quota v1/v2 and legacy fallback decisions |
 | USAGE-20 | Object/prefix collision, versions, markers and payloads | Marker-only keys remain an explicit follow-up fixture |
 | USAGE-21 | None | Local wrapper identity at distributed startup, recovery after retirement and exact durable totals |
+| USAGE-22 | Read the first converged usage after a large checkpoint restore | Standalone Helm pod, read-only root and a seeded data volume |
 
 Bind `USAGE-21-A01` to `scanner_io::tests::local_drive_recovery::issue_9469_recovers_retired_wrapper_before_first_object` in the candidate's `rustfs-scanner` test binary. The test replaces the retired wrapper with one that has the same persisted format identity. It requires two total attempts, reloads a completed bucket cache with three objects and 21 logical bytes, and emits the cleanup milestone after removing its temporary data.
 

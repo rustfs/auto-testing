@@ -4794,6 +4794,31 @@
             ],
             "case_ids": []
           }
+        },
+        {
+          "id": "scanner.usage-22-helm-checkpoint-restore",
+          "source_status": "procedure-ready",
+          "priority": "P1",
+          "channels": [
+            "admin-api",
+            "kubernetes"
+          ],
+          "assertions": [
+            "The chart's non-root container restores a paged checkpoint larger than 1 MiB and publishes a fresh snapshot matching the fixture's one object and 16 logical bytes."
+          ],
+          "probes": {
+            "designCode": "USAGE-22",
+            "procedure": "docs/scanner-usage-validation.md",
+            "executionMode": "configured-endpoint",
+            "runner": "scripts/validation_scanner_usage/run_case.sh",
+            "publicScenario": null
+          },
+          "reuse_candidates": {
+            "suites": [
+              "rustfs-scanner-usage-test.sh"
+            ],
+            "case_ids": []
+          }
         }
       ]
     },

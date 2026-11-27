@@ -13,6 +13,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -27,6 +28,7 @@ from scripts.select_validation_cases import select_validation_cases, sweepable_c
 from scripts.validation_scanner_usage.client import Client, Evidence, ProbeError, bucket_view, endpoint_url, run_command, sha256
 from scripts.validation_scanner_usage.contracts import CASES, assertion_id, catalog_module, select_cases
 from scripts.validation_scanner_usage.cycle import CycleTracker
+from scripts.validation_scanner_usage.helm_checkpoint import FIXTURE, FIXTURE_SHA256, check_snapshot
 from scripts.validation_scanner_usage.native import run_native
 from scripts.validation_scanner_usage.runner import execute_case, Fixture, main, render_report
 
@@ -52,7 +54,7 @@ def options(**changes):
     value = dict(endpoints=["http://example.invalid:9000"], admin_endpoints=[],
                  execution="combined", aws_bin="aws", region="us-east-1", request_timeout=1,
                  convergence_timeout=0.002, native_timeout=2, poll_interval=0.001,
-                 objects=3, freshness_samples=2, load_seconds=0)
+                 objects=3, freshness_samples=2, load_seconds=0, helm_chart=None, kube_context=None)
     value.update(changes)
     return SimpleNamespace(**value)
 
@@ -864,6 +866,33 @@ class NativeTests(unittest.TestCase):
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_helm_checkpoint_seed_has_no_published_usage_snapshot(self):
+        self.assertEqual(sha256(FIXTURE), FIXTURE_SHA256)
+        with tarfile.open(FIXTURE) as archive:
+            files = {member.name for member in archive if member.isfile()}
+        self.assertIn("bucket/item/xl.meta", files)
+        self.assertIn(".rustfs.sys/buckets/bucket/.usage-cache.bin/xl.meta", files)
+        self.assertTrue(any(name.startswith(".rustfs.sys/buckets/bucket/.usage-cache.bin.pages/") for name in files))
+        system = {".rustfs.sys/format.json", ".rustfs.sys/pool.bin/xl.meta", ".rustfs.sys/pool.bin.identity/xl.meta"}
+        self.assertEqual({name for name in files if not name.startswith(("bucket/item/", ".rustfs.sys/buckets/bucket/"))}, system)
+
+    def test_helm_checkpoint_requires_explicit_cluster_and_chart(self):
+        case, = select_cases("USAGE-22")
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.validation_scanner_usage.helm_checkpoint.command") as command:
+            result = execute_case(case, directory, options(), PROVENANCE)
+        command.assert_not_called()
+        self.assertEqual((result["verdict"], result["hit_count"]), ("BLOCKED", 0))
+
+    def test_helm_checkpoint_requires_converged_bucket_and_cluster_totals(self):
+        sample = {"last_update": {"secs_since_epoch": 1, "nanos_since_epoch": 0}, "scanner_cycle": 1,
+                  "usage_snapshot_complete": True, "usage_snapshot_converged": True,
+                  "buckets_usage": {"bucket": {"objects_count": 1, "size": 16}}, "objects_total_count": 1, "objects_total_size": 16}
+        self.assertTrue(check_snapshot(sample))
+        for change in ({"last_update": None}, {"scanner_cycle": None}, {"usage_snapshot_pending_buckets": ["bucket"]},
+                       {"objects_total_size": 15}, {"buckets_usage": {"bucket": {"objects_count": 4096, "size": 8390656}}}):
+            with self.subTest(change=change):
+                self.assertFalse(check_snapshot({**sample, **change}))
+
     def test_cli_rejects_endpoint_secrets_before_artifacts_in_every_mode(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
             artifacts = Path(directory) / "must-not-exist"
@@ -896,18 +925,18 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(config["endpoints"], ["http://host:9000"])
             self.assertEqual(config["admin_endpoints"], ["http://host:9001"])
 
-    def test_twenty_native_rows_without_capabilities_remain_blocked(self):
+    def test_all_rows_without_capabilities_remain_blocked_in_native_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("scripts.validation_scanner_usage.runner.Client", side_effect=AssertionError("no endpoint access")) as client:
                 results = [execute_case(case, directory, options(execution="native", endpoints=[]), PROVENANCE, client_factory=client)
                            for case in select_cases("all")]
                 client.assert_not_called()
-            self.assertEqual(len(results), 21)
+            self.assertEqual(len(results), 22)
             self.assertTrue(all(result["verdict"] == "BLOCKED" for result in results))
             self.assertTrue(all(result["profile"] == "native-test" and result["hit_count"] == 0 for result in results))
             self.assertTrue(all(result["cleanup_status"] == "PASS" for result in results))
             self.assertTrue(all(assertion["status"] == "BLOCKED" for result in results for assertion in result["assertions"]))
-            self.assertEqual(len(list((Path(directory) / "cases").glob("*.json"))), 21)
+            self.assertEqual(len(list((Path(directory) / "cases").glob("*.json"))), 22)
 
     def test_usage_rows_are_registered_without_rewriting_source_counts(self):
         catalog = json.loads((ROOT / "validation-cases.json").read_text())
@@ -925,7 +954,7 @@ class RegistrationTests(unittest.TestCase):
             [case["id"] for module in catalog_modules(catalog) for case in module["cases"]],
             source_and_local_ids,
         )
-        self.assertEqual(len(select_cases("all")), 21)
+        self.assertEqual(len(select_cases("all")), 22)
         self.assertEqual([case.number for case in select_cases("blackbox")], [1, 20])
         self.assertNotIn(CASES[0].id, [case for case, _ in sweepable_cases(catalog)])
         self.assertEqual(select_validation_cases(catalog, case=CASES[0].id), [(CASES[0].id, "scanner-usage-regressions")])
@@ -948,7 +977,7 @@ class RegistrationTests(unittest.TestCase):
                                   "--cases", "all", "--artifacts-dir", str(destination),
                                   "--candidate-manifest", str(Path(directory) / "not-a-manifest")], 10)
             self.assertEqual(result["exit_code"], 0, result)
-            self.assertEqual(len(json.loads(result["stdout"])["cases"]), 21)
+            self.assertEqual(len(json.loads(result["stdout"])["cases"]), 22)
             self.assertFalse(destination.exists())
 
 
