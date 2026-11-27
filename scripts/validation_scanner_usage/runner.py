@@ -19,6 +19,7 @@ from uuid import UUID
 from .client import Client, Evidence, ProbeError, bucket_view, endpoint_url, integer, run_command, sha256, utc_now
 from .contracts import CASES, assertion_id, select_cases
 from .cycle import CycleTracker
+from . import helm_checkpoint
 from .native import run_native
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -412,7 +413,19 @@ def execute_case(case, directory, options, provenance, native_manifest=None, cli
               "verdict": "RUNNING", "started_at": utc_now(), "cleanup_status": "PENDING",
               "provenance": provenance, "assertions": [], "capabilities": {}, "hit_count": 0}
     records, errors = {}, []
+    helm_cleanup = {}
     try:
+        if case.assertions[0][0] == "helm":
+            identifier = assertion_id(case, 0)
+            try:
+                path = helm_checkpoint.run(options, provenance, evidence, helm_cleanup)
+            except (OSError, ValueError, KeyError, ProbeError) as exc:
+                failure = exc if isinstance(exc, ProbeError) else ProbeError(str(exc))
+                path = evidence.save("helm-checkpoint-error", {"reason": str(failure)})
+                records[identifier] = {"status": failure.verdict, "reason": str(failure), "evidence": [path]}
+                raise failure
+            records[identifier] = {"status": "PASS", "evidence": [path]}
+            result["provenance"] = {**provenance, "binary_identity_source": "SHA-256 verified inside the RustFS pod"}
         if case.scenario and options.execution != "native":
             require(options.endpoints, "Explicit --endpoint is required for public probes", "BLOCKED")
             client = client_factory(options.endpoints, options.admin_endpoints, evidence,
@@ -467,13 +480,16 @@ def execute_case(case, directory, options, provenance, native_manifest=None, cli
     finally:
         if fixture:
             cleanup, cleanup_path = fixture.cleanup()
+        elif helm_cleanup:
+            cleanup = helm_cleanup["status"]
+            cleanup_path = evidence.save("namespace-cleanup", helm_cleanup)
         else:
             cleanup = "PASS"
             cleanup_path = evidence.save("cleanup", {"status": "PASS", "owned_buckets": [], "reason": "no public fixture created"})
         result["cleanup_status"] = cleanup
         if any(error.cleanup_status == "FAIL" for error in errors):
             result["cleanup_status"] = "FAIL"
-        if cleanup != "PASS":
+        if fixture and cleanup != "PASS":
             errors.append(ProbeError("Fixture cleanup failed; retain owned-buckets.json for scoped recovery"))
         for index, (_, text) in enumerate(case.assertions):
             identifier = assertion_id(case, index)
@@ -525,6 +541,8 @@ def main(argv=None):
     parser.add_argument("--validation-case", help="one canonical validation ID")
     parser.add_argument("--endpoint", action="append", default=[])
     parser.add_argument("--admin-endpoint", action="append", default=[])
+    parser.add_argument("--helm-chart", type=Path, default=os.environ.get("RUSTFS_USAGE_HELM_CHART"), help="Packaged RustFS chart for USAGE-22")
+    parser.add_argument("--kube-context", default=os.environ.get("RUSTFS_USAGE_KUBE_CONTEXT"), help="Disposable Kubernetes context for USAGE-22")
     parser.add_argument("--artifacts-dir", "--validation-artifacts-dir", dest="artifacts", type=Path, required=True)
     parser.add_argument("--candidate-manifest", type=Path, required=True)
     parser.add_argument("--testing-commit")
@@ -553,7 +571,8 @@ def main(argv=None):
                                            args.poll_interval, args.freshness_samples)), "Timeouts and sample counts must be positive", "INFRA_ERROR")
         require(2 <= args.objects <= 100000 and math.isfinite(args.load_seconds) and args.load_seconds >= 0, "Fixture counts or load duration are outside the supported bounds", "INFRA_ERROR")
         if args.dry_run:
-            print(json.dumps({"cases": [case.id for case in selected], "mutations": "suite-owned buckets only",
+            mutations = "suite-owned buckets and an isolated USAGE-22 namespace" if any(case.number == 22 for case in selected) else "suite-owned buckets only"
+            print(json.dumps({"cases": [case.id for case in selected], "mutations": mutations,
                               "node_actions": [], "native_capability_required": [case.id for case in selected
                                if any(kind == "native" for kind, _ in case.assertions)]}, indent=2))
             return 0
@@ -571,7 +590,7 @@ def main(argv=None):
         provenance = {"candidate_url": candidate["package_url"], "candidate_sha256": candidate["package_sha256"],
                       "binary_sha256": candidate["binary_sha256"], "source_commit": candidate["source_sha"],
                       "testing_commit": actual_commit, "rc_path": str(Path(rc_path).resolve()), "rc_sha256": sha256(rc_path),
-                      "binary_identity_source": "operator-supplied candidate manifest; suite does not deploy or inspect host binaries"}
+                      "binary_identity_source": "operator-supplied candidate manifest"}
         native = json.loads(args.native_manifest.read_text()) if args.native_manifest else None
         args.artifacts.mkdir(parents=True)
         (args.artifacts / "run-configuration.json").write_text(json.dumps({

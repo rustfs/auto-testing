@@ -79,6 +79,7 @@ on:
       - test_validation_scanner_usage.py
       - rustfs-scanner-usage-test.sh
       - scripts/validation_scanner_usage/**
+      - testdata/scanner-usage/**
       - docs/scanner-usage-validation.md
       - .github/workflows/validation-catalog-tests.yml
   push:
@@ -160,6 +161,7 @@ on:
       - test_validation_scanner_usage.py
       - rustfs-scanner-usage-test.sh
       - scripts/validation_scanner_usage/**
+      - testdata/scanner-usage/**
       - docs/scanner-usage-validation.md
       - .github/workflows/validation-catalog-tests.yml
 
