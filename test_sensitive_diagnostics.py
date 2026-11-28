@@ -19,7 +19,7 @@ class SensitiveDiagnosticsTests(unittest.TestCase):
     def setUp(self):
         self.functions = {}
         for name, script in (("test_kms106", "rustfs-kms-test.sh"), ("verify_config_persisted", "rustfs-upgrade-test.sh"),
-                             ("assert_aws_fails", "rustfs-security-test.sh")):
+                             ("aws_error_code", "rustfs-security-test.sh"), ("assert_aws_denied", "rustfs-security-test.sh")):
             source = (ROOT / script).read_text()
             function = re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", source)
             self.assertIsNotNone(function, f"the real {name} function must be tested")
@@ -30,7 +30,7 @@ class SensitiveDiagnosticsTests(unittest.TestCase):
         self.valid = {"backend": "VaultKV2", "cache_enabled": True}
 
     def run_case(self, body, http, expected, context, function="test_kms106", secret=CANARY):
-        command = self.functions[function] + '''
+        command = (self.functions["aws_error_code"] + "\n" if function == "assert_aws_denied" else "") + self.functions[function] + '''
 admin_api() { printf '%s' "$TEST_RESPONSE"; }
 admin_api_code() { printf '%s' "$TEST_HTTP"; }
 ssh() { printf '%s' "$TEST_RESPONSE"; }
@@ -43,7 +43,7 @@ SSH_OPTS=(-o BatchMode=yes)
 AWS_CODE="$TEST_HTTP"
 AWS_OUT="$TEST_RESPONSE"
 exec > >(tee "$TEST_LOG") 2>&1
-''' + function + " 'expired/garbage web identity token'\n"
+''' + function + " 'expired/garbage web identity token' AccessDenied\n"
         result = subprocess.run(["bash", "--noprofile", "--norc", "-uo", "pipefail", "-c", command],
                                 env={**os.environ, "TEST_RESPONSE": json.dumps(body) if isinstance(body, dict) else body, "TEST_HTTP": str(http),
                                      "TEST_SECRET": secret, "TEST_LOG": str(self.public_log)}, text=True, capture_output=True, timeout=10)
@@ -74,8 +74,12 @@ exec > >(tee "$TEST_LOG") 2>&1
 
     def test_unexpected_sts_success_does_not_print_credentials(self):
         credentials = {"Credentials": {"AccessKeyId": "fixture", "SecretAccessKey": CANARY, "SessionToken": CANARY}}
-        self.run_case(credentials, 0, 1, "aws unexpectedly succeeded (exit 0): expired/garbage web identity token", "assert_aws_fails")
-        self.run_case(credentials, 42, 0, "", "assert_aws_fails")
+        context = "expired/garbage web identity token"
+        self.run_case(credentials, 0, 1, context, "assert_aws_denied")
+        self.run_case(credentials, 42, 1, context, "assert_aws_denied")
+        for code, expected_status in (("AccessDenied", 0), ("ServiceUnavailable", 1)):
+            body = f"An error occurred ({code}) when calling the AssumeRoleWithWebIdentity operation: {CANARY}"
+            self.run_case(body, 254, expected_status, "" if expected_status == 0 else context, "assert_aws_denied")
 
     def test_valid_sanitized_response_still_passes(self):
         self.run_case(self.valid, 200, 0, "")
