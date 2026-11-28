@@ -387,7 +387,7 @@ env_setup_main_cluster() {
 
 env_setup_site2() {
   local node="${NODES[0]}"
-  log "environment setup: second site ${SITE2_SERVICE} on ${node} (${SITE2_ENDPOINT})"
+  log "environment setup: second deployment ${SITE2_SERVICE} shares host ${node} (${SITE2_ENDPOINT})"
   ensure_volume_dirs "${node}" "${SITE2_VOLUMES}"
   write_remote_config "${node}" "${SITE2_CONFIG_FILE}" "$(site2_config_body)"
   write_site2_unit "${node}"
@@ -631,18 +631,34 @@ results_summary() {
   fi
 }
 
-# aws_wait_ep <endpoint> <desc> <aws args...> — poll until the aws call succeeds.
+# aws_wait_ep <endpoint> <description> [--expect-true] <aws args...>
 aws_wait_ep() {
   local ep="$1" desc="$2"; shift 2
-  local waited=0
-  while [ "${waited}" -lt "${CONVERGE_TIMEOUT}" ]; do
-    if aws --endpoint-url "${ep}" --region "${REGION}" "$@" >/dev/null 2>&1; then
-      return 0
+  local expect_true=0 output="" deadline=$((SECONDS + CONVERGE_TIMEOUT)) remaining
+  if [ "${1:-}" = "--expect-true" ]; then
+    expect_true=1
+    shift
+  fi
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    remaining=$((deadline - SECONDS))
+    if output="$(AWS_MAX_ATTEMPTS=1 timeout "${remaining}s" aws --endpoint-url "${ep}" --region "${REGION}" "$@" 2>&1)"; then
+      if [ "${expect_true}" -eq 0 ] || [ "${output}" = "True" ] || [ "${output}" = "true" ]; then
+        return 0
+      fi
     fi
-    sleep "${CONVERGE_INTERVAL}"; waited=$((waited+CONVERGE_INTERVAL))
+    remaining=$((deadline - SECONDS))
+    [ "${remaining}" -gt 0 ] || break
+    sleep "$((remaining < CONVERGE_INTERVAL ? remaining : CONVERGE_INTERVAL))"
   done
-  echo "timeout (${CONVERGE_TIMEOUT}s) waiting for: ${desc}"
+  echo "timeout (${CONVERGE_TIMEOUT}s) waiting for: ${desc}; last response: ${output:-none}"
   return 1
+}
+
+wait_for_delete_marker() {
+  local ep="$1" desc="$2" bucket="$3" key="$4" query
+  printf -v query 'length((DeleteMarkers || `[]`)[?Key == `%s` && IsLatest == `true`]) == `1`' "$(jq -cn --arg key "${key}" '$key')"
+  aws_wait_ep "${ep}" "${desc}" --expect-true \
+    s3api list-object-versions --bucket "${bucket}" --prefix "${key}" --query "${query}" --output text
 }
 
 # ==================== Bucket/object helpers ====================
@@ -880,9 +896,7 @@ test_rep105() {
   aws_run s3api delete-object --bucket "rep105-src" --key m.txt
   assert_aws_ok "delete-object m.txt" \
     || { rm_bucket_force main rep105-src; rm_bucket_force site2 rep105-dst; return 1; }
-  aws_wait_ep "${SITE2_ENDPOINT}" "delete marker replicated" \
-    s3api list-object-versions --bucket rep105-dst --prefix m.txt --output json \
-      --query 'length(DeleteMarkers || `[]`) > `0`' --output text \
+  wait_for_delete_marker "${SITE2_ENDPOINT}" "delete marker replicated" rep105-dst m.txt \
     || { rm_bucket_force main rep105-src; rm_bucket_force site2 rep105-dst; return 1; }
   rm_bucket_force main rep105-src
   rm_bucket_force site2 rep105-dst
@@ -989,9 +1003,7 @@ test_rep110() {
     || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
   # Wait for the delete marker to arrive, then assert the end state: HEAD
   # must 404 and the listing must be empty.
-  aws_wait_ep "${SITE2_ENDPOINT}" "delete marker on target" \
-    s3api list-object-versions --bucket rep110-dst --prefix gone.txt \
-      --query 'length(DeleteMarkers || `[]`) > `0`' --output text \
+  wait_for_delete_marker "${SITE2_ENDPOINT}" "delete marker on target" rep110-dst gone.txt \
     || { rm_bucket_force main rep110-src; rm_bucket_force site2 rep110-dst; return 1; }
   local deadline=$(( $(date +%s) + 120 )) gone=0
   while [ "$(date +%s)" -lt "${deadline}" ]; do
@@ -1072,6 +1084,7 @@ run_all_site_tests() {
 
 test_site101() {
   local body
+  [ "${API_ENDPOINT%/}" != "${SITE2_ENDPOINT%/}" ] || { echo "site replication requires different endpoints"; return 1; }
   # The add request must reach a node directly (not the LB): the server
   # derives the local site's endpoint from the request Host header, and with
   # the LB host it no longer matches the payload's site1 endpoint — the local
@@ -1085,20 +1098,19 @@ test_site101() {
     || { echo "site add not successful: ${body}"; return 1; }
   body="$(admin_api GET "/rustfs/admin/v3/site-replication/info")"
   [ "$(signed_code)" = "200" ] || { echo "site-replication/info HTTP $(signed_code): ${body}"; return 1; }
-  printf '%s' "${body}" | jq -e '.enabled == true and (.sites | length == 2)' >/dev/null 2>&1 \
-    || { echo "site info does not show 2 enabled sites: ${body}"; return 1; }
+  printf '%s' "${body}" | jq -e '.enabled == true and ([.sites[].deploymentID | strings | select(length > 0)] | length == 2 and (unique | length == 2))' >/dev/null 2>&1 \
+    || { echo "site info does not show 2 distinct enabled deployments: ${body}"; return 1; }
   # The peer entry must be visible from site2 as well.
   body="$(site2_admin_api GET "/rustfs/admin/v3/site-replication/info")"
   [ "$(signed_code)" = "200" ] || { echo "site2 info HTTP $(signed_code): ${body}"; return 1; }
-  printf '%s' "${body}" | jq -e '.enabled == true and (.sites | length == 2)' >/dev/null 2>&1 \
-    || { echo "site2 does not show 2 enabled sites: ${body}"; return 1; }
+  printf '%s' "${body}" | jq -e '.enabled == true and ([.sites[].deploymentID | strings | select(length > 0)] | length == 2 and (unique | length == 2))' >/dev/null 2>&1 \
+    || { echo "site2 does not show 2 distinct enabled deployments: ${body}"; return 1; }
 }
 
 # admin_wait_user <admin_api_fn> <desc> <access_key> — poll the admin
 # list-users endpoint until the user is present. RustFS does not serve the
 # AWS IAM query protocol (`aws iam ...` fails with "unknown service 'iam' in
-# credential scope"), and `aws_wait_ep` only inspects the exit status, so the
-# previous `iam list-users --query` probe could never observe convergence.
+# credential scope"), so use the admin API to observe convergence.
 admin_wait_user() {
   local api_fn="$1" desc="$2" user="$3"
   local waited=0 body
@@ -1147,7 +1159,7 @@ test_site104() {
   local policy='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::site104-b1/*"]}]}'
   aws_run s3api put-bucket-policy --bucket site104-b1 --policy "${policy}"
   assert_aws_ok "put-bucket-policy" || { rm_bucket_force main site104-b1; return 1; }
-  aws_wait_ep "${SITE2_ENDPOINT}" "bucket policy on site2" \
+  aws_wait_ep "${SITE2_ENDPOINT}" "bucket policy on site2" --expect-true \
     s3api get-bucket-policy --bucket site104-b1 --query 'length(Policy) > `0`' --output text \
     || { rm_bucket_force main site104-b1; return 1; }
   rm_bucket_force main site104-b1
@@ -1184,11 +1196,11 @@ test_site105() {
   aws_run s3api delete-object --bucket site105-b1 --key gone.txt
   assert_aws_ok "delete-object gone.txt" || { rm_bucket_force main site105-b1; return 1; }
   aws_wait_ep "${SITE2_ENDPOINT}" "live object on site2" \
-    s3api head-object --bucket site105-b1 --key live.bin \
+    s3api get-object --bucket site105-b1 --key live.bin "${TEST_TMP}/site105-download" \
     || { rm_bucket_force main site105-b1; return 1; }
-  aws_wait_ep "${SITE2_ENDPOINT}" "delete marker on site2" \
-    s3api list-object-versions --bucket site105-b1 --prefix gone.txt --output json \
-      --query 'length(DeleteMarkers || `[]`) > `0`' --output text \
+  cmp "${TEST_TMP}/site105-live" "${TEST_TMP}/site105-download" \
+    || { rm_bucket_force main site105-b1; return 1; }
+  wait_for_delete_marker "${SITE2_ENDPOINT}" "delete marker on site2" site105-b1 gone.txt \
     || { rm_bucket_force main site105-b1; return 1; }
 
   body="$(admin_api PUT "/rustfs/admin/v3/site-replication/resync/op" "operation=start" "${peer}")"
@@ -1213,9 +1225,18 @@ test_site105() {
     body="$(admin_api PUT "/rustfs/admin/v3/site-replication/resync/op" "operation=status" "${peer}")"
     [ "$(signed_code)" = "200" ] || { echo "resync status HTTP $(signed_code): ${body}"; rm_bucket_force main site105-b1; return 1; }
   done
+  printf '%s' "${entry}" | jq -e '
+    (.status == "completed" or .status == "success") and
+    ((.failedObjects // 0) == 0) and (.errorDetail // "" | length == 0) and
+    (.replicatedObjects | type == "number" and . >= 2)
+  ' >/dev/null 2>&1 \
+    || { echo "resync of site105-b1 did not complete cleanly: ${entry}"; rm_bucket_force main site105-b1; return 1; }
+  aws_run_site2 s3api get-object --bucket site105-b1 --key live.bin "${TEST_TMP}/site105-after-resync"
+  assert_aws_ok "live object after resync" \
+    && cmp "${TEST_TMP}/site105-live" "${TEST_TMP}/site105-after-resync" \
+    && wait_for_delete_marker "${SITE2_ENDPOINT}" "delete marker after resync" site105-b1 gone.txt \
+    || { rm_bucket_force main site105-b1; return 1; }
   rm_bucket_force main site105-b1
-  printf '%s' "${entry}" | jq -e '(.status == "completed" or .status == "success") and ((.failedObjects // 0) == 0) and ((.replicatedObjects // 0) >= 2)' >/dev/null 2>&1 \
-    || { echo "resync of site105-b1 did not complete cleanly: ${entry}"; return 1; }
 }
 
 test_site106() {
@@ -1326,6 +1347,8 @@ main() {
   need_cmd aws "AWS CLI (S3 + admin channels)"
   need_cmd jq "JSON processor"
   need_cmd curl "HTTP client"
+  need_cmd cmp "byte comparison"
+  need_cmd timeout "bounded convergence requests"
   need_cmd openssl "OpenSSL (SigV4 signing)"
   confirm "This DESTROYS existing rustfs data/config on: ${NODES[*]}"
   log "nodes: ${NODES[*]}  package: $(resolve_package_url)  suites: ${SELECTED_SUITES[*]}"

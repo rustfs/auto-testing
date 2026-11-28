@@ -24,6 +24,7 @@ put_replication_rule() { :; }
 make_test_file() { :; }
 rm_bucket_force() { :; }
 aws_wait_ep() { [ "$1" = "$SITE2_ENDPOINT" ]; }
+wait_for_delete_marker() { [ "$1" = "$SITE2_ENDPOINT" ]; }
 assert_aws_ok() { [ "$AWS_CODE" -eq 0 ]; }
 aws_run() {
   case "$2" in
@@ -65,6 +66,27 @@ aws_run_site2() {
 
     def test_rejects_failed_listing_even_with_empty_json(self):
         self.assertNotEqual(self.run_case("list_error").returncode, 0)
+
+
+class ReplicationPollingTests(unittest.TestCase):
+    def test_exit_zero_with_false_response_cannot_satisfy_a_predicate(self):
+        source = (ROOT / "rustfs-replication-test.sh").read_text()
+        wait = source[source.index("aws_wait_ep() {"):source.index("\nwait_for_delete_marker() {")]
+        harness = r"""
+CONVERGE_TIMEOUT=2
+CONVERGE_INTERVAL=1
+REGION=us-east-1
+timeout() { shift; "$@"; }
+aws() { printf '%s\n' "$RESPONSE"; }
+"""
+        for response, expected in (("False", 1), ("false", 1), ("", 1), ("True", 0), ("true", 0)):
+            with self.subTest(response=response):
+                result = subprocess.run(
+                    ["bash", "-c", harness + wait +
+                     '\naws_wait_ep http://target:19000 "predicate" --expect-true s3api fake'],
+                    env={**os.environ, "RESPONSE": response}, capture_output=True, text=True, timeout=6,
+                )
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
 
 
 class JqBatchCompatibilityTests(unittest.TestCase):

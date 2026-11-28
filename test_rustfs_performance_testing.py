@@ -138,6 +138,35 @@ def client(*args, **kwargs): return Client()
                             for row in self.round_evidence()))
         self.assertNotIn("test-secret", "".join(path.read_text() for path in self.results.iterdir()))
 
+    def test_mixed_percentiles_and_an_explicit_budget_gate(self):
+        budget = self.root / "budget.json"
+        scope = dict(WARP_METHODS="mixed", WARP_SIZES="1KiB", WARP_BUDGET_FILE=str(budget))
+        for rate, latency, accepted in ((1280, 2.1, True), (1281, 2.1, False), (1280, 2.0, False)):
+            with self.subTest(rate=rate, latency=latency):
+                budget.write_text(json.dumps({"mixed/1KiB": {
+                    "min_obj_per_s": rate, "max_get_p99_ms": latency, "max_put_p99_ms": 2.1,
+                }}))
+                result, rows = self.run_benchmark(**scope)
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+                self.assertEqual((self.results / "performance-budget.json").read_text(), budget.read_text())
+                if accepted:
+                    self.assertEqual(rows[0]["mixed_get_p50"], "1.1ms")
+                    self.assertEqual(rows[0]["mixed_get_p99"], "2.1ms")
+                    self.assertEqual(rows[0]["mixed_put_p90"], "1.5ms")
+                    self.assertEqual(rows[0]["mixed_put_p99"], "2.1ms")
+                else:
+                    self.assertEqual(rows, [])
+                    self.assertEqual(self.round_evidence()[0]["reason"], "performance_budget_failed")
+
+    def test_missing_budget_for_selected_round_fails_before_warp(self):
+        budget = self.root / "missing-budget.json"
+        budget.write_text("{}")
+        result, rows = self.run_benchmark(WARP_METHODS="mixed", WARP_SIZES="1KiB", WARP_BUDGET_FILE=str(budget))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(rows, [])
+        self.assertIn("mixed/1KiB budget requires", result.stderr)
+
     def test_all_failed_rounds_return_failure_after_collecting_every_round(self):
         result, rows = self.run_benchmark("fail")
         self.assertNotEqual(result.returncode, 0)
@@ -452,6 +481,52 @@ def client(*args, **kwargs): return Client()
                 parsed = subprocess.run(command, cwd=self.root, env=self.env, capture_output=True, text=True)
                 self.assertNotEqual(parsed.returncode, 0)
                 self.assertIn("failed=1", (self.results / "summary.reparsed.md").read_text())
+
+
+class PerformanceCandidateTests(unittest.TestCase):
+    def test_budget_targets_must_bind_to_each_verified_node(self):
+        script = Path(__file__).with_name("rustfs_performance_test.sh").read_text()
+        verify = script[script.index("record_performance_candidate() {"):script.index("\nstep5_benchmark() {")]
+        harness = r"""
+set -Eeuo pipefail
+NODES=(first second)
+PACKAGES_DIR=/fixture
+PACKAGE_FILE=candidate.deb
+PACKAGE_SHA256=fixture
+getent() {
+  case "$2" in
+    assigned-one) echo '192.0.2.1 STREAM assigned-one' ;;
+    assigned-two) echo '192.0.2.2 STREAM assigned-two' ;;
+    wrong-target) echo '192.0.2.3 STREAM wrong-target' ;;
+  esac
+}
+run_remote() {
+  cat >/dev/null
+  case "$1" in
+    first) echo '192.0.2.1' ;;
+    second) echo '192.0.2.2' ;;
+  esac
+}
+verify_running_package_candidate() { printf '%s\tfixture\tfixture\t42\n' "$1"; }
+die() { echo "$*" >&2; exit 1; }
+record_performance_candidate "$RECEIPT"
+"""
+        for targets, accepted in (
+            ("assigned-one:9000,assigned-two:9000", True),
+            ("assigned-one:9000,wrong-target:9000", False),
+            ("assigned-one:9000,assigned-one:9000", False),
+            ("assigned-one:9001,assigned-two:9000", False),
+        ):
+            with self.subTest(targets=targets), tempfile.TemporaryDirectory() as directory:
+                receipt = Path(directory) / "candidate.tsv"
+                result = subprocess.run(
+                    ["bash", "-c", verify + "\n" + harness],
+                    env={**os.environ, "WARP_HOST": targets, "RECEIPT": str(receipt)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+                if accepted:
+                    self.assertIn("assigned-two:9000\t192.0.2.2\tsecond\t", receipt.read_text())
 
 
 class PerformanceEnvironmentTests(unittest.TestCase):

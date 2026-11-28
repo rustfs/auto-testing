@@ -125,15 +125,13 @@ jobs:
       - name: Run matrix sweep (topology x EC outage combinations)
         timeout-minutes: 350
         id: test
-        # No continue-on-error: an UNEXPECTED verdict (a probe that should
-        # fail by quorum math but passes, or vice versa) is the finding this
-        # sweep exists to surface, and the red run is the signal until matrix
-        # runs get backlog integration like the scenario suite has.
+        # Gate on every probe matching the quorum model, including known
+        # divergences. The report below still retains every verdict.
         env:
           MATRIX_EC: ${{ inputs.matrix_ec }}
         run: |
           set -euo pipefail
-          ARGS=(--matrix -y --package-url "${{ inputs.package_url || env.RUSTFS_NIGHTLY_PACKAGE_URL }}" --log-file "${LOG_FILE}" --results-file "${RESULTS_FILE}")
+          ARGS=(--matrix --strict -y --package-url "${{ inputs.package_url || env.RUSTFS_NIGHTLY_PACKAGE_URL }}" --log-file "${LOG_FILE}" --results-file "${RESULTS_FILE}")
           if [ -n "${{ inputs.matrix_topo }}" ]; then
             # Trailing value form: consumed as `--matrix-topo <topo> [ec]`.
             ARGS+=(--matrix-topo "${{ inputs.matrix_topo }}")

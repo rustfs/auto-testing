@@ -32,7 +32,6 @@ admin_api() {
 admin_api_code() { cat "$TEST_TMP/code"; }
 assert_admin_ok() { [ "$(admin_api_code)" = "$1" ]; }
 assert_aws_ok() { [ "$AWS_CODE" -eq 0 ]; }
-assert_aws_fails() { [ "$AWS_CODE" -ne 0 ]; }
 aws_run_as() {
   AWS_CALLS=$((AWS_CALLS + 1))
   echo "aws-${AWS_CALLS}" >> "$TEST_TMP/steps"
@@ -50,7 +49,8 @@ aws_run_as() {
 '''
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
-                ["bash", "-c", harness + shell_function("case_sts_105_revoke") +
+                ["bash", "-c", harness + "\n".join(shell_function(name) for name in
+                                     ("aws_error_code", "assert_aws_denied", "case_sts_105_revoke")) +
                  "\nif case_sts_105_revoke; then exit 0; else exit 1; fi"],
                 env={**os.environ, "TEST_TMP": directory, "SCENARIO": scenario, "TEST_RESPONSE": response,
                      "STS_DIAGNOSTICS_FILE": str(Path(directory) / "diagnostics")},
@@ -80,6 +80,65 @@ aws_run_as() {
     def test_successful_access_and_network_failures_do_not_pass(self):
         for scenario in ("still-valid", "network-error"):
             self.assertNotEqual(self.run_case(scenario)[0].returncode, 0)
+
+
+class ReadonlyPolicyTest(unittest.TestCase):
+    def test_preserves_failures_after_cleanup_and_requires_the_exact_denial(self):
+        harness = r"""
+set -Eeu -o pipefail
+admin_user_add() { :; }
+admin_user_remove() { echo user-cleanup >> "$TEST_TMP/steps"; }
+admin_policy_attach() { :; }
+admin_api_code() { echo 200; }
+new_bucket() { :; }
+rm_bucket() { echo bucket-cleanup >> "$TEST_TMP/steps"; }
+aws_run() {
+  AWS_CODE=0 AWS_OUT=""
+  case "$2" in
+    put-object) cp "${@: -1}" "$TEST_TMP/object" ;;
+    get-object)
+      cp "$TEST_TMP/object" "${@: -1}"
+      if [ "$SCENARIO" = wrong-bytes ]; then echo corrupt > "${@: -1}"; fi
+      ;;
+    delete-object) rm -f "$TEST_TMP/object" ;;
+    *) return 99 ;;
+  esac
+}
+aws_run_as() {
+  shift 3
+  AWS_CODE=0 AWS_OUT=""
+  case "$2" in
+    get-object)
+      if [ "$SCENARIO" = allowed-read-fails ]; then AWS_CODE=254; return; fi
+      cp "$TEST_TMP/object" "${@: -1}"
+      ;;
+    put-object)
+      case "$SCENARIO" in
+        unexpected-write) cp "${@: -1}" "$TEST_TMP/object" ;;
+        missing-fixture) AWS_CODE=255; AWS_OUT="Unable to read file AccessDenied" ;;
+        wrong-error) AWS_CODE=254; AWS_OUT="An error occurred (NoSuchBucket) when calling the PutObject operation: AccessDenied" ;;
+        *) AWS_CODE=254; AWS_OUT="An error occurred (AccessDenied) when calling the PutObject operation: denied" ;;
+      esac
+      ;;
+    *) return 99 ;;
+  esac
+  return 0
+}
+"""
+        helpers = "\n".join(shell_function(name) for name in (
+            "assert_admin_ok", "assert_aws_ok", "aws_error_code", "assert_aws_denied",
+            "case_iam_105_readonly_boundary",
+        ))
+        for scenario in ("expected", "unexpected-write", "allowed-read-fails", "missing-fixture",
+                         "wrong-error", "wrong-bytes"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                result = subprocess.run(
+                    ["bash", "-c", harness + helpers + "\nif case_iam_105_readonly_boundary; then exit 0; else exit 1; fi"],
+                    env={**os.environ, "TEST_TMP": directory, "SCENARIO": scenario},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, int(scenario != "expected"), result.stdout + result.stderr)
+                self.assertEqual((Path(directory) / "steps").read_text().splitlines(), ["bucket-cleanup", "user-cleanup"])
 
 
 class AdminResponseDiagnosticsTest(unittest.TestCase):

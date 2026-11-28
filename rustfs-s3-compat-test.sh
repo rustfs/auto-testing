@@ -666,7 +666,27 @@ raise SystemExit(subprocess.call(command))
 PY_SIGN
 }
 
-md5_of_file() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
+md5_of_file() {
+  python3 - "$1" <<'PY_MD5'
+import hashlib
+import sys
+
+digest = hashlib.md5()
+with open(sys.argv[1], "rb") as stream:
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(block)
+print(digest.hexdigest())
+PY_MD5
+}
+
+utc_after() {
+  python3 - "$1" "$2" <<'PY_DATE'
+from datetime import datetime, timedelta, timezone
+import sys
+
+print((datetime.now(timezone.utc) + timedelta(hours=int(sys.argv[1]))).strftime(sys.argv[2]))
+PY_DATE
+}
 
 new_bucket() {
   local b="$1"
@@ -730,7 +750,7 @@ test_s3c1401() { # COPY-directive CopyObject keeps source metadata, ignores requ
   aws_run s3api head-object --bucket "s3c1401-dst" --key f
   assert_aws_ok || return 1
   printf '%s' "${AWS_OUT}" | jq -e \
-    '.ContentType == "application/x-rustfs-src" and .Metadata.src == "1" and .Metadata.requestonly == null' >/dev/null \
+    '.ContentType == "application/x-rustfs-src" and .Metadata.src == "1" and (.Metadata | has("request-only") | not)' >/dev/null \
     || { echo "COPY did not preserve source metadata / drop request-only metadata: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c1401-src"; rm_bucket "s3c1401-dst"
 }
@@ -747,14 +767,14 @@ test_s3c1402() { # Content-Encoding: aws-chunked without decoded-content-length 
     || { echo "wrong stored size: ${AWS_OUT}"; return 1; }
   aws_run s3api get-object --bucket "s3c1402-b" --key f "${TEST_TMP}/s3c1402-dl"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/s3c1402-dl")" = "$(md5_of_file "${TEST_TMP}/s3c1402")" ] \
+  cmp -s "${TEST_TMP}/s3c1402-dl" "${TEST_TMP}/s3c1402" \
     || { echo "content mismatch"; return 1; }
   rm_bucket "s3c1402-b"
 }
 
 test_s3c1403() { # concurrent UploadPart must not fail while write quorum is met (regressions #6133 #6350)
   local bucket="s3c1403-b" parts=32 psize=5242880 up_id i rc=0
-  local pids expected_md5 actual_md5
+  local pids
   new_bucket "${bucket}" || return 1
   aws_run s3api create-multipart-upload --bucket "${bucket}" --key big
   assert_aws_ok || return 1
@@ -792,9 +812,11 @@ test_s3c1403() { # concurrent UploadPart must not fail while write quorum is met
     || { echo "wrong object size: ${AWS_OUT}"; return 1; }
   aws_run s3api get-object --bucket "${bucket}" --key big "${TEST_TMP}/s3c1403-dl"
   assert_aws_ok || return 1
-  expected_md5="$({ for ((i = 1; i <= parts; i++)); do cat "${TEST_TMP}/s3c1403-p${i}"; done; } | md5sum | awk '{print $1}')"
-  actual_md5="$(md5_of_file "${TEST_TMP}/s3c1403-dl")"
-  [ "${actual_md5}" = "${expected_md5}" ] || { echo "assembled content mismatch"; return 1; }
+  if ! { for ((i = 1; i <= parts; i++)); do cat "${TEST_TMP}/s3c1403-p${i}" || exit 1; done; } |
+    cmp -s - "${TEST_TMP}/s3c1403-dl"; then
+    echo "assembled content mismatch"
+    return 1
+  fi
   rm_bucket "${bucket}"
 }
 
@@ -1058,12 +1080,12 @@ run_all_tests() {
 # describe the same object rather than separate S3C-* fixtures.
 test_validation_s3_basic_object_round_trip() {
   local bucket="val-basic-${RANDOM}-$$" key="object" source="${TEST_TMP}/validation-basic-source"
-  local downloaded="${TEST_TMP}/validation-basic-downloaded" expected_sha expected_etag put_etag
+  local downloaded="${TEST_TMP}/validation-basic-downloaded" expected_etag put_etag
   local case_rc=0 cleanup_rc=0
   VALIDATION_OBJECT_CLEANUP_STATUS=PASS
   make_test_file "${source}" 4096
-  expected_sha="$(sha256sum "${source}" | awk '{print $1}')"
-  expected_etag="\"$(md5_of_file "${source}")\""
+  expected_etag="$(md5_of_file "${source}")" || return 1
+  expected_etag="\"${expected_etag}\""
 
   new_bucket "${bucket}" || return 1
   (
@@ -1083,7 +1105,7 @@ test_validation_s3_basic_object_round_trip() {
 
     aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${downloaded}"
     assert_aws_ok || exit 1
-    [ "$(sha256sum "${downloaded}" | awk '{print $1}')" = "${expected_sha}" ] \
+    cmp -s "${source}" "${downloaded}" \
       || { echo "GET payload mismatch"; exit 1; }
 
     aws_run s3api list-objects-v2 --bucket "${bucket}"
@@ -1313,8 +1335,15 @@ test_s3c106() {
       echo "invalid bucket '${invalid}' returned HTTP ${code}, expected 400: $(head -c 200 "${TEST_TMP}/curl.out")"
       return 1
     fi
-    printf '%s' "$(cat "${TEST_TMP}/curl.out")" | grep -q "InvalidBucketName" \
-      || echo "note: invalid name '${invalid}' rejected with 400 but body lacks InvalidBucketName: $(head -c 200 "${TEST_TMP}/curl.out")"
+    python3 - "${TEST_TMP}/curl.out" <<'PY_ERROR' || return 1
+import sys
+from xml.etree import ElementTree
+
+root = ElementTree.parse(sys.argv[1]).getroot()
+code = root.findtext("{*}Code")
+if root.tag.rsplit("}", 1)[-1] != "Error" or code != "InvalidBucketName":
+    raise SystemExit(f"Expected InvalidBucketName, received {code!r}")
+PY_ERROR
   done
 }
 
@@ -1322,17 +1351,17 @@ test_s3c106() {
 
 test_s3c201() {
   new_bucket "s3c201-b1" || return 1
-  local f exp got
+  local size exp got
   for size in 1024 1048576 104857600; do
     make_test_file ${TEST_TMP}/s3c-file "${size}"
-    exp="$(md5_of_file ${TEST_TMP}/s3c-file)"
+    exp="$(md5_of_file "${TEST_TMP}/s3c-file")" || return 1
     aws_run s3api put-object --bucket "s3c201-b1" --key "f-${size}" --body ${TEST_TMP}/s3c-file
     assert_aws_ok || return 1
     got="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag' | tr -d '"')"
     [ "${got}" = "${exp}" ] || { echo "ETag ${got} != MD5 ${exp} for size ${size}"; return 1; }
     aws_run s3api get-object --bucket "s3c201-b1" --key "f-${size}" ${TEST_TMP}/s3c-dl
     assert_aws_ok || return 1
-    [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "${exp}" ] || { echo "downloaded MD5 mismatch for size ${size}"; return 1; }
+    cmp -s "${TEST_TMP}/s3c-file" "${TEST_TMP}/s3c-dl" || { echo "downloaded MD5 mismatch for size ${size}"; return 1; }
   done
   rm_bucket "s3c201-b1"
 }
@@ -1350,38 +1379,36 @@ test_s3c202() {
     || { echo "empty object not 0 bytes: ${AWS_OUT}"; return 1; }
   aws_run s3api get-object --bucket "s3c202-b1" --key empty ${TEST_TMP}/s3c-empty-dl
   assert_aws_ok || return 1
-  [ ! -s ${TEST_TMP}/s3c-empty-dl ] || { echo "empty object downloaded non-empty"; return 1; }
+  [ -f "${TEST_TMP}/s3c-empty-dl" ] && [ ! -s "${TEST_TMP}/s3c-empty-dl" ] || { echo "empty object downloaded non-empty"; return 1; }
   rm_bucket "s3c202-b1"
 }
 
 test_s3c203() {
   new_bucket "s3c203-b1" || return 1
   make_test_file ${TEST_TMP}/s3c-file 1048576
-  local exp
-  exp="$(md5_of_file ${TEST_TMP}/s3c-file)"
   aws_run s3api put-object --bucket "s3c203-b1" --key f --body "${TEST_TMP}/s3c-file" --expires "Tue, 01 Jan 2030 00:00:00 GMT"
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c203-b1" --key f ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
   printf '%s' "${AWS_OUT}" | jq -e '.Expires == "2030-01-01T00:00:00+00:00" or .Expires == "Tue, 01 Jan 2030 00:00:00 GMT"' >/dev/null \
     || { echo "get-object did not return the stored Expires header: ${AWS_OUT}"; return 1; }
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "${exp}" ] || { echo "get-object MD5 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-file" "${TEST_TMP}/s3c-dl" || { echo "get-object MD5 mismatch"; return 1; }
   rm_bucket "s3c203-b1"
 }
 
 test_s3c204() {
   new_bucket "s3c204-b1" || return 1
-  make_test_file ${TEST_TMP}/s3c-file 2048
-  aws_run s3api put-object --bucket "s3c204-b1" --key f --body ${TEST_TMP}/s3c-file
+  make_test_file "${TEST_TMP}/s3c-file" 2048 || return 1
+  aws_run s3api put-object --bucket "s3c204-b1" --key f --body "${TEST_TMP}/s3c-file"
   assert_aws_ok || return 1
-  # range 0-99 -> 206, exactly 100 bytes
-  local code len
-  code="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3api get-object \
-    --bucket "s3c204-b1" --key f --range "bytes=0-99" ${TEST_TMP}/s3c-range 2>/dev/null; echo $?)"
-  len="$(wc -c < ${TEST_TMP}/s3c-range)"
-  [ "${len}" = "100" ] || { echo "range GET returned ${len} bytes, expected 100"; return 1; }
-  # out-of-range -> 416
-  aws_run s3api get-object --bucket "s3c204-b1" --key f --range "bytes=99999-100000" ${TEST_TMP}/s3c-range2
+  aws_run s3api get-object --bucket "s3c204-b1" --key f --range "bytes=0-99" "${TEST_TMP}/s3c-range"
+  assert_aws_ok || return 1
+  jq -e '.ContentRange == "bytes 0-99/2048" and .ContentLength == 100' <<< "${AWS_OUT}" >/dev/null \
+    || { echo "wrong range metadata: ${AWS_OUT}"; return 1; }
+  head -c 100 "${TEST_TMP}/s3c-file" > "${TEST_TMP}/s3c-range-expected" || return 1
+  cmp -s "${TEST_TMP}/s3c-range-expected" "${TEST_TMP}/s3c-range" \
+    || { echo "range GET payload differs from the requested source bytes"; return 1; }
+  aws_run s3api get-object --bucket "s3c204-b1" --key f --range "bytes=99999-100000" "${TEST_TMP}/s3c-range2"
   assert_aws_fails_with "InvalidRange" || return 1
   rm_bucket "s3c204-b1"
 }
@@ -1425,18 +1452,20 @@ test_s3c207() {
 
 test_s3c208() {
   new_bucket "s3c208-b1" || return 1
+  printf 's3 fixture\n' > "${TEST_TMP}/object-fixture" || return 1
   local i
   for i in $(seq 1 5); do
-    aws_run s3api put-object --bucket "s3c208-b1" --key "prefix/o${i}" --body /etc/hostname
+    aws_run s3api put-object --bucket "s3c208-b1" --key "prefix/o${i}" --body "${TEST_TMP}/object-fixture"
     assert_aws_ok || return 1
   done
   aws_run s3api delete-objects --bucket "s3c208-b1" --delete '{"Objects":[{"Key":"prefix/o1"},{"Key":"prefix/o2"},{"Key":"prefix/o3"}]}'
   assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '[.Deleted[]?] | length == 3' >/dev/null \
-    || { echo "batch delete did not report 3 keys: ${AWS_OUT}"; return 1; }
+  printf '%s' "${AWS_OUT}" | jq -e '([.Deleted[]?.Key] | sort) == ["prefix/o1","prefix/o2","prefix/o3"] and ((.Errors // []) | length == 0)' >/dev/null \
+    || { echo "batch delete did not acknowledge exactly the requested keys: ${AWS_OUT}"; return 1; }
   aws_run s3api list-objects-v2 --bucket "s3c208-b1"
-  printf '%s' "${AWS_OUT}" | jq -e '[.Contents[]?] | length == 2' >/dev/null \
-    || { echo "expected 2 remaining objects: ${AWS_OUT}"; return 1; }
+  assert_aws_ok "list remaining keys" || return 1
+  printf '%s' "${AWS_OUT}" | jq -e '[.Contents[]?.Key] == ["prefix/o4","prefix/o5"]' >/dev/null \
+    || { echo "unexpected remaining keys: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c208-b1"
 }
 
@@ -1462,7 +1491,7 @@ test_s3c209() {
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c209-b2" --key f ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-file)" ] || { echo "copy content mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-file" || { echo "copy content mismatch"; return 1; }
   # REPLACE metadata directive
   aws_run s3api copy-object --bucket "s3c209-b2" --key f --copy-source "s3c209-b1/f" --metadata-directive REPLACE --metadata dst=1
   assert_aws_ok || return 1
@@ -1505,7 +1534,7 @@ test_s3c210() {
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c210-b1" --key "${key}" ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-file)" ] || { echo "special-char key download mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-file" || { echo "special-char key download mismatch"; return 1; }
   aws_run s3api list-objects-v2 --bucket "s3c210-b1"
   printf '%s' "${AWS_OUT}" | jq -e --arg k "${key}" '.Contents[]? | select(.Key == $k)' >/dev/null \
     || { echo "special-char key not listed: ${AWS_OUT}"; return 1; }
@@ -1523,7 +1552,7 @@ test_s3c211() {
   assert_rc_ok "rc mv" || return 1
   aws_run s3api get-object --bucket "s3c211-b1" --key g ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-file)" ] || { echo "moved content mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-file" || { echo "moved content mismatch"; return 1; }
   aws_run s3api head-object --bucket "s3c211-b1" --key f
   assert_aws_fails_with "404" || return 1
   rm_bucket "s3c211-b1"
@@ -1610,7 +1639,7 @@ test_s3c301() {
   printf '%s' "${AWS_OUT}" | jq -e --arg etag "${final_etag}" \
     '.ETag == $etag and .ContentLength == 15728640' >/dev/null \
     || { echo "multipart GET disagrees with completion: ${AWS_OUT}"; return 1; }
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-mp)" ] || { echo "multipart download MD5 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-mp" || { echo "multipart download MD5 mismatch"; return 1; }
   rm_bucket "s3c301-b1"
 }
 
@@ -1643,7 +1672,8 @@ test_s3c302() {
     --copy-source-if-modified-since "${copy_date_past}" --copy-source-if-unmodified-since "${copy_date_future}"
   assert_aws_ok "copy part with satisfied dates" || return 1
   tail -c 5242880 "${TEST_TMP}/s3c-mp" > "${TEST_TMP}/s3c-second-part"
-  second_etag="\"$(md5_of_file "${TEST_TMP}/s3c-second-part")\""
+  second_etag="$(md5_of_file "${TEST_TMP}/s3c-second-part")" || return 1
+  second_etag="\"${second_etag}\""
   aws_run s3api list-parts --bucket "s3c302-b1" --key dst --upload-id "${upload_id}"
   assert_aws_ok || return 1
   jq -e --arg etag "${second_etag}" '.Parts | length == 1 and .[0].ETag == $etag' <<< "${AWS_OUT}" >/dev/null \
@@ -1658,7 +1688,6 @@ test_s3c302() {
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c302-b1" --key dst ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(wc -c < ${TEST_TMP}/s3c-dl)" = "5242880" ] || { echo "upload-part-copy size mismatch"; return 1; }
   head -c 5242880 "${TEST_TMP}/s3c-mp" > "${TEST_TMP}/s3c-first-part"
   cmp -s "${TEST_TMP}/s3c-first-part" "${TEST_TMP}/s3c-dl" || { echo "conditional part-copy content mismatch"; return 1; }
   rm_bucket "s3c302-b1"
@@ -1700,45 +1729,91 @@ test_s3c304() {
 }
 
 test_s3c305() {
-  new_bucket "s3c305-b1" || return 1
-  make_test_file ${TEST_TMP}/s3c-p1 5242880
-  make_test_file ${TEST_TMP}/s3c-p2 5242880
-  local upload_id etag1 etag2 etag3
+  local bucket="s3c305-b1" scenario key first second expected rc=0
+  make_test_file "${TEST_TMP}/s3c305-large" 5242880 || return 1
+  make_test_file "${TEST_TMP}/s3c305-small" 1048576 || return 1
+  new_bucket "${bucket}" || return 1
 
-  # Case 1: wrong order (2 before 1) -> AWS returns InvalidPart
-  aws_run s3api create-multipart-upload --bucket "s3c305-b1" --key mp
-  upload_id="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 1 --body ${TEST_TMP}/s3c-p1
-  etag1="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 2 --body ${TEST_TMP}/s3c-p2
-  etag2="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api complete-multipart-upload --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" \
-    --multipart-upload "{\"Parts\":[{\"ETag\":${etag2},\"PartNumber\":2},{\"ETag\":${etag1},\"PartNumber\":1}]}"
-  if [ "${AWS_CODE}" -eq 0 ]; then
-    echo "note: server accepts out-of-order parts (AWS returns InvalidPart)"
-  else
-    assert_aws_fails_with "InvalidPart" || return 1
-    aws_run s3api abort-multipart-upload --bucket "s3c305-b1" --key mp --upload-id "${upload_id}"
-  fi
+  for scenario in     'out-of-order:large:large:InvalidPartOrder'     'small-non-final:small:large:EntityTooSmall'     'small-final:large:small:'     'small-only:small::'
+  do
+    IFS=: read -r key first second expected <<< "${scenario}"
+    (
+      upload_id=""
+      trap '
+        if [ -n "${upload_id}" ]; then
+          aws_run s3api abort-multipart-upload --bucket "${bucket}" --key "${key}" --upload-id "${upload_id}"
+        fi
+        aws_run s3api delete-object --bucket "${bucket}" --key "${key}"
+      ' EXIT
+      aws_run s3api create-multipart-upload --bucket "${bucket}" --key "${key}"
+      assert_aws_ok || exit 1
+      upload_id="$(jq -er '.UploadId | strings | select(length > 0)' <<< "${AWS_OUT}")" || exit 1
+      encoded_upload_id="$(jq -rn --arg id "${upload_id}" '$id | @uri')" || exit 1
 
-  # Case 2: non-last part smaller than 5 MiB -> AWS returns EntityTooSmall
-  make_test_file ${TEST_TMP}/s3c-small 1048576
-  aws_run s3api create-multipart-upload --bucket "s3c305-b1" --key mp
-  upload_id="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 1 --body ${TEST_TMP}/s3c-p1
-  etag1="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 2 --body ${TEST_TMP}/s3c-p2
-  etag2="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 3 --body ${TEST_TMP}/s3c-small
-  etag3="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api complete-multipart-upload --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" \
-    --multipart-upload "{\"Parts\":[{\"ETag\":${etag1},\"PartNumber\":1},{\"ETag\":${etag2},\"PartNumber\":2},{\"ETag\":${etag3},\"PartNumber\":3}]}"
-  if [ "${AWS_CODE}" -eq 0 ]; then
-    echo "note: server accepts a non-last part smaller than 5 MiB (AWS returns EntityTooSmall)"
-  else
-    assert_aws_fails_with "EntityTooSmall" || return 1
-  fi
-  rm_bucket "s3c305-b1"
+      part_files=("${TEST_TMP}/s3c305-${first}")
+      if [ -n "${second}" ]; then part_files+=("${TEST_TMP}/s3c305-${second}"); fi
+      manifest=()
+      for i in "${!part_files[@]}"; do
+        number=$((i + 1))
+        aws_run s3api upload-part --bucket "${bucket}" --key "${key}" --upload-id "${upload_id}"           --part-number "${number}" --body "${part_files[i]}"
+        assert_aws_ok || exit 1
+        etag="$(jq -er '.ETag | strings | select(length > 0)' <<< "${AWS_OUT}")" || exit 1
+        manifest+=("${number}" "${etag}")
+      done
+      if [ "${key}" = "out-of-order" ]; then
+        manifest=("${manifest[@]:2:2}" "${manifest[@]:0:2}")
+      fi
+
+      python3 - "${TEST_TMP}/s3c305-complete.xml" "${manifest[@]}" <<'PY_MANIFEST' || exit 1
+import sys
+from xml.etree import ElementTree
+
+root = ElementTree.Element("CompleteMultipartUpload", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+for number, etag in zip(sys.argv[2::2], sys.argv[3::2]):
+    part = ElementTree.SubElement(root, "Part")
+    ElementTree.SubElement(part, "PartNumber").text = number
+    ElementTree.SubElement(part, "ETag").text = etag
+ElementTree.ElementTree(root).write(sys.argv[1], encoding="utf-8")
+PY_MANIFEST
+
+      status="$(s3_signed_curl POST "/${bucket}/${key}?uploadId=${encoded_upload_id}"         -H "Content-Type: application/xml" --data "${TEST_TMP}/s3c305-complete.xml")" || exit 1
+      python3 - "${TEST_TMP}/curl.out" "${status}" "${expected}" "${key}" <<'PY_RESULT' || exit 1
+import sys
+from xml.etree import ElementTree
+
+path, status, expected, key = sys.argv[1:]
+try:
+    response = ElementTree.parse(path).getroot()
+except ElementTree.ParseError as error:
+    raise SystemExit(f"{key}: HTTP {status} returned malformed completion XML: {error}")
+kind = response.tag.rsplit("}", 1)[-1]
+code = response.findtext("{*}Code")
+print(f"{key}: HTTP {status} {kind}" + (f" {code}" if code else ""), flush=True)
+if expected:
+    if (status, kind, code) != ("400", "Error", expected):
+        raise SystemExit(f"{key}: expected HTTP 400 with S3 error {expected}")
+elif (status != "200" or kind != "CompleteMultipartUploadResult"
+      or response.findtext("{*}Key") != key or not response.findtext("{*}ETag")):
+    raise SystemExit(f"{key}: expected HTTP 200 with a successful completion result for this key")
+PY_RESULT
+
+      if [ -n "${expected}" ]; then
+        aws_run s3api head-object --bucket "${bucket}" --key "${key}"
+        assert_aws_fails_with '[(]404[)]' "rejected completion must not publish the object" || exit 1
+        aws_run s3api abort-multipart-upload --bucket "${bucket}" --key "${key}" --upload-id "${upload_id}"
+        assert_aws_ok || exit 1
+      else
+        aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${TEST_TMP}/s3c305-download"
+        assert_aws_ok || exit 1
+        cat "${part_files[@]}" > "${TEST_TMP}/s3c305-expected" || exit 1
+        cmp -s "${TEST_TMP}/s3c305-expected" "${TEST_TMP}/s3c305-download"           || { echo "${key}: assembled object differs from its parts"; exit 1; }
+        echo "${key}: assembled bytes match"
+      fi
+      upload_id=""
+    ) || rc=1
+  done
+  rm_bucket "${bucket}"
+  return "${rc}"
 }
 
 # ---------- 4. Listing ----------
@@ -1779,13 +1854,18 @@ test_s3c401() {
 
 test_s3c402() {
   new_bucket "s3c402-b1" || return 1
-  aws_run s3api put-object --bucket "s3c402-b1" --key "dir/a.txt" --body /etc/hostname
-  aws_run s3api put-object --bucket "s3c402-b1" --key "dir/b.txt" --body /etc/hostname
-  aws_run s3api put-object --bucket "s3c402-b1" --key "top.txt" --body /etc/hostname
+  printf 's3 fixture\n' > "${TEST_TMP}/object-fixture" || return 1
+  aws_run s3api put-object --bucket "s3c402-b1" --key "dir/a.txt" --body "${TEST_TMP}/object-fixture"
+  assert_aws_ok "seed listing fixture" || return 1
+  aws_run s3api put-object --bucket "s3c402-b1" --key "dir/b.txt" --body "${TEST_TMP}/object-fixture"
+  assert_aws_ok "seed listing fixture" || return 1
+  aws_run s3api put-object --bucket "s3c402-b1" --key "top.txt" --body "${TEST_TMP}/object-fixture"
+  assert_aws_ok "seed listing fixture" || return 1
   aws_run s3api list-objects-v2 --bucket "s3c402-b1" --prefix "dir/" --delimiter "/"
   assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '.Contents | length == 2' >/dev/null || { echo "Contents != 2: ${AWS_OUT}"; return 1; }
+  printf '%s' "${AWS_OUT}" | jq -e '[.Contents[]?.Key] == ["dir/a.txt","dir/b.txt"]' >/dev/null || { echo "unexpected keys under dir/: ${AWS_OUT}"; return 1; }
   aws_run s3api list-objects-v2 --bucket "s3c402-b1" --delimiter "/"
+  assert_aws_ok "list with delimiter" || return 1
   printf '%s' "${AWS_OUT}" | jq -e '[.CommonPrefixes[].Prefix] | index("dir/") != null' >/dev/null \
     || { echo "CommonPrefixes missing dir/: ${AWS_OUT}"; return 1; }
   rm_bucket "s3c402-b1"
@@ -1793,30 +1873,40 @@ test_s3c402() {
 
 test_s3c403() {
   new_bucket "s3c403-b1" || return 1
+  printf 's3 fixture\n' > "${TEST_TMP}/object-fixture" || return 1
   local i
   for i in $(seq 1 5); do
-    aws_run s3api put-object --bucket "s3c403-b1" --key "k${i}" --body /etc/hostname
+    aws_run s3api put-object --bucket "s3c403-b1" --key "k${i}" --body "${TEST_TMP}/object-fixture"
+    assert_aws_ok "seed listing fixture" || return 1
   done
-  aws_run s3api list-objects-v2 --bucket "s3c403-b1" --max-keys 2
-  assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '.IsTruncated == true and .KeyCount == 2' >/dev/null \
-    || { echo "page1 not truncated: ${AWS_OUT}"; return 1; }
-  local token
-  token="$(printf '%s' "${AWS_OUT}" | jq -r '.NextContinuationToken')"
-  aws_run s3api list-objects-v2 --bucket "s3c403-b1" --max-keys 2 --continuation-token "${token}"
-  assert_aws_ok || return 1
-  printf '%s' "${AWS_OUT}" | jq -e '.IsTruncated == true' >/dev/null || { echo "page2 not truncated: ${AWS_OUT}"; return 1; }
-  token="$(printf '%s' "${AWS_OUT}" | jq -r '.NextContinuationToken')"
-  aws_run s3api list-objects-v2 --bucket "s3c403-b1" --max-keys 2 --continuation-token "${token}"
-  printf '%s' "${AWS_OUT}" | jq -e '.IsTruncated == false' >/dev/null || { echo "page3 should end: ${AWS_OUT}"; return 1; }
+  local expected token="" next_token
+  local -a continuation=()
+  for expected in '["k1","k2"]' '["k3","k4"]' '["k5"]'; do
+    aws_run s3api list-objects-v2 --bucket "s3c403-b1" --max-keys 2 "${continuation[@]}"
+    assert_aws_ok || return 1
+    jq -e --argjson expected "${expected}" \
+      '[.Contents[]?.Key] == $expected and .KeyCount == ($expected | length)
+       and .IsTruncated == (($expected | length) == 2)' <<< "${AWS_OUT}" >/dev/null \
+      || { echo "unexpected listing page: ${AWS_OUT}"; return 1; }
+    if [ "${expected}" != '["k5"]' ]; then
+      next_token="$(jq -er '.NextContinuationToken | strings | select(length > 0)' <<< "${AWS_OUT}")" || return 1
+      [ "${next_token}" != "${token}" ] || { echo "listing repeated its continuation token"; return 1; }
+      token="${next_token}"
+      continuation=(--continuation-token "${token}")
+    fi
+  done
   rm_bucket "s3c403-b1"
 }
 
 test_s3c404() {
   new_bucket "s3c404-b1" || return 1
-  aws_run s3api put-object --bucket "s3c404-b1" --key a --body /etc/hostname
-  aws_run s3api put-object --bucket "s3c404-b1" --key b --body /etc/hostname
-  aws_run s3api put-object --bucket "s3c404-b1" --key c --body /etc/hostname
+  printf 's3 fixture\n' > "${TEST_TMP}/object-fixture" || return 1
+  aws_run s3api put-object --bucket "s3c404-b1" --key a --body "${TEST_TMP}/object-fixture"
+  assert_aws_ok "seed listing fixture" || return 1
+  aws_run s3api put-object --bucket "s3c404-b1" --key b --body "${TEST_TMP}/object-fixture"
+  assert_aws_ok "seed listing fixture" || return 1
+  aws_run s3api put-object --bucket "s3c404-b1" --key c --body "${TEST_TMP}/object-fixture"
+  assert_aws_ok "seed listing fixture" || return 1
   aws_run s3api list-objects --bucket "s3c404-b1" --marker a
   assert_aws_ok || return 1
   printf '%s' "${AWS_OUT}" | jq -e '[.Contents[].Key] == ["b","c"]' >/dev/null \
@@ -1888,7 +1978,7 @@ test_s3c503() {
   aws_run s3api put-object --bucket "s3c503-b1" --key f --body ${TEST_TMP}/s3c-v2
   aws_run s3api get-object --bucket "s3c503-b1" --key f --version-id "${v1}" ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-v1)" ] || { echo "version read mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-v1" || { echo "version read mismatch"; return 1; }
   rm_bucket "s3c503-b1"
 }
 
@@ -1935,7 +2025,7 @@ test_s3c506() {
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c506-b1" --key f ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-v)" ] || { echo "restored content mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-v" || { echo "restored content mismatch"; return 1; }
   rm_bucket "s3c506-b1"
 }
 
@@ -1989,10 +2079,10 @@ assert_object_lock_protects_version() {
   WORM_OVERWRITE_VID=""
   aws_run s3api get-object --bucket "${bucket}" --key "${key}" --version-id "${vid}" "${got}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${got}")" = "$(md5_of_file "${expected}")" ] \
+  cmp -s "${got}" "${expected}" \
     || { echo "protected version ${vid} bytes differ before overwrite"; return 1; }
   printf 'worm-overwrite-%s\n' "${vid}" > "${overwrite}"
-  if [ "$(md5_of_file "${overwrite}")" = "$(md5_of_file "${expected}")" ]; then
+  if cmp -s "${overwrite}" "${expected}"; then
     printf 'x' >> "${overwrite}"
   fi
   aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${overwrite}"
@@ -2004,13 +2094,13 @@ assert_object_lock_protects_version() {
     || { echo "overwrite reused protected version ${vid}"; return 1; }
   aws_run s3api get-object --bucket "${bucket}" --key "${key}" --version-id "${vid}" "${got}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${got}")" = "$(md5_of_file "${expected}")" ] \
+  cmp -s "${got}" "${expected}" \
     || { echo "overwrite replaced protected version ${vid}"; return 1; }
   aws_run s3api delete-object --bucket "${bucket}" --key "${key}" --version-id "${vid}"
   assert_aws_fails_with "AccessDenied" || return 1
   aws_run s3api get-object --bucket "${bucket}" --key "${key}" --version-id "${vid}" "${got}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${got}")" = "$(md5_of_file "${expected}")" ] \
+  cmp -s "${got}" "${expected}" \
     || { echo "protected version ${vid} changed after denied delete"; return 1; }
   WORM_OVERWRITE_VID="${overwrite_vid}"
 }
@@ -2062,7 +2152,7 @@ test_s3c603() {
   assert_aws_ok || return 1
   vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
   [ -n "${vid}" ] && [ "${vid}" != "null" ] || { echo "put-object returned no VersionId"; return 1; }
-  until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
+  until="$(utc_after 24 '%Y-%m-%dT%H:%M:%SZ')" || return 1
   # Attach GOVERNANCE to this version before any delete or overwrite probe.
   aws_run s3api put-object-retention --bucket "${bucket}" --key f --version-id "${vid}" \
     --retention "{\"Mode\":\"GOVERNANCE\",\"RetainUntilDate\":\"${until}\"}"
@@ -2082,7 +2172,7 @@ test_s3c603() {
   assert_aws_fails_with "AccessDenied" || return 1
   aws_run s3api get-object --bucket "${bucket}" --key f --version-id "${vid}" "${TEST_TMP}/s3c-got"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/s3c-got")" = "$(md5_of_file "${TEST_TMP}/s3c-v")" ] \
+  cmp -s "${TEST_TMP}/s3c-got" "${TEST_TMP}/s3c-v" \
     || { echo "protected version bytes changed after denied delete"; return 1; }
   worm_bypass_delete_version "${bucket}" f "${vid}" || return 1
   worm_delete_version "${bucket}" f "${WORM_OVERWRITE_VID}" || return 1
@@ -2099,7 +2189,7 @@ test_s3c604() {
   assert_aws_ok || return 1
   vid="$(printf '%s' "${AWS_OUT}" | jq -r '.VersionId // empty')"
   [ -n "${vid}" ] && [ "${vid}" != "null" ] || { echo "put-object returned no VersionId"; return 1; }
-  until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
+  until="$(utc_after 24 '%Y-%m-%dT%H:%M:%SZ')" || return 1
   aws_run s3api put-object-retention --bucket "${bucket}" --key f --version-id "${vid}" \
     --retention "{\"Mode\":\"COMPLIANCE\",\"RetainUntilDate\":\"${until}\"}"
   assert_aws_ok || return 1
@@ -2120,7 +2210,7 @@ test_s3c604() {
   assert_aws_fails_with "AccessDenied" || return 1
   aws_run s3api get-object --bucket "${bucket}" --key f --version-id "${vid}" "${TEST_TMP}/s3c-got"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/s3c-got")" = "$(md5_of_file "${TEST_TMP}/s3c-v")" ] \
+  cmp -s "${TEST_TMP}/s3c-got" "${TEST_TMP}/s3c-v" \
     || { echo "COMPLIANCE version bytes changed after denied delete"; return 1; }
   # The overwrite version and delete marker are not under COMPLIANCE.
   worm_delete_version "${bucket}" f "${WORM_OVERWRITE_VID}" || return 1
@@ -2327,7 +2417,7 @@ test_s3c901() {
     || { echo "SSE-S3 header missing: ${AWS_OUT}"; return 1; }
   aws_run s3api get-object --bucket "s3c901-b1" --key f ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-v)" ] || { echo "SSE-S3 download MD5 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-v" || { echo "SSE-S3 download MD5 mismatch"; return 1; }
   rm_bucket "s3c901-b1"
 }
 
@@ -2350,7 +2440,7 @@ test_s3c902() {
   aws_run s3api get-object --bucket "s3c902-b1" --key f ${TEST_TMP}/s3c-dl \
     --sse-customer-algorithm AES256 --sse-customer-key "${key}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-v)" ] || { echo "SSE-C download MD5 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-v" || { echo "SSE-C download MD5 mismatch"; return 1; }
   # missing key -> 400/403
   aws_run s3api get-object --bucket "s3c902-b1" --key f ${TEST_TMP}/s3c-dl2
   assert_aws_fails_with "400|403|InvalidRequest|AccessDenied" || return 1
@@ -2384,7 +2474,7 @@ test_s3c904() {
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c904-b1" --key dst ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-v)" ] || { echo "encrypted copy MD5 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-v" || { echo "encrypted copy MD5 mismatch"; return 1; }
   # multipart with SSE-S3
   make_test_file ${TEST_TMP}/s3c-mp 15728640
   aws_run s3api create-multipart-upload --bucket "s3c904-b1" --key mp --server-side-encryption AES256
@@ -2404,7 +2494,7 @@ test_s3c904() {
   assert_aws_ok || return 1
   aws_run s3api get-object --bucket "s3c904-b1" --key mp ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-mp)" ] || { echo "encrypted multipart MD5 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-mp" || { echo "encrypted multipart MD5 mismatch"; return 1; }
   rm_bucket "s3c904-b1"
 }
 
@@ -2424,11 +2514,8 @@ test_enc101() {
     assert_aws_ok || { echo "SSE-S3 put size=${size} failed: ${AWS_OUT}"; return 1; }
     aws_run s3api get-object --bucket "enc101-b1" --key "f-${size}" "${TEST_TMP}/enc101-dl"
     assert_aws_ok || return 1
-    [ "$(wc -c < "${TEST_TMP}/enc101-dl")" = "${size}" ] || { echo "SSE-S3 size=${size} length mismatch"; return 1; }
-    if [ "${size}" -gt 0 ]; then
-      [ "$(md5_of_file "${TEST_TMP}/enc101-dl")" = "$(md5_of_file "${TEST_TMP}/enc101-v")" ] \
-        || { echo "SSE-S3 size=${size} MD5 mismatch"; return 1; }
-    fi
+    cmp -s "${TEST_TMP}/enc101-dl" "${TEST_TMP}/enc101-v" \
+      || { echo "SSE-S3 size=${size} payload mismatch"; return 1; }
   done
   rm_bucket "enc101-b1"
 }
@@ -2513,7 +2600,7 @@ test_enc108() {
   aws_run s3api get-object --bucket "enc108-b1" --key mp "${TEST_TMP}/enc108-dl" \
     --sse-customer-algorithm AES256 --sse-customer-key "${key_a}"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/enc108-dl")" = "$(md5_of_file "${TEST_TMP}/enc108-mp")" ] \
+  cmp -s "${TEST_TMP}/enc108-dl" "${TEST_TMP}/enc108-mp" \
     || { echo "SSE-C multipart MD5 mismatch"; return 1; }
   rm_bucket "enc108-b1"
 }
@@ -2550,7 +2637,7 @@ test_enc114() {
   url="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3 presign "s3://enc114-b1/f" --expires-in 60 2>/dev/null)"
   [ -n "${url}" ] || { echo "presign produced no URL"; return 1; }
   curl -fsS --max-time 30 -o "${TEST_TMP}/enc114-dl" "${url}" || { echo "presigned GET failed"; return 1; }
-  [ "$(md5_of_file "${TEST_TMP}/enc114-dl")" = "$(md5_of_file "${TEST_TMP}/enc114-v")" ] \
+  cmp -s "${TEST_TMP}/enc114-dl" "${TEST_TMP}/enc114-v" \
     || { echo "presigned SSE-S3 GET MD5 mismatch"; return 1; }
   # expired URL -> 403
   url="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3 presign "s3://enc114-b1/f" --expires-in 1 2>/dev/null)"
@@ -2603,7 +2690,7 @@ test_s3c1001() {
   assert_aws_ok || return 1
   # clock skew > 15 min -> RequestTimeTooSkewed
   local fake_date code
-  fake_date="$(date -u -d '+1 hour' '+%Y%m%dT%H%M%SZ')"
+  fake_date="$(utc_after 1 '%Y%m%dT%H%M%SZ')" || return 1
   code="$(AWS_ACCESS_KEY_ID="${ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${SECRET_KEY}" AWS_DEFAULT_REGION="${REGION}" \
     aws --endpoint-url "${ENDPOINT}" s3api head-object --bucket "s3c1001-b1" --key f 2>&1 | head -c 200; echo rc=$?)"
   # tampered signature
@@ -2636,7 +2723,7 @@ test_s3c1003() {
   url="$(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3 presign "s3://s3c1003-b1/f" --expires-in 3600)"
   code="$(curl -s -o ${TEST_TMP}/s3c-presign-dl -w '%{http_code}' "${url}")"
   [ "${code}" = "200" ] || { echo "presigned GET returned ${code}"; return 1; }
-  [ "$(md5_of_file ${TEST_TMP}/s3c-presign-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-v)" ] || { echo "presigned download MD5 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-presign-dl" "${TEST_TMP}/s3c-v" || { echo "presigned download MD5 mismatch"; return 1; }
   # tampered param -> 403
   local tampered
   tampered="${url/&X-Amz-Expires=/&X-Amz-Expires=99999}"
@@ -2777,7 +2864,7 @@ test_s3c1101() {
   assert_aws_fails_with "304|NotModified" || return 1
   # If-Unmodified-Since in future -> 200
   local future
-  future="$(date -u -d '+1 day' '+%Y-%m-%dT%H:%M:%SZ')"
+  future="$(utc_after 24 '%Y-%m-%dT%H:%M:%SZ')" || return 1
   aws_run s3api get-object --bucket "s3c1101-b1" --key f ${TEST_TMP}/s3c-dl --if-unmodified-since "${future}"
   assert_aws_ok || return 1
   rm_bucket "s3c1101-b1"
@@ -2805,16 +2892,24 @@ test_s3c1103() {
 
 test_s3c1104() {
   new_bucket "s3c1104-b1" || return 1
-  make_test_file ${TEST_TMP}/s3c-v 1024
-  local alg
+  make_test_file "${TEST_TMP}/s3c-v" 1024 || return 1
+  local alg field checksum
   for alg in CRC32 CRC32C SHA1 SHA256 CRC64NVME; do
-    aws_run s3api put-object --bucket "s3c1104-b1" --key "f-${alg}" --body ${TEST_TMP}/s3c-v --checksum-algorithm "${alg}"
-    assert_aws_ok || { echo "checksum algorithm ${alg} failed: ${AWS_OUT}"; return 1; }
+    field="Checksum${alg}"
+    aws_run s3api put-object --bucket "s3c1104-b1" --key "f-${alg}" --body "${TEST_TMP}/s3c-v" --checksum-algorithm "${alg}"
+    assert_aws_ok "PUT with ${alg}" || return 1
+    checksum="$(jq -er --arg field "${field}" '.[$field] | strings | select(length > 0)' <<< "${AWS_OUT}")" \
+      || { echo "PUT omitted ${field}"; return 1; }
+    aws_run s3api head-object --bucket "s3c1104-b1" --key "f-${alg}" --checksum-mode ENABLED
+    assert_aws_ok "HEAD with checksum mode" || return 1
+    jq -e --arg field "${field}" --arg checksum "${checksum}" \
+      '.[$field] == $checksum' <<< "${AWS_OUT}" >/dev/null \
+      || { echo "HEAD ${field} differs from the PUT checksum"; return 1; }
+    aws_run s3api get-object --bucket "s3c1104-b1" --key "f-${alg}" --checksum-mode ENABLED "${TEST_TMP}/s3c-checksum-dl"
+    assert_aws_ok "GET with checksum mode" || return 1
+    cmp -s "${TEST_TMP}/s3c-v" "${TEST_TMP}/s3c-checksum-dl" \
+      || { echo "GET payload mismatch for ${alg}"; return 1; }
   done
-  aws_run s3api head-object --bucket "s3c1104-b1" --key f-CRC64NVME
-  if ! printf '%s' "${AWS_OUT}" | jq -e '.ChecksumCRC64NVME != null' >/dev/null 2>&1; then
-    echo "note: checksum accepted but not echoed in head-object (server reporting gap)"
-  fi
   rm_bucket "s3c1104-b1"
 }
 
@@ -2991,9 +3086,10 @@ test_s3c1302() {
 
 test_s3c1303() {
   new_bucket "s3c1303-b1" || return 1
+  printf 's3 fixture\n' > "${TEST_TMP}/object-fixture" || return 1
   local bigkey
   bigkey="$(printf 'k%.0s' $(seq 1 1100))"
-  aws_run s3api put-object --bucket "s3c1303-b1" --key "${bigkey}" --body /etc/hostname
+  aws_run s3api put-object --bucket "s3c1303-b1" --key "${bigkey}" --body "${TEST_TMP}/object-fixture"
   if [ "${AWS_CODE}" -eq 0 ]; then
     echo "note: server accepts a 1100-byte key (AWS returns KeyTooLongError)"
     aws_run s3api delete-object --bucket "s3c1303-b1" --key "${bigkey}"
@@ -3037,7 +3133,7 @@ test_s3c1305() {
   [ "${fail}" -eq 0 ] || { echo "some concurrent writes failed (5xx)"; return 1; }
   aws_run s3api get-object --bucket "s3c1305-b1" --key f ${TEST_TMP}/s3c-dl
   assert_aws_ok || return 1
-  [ "$(md5_of_file ${TEST_TMP}/s3c-dl)" = "$(md5_of_file ${TEST_TMP}/s3c-v)" ] || { echo "concurrent overwrite produced torn object"; return 1; }
+  cmp -s "${TEST_TMP}/s3c-dl" "${TEST_TMP}/s3c-v" || { echo "concurrent overwrite produced torn object"; return 1; }
   rm_bucket "s3c1305-b1"
 }
 
@@ -3236,7 +3332,7 @@ PY
   aws_run s3api create-bucket --bucket "snw108-lk" --object-lock-enabled-for-bucket
   assert_aws_ok || return 1
   local until
-  until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
+  until="$(utc_after 24 '%Y-%m-%dT%H:%M:%SZ')" || return 1
   python3 - "${TEST_TMP}/snw108-lock.tar" "${until}" <<'PY'
 import io, sys, tarfile
 path, until = sys.argv[1], sys.argv[2]
@@ -3341,7 +3437,7 @@ test_snw114() {
   new_bucket "snw114-b1" || return 1
   snw_build_basic_tar "${TEST_TMP}/snw114.tar" "${TEST_TMP}/snw114-src" || return 1
   local archive_md5 etag
-  archive_md5="$(md5_of_file "${TEST_TMP}/snw114.tar")"
+  archive_md5="$(md5_of_file "${TEST_TMP}/snw114.tar")" || return 1
   aws_run s3api put-object --bucket "snw114-b1" --key "fixture.tar" --body "${TEST_TMP}/snw114.tar" \
     --metadata '{"snowball-auto-extract":"true"}'
   assert_aws_ok || return 1
@@ -3523,6 +3619,7 @@ main() {
   need_cmd python3 "Python 3 (archive fixtures)"
   [ -f "${SCRIPT_DIR}/scripts/sse_contract_cases.py" ] || die "missing scripts/sse_contract_cases.py"
   need_cmd tar "tar archive tool"
+  need_cmd cmp "byte comparison tool"
   if [ "${DRY_RUN}" -eq 0 ] && [ -z "${VALIDATION_CASE}" ]; then
     case ",${SELECTED_CASES}," in
       ,,|*,S3C-213,*|*,S3C-214,*|*,S3C-1306,*|*,S3C-1307,*)

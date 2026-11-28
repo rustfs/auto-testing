@@ -57,7 +57,7 @@ PACKAGE_URL="${RUSTFS_PACKAGE_URL:-}"
 ARCH="${RUSTFS_ARCH:-amd64}"
 PACKAGES_DIR="/home/rustfs/packages"
 PACKAGE_FILE="rustfs.deb"
-PACKAGE_SHA256="${RUSTFS_PACKAGE_SHA256:-}"
+PACKAGE_SHA256="${RUSTFS_PACKAGE_SHA256:-${PACKAGE_SHA256:-}}"
 
 # 4x4 topology: 4 nodes x 4 drives each, same expression on every node
 DRIVES_PER_NODE="${RUSTFS_DRIVES_PER_NODE:-4}"
@@ -98,6 +98,7 @@ WARP_HOST="${RUSTFS_WARP_HOST:-rustfs-node1:9000,rustfs-node2:9000,rustfs-node3:
 WARP_BUCKET="${RUSTFS_WARP_BUCKET:-warp-benchmark-bucket}"
 WARP_CLEANUP_TIMEOUT="${RUSTFS_WARP_CLEANUP_TIMEOUT:-180}"
 WARP_CLEANUP_ATTEMPTS="${RUSTFS_WARP_CLEANUP_ATTEMPTS:-3}"
+WARP_BUDGET_FILE="${RUSTFS_WARP_BUDGET_FILE:-${WARP_BUDGET_FILE:-}}"
 WARP_CONCURRENCY="${RUSTFS_WARP_CONCURRENCY:-64}"
 WARP_DURATION="${RUSTFS_WARP_DURATION:-5m}"
 WARP_GET_OBJECTS="${RUSTFS_WARP_GET_OBJECTS:-2500}"
@@ -473,6 +474,31 @@ step4_configure_start() {
   log "step 4 complete"
 }
 
+record_performance_candidate() {
+  local path="$1" node index target address node_addresses receipt
+  local -a targets
+  local -A seen_addresses=()
+  IFS=',' read -r -a targets <<< "${WARP_HOST}"
+  [ "${#targets[@]}" -eq "${#NODES[@]}" ] || die "candidate budget requires one Warp target per node"
+  printf 'warp_target\taddress\tnode\texpected_package_sha256\trunning_binary_sha256\tservice_pid\n' > "${path}"
+  for index in "${!NODES[@]}"; do
+    node="${NODES[index]}"
+    target="${targets[index]}"
+    [[ "${target}" =~ ^[[:alnum:]][[:alnum:].-]*:9000$ ]] \
+      || die "candidate budget requires a direct Warp target at port 9000: ${target}"
+    address="$(getent ahosts "${target%:9000}" | awk '$2 == "STREAM" {print $1}' | sort -u)"
+    [[ "${address}" =~ ^[0-9.]+$ ]] || die "Warp target must resolve to a single IPv4 address: ${target}"
+    [ -z "${seen_addresses[${address}]:-}" ] || die "Warp targets share an address: ${address}"
+    seen_addresses[${address}]=1
+    node_addresses="$(run_remote "${node}" <<< 'hostname -I')"
+    [[ " ${node_addresses} " == *" ${address} "* ]] \
+      || die "Warp target ${target} does not resolve to candidate node ${node}"
+    receipt="$(verify_running_package_candidate "${node}" "${PACKAGES_DIR}/${PACKAGE_FILE}" "${PACKAGE_SHA256}")" \
+      || die "benchmark candidate could not be verified on ${node}"
+    printf '%s\t%s\t%s\n' "${target}" "${address}" "${receipt}" >> "${path}"
+  done
+}
+
 step5_benchmark() {
   log "step 5: run the benchmark (${BENCH_SCRIPT})"
   need_cmd warp "warp benchmark tool"
@@ -480,6 +506,16 @@ step5_benchmark() {
   if [ "${DRY_RUN}" -eq 1 ]; then
     log "DRY-RUN: WARP_HOST=${WARP_HOST} WARP_RESULT_DIR=${RESULT_DIR} bash ${BENCH_SCRIPT}"
     return 0
+  fi
+  local benchmark_rc=0
+  if [ -n "${WARP_BUDGET_FILE}" ]; then
+    [[ "${PACKAGE_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]] || die "a performance budget requires the candidate package SHA-256"
+    [[ "${BENCH_SCRIPT}" -ef "${_SCRIPT_DIR}/rustfs_performance_testing.sh" ]] \
+      || die "a performance budget requires the repository benchmark script"
+    source "${_SCRIPT_DIR}/scripts/lib/package_candidate.sh"
+    [ ! -e "${RESULT_DIR}/master.log" ] || die "performance budget requires a fresh result directory"
+    mkdir -p "${RESULT_DIR}"
+    record_performance_candidate "${RESULT_DIR}/candidate-before.tsv"
   fi
   WARP_HOST="${WARP_HOST}" \
   WARP_ACCESS_KEY="${ACCESS_KEY}" \
@@ -492,11 +528,19 @@ step5_benchmark() {
   WARP_ROUND_TIMEOUT="${WARP_ROUND_TIMEOUT}" \
   WARP_MAX_CONSECUTIVE_FAILURES="${WARP_MAX_CONSECUTIVE_FAILURES}" \
   WARP_CLEANUP_TIMEOUT="${WARP_CLEANUP_TIMEOUT}" \
+  WARP_BUDGET_FILE="${WARP_BUDGET_FILE}" \
   WARP_CLEANUP_ATTEMPTS="${WARP_CLEANUP_ATTEMPTS}" \
   WARP_METHODS="${WARP_METHODS}" \
   WARP_SIZES="${WARP_SIZES}" \
   WARP_RESULT_DIR="${RESULT_DIR}" \
-  bash "${BENCH_SCRIPT}"
+  bash "${BENCH_SCRIPT}" || benchmark_rc=$?
+  if [ -n "${WARP_BUDGET_FILE}" ]; then
+    record_performance_candidate "${RESULT_DIR}/candidate-after.tsv"
+    cmp -s "${RESULT_DIR}/candidate-before.tsv" "${RESULT_DIR}/candidate-after.tsv" \
+      || die "running candidate changed during the benchmark"
+    log "candidate package, running binaries and service processes match before and after the benchmark"
+  fi
+  [ "${benchmark_rc}" -eq 0 ] || return "${benchmark_rc}"
   log "step 5 complete (results in ${RESULT_DIR})"
 }
 
