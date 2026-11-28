@@ -1729,45 +1729,91 @@ test_s3c304() {
 }
 
 test_s3c305() {
-  new_bucket "s3c305-b1" || return 1
-  make_test_file ${TEST_TMP}/s3c-p1 5242880
-  make_test_file ${TEST_TMP}/s3c-p2 5242880
-  local upload_id etag1 etag2 etag3
+  local bucket="s3c305-b1" scenario key first second expected rc=0
+  make_test_file "${TEST_TMP}/s3c305-large" 5242880 || return 1
+  make_test_file "${TEST_TMP}/s3c305-small" 1048576 || return 1
+  new_bucket "${bucket}" || return 1
 
-  # Case 1: wrong order (2 before 1) -> AWS returns InvalidPart
-  aws_run s3api create-multipart-upload --bucket "s3c305-b1" --key mp
-  upload_id="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 1 --body ${TEST_TMP}/s3c-p1
-  etag1="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 2 --body ${TEST_TMP}/s3c-p2
-  etag2="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api complete-multipart-upload --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" \
-    --multipart-upload "{\"Parts\":[{\"ETag\":${etag2},\"PartNumber\":2},{\"ETag\":${etag1},\"PartNumber\":1}]}"
-  if [ "${AWS_CODE}" -eq 0 ]; then
-    echo "note: server accepts out-of-order parts (AWS returns InvalidPart)"
-  else
-    assert_aws_fails_with "InvalidPart" || return 1
-    aws_run s3api abort-multipart-upload --bucket "s3c305-b1" --key mp --upload-id "${upload_id}"
-  fi
+  for scenario in     'out-of-order:large:large:InvalidPartOrder'     'small-non-final:small:large:EntityTooSmall'     'small-final:large:small:'     'small-only:small::'
+  do
+    IFS=: read -r key first second expected <<< "${scenario}"
+    (
+      upload_id=""
+      trap '
+        if [ -n "${upload_id}" ]; then
+          aws_run s3api abort-multipart-upload --bucket "${bucket}" --key "${key}" --upload-id "${upload_id}"
+        fi
+        aws_run s3api delete-object --bucket "${bucket}" --key "${key}"
+      ' EXIT
+      aws_run s3api create-multipart-upload --bucket "${bucket}" --key "${key}"
+      assert_aws_ok || exit 1
+      upload_id="$(jq -er '.UploadId | strings | select(length > 0)' <<< "${AWS_OUT}")" || exit 1
+      encoded_upload_id="$(jq -rn --arg id "${upload_id}" '$id | @uri')" || exit 1
 
-  # Case 2: non-last part smaller than 5 MiB -> AWS returns EntityTooSmall
-  make_test_file ${TEST_TMP}/s3c-small 1048576
-  aws_run s3api create-multipart-upload --bucket "s3c305-b1" --key mp
-  upload_id="$(printf '%s' "${AWS_OUT}" | jq -r '.UploadId')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 1 --body ${TEST_TMP}/s3c-p1
-  etag1="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 2 --body ${TEST_TMP}/s3c-p2
-  etag2="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api upload-part --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" --part-number 3 --body ${TEST_TMP}/s3c-small
-  etag3="$(printf '%s' "${AWS_OUT}" | jq -r '.ETag')"
-  aws_run s3api complete-multipart-upload --bucket "s3c305-b1" --key mp --upload-id "${upload_id}" \
-    --multipart-upload "{\"Parts\":[{\"ETag\":${etag1},\"PartNumber\":1},{\"ETag\":${etag2},\"PartNumber\":2},{\"ETag\":${etag3},\"PartNumber\":3}]}"
-  if [ "${AWS_CODE}" -eq 0 ]; then
-    echo "note: server accepts a non-last part smaller than 5 MiB (AWS returns EntityTooSmall)"
-  else
-    assert_aws_fails_with "EntityTooSmall" || return 1
-  fi
-  rm_bucket "s3c305-b1"
+      part_files=("${TEST_TMP}/s3c305-${first}")
+      if [ -n "${second}" ]; then part_files+=("${TEST_TMP}/s3c305-${second}"); fi
+      manifest=()
+      for i in "${!part_files[@]}"; do
+        number=$((i + 1))
+        aws_run s3api upload-part --bucket "${bucket}" --key "${key}" --upload-id "${upload_id}"           --part-number "${number}" --body "${part_files[i]}"
+        assert_aws_ok || exit 1
+        etag="$(jq -er '.ETag | strings | select(length > 0)' <<< "${AWS_OUT}")" || exit 1
+        manifest+=("${number}" "${etag}")
+      done
+      if [ "${key}" = "out-of-order" ]; then
+        manifest=("${manifest[@]:2:2}" "${manifest[@]:0:2}")
+      fi
+
+      python3 - "${TEST_TMP}/s3c305-complete.xml" "${manifest[@]}" <<'PY_MANIFEST' || exit 1
+import sys
+from xml.etree import ElementTree
+
+root = ElementTree.Element("CompleteMultipartUpload", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+for number, etag in zip(sys.argv[2::2], sys.argv[3::2]):
+    part = ElementTree.SubElement(root, "Part")
+    ElementTree.SubElement(part, "PartNumber").text = number
+    ElementTree.SubElement(part, "ETag").text = etag
+ElementTree.ElementTree(root).write(sys.argv[1], encoding="utf-8")
+PY_MANIFEST
+
+      status="$(s3_signed_curl POST "/${bucket}/${key}?uploadId=${encoded_upload_id}"         -H "Content-Type: application/xml" --data "${TEST_TMP}/s3c305-complete.xml")" || exit 1
+      python3 - "${TEST_TMP}/curl.out" "${status}" "${expected}" "${key}" <<'PY_RESULT' || exit 1
+import sys
+from xml.etree import ElementTree
+
+path, status, expected, key = sys.argv[1:]
+try:
+    response = ElementTree.parse(path).getroot()
+except ElementTree.ParseError as error:
+    raise SystemExit(f"{key}: HTTP {status} returned malformed completion XML: {error}")
+kind = response.tag.rsplit("}", 1)[-1]
+code = response.findtext("{*}Code")
+print(f"{key}: HTTP {status} {kind}" + (f" {code}" if code else ""), flush=True)
+if expected:
+    if (status, kind, code) != ("400", "Error", expected):
+        raise SystemExit(f"{key}: expected HTTP 400 with S3 error {expected}")
+elif (status != "200" or kind != "CompleteMultipartUploadResult"
+      or response.findtext("{*}Key") != key or not response.findtext("{*}ETag")):
+    raise SystemExit(f"{key}: expected HTTP 200 with a successful completion result for this key")
+PY_RESULT
+
+      if [ -n "${expected}" ]; then
+        aws_run s3api head-object --bucket "${bucket}" --key "${key}"
+        assert_aws_fails_with '[(]404[)]' "rejected completion must not publish the object" || exit 1
+        aws_run s3api abort-multipart-upload --bucket "${bucket}" --key "${key}" --upload-id "${upload_id}"
+        assert_aws_ok || exit 1
+      else
+        aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${TEST_TMP}/s3c305-download"
+        assert_aws_ok || exit 1
+        cat "${part_files[@]}" > "${TEST_TMP}/s3c305-expected" || exit 1
+        cmp -s "${TEST_TMP}/s3c305-expected" "${TEST_TMP}/s3c305-download"           || { echo "${key}: assembled object differs from its parts"; exit 1; }
+        echo "${key}: assembled bytes match"
+      fi
+      upload_id=""
+    ) || rc=1
+  done
+  rm_bucket "${bucket}"
+  return "${rc}"
 }
 
 # ---------- 4. Listing ----------
