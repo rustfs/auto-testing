@@ -55,6 +55,8 @@ class VersionedS3:
             try:
                 if not self.bulk_entered.wait(2):
                     raise S3Error("FixtureDeleteNotStarted", 500)
+                if self.mutation == "overlap-503":
+                    raise S3Error("ServiceUnavailable")
             finally:
                 with self.lock:
                     self.load_active -= 1
@@ -308,6 +310,22 @@ class BulkDeleteTests(unittest.TestCase):
                 self.assertTrue(all(row["post_warmup_requests"] == 1 for row in result["load"]))
                 self.assertEqual(result["cleanup"], "PASS")
 
+    def test_failed_overlapping_requests_are_counted_and_fail_the_case(self):
+        result, _, events = self.run_probe(case_id="S3C-1307", mode="on", mutation="overlap-503")
+        self.assertEqual(result["primary_verdict"], "FAIL")
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["error_code"], "AllOverlappingLoadRequestsFailed")
+        overlap = result["load_overlap"]
+        failed_overlaps = [row for row in events if row.get("kind") == "load_overlap" and not row["success"]]
+        self.assertGreater(len(failed_overlaps), 0)
+        self.assertEqual(overlap["overlapping_requests"], len(failed_overlaps))
+        self.assertEqual(overlap["successful_requests"], 0)
+        self.assertGreaterEqual(result["http_503_by_phase"].get("load", 0), len(failed_overlaps))
+        self.assertIn({"phase": "load", "error_code": "LoadRequestFailed"}, result["failures"])
+        self.assertEqual(result["delete_observation"]["logical_outcome"], "acknowledged")
+        self.assertEqual(result["recovery"], "PASS")
+        self.assertEqual(result["cleanup"], "PASS")
+
     def test_recorded_overlap_uses_intersection_not_total_request_duration(self):
         for started, finished, expected in ((1, 4, 2), (3, 6, 2), (0, 1, 0), (5, 7, 0)):
             with self.subTest(started=started, finished=finished):
@@ -468,6 +486,7 @@ class BulkDeleteTests(unittest.TestCase):
         self.assertEqual(result["cleanup"], "FAIL")
         self.assertEqual(result["verdict"], "FAIL")
         self.assertFalse(fake.deleted_bucket)
+        self.assertEqual(result["cleanup_error_code"], "CleanupDeleteFailed")
 
     def test_interrupt_saves_primary_failure_and_runs_cleanup(self):
         result, fake, _ = self.run_probe(mutation="interrupt")

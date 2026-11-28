@@ -270,6 +270,8 @@ def cleanup_bucket(session, state, result, delete_session=None):
         receipt["cleanup_in_progress"] = False
         save(state, receipt)
         result.update({key: receipt[key] for key in ("cleanup", "cleanup_had_errors", "cleanup_error_entries")})
+        if "cleanup_error_code" in receipt:
+            result["cleanup_error_code"] = receipt["cleanup_error_code"]
         result["remaining_versions"] = receipt.get("remaining_versions")
         result["remaining_objects"] = receipt.get("remaining_objects")
 
@@ -537,11 +539,14 @@ def run_case(case_id, mode, count, endpoints, directory, workers=32, factory=Non
         if loaded:
             result["load_overlap"] = {
                 "delete_started_monotonic": window.started, "delete_finished_monotonic": window.finished,
+                "overlapping_requests": sum(row["overlapping_requests"] for row in result["load"]),
                 "successful_requests": sum(row["overlapping_successes"] for row in result["load"]),
                 "successful_workers": sum(row["overlapping_successes"] > 0 for row in result["load"]),
             }
-            if not result["load_overlap"]["successful_requests"]:
+            if not result["load_overlap"]["overlapping_requests"]:
                 failed(RequestFailure("LoadDidNotOverlapDelete"), "load")
+            elif not result["load_overlap"]["successful_requests"]:
+                failed(RequestFailure("AllOverlappingLoadRequestsFailed"), "load")
         if any(row["failures"] or not row["first_success"] for row in result["load"]):
             failed(RequestFailure("LoadRequestFailed"), "load")
         if not observed:
