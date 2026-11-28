@@ -95,7 +95,8 @@ exceeded budget fails the affected run. The runner retains the supplied budget
 with its artifacts and reuses it for `--parse-only`. An invocation without a
 budget reports execution and captures metrics. Run the fleet wrapper
 `rustfs_performance_test.sh` with `RUSTFS_WARP_BUDGET_FILE` and a package
-SHA-256 to verify every running service before and after measurement. The
+SHA-256 to verify the direct Warp targets and running services before and
+after measurement. The
 performance workflow reads the budget from the `RUSTFS_WARP_BUDGET_JSON`
 repository variable and retains both candidate receipts.
 

@@ -475,11 +475,27 @@ step4_configure_start() {
 }
 
 record_performance_candidate() {
-  local path="$1" node
-  printf 'node\texpected_package_sha256\trunning_binary_sha256\tservice_pid\n' > "${path}"
-  for node in "${NODES[@]}"; do
-    verify_running_package_candidate "${node}" "${PACKAGES_DIR}/${PACKAGE_FILE}" "${PACKAGE_SHA256}" \
-      >> "${path}" || die "benchmark candidate could not be verified on ${node}"
+  local path="$1" node index target address node_addresses receipt
+  local -a targets
+  local -A seen_addresses=()
+  IFS=',' read -r -a targets <<< "${WARP_HOST}"
+  [ "${#targets[@]}" -eq "${#NODES[@]}" ] || die "candidate budget requires one Warp target per node"
+  printf 'warp_target\taddress\tnode\texpected_package_sha256\trunning_binary_sha256\tservice_pid\n' > "${path}"
+  for index in "${!NODES[@]}"; do
+    node="${NODES[index]}"
+    target="${targets[index]}"
+    [[ "${target}" =~ ^[[:alnum:]][[:alnum:].-]*:9000$ ]] \
+      || die "candidate budget requires a direct Warp target at port 9000: ${target}"
+    address="$(getent ahosts "${target%:9000}" | awk '$2 == "STREAM" {print $1}' | sort -u)"
+    [[ "${address}" =~ ^[0-9.]+$ ]] || die "Warp target must resolve to a single IPv4 address: ${target}"
+    [ -z "${seen_addresses[${address}]:-}" ] || die "Warp targets share an address: ${address}"
+    seen_addresses[${address}]=1
+    node_addresses="$(run_remote "${node}" <<< 'hostname -I')"
+    [[ " ${node_addresses} " == *" ${address} "* ]] \
+      || die "Warp target ${target} does not resolve to candidate node ${node}"
+    receipt="$(verify_running_package_candidate "${node}" "${PACKAGES_DIR}/${PACKAGE_FILE}" "${PACKAGE_SHA256}")" \
+      || die "benchmark candidate could not be verified on ${node}"
+    printf '%s\t%s\t%s\n' "${target}" "${address}" "${receipt}" >> "${path}"
   done
 }
 

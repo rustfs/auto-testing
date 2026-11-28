@@ -483,6 +483,52 @@ def client(*args, **kwargs): return Client()
                 self.assertIn("failed=1", (self.results / "summary.reparsed.md").read_text())
 
 
+class PerformanceCandidateTests(unittest.TestCase):
+    def test_budget_targets_must_bind_to_each_verified_node(self):
+        script = Path(__file__).with_name("rustfs_performance_test.sh").read_text()
+        verify = script[script.index("record_performance_candidate() {"):script.index("\nstep5_benchmark() {")]
+        harness = r"""
+set -Eeuo pipefail
+NODES=(first second)
+PACKAGES_DIR=/fixture
+PACKAGE_FILE=candidate.deb
+PACKAGE_SHA256=fixture
+getent() {
+  case "$2" in
+    assigned-one) echo '192.0.2.1 STREAM assigned-one' ;;
+    assigned-two) echo '192.0.2.2 STREAM assigned-two' ;;
+    wrong-target) echo '192.0.2.3 STREAM wrong-target' ;;
+  esac
+}
+run_remote() {
+  cat >/dev/null
+  case "$1" in
+    first) echo '192.0.2.1' ;;
+    second) echo '192.0.2.2' ;;
+  esac
+}
+verify_running_package_candidate() { printf '%s\tfixture\tfixture\t42\n' "$1"; }
+die() { echo "$*" >&2; exit 1; }
+record_performance_candidate "$RECEIPT"
+"""
+        for targets, accepted in (
+            ("assigned-one:9000,assigned-two:9000", True),
+            ("assigned-one:9000,wrong-target:9000", False),
+            ("assigned-one:9000,assigned-one:9000", False),
+            ("assigned-one:9001,assigned-two:9000", False),
+        ):
+            with self.subTest(targets=targets), tempfile.TemporaryDirectory() as directory:
+                receipt = Path(directory) / "candidate.tsv"
+                result = subprocess.run(
+                    ["bash", "-c", verify + "\n" + harness],
+                    env={**os.environ, "WARP_HOST": targets, "RECEIPT": str(receipt)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+                if accepted:
+                    self.assertIn("assigned-two:9000\t192.0.2.2\tsecond\t", receipt.read_text())
+
+
 class PerformanceEnvironmentTests(unittest.TestCase):
     def test_help_does_not_require_home(self):
         environment = dict(os.environ)
