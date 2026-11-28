@@ -30,7 +30,12 @@ class SensitiveDiagnosticsTests(unittest.TestCase):
         self.valid = {"backend": "VaultKV2", "cache_enabled": True}
 
     def run_case(self, body, http, expected, context, function="test_kms106", secret=CANARY):
-        command = (self.functions["aws_error_code"] + "\n" if function == "assert_aws_denied" else "") + self.functions[function] + '''
+        definitions = self.functions[function]
+        invocation = function
+        if function == "assert_aws_denied":
+            definitions = self.functions["aws_error_code"] + "\n" + definitions
+            invocation += " 'expired/garbage web identity token' AccessDenied"
+        command = definitions + '''
 admin_api() { printf '%s' "$TEST_RESPONSE"; }
 admin_api_code() { printf '%s' "$TEST_HTTP"; }
 ssh() { printf '%s' "$TEST_RESPONSE"; }
@@ -43,7 +48,7 @@ SSH_OPTS=(-o BatchMode=yes)
 AWS_CODE="$TEST_HTTP"
 AWS_OUT="$TEST_RESPONSE"
 exec > >(tee "$TEST_LOG") 2>&1
-''' + function + " 'expired/garbage web identity token' AccessDenied\n"
+''' + invocation + "\n"
         result = subprocess.run(["bash", "--noprofile", "--norc", "-uo", "pipefail", "-c", command],
                                 env={**os.environ, "TEST_RESPONSE": json.dumps(body) if isinstance(body, dict) else body, "TEST_HTTP": str(http),
                                      "TEST_SECRET": secret, "TEST_LOG": str(self.public_log)}, text=True, capture_output=True, timeout=10)
