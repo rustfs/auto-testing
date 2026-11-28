@@ -22,6 +22,13 @@ s3_signed_curl() {
   done
   : > "${TEST_TMP}/curl.out"
   case "$CASE:$method:$path:$header" in
+    106:PUT:*)
+      printf '<Error><Code>%s</Code></Error>' "$([ "$SCENARIO" = wrong-code ] && echo InvalidArgument || echo InvalidBucketName)" > "${TEST_TMP}/curl.out"
+      printf '400'
+      ;;
+    1401:PUT:/s3c1401-dst/f:*)
+      printf '200'
+      ;;
     101:PUT:/s3c101-b2:"x-amz-bucket-namespace: global")
       if [ "$SCENARIO" = rejects-global-ns ]; then
         printf '<Error><Code>InternalError</Code></Error>' > "${TEST_TMP}/curl.out"
@@ -154,6 +161,11 @@ aws_run() {
       esac
       ;;
     head-object)
+      if [ "$CASE" = 1401 ]; then
+        AWS_OUT='{"ContentType":"application/x-rustfs-src","Metadata":{"src":"1"}}'
+        [ "$SCENARIO" != copied-request-header ] || AWS_OUT='{"ContentType":"application/x-rustfs-src","Metadata":{"src":"1","request-only":"ignored"}}'
+        return 0
+      fi
       AWS_OUT='{"ETag":"\"final-3\"","ContentLength":15728640}'
       case "$SCENARIO" in
         wrong-head-etag) AWS_OUT='{"ETag":"\"different-3\"","ContentLength":15728640}' ;;
@@ -277,6 +289,14 @@ class HistoricalS3RegressionTest(unittest.TestCase):
         for scenario in ("fractional-date", "offset-date"):
             with self.subTest(scenario=scenario):
                 self.assert_case(103, scenario, True)
+
+    def test_create_bucket_requires_the_protocol_error_code(self):
+        self.assert_case(106, "success", True)
+        self.assert_case(106, "wrong-code", False)
+
+    def test_copy_rejects_the_exact_request_only_metadata_key(self):
+        self.assert_case(1401, "success", True)
+        self.assert_case(1401, "copied-request-header", False)
 
     def test_create_bucket_global_namespace_and_location(self):
         for scenario in ("missing-location", "rejects-global-ns", "head-global-ns-fails"):

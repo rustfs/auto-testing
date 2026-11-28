@@ -497,6 +497,7 @@ assert_admin_ok() {
   local code
   code="$(admin_api_code)"
   [ "${code}" = "${expected}" ] || {
+    assertion_failed=1
     echo "admin ${context}: expected HTTP ${expected}, got ${code}" >&2
     return 1
   }
@@ -516,15 +517,29 @@ aws_run_as() {
   [ "${1:-}" = "--" ] && shift
   local env_args=(AWS_ACCESS_KEY_ID="${ak}" AWS_SECRET_ACCESS_KEY="${sk}" AWS_EC2_METADATA_DISABLED=true AWS_DEFAULT_REGION="${REGION}")
   if [ -n "${token}" ]; then env_args+=(AWS_SESSION_TOKEN="${token}"); fi
-  AWS_OUT="$(env "${env_args[@]}" aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
+  AWS_OUT="$(env -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN "${env_args[@]}" aws --endpoint-url "${ENDPOINT}" --region "${REGION}" "$@" 2>&1)"; AWS_CODE=$?
 }
 
 assert_aws_ok() {
-  [ "${AWS_CODE}" -eq 0 ] || { echo "aws failed (exit ${AWS_CODE}): $*"; echo "${AWS_OUT}"; return 1; }
+  [ "${AWS_CODE}" -eq 0 ] || { assertion_failed=1; echo "aws failed (exit ${AWS_CODE}): $*"; echo "${AWS_OUT}"; return 1; }
 }
 
-assert_aws_fails() {
-  [ "${AWS_CODE}" -ne 0 ] || { echo "aws unexpectedly succeeded (exit ${AWS_CODE}): $*"; return 1; }
+aws_error_code() {
+  printf '%s\n' "${AWS_OUT}" | sed -n 's/^An error occurred (\([A-Za-z0-9]*\)) when calling .*/\1/p'
+}
+
+assert_aws_denied() {
+  local context="$1" code expected
+  shift
+  code="$(aws_error_code)"
+  if [ "${AWS_CODE}" -ne 0 ]; then
+    for expected in "$@"; do
+      [ "${code}" != "${expected}" ] || return 0
+    done
+  fi
+  assertion_failed=1
+  echo "${context}: expected AWS error ($*), got exit ${AWS_CODE}, code ${code:-none}" >&2
+  return 1
 }
 
 new_bucket() {
@@ -576,7 +591,7 @@ SKIP=0
 run_test() {
   local id="$1" name="$2" fn="$3"
   local out="${TEST_TMP}/${id}.out"
-  local started_at
+  local started_at assertion_failed=0
   if [ -n "${SELECTED_CASES:-}" ]; then
     case ",${SELECTED_CASES:-}," in
       *",${id},"*) ;;
@@ -594,7 +609,7 @@ run_test() {
       "${CURRENT_TOPOLOGY}" "${started_at}" > "${STS_DIAGNOSTICS_FILE}"
   fi
   printf '\n--- %s %s ---\n' "${id}" "${name}"
-  if "${fn}" > "${out}" 2>&1; then
+  if "${fn}" > "${out}" 2>&1 && [ "${assertion_failed}" -eq 0 ]; then
     PASS=$((PASS+1)); printf '\033[1;32m[PASS]\033[0m %s %s\n' "${id}" "${name}"
     CASE_RESULTS+=("${id}|${name}|PASS")
   else
@@ -665,7 +680,7 @@ case_iam_102_user_disable() {
   out="$(admin_user_add "${user}" "${secret}")"; assert_admin_ok 200 "add-user"
   aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_ok "enabled user works"
   out="$(admin_api PUT "/rustfs/admin/v3/set-user-status?accessKey=${user}&status=disabled")"; assert_admin_ok 200 "disable"
-  aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_fails "disabled user denied"
+  aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_denied "disabled user denied" InvalidAccessKeyId AccessDenied
   out="$(admin_api PUT "/rustfs/admin/v3/set-user-status?accessKey=${user}&status=enabled")"; assert_admin_ok 200 "enable"
   aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_ok "re-enabled user works"
   admin_user_remove "${user}" >/dev/null
@@ -676,19 +691,52 @@ case_iam_103_delete_invalidates() {
   out="$(admin_user_add "${user}" "${secret}")"; assert_admin_ok 200 "add-user"
   aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_ok "user works before delete"
   out="$(admin_user_remove "${user}")"; assert_admin_ok 200 "remove-user"
-  aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_fails "deleted user denied"
+  aws_run_as "${user}" "${secret}" -- s3 ls; assert_aws_denied "deleted user denied" InvalidAccessKeyId AccessDenied
 }
 
 case_iam_105_readonly_boundary() {
-  local user="sec105u" secret="sec105secret" out
-  out="$(admin_user_add "${user}" "${secret}")"; assert_admin_ok 200 "add-user"
-  out="$(admin_policy_attach "${user}" readonly)"; assert_admin_ok 200 "attach readonly"
-  new_bucket sec105-bucket || return 1
-  aws_run_as "${user}" "${secret}" -- s3 ls s3://sec105-bucket; assert_aws_ok "readonly can list bucket"
-  aws_run_as "${user}" "${secret}" -- s3api put-object --bucket sec105-bucket --key hello.txt --body /etc/hostname
-  assert_aws_fails "readonly cannot write"
-  rm_bucket sec105-bucket
+  local user="sec105u" secret="sec105secret" bucket="sec105-bucket" key="hello.txt"
+  local original="${TEST_TMP}/sec105-original" replacement="${TEST_TMP}/sec105-replacement"
+  local downloaded="${TEST_TMP}/sec105-download"
+  local result=0 bucket_created=0
+
+  admin_user_add "${user}" "${secret}" >/dev/null
+  assert_admin_ok 200 "add-user" || return 1
+  if new_bucket "${bucket}"; then
+    bucket_created=1
+    (
+      admin_policy_attach "${user}" readonly >/dev/null
+      assert_admin_ok 200 "attach readonly" || exit 1
+      printf 'original payload\n' > "${original}" || exit 1
+      printf 'replacement payload\n' > "${replacement}" || exit 1
+      aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${original}"
+      assert_aws_ok "seed readonly object" || exit 1
+      aws_run_as "${user}" "${secret}" -- s3api get-object --bucket "${bucket}" --key "${key}" "${downloaded}"
+      assert_aws_ok "readonly can get the object" || exit 1
+      cmp "${original}" "${downloaded}" || exit 1
+
+      aws_run_as "${user}" "${secret}" -- s3api put-object --bucket "${bucket}" --key "${key}" --body "${replacement}"
+      assert_aws_denied "readonly cannot overwrite the object" AccessDenied || exit 1
+      rm -f "${downloaded}" || exit 1
+      aws_run s3api get-object --bucket "${bucket}" --key "${key}" "${downloaded}"
+      assert_aws_ok "denied overwrite preserved the object" || exit 1
+      cmp "${original}" "${downloaded}" || exit 1
+
+      aws_run s3api put-object --bucket "${bucket}" --key "${key}" --body "${replacement}"
+      assert_aws_ok "administrator can send the same PUT"
+    ) || result=1
+  else
+    result=1
+  fi
+  if [ "${bucket_created}" -eq 1 ]; then
+    aws_run s3api delete-object --bucket "${bucket}" --key "${key}"
+    assert_aws_ok "cleanup readonly object" || result=1
+    rm_bucket "${bucket}"
+    assert_aws_ok "cleanup readonly bucket" || result=1
+  fi
   admin_user_remove "${user}" >/dev/null
+  assert_admin_ok 200 "cleanup readonly user" || result=1
+  return "${result}"
 }
 
 case_iam_106_custom_policy_crud() {
@@ -714,7 +762,7 @@ case_iam_107_attach_detach() {
   out="$(admin_policy_attach "${user}" sec107p)"; assert_admin_ok 200 "attach"
   aws_run_as "${user}" "${secret}" -- s3 ls s3://sec107-bucket; assert_aws_ok "policy grants list"
   out="$(admin_policy_detach "${user}" sec107p)"; assert_admin_ok 200 "detach"
-  aws_run_as "${user}" "${secret}" -- s3 ls s3://sec107-bucket; assert_aws_fails "detached user denied"
+  aws_run_as "${user}" "${secret}" -- s3 ls s3://sec107-bucket; assert_aws_denied "detached user denied" AccessDenied
   out="$(admin_policy_detach "${user}" sec107p)"; assert_admin_ok 200 "detach idempotent"
   rm_bucket sec107-bucket
   admin_user_remove "${user}" >/dev/null
@@ -729,9 +777,12 @@ case_iam_109_deny_precedence() {
   out="$(admin_policy_add sec109-allow "${allow}")"; assert_admin_ok 200 "add allow"
   out="$(admin_policy_add sec109-deny "${deny}")"; assert_admin_ok 200 "add deny"
   new_bucket sec109-bucket || return 1
+  out="$(admin_policy_attach "${user}" sec109-allow)"; assert_admin_ok 200 "attach allow"
+  aws_run_as "${user}" "${secret}" -- s3api list-objects-v2 --bucket sec109-bucket
+  assert_aws_ok "allow grants list before attaching deny"
   out="$(admin_api POST /rustfs/admin/v3/idp/builtin/policy/attach "" "{\"policies\":[\"sec109-allow\",\"sec109-deny\"],\"user\":\"${user}\"}")"
   assert_admin_ok 200 "attach allow+deny"
-  aws_run_as "${user}" "${secret}" -- s3 ls s3://sec109-bucket; assert_aws_fails "deny overrides allow"
+  aws_run_as "${user}" "${secret}" -- s3api list-objects-v2 --bucket sec109-bucket; assert_aws_denied "deny overrides allow" AccessDenied
   rm_bucket sec109-bucket
   admin_user_remove "${user}" >/dev/null
 }
@@ -750,8 +801,7 @@ validation_iam_policy_body() {
   assert_aws_ok "allowed GET" || return 1
   cmp "${TEST_TMP}/validation-iam-source.bin" "${TEST_TMP}/validation-iam-read.bin" || return 1
   aws_run_as "${user}" "${secret}" -- s3api delete-object --bucket "${bucket}" --key object.bin
-  assert_aws_fails "explicit deny DELETE" || return 1
-  [[ "${AWS_OUT}" == *AccessDenied* ]] || { echo "DELETE failure was not AccessDenied"; return 1; }
+  assert_aws_denied "explicit deny DELETE" AccessDenied || return 1
   aws_run s3api get-object --bucket "${bucket}" --key object.bin "${TEST_TMP}/validation-iam-root-read.bin"
   assert_aws_ok "denied DELETE preserved object" || return 1
   cmp "${TEST_TMP}/validation-iam-source.bin" "${TEST_TMP}/validation-iam-root-read.bin" || return 1
@@ -804,13 +854,13 @@ create_service_account() {
   [ -n "${policy}" ] && body="{\"targetUser\":\"${target}\",\"policy\":${policy}}"
   local out
   out="$(admin_api PUT /rustfs/admin/v3/add-service-accounts "" "${body}")"
-  assert_admin_ok 200 "add-service-accounts"
+  assert_admin_ok 200 "add-service-accounts" || return 1
   printf '%s' "${out}" | jq -r '.credentials.accessKey + "\t" + .credentials.secretKey'
 }
 
 case_sa_101_create_and_use() {
   local sa
-  sa="$(create_service_account "${ACCESS_KEY}")"
+  sa="$(create_service_account "${ACCESS_KEY}")" || return 1
   local sa_ak="${sa%%$'\t'*}" sa_sk="${sa#*$'\t'}"
   aws_run_as "${sa_ak}" "${sa_sk}" -- s3 ls; assert_aws_ok "service account can list buckets"
   admin_api DELETE "/rustfs/admin/v3/delete-service-account?accessKey=${sa_ak}" >/dev/null
@@ -823,10 +873,11 @@ case_sa_103_parent_boundary() {
   out="$(admin_policy_attach "${user}" readonly)"; assert_admin_ok 200 "attach readonly"
   new_bucket sec103p-bucket || return 1
   local sa
-  sa="$(create_service_account "${user}" "${policy}")"
+  sa="$(create_service_account "${user}" "${policy}")" || return 1
   local sa_ak="${sa%%$'\t'*}" sa_sk="${sa#*$'\t'}"
-  aws_run_as "${sa_ak}" "${sa_sk}" -- s3api put-object --bucket sec103p-bucket --key hello.txt --body /etc/hostname
-  assert_aws_fails "service account cannot exceed readonly parent"
+  printf 'authorization fixture\n' > "${TEST_TMP}/sec103p-payload" || return 1
+  aws_run_as "${sa_ak}" "${sa_sk}" -- s3api put-object --bucket sec103p-bucket --key hello.txt --body "${TEST_TMP}/sec103p-payload"
+  assert_aws_denied "service account cannot exceed readonly parent" AccessDenied
   admin_api DELETE "/rustfs/admin/v3/delete-service-account?accessKey=${sa_ak}" >/dev/null
   rm_bucket sec103p-bucket
   admin_user_remove "${user}" >/dev/null
@@ -834,12 +885,12 @@ case_sa_103_parent_boundary() {
 
 case_sa_104_delete_invalidates() {
   local sa
-  sa="$(create_service_account "${ACCESS_KEY}")"
+  sa="$(create_service_account "${ACCESS_KEY}")" || return 1
   local sa_ak="${sa%%$'\t'*}" sa_sk="${sa#*$'\t'}"
   aws_run_as "${sa_ak}" "${sa_sk}" -- s3 ls; assert_aws_ok "service account works"
   local out
   out="$(admin_api DELETE "/rustfs/admin/v3/delete-service-account?accessKey=${sa_ak}")"; assert_admin_ok 200 "delete-service-account"
-  aws_run_as "${sa_ak}" "${sa_sk}" -- s3 ls; assert_aws_fails "deleted service account denied"
+  aws_run_as "${sa_ak}" "${sa_sk}" -- s3 ls; assert_aws_denied "deleted service account denied" InvalidAccessKeyId AccessDenied
 }
 
 # ==================== STS ====================
@@ -891,8 +942,9 @@ case_sts_104_temp_boundary() {
   local sts_ak sts_sk sts_token sts_exp
   IFS=$'\t' read -r sts_ak sts_sk sts_token sts_exp <<<"${creds}"
   aws_run_as "${sts_ak}" "${sts_sk}" "${sts_token}" -- s3 ls s3://sec104-a-bucket; assert_aws_ok "STS creds can list allowed bucket"
-  aws_run_as "${sts_ak}" "${sts_sk}" "${sts_token}" -- s3api put-object --bucket sec104-b-bucket --key hello.txt --body /etc/hostname
-  assert_aws_fails "STS creds cannot exceed identity scope"
+  printf 'authorization fixture\n' > "${TEST_TMP}/sec104-payload" || return 1
+  aws_run_as "${sts_ak}" "${sts_sk}" "${sts_token}" -- s3api put-object --bucket sec104-b-bucket --key hello.txt --body "${TEST_TMP}/sec104-payload"
+  assert_aws_denied "STS creds cannot exceed identity scope" AccessDenied
   rm_bucket sec104-a-bucket
   rm_bucket sec104-b-bucket
   admin_user_remove "${user}" >/dev/null
@@ -914,15 +966,8 @@ case_sts_105_revoke() {
     printf 'STS-105 post-revoke: aws_exit=%s\n' "${AWS_CODE}"
     printf '%s\n' "${AWS_OUT}"
   } >> "${STS_DIAGNOSTICS_FILE}"
-  assert_aws_fails "STS creds invalid after revoke" || return 1
-  local error_code
-  error_code="$(printf '%s\n' "${AWS_OUT}" | sed -n 's/.*An error occurred (\([A-Za-z]*\)) when calling.*/\1/p' | head -1)"
-  case "${error_code}" in
-    InvalidAccessKeyId|AccessDenied)
-      printf 'STS-105 post-revoke: aws_exit=%s error_code=%s\n' "${AWS_CODE}" "${error_code}" >> "${STS_DIAGNOSTICS_FILE}"
-      ;;
-    *) echo "STS request failed without the expected credential rejection" >&2; return 1 ;;
-  esac
+  assert_aws_denied "STS creds invalid after revoke" InvalidAccessKeyId AccessDenied || return 1
+  printf 'STS-105 post-revoke: aws_exit=%s error_code=%s\n' "${AWS_CODE}" "$(aws_error_code)" >> "${STS_DIAGNOSTICS_FILE}"
 }
 
 # Issue #9279 uses an S3-scoped SigV4 POST, rather than the AWS CLI's STS
@@ -997,8 +1042,7 @@ PY
     --role-session-name sec108 \
     --duration-seconds 900 \
     --web-identity-token "${expired_jwt}"
-  assert_aws_fails "expired/garbage web identity token"
-  printf '%s' "${AWS_OUT}" | grep -qiE 'AccessDenied' || { echo "expected AccessDenied, got: ${AWS_OUT}"; return 1; }
+  assert_aws_denied "expired/garbage web identity token" AccessDenied
 }
 
 case_oidc_103_keycloak_live() {
@@ -1179,6 +1223,7 @@ main() {
   need_cmd openssl "openssl"
   need_cmd aws "aws cli"
   need_cmd jq "jq"
+  need_cmd cmp "cmp"
   need_cmd python3 "python3"
   if [ -n "${VALIDATION_CASE}" ]; then need_cmd rc "rc client provenance"; fi
   TEST_SCRIPT_REVISION="$(git -C "${SCRIPT_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)"

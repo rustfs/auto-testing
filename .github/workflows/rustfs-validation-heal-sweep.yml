@@ -361,29 +361,23 @@ jobs:
               "${AUTO_TESTING_SHA}" "${HEAL_ROOT}/run" \
               < /dev/null \
               > "${HEAL_ROOT}/results/${CASE_ID//\//_}.log" 2>&1 || rc=$?
-            # The case verdict is authoritative from the result JSON: drivers
-            # may self-report BLOCKED (diagnostic gates) with a nonzero exit;
-            # only FAIL / INFRA_ERROR / TIMEOUT keep the sweep red.
-            # Terminal verdict lives at run/<case>/cases/<case>.json
-            # (run_validation_case.sh passes --validation-artifacts-dir
-            # run/<case>; the heal runner appends cases/<case>.json).
+            # Keep the runner's terminal receipt even when the runner fails.
             VERDICT=""
             RESULT_JSON="${HEAL_ROOT}/run/${CASE_ID}/cases/${CASE_ID}.json"
             if [ -f "${RESULT_JSON}" ]; then
-              VERDICT="$(jq -r '.verdict // empty' "${RESULT_JSON}" 2>/dev/null || true)"
+              VERDICT="$(jq -er --arg case_id "${CASE_ID}" '
+                select(.schema_version == 1 and .case_id == $case_id)
+                | .verdict | strings
+              ' "${RESULT_JSON}" 2>/dev/null || true)"
               cp "${RESULT_JSON}" "${HEAL_ROOT}/results/${CASE_ID//\//_}.result.json" 2>/dev/null || true
             fi
-            # The terminal verdict is authoritative when present; otherwise
-            # trust the runner exit code (rc=0 with no verdict was recorded
-            # as FAIL before this fix — smoke run 41748362310).
-            STATUS="FAIL"
-            if [ "${VERDICT}" = "PASS" ] || { [ -z "${VERDICT}" ] && [ "${rc}" -eq 0 ]; }; then
-              STATUS="PASS"
-            elif [ "${VERDICT}" = "BLOCKED" ]; then
-              STATUS="BLOCKED"
-            elif [ "${rc}" -eq 124 ]; then
-              STATUS="TIMEOUT"
-            fi
+            case "${rc}:${VERDICT}" in
+              124:*) STATUS=TIMEOUT ;;
+              0:PASS) STATUS=PASS ;;
+              *:BLOCKED) STATUS=BLOCKED ;;
+              *:FAIL) STATUS=FAIL ;;
+              *) STATUS=INFRA_ERROR ;;
+            esac
             printf '%s\t%s\n' "${CASE_ID}" "${STATUS}" >> "${HEAL_ROOT}/results.txt"
             echo "case ${CASE_ID}: ${STATUS} (rc=${rc} verdict=${VERDICT:-none})"
             if [ -f "${HEAL_ROOT}/run/report.md" ]; then
@@ -428,6 +422,10 @@ jobs:
                   rows.append((case_id, module_of.get(case_id, "heal"), status))
           passed = sum(1 for _, _, s in rows if s == "PASS")
           failed = sum(1 for _, _, s in rows if s == "FAIL")
+          infra_errors = sum(1 for _, _, s in rows if s == "INFRA_ERROR")
+          selected = (root / "heal-cases.txt").read_text().split()
+          reported = {case_id for case_id, _, _ in rows}
+          missing = [case_id for case_id in selected if case_id not in reported]
           timed_out = sum(1 for _, _, s in rows if s == "TIMEOUT")
           blocked = (root / "blocked-cases.txt").read_text().split()
           pinned = (root / "pinned-cases.txt").read_text().split()
@@ -470,14 +468,19 @@ jobs:
           report += [f"- {c}: BLOCKED" for c in pinned]
           report += [
               "", "## Totals", "",
-              f"- Total: {len(rows)}",
+              f"- Selected: {len(selected)}",
+              f"- Reported: {len(rows)}",
+              f"- Missing: {len(missing)}",
               f"- PASS: {passed}",
               f"- FAIL: {failed}",
+              f"- INFRA_ERROR: {infra_errors}",
               f"- TIMEOUT: {timed_out}",
-              f"- BLOCKED: {len(blocked) + len(pinned) + sum(1 for _, _, s in rows if s == 'BLOCKED')}", "",
-              "Failing cases keep this workflow red only as a report; the sweep artifact",
-              "retains every case log and per-case report for diagnosis.", "",
+              f"- BLOCKED among selected: {sum(1 for _, _, s in rows if s == 'BLOCKED')}",
+              f"- BLOCKED before selection: {len(blocked) + len(pinned)}", "",
+              "Every selected case must pass. The sweep artifact retains case logs and per-case reports.", "",
           ]
+          if missing:
+              report += ["## Missing case results", "", *[f"- {c}" for c in missing], ""]
           (root / "report.md").write_text("\n".join(report))
           (root / "cases.md").write_text("\n".join(f"| {c} | {m} | {s} |" for c, m, s in rows) + "\n")
           PY
@@ -567,8 +570,9 @@ jobs:
           HEAL_ROOT: ${{ runner.temp }}/validation-heal
         run: |
           set -euo pipefail
-          if grep -qE $'\t(FAIL|TIMEOUT)$' "${HEAL_ROOT}/results.txt"; then
-            echo "validation heal sweep has failing or timed-out cases:"
-            grep -E $'\t(FAIL|TIMEOUT)$' "${HEAL_ROOT}/results.txt"
-            exit 1
-          fi
+          test -s "${HEAL_ROOT}/heal-cases.txt"
+          cut -f1 "${HEAL_ROOT}/results.txt" | diff -u "${HEAL_ROOT}/heal-cases.txt" -
+          awk -F '\t' '
+            NF != 2 || $2 != "PASS" { print "selected heal case did not pass: " $0; invalid = 1 }
+            END { exit invalid }
+          ' "${HEAL_ROOT}/results.txt"
