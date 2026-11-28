@@ -40,6 +40,8 @@ CLEANUP_ATTEMPTS="${WARP_CLEANUP_ATTEMPTS:-3}"
 RESULT_DIR="${WARP_RESULT_DIR:-$(pwd)/warp-bench-results-$(date +%Y%m%d-%H%M%S)}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 S3_HELPER="${SCRIPT_DIR}/scripts/performance_s3.py"
+BUDGET_HELPER="${SCRIPT_DIR}/scripts/performance_budget.py"
+BUDGET_FILE="${WARP_BUDGET_FILE:-}"
 S3_ENDPOINT="${HOST%%,*}"
 [[ "${S3_ENDPOINT}" == *://* ]] || S3_ENDPOINT="http://${S3_ENDPOINT}"
 export WARP_ACCESS_KEY="${ACCESS_KEY}" WARP_SECRET_KEY="${SECRET_KEY}"
@@ -71,6 +73,9 @@ fi
 if [[ "${1:-}" == "--parse-only" ]]; then
   # Reanalysis must not rewrite the execution's abort states, timings or reports.
   OUTPUT_TAG=".reparsed"
+  if [[ -z "${BUDGET_FILE}" && -f "${RESULT_DIR}/performance-budget.json" ]]; then
+    BUDGET_FILE="${RESULT_DIR}/performance-budget.json"
+  fi
 fi
 
 LOG_FILE="${RESULT_DIR}/master${OUTPUT_TAG}.log"
@@ -196,27 +201,34 @@ parse_round() {
       return 1
     fi
   fi
-  local line
+  local line objects get_p99="" put_p99=""
   if [[ "${method}" == "mixed" ]]; then
     local total get put
     total=$(section_lines "$file" Total)
     get=$(section_lines "$file" GET)
     put=$(section_lines "$file" PUT)
-    line=$(printf 'mixed\t%s\t%s\t%s\t%s\t%s' \
-      "$size" \
-      "$(field "${total}" tp)" \
-      "$(field "${total}" objs)" \
-      "$(field "${get}" avg)" \
-      "$(field "${put}" avg)")
+    objects=$(field "${total}" objs)
+    get_p99=$(field "${get}" p99)
+    put_p99=$(field "${put}" p99)
+    line=$(printf 'mixed\t%s\t%s\t%s\t%s\t%s\t\t\t\t\t\t%s\t%s\t%s\t%s\t%s\t%s' \
+      "$size" "$(field "${total}" tp)" "${objects}" "$(field "${get}" avg)" "$(field "${put}" avg)" \
+      "$(field "${get}" p50)" "$(field "${get}" p90)" "${get_p99}" \
+      "$(field "${put}" p50)" "$(field "${put}" p90)" "${put_p99}")
   else
     local sec
     sec=$(printf '%s' "${method}" | tr '[:lower:]' '[:upper:]')
     local stats
     stats=$(section_lines "$file" "${sec}")
+    objects=$(field "${stats}" objs)
+    if [[ "${method}" == get ]]; then
+      get_p99=$(field "${stats}" p99)
+    else
+      put_p99=$(field "${stats}" p99)
+    fi
     line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
       "${method}" "${size}" \
       "$(field "${stats}" tp)" \
-      "$(field "${stats}" objs)" \
+      "${objects}" \
       "$(field "${stats}" avg)" \
       "$(field "${stats}" p50)" \
       "$(field "${stats}" p90)" \
@@ -224,14 +236,22 @@ parse_round() {
       "$(field "${stats}" ttfb_avg)" \
       "$(field "${stats}" ttfb_p99)" \
       "$(field "${stats}" ttfb_worst)")
+    line+=$'\t\t\t\t\t\t'
   fi
   # TTFB is optional in warp; throughput and request statistics define a result.
   if ! printf '%s\n' "${line}" | awk -F '\t' '
     { last = $1 == "mixed" ? 6 : 8
-      for (i = 3; i <= last; i++) if ($i !~ /[^[:space:]]/) exit 1 }
+      for (i = 3; i <= last; i++) if ($i !~ /[^[:space:]]/) exit 1
+      if ($1 == "mixed") for (i = 12; i <= 17; i++) if ($i !~ /[^[:space:]]/) exit 1 }
   '; then
     PARSE_FAILURE_REASON=missing_required_metrics
     log "PARSE_FAILED method=${method} size=${size} reason=missing_required_metrics file=${file}"
+    return 1
+  fi
+  if [[ -n "${BUDGET_FILE}" ]] && ! python3 "${BUDGET_HELPER}" check "${BUDGET_FILE}" \
+      "${method}/${size}" "${objects}" "${get_p99}" "${put_p99}" >> "${LOG_FILE}" 2>&1; then
+    PARSE_FAILURE_REASON=performance_budget_failed
+    log "PARSE_FAILED method=${method} size=${size} reason=${PARSE_FAILURE_REASON}; see ${LOG_FILE}"
     return 1
   fi
   printf '%s\n' "${line}" >> "${SUMMARY_TSV}"
@@ -247,6 +267,11 @@ gen_summary_md() {
     echo "- Concurrency: ${CONCURRENCY}; duration: ${DURATION}; sleep: ${SLEEP_BETWEEN_ROUNDS}s; GET objects: ${GET_OBJECTS}"
     echo "- Methods: ${METHODS[*]-}; sizes: ${SIZES[*]-}"
     echo "- Rounds: selected=${TOTAL_ROUNDS}; parsed=${PARSED_ROUNDS}; failed=${FAILED_ROUNDS}"
+    if [[ -n "${BUDGET_FILE}" ]]; then
+      echo "- Candidate budget: $(basename "${BUDGET_FILE}"); see master log and round verdicts."
+    else
+      echo "- Candidate budget: not configured; results certify execution and metric capture."
+    fi
     if [[ -n "${OUTPUT_TAG}" ]]; then
       echo "- Reparsed raw outputs: elapsed time is unknown; configuration above is from this parser invocation. See the original rounds.tsv, master.log and summary files for execution evidence."
     fi
@@ -279,13 +304,13 @@ gen_summary_md() {
   {
     echo "## MIXED Results (Total)"
     echo ""
-    echo "| Object Size | Total Avg Throughput | Total Avg obj/s | MIXED GET Avg | MIXED PUT Avg |"
-    echo "|-------------|----------------------|-----------------|---------------|---------------|"
+    echo "| Object Size | Total Avg Throughput | Total Avg obj/s | GET Avg | PUT Avg | GET P50 | GET P90 | GET P99 | PUT P50 | PUT P90 | PUT P99 |"
+    echo "|-------------|----------------------|-----------------|---------|---------|---------|---------|---------|---------|---------|---------|"
   } >> "${SUMMARY_MD}"
-  while IFS=$'\t' read -r method size tp objs gavg pavg rest; do
-    [[ "${method}" == "mixed" ]] && \
-      echo "| ${size} | ${tp} | ${objs} | ${gavg} | ${pavg} |" >> "${SUMMARY_MD}"
-  done < "${SUMMARY_TSV}"
+  awk -F '\t' '$1 == "mixed" {
+    printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",
+      $2, $3, $4, $5, $6, $12, $13, $14, $15, $16, $17
+  }' "${SUMMARY_TSV}" >> "${SUMMARY_MD}"
   echo "" >> "${SUMMARY_MD}"
 }
 
@@ -293,13 +318,28 @@ gen_summary_md() {
 
 mkdir -p "${RESULT_DIR}" || exit 1
 log "CONFIG host=${HOST} bucket=${BUCKET} concurrency=${CONCURRENCY} duration=${DURATION} get_objects=${GET_OBJECTS} sleep_between_rounds=${SLEEP_BETWEEN_ROUNDS}s" || exit 1
-printf 'method\tsize\tthroughput\tobj_per_s\treq_avg\treq_p50\treq_p90\treq_p99\tttfb_avg\tttfb_p99\tttfb_worst\n' > "${SUMMARY_TSV}" || exit 1
+printf 'method\tsize\tthroughput\tobj_per_s\treq_avg\treq_p50\treq_p90\treq_p99\tttfb_avg\tttfb_p99\tttfb_worst\tmixed_get_p50\tmixed_get_p90\tmixed_get_p99\tmixed_put_p50\tmixed_put_p90\tmixed_put_p99\n' > "${SUMMARY_TSV}" || exit 1
 printf 'method\tsize\tverdict\treason\twarp_exit\tcapture_exit\telapsed_seconds\treport_present\terror_lines\tbucket\tprepare\tcleanup\tcleanup_error_entries\tremaining_objects\tcleanup_http_503_attempts\tcleanup_request_failures\tcleanup_had_errors\n' > "${ROUNDS_TSV}" || exit 1
 
 if [[ ${TOTAL_ROUNDS} -eq 0 ]]; then
   log "NO_ROUNDS_SELECTED"
   gen_summary_md
   exit 1
+fi
+
+if [[ -n "${BUDGET_FILE}" ]]; then
+  budgets=()
+  for method in "${METHODS[@]}"; do
+    for size in "${SIZES[@]}"; do
+      budgets+=("${method}/${size}")
+    done
+  done
+  python3 "${BUDGET_HELPER}" validate "${BUDGET_FILE}" "${budgets[@]}" || exit 1
+  retained_budget="${RESULT_DIR}/performance-budget${OUTPUT_TAG}.json"
+  if [[ ! "${BUDGET_FILE}" -ef "${retained_budget}" ]]; then
+    cp "${BUDGET_FILE}" "${retained_budget}" || exit 1
+  fi
+  BUDGET_FILE="${retained_budget}"
 fi
 
 if [[ "${1:-}" == "--parse-only" ]]; then

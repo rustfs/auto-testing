@@ -38,6 +38,14 @@ on:
         description: 'NEW .deb URL. Overrides to_version / nightly default.'
         required: false
         type: string
+      to_sha256:
+        description: SHA-256 of the candidate Debian package
+        required: false
+        type: string
+      require_upgrade_availability:
+        description: Require successful sampled I/O and verify each running candidate
+        type: boolean
+        default: false
       topology:
         description: 'Topology to run (all = SNSD, SNMD, MNMD)'
         type: choice
@@ -164,6 +172,8 @@ jobs:
         # Collect reports and backlog evidence before the final suite verdict.
         continue-on-error: true
         env:
+          INPUT_TO_SHA256: ${{ inputs.to_sha256 }}
+          REQUIRE_UPGRADE_AVAILABILITY: ${{ inputs.require_upgrade_availability }}
           GH_TOKEN: ${{ secrets.PF_TESTING_GH_TOKEN }}
         run: |
           set -euo pipefail
@@ -175,6 +185,12 @@ jobs:
           TOPOLOGY='${{ inputs.topology }}'
           BACKENDS='${{ inputs.backends }}'
           ARGS=(-y --log-file "${LOG_FILE}" --artifacts-dir "${FUNCTIONAL_ARTIFACTS_DIR}/upgrade")
+          if [ -n "${INPUT_TO_SHA256}" ]; then
+            ARGS+=(--sha256-to "${INPUT_TO_SHA256}")
+          fi
+          if [ "${REQUIRE_UPGRADE_AVAILABILITY}" = true ]; then
+            ARGS+=(--require-upgrade-availability)
+          fi
           if [ "${TOPOLOGY}" = "all" ] || [ -z "${TOPOLOGY}" ] || [ "${TOPOLOGY}" = "null" ]; then
             ARGS+=(--all-topologies)
           else
@@ -285,6 +301,11 @@ jobs:
               cat "${MATRIX_TABLE}"
               echo ""
             fi
+            echo "## Sampled install-window I/O"
+            echo '~~~text'
+            grep -E '^\[UPG-AVAILABILITY\]' "${LOG_FILE}" || echo "No install-window observations recorded."
+            echo '~~~'
+            echo ""
             if [ -s "${CASE_TABLE}" ]; then
               cat "${CASE_TABLE}"
               echo ""

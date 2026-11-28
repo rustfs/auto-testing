@@ -20,6 +20,10 @@ on:
         description: 'Direct .deb URL (nightly/R2). Defaults to the latest nightly deb.'
         required: false
         type: string
+      package_sha256:
+        description: SHA-256 of the candidate Debian package
+        required: false
+        type: string
       test_method:
         description: 'Benchmark method(s) to run (manual runs only; "all" = GET+PUT+MIXED)'
         type: choice
@@ -111,6 +115,7 @@ jobs:
     runs-on: pf-testing
     timeout-minutes: 900
     env:
+      RUSTFS_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
       RUSTFS_BENCH_SCRIPT: ${{ github.workspace }}/rustfs_performance_testing.sh
       RUSTFS_WARP_METHODS: ${{ inputs.test_method }}
       RUSTFS_WARP_SIZES: ${{ inputs.object_size }}
@@ -194,7 +199,13 @@ jobs:
 
       - name: Run benchmark (GET/PUT/MIXED)
         id: benchmark
+        env:
+          PERFORMANCE_BUDGET_JSON: ${{ vars.RUSTFS_WARP_BUDGET_JSON }}
         run: |
+          if [ -n "${PERFORMANCE_BUDGET_JSON}" ]; then
+            export RUSTFS_WARP_BUDGET_FILE="${FUNCTIONAL_ARTIFACTS_DIR}/performance-budget.json"
+            printf '%s\n' "${PERFORMANCE_BUDGET_JSON}" > "${RUSTFS_WARP_BUDGET_FILE}"
+          fi
           ./rustfs_performance_test.sh \
             --step 5 -y \
             --log-file "${LOG_FILE}"
@@ -321,6 +332,8 @@ jobs:
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/report.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/suite.log
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/version.txt
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/performance-budget*.json
+            ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/candidate-*.tsv
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/master.log
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/summary.md
             ${{ env.FUNCTIONAL_ARTIFACTS_DIR }}/results/summary.tsv

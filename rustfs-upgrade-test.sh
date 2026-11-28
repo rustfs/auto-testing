@@ -78,6 +78,10 @@ PACKAGES_DIR="/home/rustfs/packages"
 PACKAGE_FILE="rustfs.deb"
 FROM_SHA256="${FROM_SHA256:-}"
 TO_SHA256="${TO_SHA256:-}"
+REQUIRE_UPGRADE_AVAILABILITY=0
+UPGRADE_PROBE_PID=""
+UPGRADE_PROBE_STOP=""
+UPGRADE_PROBE_TIMEOUT_SECONDS="${RUSTFS_UPGRADE_PROBE_TIMEOUT_SECONDS:-15}"
 TO_NIGHTLY_URL="${TO_NIGHTLY_URL:-https://dl.rustfs.com/artifacts/rustfs/packages/nightly/rustfs-nightly-latest.deb}"
 
 ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfs@test}"
@@ -634,16 +638,93 @@ env_setup_old() {
   fi
 }
 
+monitor_upgrade_io() {
+  local ledger="$1" stop="$2" fixture="$3" count=0 read_rc write_rc start
+  local upload="${TEST_TMP}/upgrade-probe-body" download="${TEST_TMP}/upgrade-probe-read"
+  local request_timeout="${UPGRADE_PROBE_TIMEOUT_SECONDS:-15}"
+  local -a command=(aws --endpoint-url "${ENDPOINT}" --region "${REGION}" s3api)
+  while [ ! -e "${stop}" ]; do
+    count=$((count + 1))
+    start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    read_rc=0 write_rc=0
+    rm -f "${download}" || return 1
+    AWS_MAX_ATTEMPTS=1 timeout --kill-after=2 "${request_timeout}" "${command[@]}" get-object \
+      --bucket upg-plain --key plain "${download}" >/dev/null 2>&1 || read_rc=$?
+    if [ "${read_rc}" -eq 0 ] && ! cmp -s "${fixture}" "${download}"; then read_rc=1; fi
+
+    printf 'upgrade observation %d\n' "${count}" > "${upload}" || return 1
+    AWS_MAX_ATTEMPTS=1 timeout --kill-after=2 "${request_timeout}" "${command[@]}" put-object \
+      --bucket upg-plain --key upgrade-probe --body "${upload}" >/dev/null 2>&1 || write_rc=$?
+    if [ "${write_rc}" -eq 0 ]; then
+      rm -f "${download}" || return 1
+      AWS_MAX_ATTEMPTS=1 timeout --kill-after=2 "${request_timeout}" "${command[@]}" get-object \
+        --bucket upg-plain --key upgrade-probe "${download}" >/dev/null 2>&1 || write_rc=$?
+      if [ "${write_rc}" -eq 0 ] && ! cmp -s "${upload}" "${download}"; then write_rc=1; fi
+    fi
+    printf '%s\t%s\t%d\t%d\t%d\n' "${start}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "${count}" "${read_rc}" "${write_rc}" >> "${ledger}" || return 1
+    [ -e "${stop}" ] || sleep 1
+  done
+}
+
+stop_upgrade_observation() {
+  [ -n "${UPGRADE_PROBE_PID}" ] || return 0
+  touch "${UPGRADE_PROBE_STOP}" || {
+    kill "${UPGRADE_PROBE_PID}" 2>/dev/null || true
+  }
+  local result=0
+  wait "${UPGRADE_PROBE_PID}" || result=$?
+  UPGRADE_PROBE_PID=""
+  return "${result}"
+}
+
+upgrade_observation_status() {
+  awk -F '\t' '
+    NR == 1 { next }
+    NF != 5 || $3 != NR - 1 || $4 != "0" || $5 != "0" { failed = 1 }
+    END { print failed ? "FAIL" : (NR < 3 ? "UNVERIFIED" : "SAMPLED") }
+  ' "$1"
+}
+
 upgrade_in_place() {
   local topo="$1"
   read -r -a nodes <<<"$(topology_nodes "${topo}")"
   local to_url
   to_url="$(resolve_to_url)"
   log "upgrading in place to ${to_url} on ${nodes[*]} (keeping /data and ${RUSTFS_CONFIG_FILE})"
+  local ledger="${GROUP_DIR}/upgrade-observations.tsv" node coverage=UNVERIFIED
+  printf 'start_utc\tfinish_utc\tsample\tbaseline_read_exit\twrite_and_readback_exit\n' > "${ledger}"
+  UPGRADE_PROBE_STOP="${TEST_TMP}/upgrade-probe-stop"
+  rm -f "${UPGRADE_PROBE_STOP}"
+  monitor_upgrade_io "${ledger}" "${UPGRADE_PROBE_STOP}" "${TEST_TMP}/plain.bin" &
+  UPGRADE_PROBE_PID=$!
   install_deb_on_nodes "${to_url}" "${TO_SHA256}" "${nodes[@]}"
   # dpkg postinst usually restarts the service; make sure it is up and healthy.
   start_and_wait_nodes "${nodes[@]}"
   wait_cluster_ready "${nodes[@]}" || die "NEW cluster ${ENDPOINT} not ready after upgrade"
+
+  if stop_upgrade_observation; then
+    coverage="$(upgrade_observation_status "${ledger}")"
+  fi
+  aws_run s3api delete-object --bucket upg-plain --key upgrade-probe
+  assert_aws_ok "cleanup upgrade observation object" || die "could not clean up upgrade observation"
+  if [ "${REQUIRE_UPGRADE_AVAILABILITY}" -eq 1 ]; then
+    source "${SCRIPT_DIR}/scripts/lib/package_candidate.sh"
+    printf 'node\texpected_package_sha256\trunning_binary_sha256\tservice_pid\n' > "${GROUP_DIR}/upgrade-candidate.tsv"
+    for node in "${nodes[@]}"; do
+      if ! verify_running_package_candidate "${node}" "${PACKAGES_DIR}/${PACKAGE_FILE}" "${TO_SHA256}" >> "${GROUP_DIR}/upgrade-candidate.tsv"; then
+        evidence_line "[UPG-AVAILABILITY] ${topo} ${KMS_BACKEND} UNVERIFIED running candidate on ${node}"
+        die "running candidate binary not verified on ${node}"
+      fi
+    done
+    if [ "${coverage}" != SAMPLED ]; then
+      evidence_line "[UPG-AVAILABILITY] ${topo} ${KMS_BACKEND} ${coverage} see upgrade-observations.tsv"
+      die "upgrade did not pass the sampled read/write check"
+    fi
+    evidence_line "[UPG-AVAILABILITY] ${topo} ${KMS_BACKEND} PASS sampled install-window I/O; running candidate verified"
+  else
+    evidence_line "[UPG-AVAILABILITY] ${topo} ${KMS_BACKEND} ${coverage} see upgrade-observations.tsv"
+  fi
 
   NEW_VERSION_ACTUAL="$(node_rustfs_version "${nodes[0]}")"
   log "NEW version in place: ${NEW_VERSION_ACTUAL}"
@@ -770,6 +851,7 @@ upgrade_exit() {
   local rc="$1" index group topo backend
   trap - EXIT INT TERM
   set +e
+  stop_upgrade_observation || rc=1
   if [ "${ARTIFACTS_READY}" -eq 1 ]; then
     if [ "${GROUP_ACTIVE}" -eq 1 ]; then
       if [ "${rc}" -eq 130 ] || [ "${rc}" -eq 143 ]; then CURRENT_RESULT=INTERRUPTED; fi
@@ -977,7 +1059,6 @@ make_test_file() {
   if [ "${size}" -eq 0 ]; then : > "${path}"; else head -c "${size}" /dev/urandom > "${path}"; fi
 }
 
-md5_of_file() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
 
 golden_set() {
   # golden_set KEY VALUE
@@ -1282,7 +1363,7 @@ run_test() {
 verify_plain() {
   aws_run s3api get-object --bucket upg-plain --key plain "${TEST_TMP}/plain-dl.bin"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/plain-dl.bin")" = "$(md5_of_file "${TEST_TMP}/plain.bin")" ] || { echo "plain object mismatch after upgrade"; return 1; }
+  cmp -s "${TEST_TMP}/plain-dl.bin" "${TEST_TMP}/plain.bin" || { echo "plain object mismatch after upgrade"; return 1; }
 }
 
 verify_versioned() {
@@ -1291,22 +1372,22 @@ verify_versioned() {
   vid1="${versions%%|*}"; vid2="${versions#*|}"
   aws_run s3api get-object --bucket upg-versioned --key obj --version-id "${vid1}" "${TEST_TMP}/v1-dl.bin"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/v1-dl.bin")" = "$(md5_of_file "${TEST_TMP}/v1.bin")" ] || { echo "version v1 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/v1-dl.bin" "${TEST_TMP}/v1.bin" || { echo "version v1 mismatch"; return 1; }
   aws_run s3api get-object --bucket upg-versioned --key obj --version-id "${vid2}" "${TEST_TMP}/v2-dl.bin"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/v2-dl.bin")" = "$(md5_of_file "${TEST_TMP}/v2.bin")" ] || { echo "version v2 mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/v2-dl.bin" "${TEST_TMP}/v2.bin" || { echo "version v2 mismatch"; return 1; }
 }
 
 verify_multipart() {
   aws_run s3api get-object --bucket upg-mp --key mp "${TEST_TMP}/mp-dl.bin"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/mp-dl.bin")" = "$(md5_of_file "${TEST_TMP}/mp.bin")" ] || { echo "multipart object mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/mp-dl.bin" "${TEST_TMP}/mp.bin" || { echo "multipart object mismatch"; return 1; }
 }
 
 verify_large() {
   aws_run s3api get-object --bucket upg-large --key large "${TEST_TMP}/large-dl.bin"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/large-dl.bin")" = "$(md5_of_file "${TEST_TMP}/large.bin")" ] || { echo "large object mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/large-dl.bin" "${TEST_TMP}/large.bin" || { echo "large object mismatch"; return 1; }
 }
 
 verify_sse_s3() {
@@ -1315,7 +1396,7 @@ verify_sse_s3() {
   printf '%s' "${AWS_OUT}" | grep -q '"ServerSideEncryption": "AES256"' || { echo "SSE-S3 header lost: ${AWS_OUT}"; return 1; }
   aws_run s3api get-object --bucket upg-sse --key sse3 "${TEST_TMP}/sse3-dl.bin"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/sse3-dl.bin")" = "$(md5_of_file "${TEST_TMP}/sse3.bin")" ] || { echo "SSE-S3 object mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/sse3-dl.bin" "${TEST_TMP}/sse3.bin" || { echo "SSE-S3 object mismatch"; return 1; }
 }
 
 verify_sse_kms() {
@@ -1323,7 +1404,7 @@ verify_sse_kms() {
   kid="$(golden_get "kms:upg-key")"
   aws_run s3api get-object --bucket upg-kms --key ssek "${TEST_TMP}/ssek-dl.bin"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/ssek-dl.bin")" = "$(md5_of_file "${TEST_TMP}/ssek.bin")" ] || { echo "SSE-KMS object mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/ssek-dl.bin" "${TEST_TMP}/ssek.bin" || { echo "SSE-KMS object mismatch"; return 1; }
   # key still usable for new writes after upgrade.
   aws_run s3api put-object --bucket upg-kms --key new --body "${TEST_TMP}/ssek.bin" \
     --server-side-encryption aws:kms --ssekms-key-id "${kid}"
@@ -1333,7 +1414,7 @@ verify_sse_kms() {
 verify_context() {
   aws_run s3api get-object --bucket upg-ctx --key ctx "${TEST_TMP}/ctx-dl.bin"
   assert_aws_ok || return 1
-  [ "$(md5_of_file "${TEST_TMP}/ctx-dl.bin")" = "$(md5_of_file "${TEST_TMP}/ssek.bin")" ] || { echo "context object mismatch"; return 1; }
+  cmp -s "${TEST_TMP}/ctx-dl.bin" "${TEST_TMP}/ssek.bin" || { echo "context object mismatch"; return 1; }
 }
 
 verify_identity_user() {
@@ -1413,7 +1494,7 @@ verify_smoke_crud() {
   assert_aws_ok || { echo "post-upgrade put failed"; rm_bucket upg-smoke; return 1; }
   aws_run s3api get-object --bucket upg-smoke --key hello.txt "${TEST_TMP}/smoke-dl.bin"
   assert_aws_ok || { echo "post-upgrade get failed"; rm_bucket upg-smoke; return 1; }
-  [ "$(md5_of_file "${TEST_TMP}/smoke-dl.bin")" = "$(md5_of_file "${TEST_TMP}/plain.bin")" ] || { echo "post-upgrade CRUD mismatch"; rm_bucket upg-smoke; return 1; }
+  cmp -s "${TEST_TMP}/smoke-dl.bin" "${TEST_TMP}/plain.bin" || { echo "post-upgrade CRUD mismatch"; rm_bucket upg-smoke; return 1; }
   rm_bucket upg-smoke
 }
 
@@ -1588,6 +1669,7 @@ Usage:
                             (default: local,vault-kv2)
   --from-version <ver>      OLD RustFS release tag (default: 1.0.0-rc.3; must ship a .deb asset)
   --from-url <url>          OLD .deb URL (overrides --from-version)
+  --require-upgrade-availability  Fail on missed/failed install-window reads or writes; requires --sha256-to.
   --to-version <ver>        NEW RustFS release tag (overrides --to-url default)
   --to-url <url>            NEW .deb URL (default: latest nightly deb)
   --sha256-from <hash>      Verify OLD .deb checksum
@@ -1617,6 +1699,7 @@ main() {
       --to-url) TO_URL="$1"; shift ;;
       --sha256-from) FROM_SHA256="$1"; shift ;;
       --sha256-to) TO_SHA256="$1"; shift ;;
+      --require-upgrade-availability) REQUIRE_UPGRADE_AVAILABILITY=1 ;;
       --keep-env) KEEP_ENV=1 ;;
       --ssh-user) SSH_USER="$1"; shift ;;
       --log-file) LOG_FILE="$1"; shift ;;
@@ -1695,6 +1778,12 @@ main() {
     evidence_line "[UPG-PLAN-END] ${#UPGRADE_GROUPS[@]}"
   fi
 
+  [[ "${UPGRADE_PROBE_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]] \
+    || die "RUSTFS_UPGRADE_PROBE_TIMEOUT_SECONDS must be a positive integer"
+  if [ "${REQUIRE_UPGRADE_AVAILABILITY}" -eq 1 ] && ! [[ "${TO_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+    die "--require-upgrade-availability requires a candidate package SHA-256 (--sha256-to)"
+  fi
+
   local _p
   for _p in /root/.local/bin /home/*/.local/bin /usr/local/bin; do
     if [ -d "${_p}" ] && [[ ":${PATH}:" != *":${_p}:"* ]]; then PATH="${_p}:${PATH}"; fi
@@ -1703,6 +1792,7 @@ main() {
   need_cmd ssh "SSH client"
   need_cmd rc "RustFS client CLI"
   need_cmd aws "AWS CLI (s3api channel)"
+  need_cmd cmp "byte comparison"
   need_cmd warp "warp benchmark tool (mixed-size data seeding)"
   need_cmd jq "JSON processor"
   need_cmd curl "HTTP client"

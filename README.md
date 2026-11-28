@@ -86,6 +86,31 @@ per-key failures, request ids, GET results and residue before/after cleanup.
 Cleanup runs in `finally`; an incomplete cleanup aborts the remaining cases.
 The caller must hold the environment's test lock throughout this probe.
 
+Set `WARP_BUDGET_FILE` to compare measured throughput and p99 latency against
+limits approved for a candidate workload. Supply an entry for each selected
+`method/size`. Each entry requires `min_obj_per_s` and the relevant
+`max_get_p99_ms` or `max_put_p99_ms`. Mixed rounds require both p99 limits.
+Mixed output includes separate GET and PUT p50, p90 and p99. A missing or
+exceeded budget fails the affected run. The runner retains the supplied budget
+with its artifacts and reuses it for `--parse-only`. An invocation without a
+budget reports execution and captures metrics. Run the fleet wrapper
+`rustfs_performance_test.sh` with `RUSTFS_WARP_BUDGET_FILE` and a package
+SHA-256 to verify every running service before and after measurement. The
+performance workflow reads the budget from the `RUSTFS_WARP_BUDGET_JSON`
+repository variable and retains both candidate receipts.
+
+### In-place upgrade observation
+
+`rustfs-upgrade-test.sh` records sampled baseline reads and write/readbacks
+during package installation and service restart in `upgrade-observations.tsv`.
+Use `--require-upgrade-availability --sha256-to <digest>` to require successful
+samples and compare the binary of each running service with its verified
+candidate package. The strict check requires at least two complete samples. Set
+`RUSTFS_UPGRADE_PROBE_TIMEOUT_SECONDS` to adjust the per-request deadline
+(default 15 seconds).
+A pass covers sampled I/O during this installation. Mixed-version compatibility,
+uninterrupted availability between samples and rollback need dedicated runs.
+
 ## UploadPart client-read timeout
 
 Run the `upload-part-client-read-timeout` case with `python3 scripts/s3_upload_part_timeout.py --rustfs-bin /absolute/path/to/rustfs` with Python 3 and `boto3>=1.36,<2`. The runner starts one RustFS process on loopback with a temporary volume and a two-second request-body idle timeout. A signed UploadPart sends a prefix and keeps the connection open until the server answers HTTP 400 with S3 code `RequestTimeout`. A complete HTTP request carrying fewer S3 bytes than declared must return HTTP 400 with `IncompleteBody`. ListParts checks that the timeout left the slot empty and the short overwrite preserved the retry's ETag and size. Completing the upload and reading the object verifies the retry bytes.

@@ -117,6 +117,94 @@ seed_warp_bucket upg-warp-100mib 100MiB 30s 2
         self.assertIn("warp:upg-warp-100mib 2", calls)
         self.assertNotIn("delete-objects", calls)
 
+    def test_install_window_io_requires_successful_reads_and_write_readbacks(self):
+        harness = r"""
+set -Eeuo pipefail
+TEST_TMP="$TEST_DIRECTORY"
+ENDPOINT=http://localhost:1
+REGION=us-east-1
+printf baseline > "$TEST_TMP/source"
+printf 'header\n' > "$TEST_TMP/ledger"
+timeout() {
+  shift 2
+  "$@"
+}
+aws() {
+  test "$AWS_MAX_ATTEMPTS" = 1 || return 99
+  case "$6:${10}" in
+    get-object:*)
+      case "${10}" in
+        plain) cp "$TEST_TMP/source" "${11}" ;;
+        upgrade-probe)
+          cp "$TEST_TMP/fake-object" "${11}"
+          if [ "$MODE" = corrupt ]; then printf corrupt > "${11}"; fi
+          ;;
+      esac
+      ;;
+    put-object:*)
+      [ "$MODE" != unavailable ] || return 124
+      cp "${12}" "$TEST_TMP/fake-object"
+      ;;
+    *) return 92 ;;
+  esac
+}
+sleep() {
+  if [ "$(awk 'END {print NR}' "$TEST_TMP/ledger")" -ge "$STOP_AT" ]; then touch "$TEST_TMP/stop"; fi
+}
+monitor_upgrade_io "$TEST_TMP/ledger" "$TEST_TMP/stop" "$TEST_TMP/source"
+upgrade_observation_status "$TEST_TMP/ledger"
+"""
+        functions = function("monitor_upgrade_io") + "\n" + function("upgrade_observation_status")
+        for mode, stop, verdict in (("ok", "3", "SAMPLED"), ("corrupt", "3", "FAIL"),
+                                     ("unavailable", "3", "FAIL"), ("ok", "2", "UNVERIFIED")):
+            with self.subTest(mode=mode, stop=stop):
+                (self.directory / "stop").unlink(missing_ok=True)
+                result = self.bash(functions + "\n" + harness, TEST_DIRECTORY=str(self.directory),
+                                   MODE=mode, STOP_AT=stop)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), verdict)
+                self.assertEqual(len((self.directory / "ledger").read_text().splitlines()), int(stop))
+
+    def test_running_package_gate_requires_the_verified_package_and_service_process(self):
+        harness = r"""
+set -Eeuo pipefail
+source "$HELPER"
+id() { echo 0; }
+dpkg-deb() { printf package-binary; }
+tar() { cat; }
+systemctl() {
+  if [ "$MODE" = stopped ]; then echo 0; else echo 42; fi
+}
+sha256sum() {
+  case "${1:-}" in
+    --check)
+      read -r hash _ || return 1
+      [ "$MODE" != wrong-package ] && [ "$hash" = "$PACKAGE_DIGEST" ]
+      ;;
+    /proc/42/exe)
+      if [ "$MODE" = wrong-process ]; then
+        printf '%064d  -\\n' 1
+      else
+        printf '%064d  -\\n' 2
+      fi
+      ;;
+    "") cat >/dev/null; printf '%064d  -\\n' 2 ;;
+    *) return 99 ;;
+  esac
+}
+export -f id dpkg-deb tar systemctl sha256sum
+run_remote() { bash -s; }
+verify_running_package_candidate fixture /path/candidate.deb "$PACKAGE_DIGEST"
+"""
+        digest = "a" * 64
+        helper = ROOT / "scripts" / "lib" / "package_candidate.sh"
+        for mode in ("ok", "wrong-package", "wrong-process", "stopped"):
+            with self.subTest(mode=mode):
+                result = self.bash(harness, HELPER=str(helper), MODE=mode, PACKAGE_DIGEST=digest)
+                self.assertEqual(result.returncode == 0, mode == "ok", result.stdout + result.stderr)
+                if mode == "ok":
+                    self.assertEqual(result.stdout.strip().split("\t"), ["fixture", digest, f"{2:064d}", "42"])
+
     def lifecycle(self, mode="pass", extra=()):
         artifacts = self.directory / "artifacts"
         # Source all real lifecycle/report functions; every external boundary

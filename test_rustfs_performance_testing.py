@@ -138,6 +138,35 @@ def client(*args, **kwargs): return Client()
                             for row in self.round_evidence()))
         self.assertNotIn("test-secret", "".join(path.read_text() for path in self.results.iterdir()))
 
+    def test_mixed_percentiles_and_an_explicit_budget_gate(self):
+        budget = self.root / "budget.json"
+        scope = dict(WARP_METHODS="mixed", WARP_SIZES="1KiB", WARP_BUDGET_FILE=str(budget))
+        for rate, latency, accepted in ((1280, 2.1, True), (1281, 2.1, False), (1280, 2.0, False)):
+            with self.subTest(rate=rate, latency=latency):
+                budget.write_text(json.dumps({"mixed/1KiB": {
+                    "min_obj_per_s": rate, "max_get_p99_ms": latency, "max_put_p99_ms": 2.1,
+                }}))
+                result, rows = self.run_benchmark(**scope)
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+                self.assertEqual((self.results / "performance-budget.json").read_text(), budget.read_text())
+                if accepted:
+                    self.assertEqual(rows[0]["mixed_get_p50"], "1.1ms")
+                    self.assertEqual(rows[0]["mixed_get_p99"], "2.1ms")
+                    self.assertEqual(rows[0]["mixed_put_p90"], "1.5ms")
+                    self.assertEqual(rows[0]["mixed_put_p99"], "2.1ms")
+                else:
+                    self.assertEqual(rows, [])
+                    self.assertEqual(self.round_evidence()[0]["reason"], "performance_budget_failed")
+
+    def test_missing_budget_for_selected_round_fails_before_warp(self):
+        budget = self.root / "missing-budget.json"
+        budget.write_text("{}")
+        result, rows = self.run_benchmark(WARP_METHODS="mixed", WARP_SIZES="1KiB", WARP_BUDGET_FILE=str(budget))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(rows, [])
+        self.assertIn("mixed/1KiB budget requires", result.stderr)
+
     def test_all_failed_rounds_return_failure_after_collecting_every_round(self):
         result, rows = self.run_benchmark("fail")
         self.assertNotEqual(result.returncode, 0)
